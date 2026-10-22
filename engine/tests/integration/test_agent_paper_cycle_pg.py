@@ -406,6 +406,7 @@ async def _seed_two_candidate_authority(
     source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
     authority_instruments=INSTRUMENTS,
     candidate_instruments=INSTRUMENTS[:2],
+    candidate_symbols=None,
 ):
     from nexus.paper.agent_cycle_authority import CycleAuthority
     from nexus.persistence.models.data import PriceBarRecord
@@ -424,6 +425,7 @@ async def _seed_two_candidate_authority(
         quote_received_at=decision_time,
         price_available_at=decision_time if same_day else None,
         instruments=authority_instruments,
+        candidate_symbols=candidate_symbols,
     )
     authority = CycleAuthority(
         account_id=registered.decision.account_id,
@@ -2112,6 +2114,7 @@ async def _seed_cycle_research_authority(
     base_payload: dict[str, object] | None = None,
     prompt_bundle_version: str | None = None,
     instruments=INSTRUMENTS,
+    candidate_symbols=None,
 ) -> None:
     authority_time = price_available_at or DECISION_TIME
     await session.execute(text("ALTER TABLE instrument_aliases DISABLE TRIGGER USER"))
@@ -2198,7 +2201,13 @@ async def _seed_cycle_research_authority(
                 ),
                 {
                     "instrument_id": instrument_id,
-                    "symbol": "AAPL" if index == 1 else f"T{index}",
+                    "symbol": (
+                        candidate_symbols[index - 1]
+                        if candidate_symbols
+                        else "AAPL"
+                        if index == 1
+                        else f"T{index}"
+                    ),
                 },
             )
     finally:
@@ -4016,7 +4025,7 @@ async def test_trigger_once_persists_and_replays_safe_terminal_failure(
 
 
 @pytest.mark.asyncio
-async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
+async def test_trigger_once_preserves_unknown_with_safe_receipt_without_replay(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4085,6 +4094,26 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
     with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
         await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
     assert provider_calls == 1
+    from nexus.paper.preparation_unknown_ack import _terminal_claim
+
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{seed.account_id}",
+                    IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                )
+            )
+            assert claim.response_payload == {
+                "outcome": "failed",
+                "error_code": "AGENT_PAPER_TRIGGER_FAILED",
+                "external_effects": "unknown",
+            }
+            assert not await _terminal_claim(session, claim, account_id=seed.account_id)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

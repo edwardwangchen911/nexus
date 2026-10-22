@@ -14,6 +14,7 @@ from nexus.ops.openai_local import prepare_database
 from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.settings import EngineSettings
@@ -26,20 +27,44 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [3, 5])
 async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
-    migrated_database_url, monkeypatch, count
+    migrated_database_url, monkeypatch, count, current_identity=False, tmp_path=None
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
     preparation_at = AT - timedelta(seconds=1)
-    engine, sessions, authority, manifest = await seed_normal_path(
-        migrated_database_url,
-        monkeypatch,
-        candidate_instruments=FIVE[:count],
-        decision_time=preparation_at,
-    )
+    if current_identity:
+        from nexus.persistence.models.market import Instrument
+        from sqlalchemy import event
+
+        def published_master(_mapper, _connection, instrument):
+            instrument.risk_bucket = "EQUITY"
+
+        event.listen(Instrument, "before_insert", published_master)
+    try:
+        engine, sessions, authority, manifest = await seed_normal_path(
+            migrated_database_url,
+            monkeypatch,
+            candidate_instruments=FIVE[:count],
+            decision_time=preparation_at,
+            candidate_symbols=("AAPL", "NVDA", "AVGO") if current_identity else None,
+        )
+    finally:
+        if current_identity:
+            event.remove(Instrument, "before_insert", published_master)
     try:
         await _set_test_insert_clock(sessions, preparation_at)
         async with sessions.begin() as session:
+            next_day = AT + timedelta(days=3)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=authority.calendar_authority_id,
+                    session=next_day.date(),
+                    decision_at=next_day.replace(hour=21),
+                    market_open_at=next_day.replace(hour=13, minute=30),
+                    market_close_at=next_day.replace(hour=20),
+                    created_at=preparation_at,
+                )
+            )
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
                     AgentModelConfigRecord.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
@@ -57,12 +82,15 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
             database_url=migrated_database_url,
             agent_runtime_mode="codex_sdk",
             NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID=str(model.id),
+            object_store_endpoint="http://127.0.0.1:9",
+            object_store_bucket="synthetic-formal-identity",
         )
         environment = host.model_dump() | {
             "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(batch.batch_id),
             "ALPACA_API_KEY_ID": "controlled-key",
             "ALPACA_API_SECRET_KEY": "controlled-secret",
             "object_store_endpoint": "http://127.0.0.1:9",
+            "SEC_CONTACT": "synthetic@example.invalid",
         }
         monkeypatch.setattr(
             loop, "load_agent_paper_service_environment", lambda *a, **kw: environment
@@ -97,6 +125,43 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
             ("prepare_agent_paper_identity_once", "identity"),
         ):
             monkeypatch.setattr(loop, name, preparation(phase))
+        from nexus.ops import formal_research_preparation as formal_preparation
+
+        async def already_seeded_identity(*_args, **kwargs):
+            assert kwargs["account_id"] == authority.account_id
+            assert kwargs["batch_id"] == batch.batch_id
+            assert kwargs["execution"].reservation.candidate_batch_id == batch.batch_id
+            return "ready"
+
+        async def already_seeded_snapshots(_settings, context, scope):
+            assert context.reservation.candidate_batch_id == batch.batch_id
+            assert tuple(item.instrument_id for item in scope.candidates) == batch.instrument_ids
+            # seed_normal_path supplied real immutable authoritative snapshots;
+            # this test owns trigger/cycle wiring, not source/archive preparation.
+            async with sessions() as session:
+                from nexus.agents.persistence import select_authoritative_snapshot
+
+                for item in scope.candidates:
+                    assert (
+                        await select_authoritative_snapshot(
+                            session, instrument_id=item.instrument_id, as_of=AT
+                        )
+                        is not None
+                    )
+
+        if current_identity:
+            from integration.test_formal_cycle_identity import seed_current_identity
+
+            identity_store = await seed_current_identity(
+                host, manifest, tmp_path, clock_at, monkeypatch
+            )
+        else:
+            monkeypatch.setattr(
+                formal_preparation, "prepare_agent_paper_identity_once", already_seeded_identity
+            )
+            monkeypatch.setattr(
+                formal_preparation, "freeze_prepared_snapshots", already_seeded_snapshots
+            )
         source_calls = []
 
         async def controlled_authority(*args, **kwargs):
@@ -106,11 +171,13 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
                 tuple(item.instrument_id for item in kwargs["identities"]) == batch.instrument_ids
             )
             source_calls.append(batch.instrument_ids)
+            if current_identity:
+                clock_at[0] = AT + timedelta(seconds=10)
             async with sessions() as session:
                 return await load_quasi_realtime_cycle_authority(
                     session,
                     account_id=authority.account_id,
-                    now=AT,
+                    now=clock_at[0],
                     expected_calendar_authority_id=authority.calendar_authority_id,
                 )
 
@@ -118,7 +185,8 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
             "nexus.ops.agent_paper_once.prepare_schwab_decision_authority", controlled_authority
         )
         monkeypatch.setattr(
-            "nexus.ops.agent_paper_once.S3ProviderEvidenceStore", lambda *a, **kw: object()
+            "nexus.ops.agent_paper_once.S3ProviderEvidenceStore",
+            lambda *a, **kw: identity_store if current_identity else object(),
         )
         tables = (AgentPaperCycleRecord, AgentResearchRunRecord, Job, IdempotencyRecord)
 
@@ -213,6 +281,10 @@ async def test_host_preparation_and_formal_trigger_freeze_exact_batch(
             assert {run.instrument_id for run in runs} == set(batch.instrument_ids)
             assert all(run.model_config_id == model.id for run in runs)
             assert all([await formal_stage_job_qualified(session, job) for job in jobs])
+            if current_identity:
+                from integration.test_formal_cycle_identity import assert_cycle_identity
+
+                await assert_cycle_identity(session, cycle, runs, manifest, identity_store)
             claim = await session.scalar(
                 select(IdempotencyRecord).where(
                     IdempotencyRecord.idempotency_key == AT.isoformat(),

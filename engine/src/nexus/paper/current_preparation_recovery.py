@@ -302,16 +302,24 @@ async def _require_idle_consumers(
 
 
 async def _require_other_claims_settled(
-    session: AsyncSession, row: ManualPaperRequest, now: datetime
+    session: AsyncSession,
+    row: ManualPaperRequest,
+    now: datetime,
+    *,
+    excluding_claim_id: UUID | None = None,
 ) -> None:
     from nexus.paper.preparation_unknown_ack import _audits, _claim_ids, _terminal_claim, _validate
 
     audits = await _audits(session, row.account_id)
-    allowed = set()
+    from nexus.paper.current_preparation_acceptance import accepted_claim_ids
+
+    allowed = await accepted_claim_ids(session, row.account_id)
+    if excluding_claim_id is not None:
+        allowed.add(excluding_claim_id)
     if audits:
         if len(audits) != 1:
             raise ValueError(BLOCKED)
-        allowed = set(_claim_ids(await _validate(session, audits[0], now=now)))
+        allowed.update(_claim_ids(await _validate(session, audits[0], now=now)))
     claims = await session.scalars(
         select(IdempotencyRecord).where(
             IdempotencyRecord.actor_id == "local-agent-paper-schwab:" + str(row.account_id)

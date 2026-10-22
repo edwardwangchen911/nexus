@@ -39,7 +39,13 @@ NOW = datetime(2026, 8, 27, 14, tzinfo=UTC)
 
 
 async def seed_normal_path(
-    url, monkeypatch, *, occupied=False, candidate_instruments=INSTRUMENTS[:2], decision_time=NOW
+    url,
+    monkeypatch,
+    *,
+    occupied=False,
+    candidate_instruments=INSTRUMENTS[:2],
+    decision_time=NOW,
+    candidate_symbols=None,
 ):
     additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
     seed = await seed_paper_batch(
@@ -76,6 +82,7 @@ async def seed_normal_path(
             source_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
             candidate_instruments=candidate_instruments,
             authority_instruments=INSTRUMENTS + additional,
+            candidate_symbols=candidate_symbols,
         )
         # Historical fixtures retain their original compatibility setup. Fresh dated
         # scenarios are constructed once and never rewrite immutable timestamps.

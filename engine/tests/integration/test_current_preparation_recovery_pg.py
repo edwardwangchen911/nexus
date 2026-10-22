@@ -50,6 +50,18 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "concurrent_late_effects",
         "concurrent_recovery",
         "accept_unknown",
+        "accept_native_claim",
+        "accept_native_claim_direct",
+        "accept_native_claim_wrong_hash",
+        "accept_native_claim_finish_first",
+        "accept_native_claim_late_finish",
+        "accept_native_claim_corrupt_audit",
+        "accept_native_claim_changed",
+        "accept_native_claim_late_cycle",
+        "accept_native_claim_concurrent",
+        "accept_native_claim_queued_job",
+        "accept_native_claim_lease",
+        "accept_native_claim_audit_rollback",
         "accept_late_claim",
         "accept_audit_rollback",
         "accept_host_diagnostic_rollback",
@@ -88,12 +100,19 @@ async def test_current_host_interruption_recovers_via_normal_cli(
     migrated_database_url, monkeypatch, tmp_path, failure_point
 ):
     acceptance_case = failure_point if failure_point.startswith("accept_") else None
-    direct_acceptance = acceptance_case in {"accept_direct", "accept_open_order"} or bool(
-        acceptance_case and acceptance_case.startswith("accept_prepared_")
-    )
+    direct_acceptance = acceptance_case in {
+        "accept_direct",
+        "accept_open_order",
+        "accept_native_claim_direct",
+    } or bool(acceptance_case and acceptance_case.startswith("accept_prepared_"))
     native_trigger = agent_paper_once.trigger_once
+    native_finish = agent_paper_once.finish_schwab_agent_paper_trigger
     if acceptance_case:
-        failure_point = "effects_unknown"
+        failure_point = (
+            "native_claim_unknown"
+            if acceptance_case.startswith("accept_native_claim")
+            else "effects_unknown"
+        )
     await prepare_database(
         EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
         **V9_OPTIONS,
@@ -121,6 +140,10 @@ async def test_current_host_interruption_recovers_via_normal_cli(
     async def clock(self, statement, *args, **kwargs):
         if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
             return AT
+        # Native claims use a server default, outside the scalar clock above.
+        # Keep both clocks on the same synthetic timeline at insertion time.
+        if getattr(statement, "is_insert", False) and statement.table.name == "idempotency_records":
+            statement = statement.values(created_at=AT)
         return await scalar(self, statement, *args, **kwargs)
 
     monkeypatch.setattr(AsyncSession, "scalar", clock)
@@ -188,6 +211,14 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             }
         )
 
+        from helpers.formal_preparation import use_seeded_formal_preparation
+
+        # This recovery fixture already supplies authoritative research inputs;
+        # keep real scope, claim, execution and calendar gates at the source boundary.
+        use_seeded_formal_preparation(
+            monkeypatch, account_id=authority.account_id, batch_id=batch.batch_id
+        )
+
         # A process cancellation bypasses Exception; the claim transaction is already committed.
         async def interrupted(*args, **kwargs):
             raise asyncio.CancelledError()
@@ -218,6 +249,19 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             else:
                 monkeypatch.setattr(agent_paper_once, "trigger_once", interrupted)
         elif failure_point in {"native_claim_unknown", "late_claim_change"}:
+            if direct_acceptance:
+                # Persisted failure shape: primary preparation error followed by a
+                # failed receipt write leaves the original committed claim empty.
+                async def interrupted(*_a, **_k):
+                    raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+
+                async def receipt_unavailable(*_a, **_k):
+                    raise RuntimeError("isolated receipt write failure")
+
+                monkeypatch.setattr(
+                    agent_paper_once, "finish_schwab_agent_paper_trigger", receipt_unavailable
+                )
+                expected_error = ValueError
             monkeypatch.setattr(agent_paper_once, "prepare_schwab_decision_authority", interrupted)
             monkeypatch.setattr(
                 agent_paper_once, "S3ProviderEvidenceStore", lambda *_a, **_k: object()
@@ -281,6 +325,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                 calendar_authority_id=CALENDAR_ID,
                 process_environment={},
             )
+        monkeypatch.setattr(agent_paper_once, "finish_schwab_agent_paper_trigger", native_finish)
         async with sessions.begin() as session:
             row = await session.get(ManualPaperRequest, request.request_id)
             assert (await manual_request.read_manual_request(session, row)).status == (
@@ -849,6 +894,56 @@ async def _check_explicit_acceptance(
                 is None
             )
         return
+    if case == "accept_native_claim_wrong_hash":
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            claim.request_hash = "f" * 64
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, args)
+        return
+    if case == "accept_native_claim_finish_first":
+        from nexus.paper.agent_cycle import finish_schwab_agent_paper_trigger
+        from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
+
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            reservation = AgentPaperTriggerReservation(
+                claim_id=claim.id,
+                trigger_mode="manual",
+                manual_request_id=request.request_id,
+                manual_execution_id=start.id,
+                decision_session=AT.date(),
+                decision_slot_at=AT,
+            )
+            await finish_schwab_agent_paper_trigger(
+                session, reservation=reservation, error_code="CANDIDATE_BATCH_INVALID"
+            )
+        finished = await business_facts()
+        assert {k: v for k, v in finished.items() if k != "idempotency_records"} == {
+            k: v for k, v in before.items() if k != "idempotency_records"
+        }
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, args)
+        assert await business_facts() == finished
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(AuditEvent.id).where(AuditEvent.action == acceptance.ACTION)
+                )
+                is None
+            )
+        return
+    native_claim_case = case.startswith("accept_native_claim")
+    if native_claim_case and case not in {"accept_native_claim", "accept_native_claim_late_finish"}:
+        case = case.replace("accept_native_claim_", "accept_", 1)
     if case in {"accept_queued_job", "accept_running_job", "accept_lease"}:
         from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy
         from nexus.jobs.repository import enqueue_job
@@ -1300,7 +1395,61 @@ async def _check_explicit_acceptance(
             changed = await stored_facts()
             assert changed["audit_events"] == original["audit_events"]
             return
-    if case == "accept_concurrent":
+    if case == "accept_native_claim_late_finish":
+        from nexus.paper import target_service
+        from nexus.paper.agent_cycle import finish_schwab_agent_paper_trigger
+        from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
+
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            late_reservation = AgentPaperTriggerReservation(
+                claim_id=claim.id,
+                trigger_mode="manual",
+                manual_request_id=request.request_id,
+                manual_execution_id=start.id,
+                decision_session=AT.date(),
+                decision_slot_at=AT,
+            )
+        audit_ready, release_audit, writer_entered = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+        append, account_lock = acceptance.append_audit_event, target_service.lock_portfolio_account
+
+        async def paused_append(*a, **kw):
+            if kw.get("action") == acceptance.ACTION:
+                audit_ready.set()
+                await release_audit.wait()
+            return await append(*a, **kw)
+
+        async def observed_lock(*a, **kw):
+            writer_entered.set()
+            return await account_lock(*a, **kw)
+
+        async def late_finish():
+            async with sessions.begin() as session:
+                await finish_schwab_agent_paper_trigger(
+                    session, reservation=late_reservation, error_code="CANDIDATE_BATCH_INVALID"
+                )
+
+        with monkeypatch.context() as m:
+            m.setattr(acceptance, "append_audit_event", paused_append)
+            accepting = asyncio.create_task(manual_paper.run(settings, args))
+            await asyncio.wait_for(audit_ready.wait(), 10)
+            m.setattr(target_service, "lock_portfolio_account", observed_lock)
+            writer = asyncio.create_task(late_finish())
+            await asyncio.wait_for(writer_entered.wait(), 10)
+            assert not writer.done()
+            release_audit.set()
+            first = await asyncio.wait_for(accepting, 10)
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await asyncio.wait_for(writer, 10)
+    elif case == "accept_concurrent":
         first, second = await asyncio.gather(
             manual_paper.run(settings, args),
             manual_paper.run(settings, args),
@@ -1312,6 +1461,62 @@ async def _check_explicit_acceptance(
     assert first.status == "preparation_unknown_acknowledged"
     assert await business_facts() == before
     assert (await manual_paper.run(settings, args)).replayed
+    if native_claim_case:
+        from nexus.paper.agent_cycle import finish_schwab_agent_paper_trigger
+        from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
+
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            assert claim.response_payload == {}
+            audit = await session.scalar(
+                select(AuditEvent).where(AuditEvent.action == acceptance.ACTION)
+            )
+            assert audit.schema_version == "manual_preparation_acceptance_v2"
+            assert audit.payload["claim"]["id"] == str(claim.id)
+            reservation = AgentPaperTriggerReservation(
+                claim_id=claim.id,
+                trigger_mode="manual",
+                manual_request_id=request.request_id,
+                manual_execution_id=start.id,
+                decision_session=AT.date(),
+                decision_slot_at=AT,
+                candidate_batch_id=admission["batch_id"],
+                candidate_batch_hash="a" * 64,
+                formal_stage_capacity=True,
+                formal_model_config_id=admission["model_config_id"],
+                formal_model_hash="a" * 64,
+            )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await finish_schwab_agent_paper_trigger(
+                    session, reservation=reservation, error_code="CANDIDATE_BATCH_INVALID"
+                )
+        assert await business_facts() == before
+    if case == "accept_changed":
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            claim.response_payload = {"outcome": "failed", "error_code": "CANDIDATE_BATCH_INVALID"}
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await read_configured_manual_request(
+                    session, settings, request_id=request.request_id
+                )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await finish_schwab_agent_paper_trigger(
+                    session, reservation=reservation, error_code="CANDIDATE_BATCH_INVALID"
+                )
+            with pytest.raises(ValueError):
+                await manual_request.admit_manual_request(
+                    session, **admission, idempotency_key="new"
+                )
+        return
     if case == "accept_corrupt_audit":
         from sqlalchemy import text
 

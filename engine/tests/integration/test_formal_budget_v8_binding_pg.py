@@ -290,6 +290,36 @@ async def test_protected_file_freezes_exact_v8_profile(
         monkeypatch.setattr(once, "prepare_schwab_decision_authority", seeded_authority)
         monkeypatch.setattr(once, "S3ProviderEvidenceStore", lambda *_args, **_kwargs: object())
         monkeypatch.setattr(once, "schwab_http_client", controlled_http)
+        from nexus.ops import formal_research_preparation as formal_preparation
+
+        async def already_seeded_identity(*_args, **kwargs):
+            assert kwargs["account_id"] == authority.account_id
+            assert kwargs["batch_id"] == batch.batch_id
+            assert kwargs["execution"].reservation.candidate_batch_id == batch.batch_id
+            return "ready"
+
+        async def already_seeded_snapshots(_settings, context, scope):
+            assert context.reservation.candidate_batch_id == batch.batch_id
+            assert tuple(item.instrument_id for item in scope.candidates) == batch.instrument_ids
+            # seed_normal_path supplied real immutable authoritative snapshots;
+            # this test owns trigger/cycle wiring, not source/archive preparation.
+            async with sessions() as session:
+                from nexus.agents.persistence import select_authoritative_snapshot
+
+                for item in scope.candidates:
+                    assert (
+                        await select_authoritative_snapshot(
+                            session, instrument_id=item.instrument_id, as_of=AT
+                        )
+                        is not None
+                    )
+
+        monkeypatch.setattr(
+            formal_preparation, "prepare_agent_paper_identity_once", already_seeded_identity
+        )
+        monkeypatch.setattr(
+            formal_preparation, "freeze_prepared_snapshots", already_seeded_snapshots
+        )
         loaded, calendar = await loop._load_bound_loop_environment(
             changed_settings, root, {}, env_file=path
         )

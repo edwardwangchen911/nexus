@@ -1,9 +1,11 @@
 """Explicitly end one current preparation's scheduling hold, never its uncertainty."""
 
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import or_, select, text
@@ -18,11 +20,15 @@ from nexus.paper.history_seal import _row_hash
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
-from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+from nexus.persistence.models.paper import (
+    PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+    AgentPaperCycleEventRecord,
+)
 from nexus.persistence.models.runtime import AuditEvent, Job, JobAttempt, JobLease
 
 ACTION = "paper.manual_preparation.unknown_accepted"
 SCHEMA = "manual_preparation_acceptance_v1"
+CLAIM_SCHEMA = "manual_preparation_acceptance_v2"
 ACTOR = "local-user:manual-preparation-acceptance"
 BLOCKED = recovery.BLOCKED
 
@@ -65,7 +71,9 @@ async def require_execution_not_accepted(session: AsyncSession, request_id: UUID
         raise ValueError(BLOCKED)
 
 
-async def _proof(session: AsyncSession, row: ManualPaperRequest, at: datetime) -> dict[str, object]:
+async def _proof(
+    session: AsyncSession, row: ManualPaperRequest, at: datetime, *, allow_claim: bool = False
+) -> dict[str, object]:
     from nexus.paper.manual_request import read_manual_request
 
     view = await read_manual_request(session, row)
@@ -95,7 +103,7 @@ async def _proof(session: AsyncSession, row: ManualPaperRequest, at: datetime) -
         )
         .limit(1)
     )
-    if claims or cycles or late_cycle is not None:
+    if (claims and not allow_claim) or cycles or late_cycle is not None:
         raise ValueError(BLOCKED)
     events = list(
         await session.scalars(
@@ -108,7 +116,7 @@ async def _proof(session: AsyncSession, row: ManualPaperRequest, at: datetime) -
     )
     if not events or any(e.occurred_at > at for e in events):
         raise ValueError(BLOCKED)
-    return {
+    proof: dict[str, object] = {
         "request_id": str(row.id),
         "account_id": str(row.account_id),
         "execution_id": str(journal[0].id),
@@ -118,6 +126,76 @@ async def _proof(session: AsyncSession, row: ManualPaperRequest, at: datetime) -
         "external_effects": "unknown",
         "budget_preserved": True,
     }
+    if allow_claim:
+        from nexus.paper.agent_cycle import manual_decision_slot
+
+        preparing = [e for e in events if e.status == "preparing"]
+        if len(claims) != 1 or len(preparing) != 1 or row.contract_version != 1:
+            raise ValueError(BLOCKED)
+        claim = claims[0]
+        slot = manual_decision_slot(preparing[0].occurred_at)
+        expected = job_input_hash(
+            {
+                "schema": "agent-paper-explicit-manual-v1",
+                "account_id": str(row.account_id),
+                "decision_session": slot.astimezone(ZoneInfo("America/New_York"))
+                .date()
+                .isoformat(),
+                "decision_slot_at": slot.isoformat(),
+                "source_policy_id": str(PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID),
+                "client_idempotency_hash": sha256(f"manual-entry:{row.id}".encode()).hexdigest(),
+                "candidate_batch_id": str(row.candidate_batch_id),
+                "candidate_batch_hash": row.batch_hash,
+                "manual_execution_id": str(journal[0].id),
+                "trigger_mode": "manual",
+                "manual_request_id": str(row.id),
+                "manual_mode": row.mode,
+                "formal_stage_capacity": True,
+                "formal_model_config_id": str(row.model_config_id),
+                "formal_model_hash": row.model_hash,
+            }
+        )
+        if (
+            row.mode != "research_and_paper"
+            or claim.actor_id != f"local-agent-paper-schwab:{row.account_id}"
+            or claim.route != "agent-paper-explicit-manual-v1"
+            or claim.schema_version != "agent_paper_explicit_manual_v1"
+            or claim.idempotency_key != str(row.id)
+            or claim.request_hash != expected
+            or claim.response_payload != {}
+            or not journal[1].occurred_at <= claim.created_at <= at
+        ):
+            raise ValueError(BLOCKED)
+        proof["claim"] = {"id": str(claim.id), "row_hash": _row_hash(claim)}
+    return proof
+
+
+async def accepted_claim_ids(session: AsyncSession, account_id: UUID) -> set[UUID]:
+    """Only exact, currently valid v2 proofs exempt a native claim from admission."""
+    audits = await session.scalars(
+        select(AuditEvent).where(
+            AuditEvent.action == ACTION,
+            AuditEvent.schema_version == CLAIM_SCHEMA,
+            AuditEvent.payload["account_id"].astext == str(account_id),
+        )
+    )
+    allowed: set[UUID] = set()
+    for audit in audits:
+        try:
+            row = await session.get(ManualPaperRequest, UUID(str(audit.payload["request_id"])))
+            if (
+                row is None
+                or row.account_id != account_id
+                or not await current_unknown_accepted(session, row)
+            ):
+                raise ValueError(BLOCKED)
+            claim = audit.payload["claim"]
+            if not isinstance(claim, dict):
+                raise ValueError(BLOCKED)
+            allowed.add(UUID(str(claim["id"])))
+        except (ValueError, KeyError, TypeError):
+            raise ValueError(BLOCKED) from None
+    return allowed
 
 
 async def current_unknown_accepted(session: AsyncSession, row: ManualPaperRequest) -> bool:
@@ -146,14 +224,17 @@ async def current_unknown_accepted(session: AsyncSession, row: ManualPaperReques
             )
         )
         if (
-            audit.schema_version != SCHEMA
+            audit.schema_version not in {SCHEMA, CLAIM_SCHEMA}
             or audit.actor_id != ACTOR
             or audit.occurred_at > now
             or audit.chain_version != "audit_jcs_sha256_v1"
             or audit.canonical_event != canonical
             or audit.previous_hash != ("0" * 64 if audit.event_seq == 1 else previous)
             or audit.event_hash != audit_event_hash(audit.previous_hash, canonical)
-            or audit.payload != await _proof(session, row, audit.occurred_at)
+            or audit.payload
+            != await _proof(
+                session, row, audit.occurred_at, allow_claim=audit.schema_version == CLAIM_SCHEMA
+            )
         ):
             raise ValueError(BLOCKED)
         return True
@@ -261,7 +342,7 @@ async def _check_current_unknown(
     env_file: Path,
 ) -> tuple[ManualPaperRequest, datetime, dict[str, object] | None, AuditEvent | None]:
     """Shared locked eligibility checks; never append an acceptance or change facts."""
-    from nexus.paper.manual_request import require_manual_account_available
+    from nexus.paper.manual_request import require_manual_account_state_available
 
     await lock_portfolio_account(session, account_id)
     row = await session.get(ManualPaperRequest, request_id, with_for_update=True)
@@ -270,7 +351,8 @@ async def _check_current_unknown(
     now = await recovery._now(session)
     if await current_unknown_accepted(session, row):
         return row, now, None, None
-    proof = await _proof(session, row, now)
+    claims, _ = await recovery._bindings(session, row)
+    proof = await _proof(session, row, now, allow_claim=bool(claims))
     journal = await recovery._journal(session, row, now)
     _require_producer_stopped(journal[0], repo_root, env_file, point="eligibility_producer")
     # Audit append may flush other writers' pending Jobs. Take its exact lock
@@ -309,8 +391,10 @@ async def _check_current_unknown(
         raise ValueError(BLOCKED)
     await require_no_live_research_runs(session, now=now)
     await recovery._require_idle_consumers(session, row, now)
-    await recovery._require_other_claims_settled(session, row, now)
-    await require_manual_account_available(
+    await recovery._require_other_claims_settled(
+        session, row, now, excluding_claim_id=claims[0].id if claims else None
+    )
+    await require_manual_account_state_available(
         session,
         account_id=account_id,
         now=now,
@@ -337,7 +421,7 @@ async def check_current_unknown(
     )
     if producer is not None:
         _require_producer_stopped(producer, repo_root, env_file, point="check_producer_recheck")
-        if await _proof(session, row, now) != proof:
+        if await _proof(session, row, now, allow_claim=bool(proof and "claim" in proof)) != proof:
             raise ValueError(BLOCKED)
     return PreparationAcceptanceCheck(
         request_id=row.id,
@@ -369,7 +453,7 @@ async def accept_current_unknown(
         session,
         actor_id=ACTOR,
         action=ACTION,
-        schema_version=SCHEMA,
+        schema_version=CLAIM_SCHEMA if "claim" in proof else SCHEMA,
         occurred_at=now,
         payload=proof,
     )

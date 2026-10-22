@@ -4,8 +4,9 @@ import json
 import os
 import stat
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -39,6 +40,9 @@ from nexus.research.fmp_profile_archive import _read
 from nexus.research.sec_exhibit_storage import configured_exhibit_store
 from nexus.settings import EngineSettings
 
+if TYPE_CHECKING:
+    from nexus.ops.formal_research_preparation import FormalPreparationContext
+
 
 @dataclass(frozen=True)
 class IdentityPreparationScope:
@@ -52,13 +56,19 @@ class IdentityPreparationScope:
 
 
 async def _read_scope(
-    settings: EngineSettings, *, account_id: UUID, batch_id: UUID, calendar_id: UUID
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    batch_id: UUID,
+    calendar_id: UUID,
+    execution: "FormalPreparationContext | None" = None,
 ) -> IdentityPreparationScope | None:
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     try:
         async with factory() as session, session.begin():
-            await session.execute(text("SET TRANSACTION READ ONLY"))
+            if execution is None:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
             if (
                 await session.scalar(text("SELECT version_num FROM alembic_version"))
                 != CURRENT_MIGRATION_HEAD
@@ -75,9 +85,28 @@ async def _read_scope(
                 PORTFOLIO_ALLOCATION_V1.decision_local_time,
                 tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
             ).astimezone(UTC)
+            if execution is not None:
+                from nexus.ops.formal_research_preparation import require_preparation_scope
+
+                if (
+                    execution.account_id != account_id
+                    or execution.reservation.candidate_batch_id != batch_id
+                    or execution.calendar_id not in (None, calendar_id)
+                ):
+                    raise ValueError("AGENT_PAPER_TRIGGER_FAILED")
+                validated = await require_preparation_scope(session, execution, now=now)
+                if validated.calendar_authority_id != calendar_id:
+                    raise ValueError("AGENT_PAPER_TRIGGER_FAILED")
+                slot = (
+                    calendar.market_close_at
+                    if execution.reservation.trigger_mode == "manual"
+                    else execution.reservation.decision_slot_at + timedelta(minutes=5)
+                )
             if calendar.session != calendar.local_date or not calendar.market_open_at <= now < slot:
                 return None
-            if await session.scalar(
+            if (
+                execution is None or execution.reservation.trigger_mode != "manual"
+            ) and await session.scalar(
                 select(AgentPaperCycleRecord.id)
                 .where(
                     AgentPaperCycleRecord.account_id == account_id,
@@ -212,6 +241,7 @@ async def prepare_agent_paper_identity_once(
     expected_calendar_authority_id: UUID,
     repo_root: Path,
     contact: str,
+    execution: "FormalPreparationContext | None" = None,
 ) -> str:
     """Archive once, atomically register the batch, then freeze future snapshots."""
     if not contact:
@@ -224,6 +254,7 @@ async def prepare_agent_paper_identity_once(
             account_id=account_id,
             batch_id=batch_id,
             calendar_id=expected_calendar_authority_id,
+            execution=execution,
         ),
     )
     if scope is None:
@@ -235,6 +266,9 @@ async def prepare_agent_paper_identity_once(
     if any(base is None for _, _, base in scope.candidates):
         return preparation_unavailable("research_identity", "scope", "IDENTITY_BASE_MISSING")
     if not scope.evidence_ready:
+        # Scheduled collection remains confined to the original pre-slot window.
+        if execution is not None and execution.reservation.trigger_mode == "scheduled":
+            return preparation_unavailable("research_identity", "scope", "SCOPE_UNAVAILABLE")
         with preparation_step("research_identity", "archive"):
             directory = _private_parent(repo_root) / scope.day.strftime("%Y%m%d")
         failure_marker = directory.with_name(directory.name + "-import-failure.json")
@@ -277,6 +311,7 @@ async def prepare_agent_paper_identity_once(
                 account_id=account_id,
                 batch_id=batch_id,
                 calendar_id=expected_calendar_authority_id,
+                execution=execution,
             ),
         )
         if (
@@ -289,6 +324,13 @@ async def prepare_agent_paper_identity_once(
         try:
             with preparation_step("research_identity", "import"):
                 async with factory() as session, session.begin():
+                    if execution is not None:
+                        from nexus.ops.formal_research_preparation import require_preparation_scope
+
+                        import_now = await session.scalar(select(func.clock_timestamp()))
+                        if not isinstance(import_now, datetime):
+                            raise ValueError("AGENT_PAPER_IDENTITY_CLOCK_INVALID")
+                        await require_preparation_scope(session, execution, now=import_now)
                     store = configured_exhibit_store(session)
                     for instrument_id, _, base_id in scope.candidates:
                         if instrument_id in scope.registered:
@@ -329,6 +371,7 @@ async def prepare_agent_paper_identity_once(
                 account_id=account_id,
                 batch_id=batch_id,
                 calendar_id=expected_calendar_authority_id,
+                execution=execution,
             ),
         )
         if current is None or current.candidates != scope.candidates:
@@ -348,6 +391,7 @@ async def prepare_agent_paper_identity_once(
             account_id=account_id,
             batch_id=batch_id,
             calendar_id=expected_calendar_authority_id,
+            execution=execution,
         ),
     )
     return (
