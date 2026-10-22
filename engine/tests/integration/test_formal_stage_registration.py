@@ -165,3 +165,69 @@ async def test_formal_registration_refuses_conflicting_stored_fields(migrated_da
     async with factory() as session:
         model = await session.get(AgentModelConfigRecord, model_id)
         assert model.max_input_tokens == 1
+
+
+@pytest.mark.asyncio
+async def test_bounded_setup_versions_scope_without_rewriting_frozen_prompt_authority(
+    migrated_database_url,
+):
+    import hashlib
+    import json
+
+    from nexus.agents.execution_authority import load_frozen_prompts
+    from nexus.agents.persistence import load_complete_prompt_authority
+    from nexus.persistence.models.agents import AgentPromptVersionRecord
+    from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await openai_local.prepare_database(settings, **OPTIONS)
+    async with factory() as session:
+        old = await load_complete_prompt_authority(session)
+        assert old is not None and old["portfolio"].version == "local-portfolio-synthesis-v4"
+        original = {
+            row.id: {column.name: getattr(row, column.name) for column in row.__table__.columns}
+            for row in old.values()
+        }
+        manifest = {
+            role: {"id": str(row.id), "version": row.version, "content_hash": row.content_hash}
+            for role, row in old.items()
+        }
+        frozen = AgentResearchRunRecord(
+            prompt_version_id=old["orchestrator"].id,
+            prompt_manifest=manifest,
+            prompt_hash=hashlib.sha256(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        )
+    options = V9_OPTIONS | {"formal_bounded_stage_budget": True}
+    await openai_local.prepare_database(settings, **options)
+    await openai_local.prepare_database(settings, **options)
+    async with factory() as session:
+        current = await load_complete_prompt_authority(session)
+        assert current is not None
+        assert current["portfolio"].version == "local-portfolio-synthesis-v5-paper-scope"
+        assert "research_scope=single_security" in current["portfolio"].content
+        historical = await load_frozen_prompts(session, frozen)
+        assert historical is not None
+        assert historical["portfolio"].version == "local-portfolio-synthesis-v4"
+        assert {role: row.id for role, row in historical.items()} == {
+            role: row.id for role, row in old.items()
+        }
+        for prompt_id, expected in original.items():
+            actual = await session.get(AgentPromptVersionRecord, prompt_id)
+            assert {
+                column.name: getattr(actual, column.name) for column in actual.__table__.columns
+            } == expected
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(AgentPromptVersionRecord)
+                .where(
+                    AgentPromptVersionRecord.version == "local-portfolio-synthesis-v5-paper-scope"
+                )
+            )
+            == 1
+        )
+        for table in (AgentResearchRunRecord, Job, IdempotencyRecord):
+            assert await session.scalar(select(func.count()).select_from(table)) == 0

@@ -449,7 +449,9 @@ async def prepare_database(
         )
     )
     if structured_synthesis:
-        synthesis_prompt = load_portfolio_synthesis_prompt()
+        synthesis_prompt = load_portfolio_synthesis_prompt(
+            security_research_scope=formal_bounded_stage_budget
+        )
         prompts.append(
             (
                 synthesis_prompt.role,
