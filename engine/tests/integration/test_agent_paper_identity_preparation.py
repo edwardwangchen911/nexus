@@ -332,12 +332,14 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             scope = await preparation.read_preparation_scope(settings, context)
             clock[0] += timedelta(seconds=1)
             await preparation.freeze_prepared_snapshots(settings, context, scope)
-            async with factory() as session:
+            frozen_at = clock[0]
+            clock[0] += timedelta(seconds=10)
+            async with factory() as session, session.begin():
                 for instrument_id in (AAPL_ID, NVDA_ID):
                     snapshot = await identity.select_authoritative_snapshot(
                         session, instrument_id=instrument_id, as_of=clock[0]
                     )
-                    assert snapshot.observed_at == clock[0]
+                    assert snapshot.observed_at == frozen_at
                     diagnosis = await identity.inspect_identity_binding_snapshot(
                         session,
                         instrument_id=instrument_id,
@@ -354,6 +356,14 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     )
                     assert bindings
                     assert all(item.decision_session == day for item in bindings.values())
+                    await _assert_final_paper_identity(
+                        session,
+                        store,
+                        snapshot,
+                        instrument_id,
+                        clock[0],
+                        day,
+                    )
         async with factory() as session:
             assert await session.scalar(
                 select(func.count())
@@ -364,3 +374,157 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                 assert await session.scalar(select(func.count()).select_from(model)) == 0
     finally:
         await factory.kw["bind"].dispose()
+
+
+async def _assert_final_paper_identity(session, store, base, instrument_id, decision_time, day):
+    """Use the cycle's real final-context consumer with native price/quote rows."""
+    from copy import deepcopy
+    from decimal import Decimal
+    from hashlib import sha256
+
+    from nexus.agents.paper_context import (
+        prepare_agent_paper_research_snapshot,
+        read_agent_paper_research_context,
+    )
+    from nexus.market.ingestion import ingest_price_page
+    from nexus.market.intraday_ingestion import canonical_quote_observation
+    from nexus.paper.agent_cycle_models import CandidateManifestEntry
+    from nexus.paper.projection import load_paper_projection
+    from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
+    from nexus.persistence.models.data import DataArtifact, DataSnapshot
+    from nexus.persistence.models.market import LatestQuote
+    from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID
+    from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
+
+    original = (deepcopy(base.payload), base.revision, base.observed_at)
+    before_ids = set(
+        await session.scalars(
+            select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == base.id,
+                AgentDataSnapshotEvidenceRecord.source == SOURCE,
+            )
+        )
+    )
+    assert before_ids
+    prior = day - timedelta(days=1)
+    price = await ingest_price_page(
+        session,
+        store,
+        ProviderPage(
+            items=(
+                PriceBar(
+                    instrument_id=instrument_id,
+                    session=prior,
+                    open=Decimal("100"),
+                    high=Decimal("100"),
+                    low=Decimal("100"),
+                    close=Decimal("100"),
+                    volume=Decimal("1000"),
+                    observed_at=decision_time - timedelta(days=1),
+                    available_at=decision_time,
+                    received_at=decision_time,
+                    revision="final-context-prior",
+                    quality_flags=(),
+                ),
+            ),
+            next_cursor=None,
+            raw_payload=b'{"synthetic":"final-context-prior"}',
+            source_request_id=None,
+            as_of=decision_time,
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed="sip",
+                adjustment="all",
+                interval="1Day",
+                mode="delayed",
+                delivery_mode="delayed",
+            ),
+        ),
+        commit=False,
+        source_policy_id=PAPER_DECISION_SOURCE_POLICY_ID,
+    )
+    assert price.price_authority is not None
+    digest = sha256(str(instrument_id).encode()).hexdigest()
+    artifact = DataArtifact(
+        id=uuid4(),
+        uri=f"memory://sha256/{digest}",
+        sha256=digest,
+        byte_size=100,
+        mime_type="application/json",
+        schema_version="schwab_level_one_stream_v1",
+        source="schwab",
+        observed_at=decision_time,
+        available_at=decision_time,
+        received_at=decision_time,
+        created_at=decision_time,
+    )
+    values = dict(
+        instrument_id=instrument_id,
+        source="schwab",
+        feed="l1",
+        delivery_mode="real_time",
+        event_kind="quote",
+        bid=Decimal("99.9"),
+        ask=Decimal("100.1"),
+        last=None,
+        observed_at=decision_time,
+        available_at=decision_time,
+        received_at=decision_time,
+        revision=digest,
+    )
+    quote = LatestQuote(
+        id=uuid4(),
+        **values,
+        quality_flags=[],
+        evidence_status="verified",
+        data_artifact_id=artifact.id,
+        created_at=decision_time,
+        content_hash=sha256(canonical_quote_observation(**values)).hexdigest(),
+    )
+    session.add_all((artifact, quote))
+    await session.flush()
+    candidate = CandidateManifestEntry(
+        instrument_id=instrument_id,
+        symbol="AAPL" if instrument_id == AAPL_ID else "NVDA",
+        inclusion_reason="synthetic",
+        research_snapshot_id=base.id,
+        prior_daily_price_authority_id=price.price_authority.id,
+        decision_quote_id=quote.id,
+        decision_trade_id=None,
+        decision_artifact_id=artifact.id,
+        decision_evidence_hash=digest,
+        risk_query_authority_ids=(uuid4(), uuid4(), uuid4()),
+    )
+    projection = await load_paper_projection(session, account_id=ACCOUNT_ID, as_of=decision_time)
+    final = await prepare_agent_paper_research_snapshot(
+        session,
+        cycle_id=uuid4(),
+        decision_time=decision_time,
+        candidate=candidate,
+        projection=projection,
+    )
+    assert final.id != base.id and final.observed_at == decision_time > base.observed_at
+    final_ids = set(
+        await session.scalars(
+            select(AgentDataSnapshotEvidenceRecord.evidence_ref_id).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == final.id,
+                AgentDataSnapshotEvidenceRecord.source == SOURCE,
+            )
+        )
+    )
+    assert final_ids == before_ids
+    bindings = await identity.read_identity_bindings(
+        session,
+        instrument_id=instrument_id,
+        as_of=decision_time,
+        decision_session=day,
+        evidence_ids=tuple(final_ids),
+    )
+    assert set(bindings) == final_ids
+    assert all(item.decision_session == day for item in bindings.values())
+    context = await read_agent_paper_research_context(
+        session, snapshot_id=final.id, instrument_id=instrument_id, as_of=decision_time
+    )
+    assert context is not None and context[0].decision_time == decision_time
+    unchanged = await session.get(DataSnapshot, base.id, populate_existing=True)
+    assert (unchanged.payload, unchanged.revision, unchanged.observed_at) == original
