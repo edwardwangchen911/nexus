@@ -39,7 +39,15 @@ NOW = datetime(2026, 10, 15, tzinfo=UTC)
 
 
 def test_exact_observed_report_is_accepted_but_not_called_clean(root, report):
-    assert gate.evaluate(report, 1, root, NOW) == "risk_accepted_until_2026-10-22T00:00:00Z"
+    assert gate.evaluate(report, 1, root, NOW) == "risk_accepted_until_2026-10-23T00:00:00Z"
+
+
+def test_user_approved_extension_remains_bounded(root, report):
+    assert gate.evaluate(report, 1, root, datetime(2026, 10, 22, tzinfo=UTC)) == (
+        "risk_accepted_until_2026-10-23T00:00:00Z"
+    )
+    with pytest.raises(gate.AuditRejected, match="AUDIT_ACCEPTANCE_EXPIRED"):
+        gate.evaluate(report, 1, root, datetime(2026, 10, 23, tzinfo=UTC))
 
 
 @pytest.mark.parametrize("offset", [timedelta(0), timedelta(microseconds=1)])
@@ -125,7 +133,7 @@ def test_normal_cli_keeps_complete_report_and_has_no_omit_flag(root, report, mon
 
     monkeypatch.setattr(gate, "run_audit", audit)
     target = root / "audit-report.txt"
-    assert gate.run(root, target, NOW) == "risk_accepted_until_2026-10-22T00:00:00Z"
+    assert gate.run(root, target, NOW) == "risk_accepted_until_2026-10-23T00:00:00Z"
     assert json.loads(target.read_text()) == report
     assert calls == [
         [
