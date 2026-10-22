@@ -632,6 +632,12 @@ uv run --project engine nexus-engine-manual-paper --repo-root <主仓库> --env-
 
 无迁移、依赖或配置变更；当前授权仅本地实现和隔离验收，未处置真实记录、启动宿主或新周期。未来部署须同步兼容消费者与生产者；有接受审计后，回退先停新入口及生产者、保留全部事实并核验旧消费者兼容性，不可删除审计或直接恢复不认识该执行拦截的旧版本。
 
+### 正式触发的当日输入准备
+
+正式 manual / scheduled 入口在原生触发认领提交后、创建周期前，复用日线、当日身份、宏观和趋势准备。manual 的范围来自精确 request / execution / claim 与模型、批次哈希；scheduled 保留原定时窗口，槽位之后不新采集身份。已有合格材料只读复用，未知或失败不自动重试。宏观仍允许原有 unavailable，其余必要材料不降级。
+
+准备后通过正常研究快照 builder 冻结新 snapshot，再核对实际正常选择结果、精确 ID、observed_at 及当日 identity binding。旧快照不改写；最终 decision_time 仍由原正式行情流程取得，收盘、价格及时效检查不变。未来非固定白名单异常写入固定 AGENT_PAPER_TRIGGER_FAILED 与 external_effects=unknown；收尾写入失败另记脱敏诊断，不覆盖首异常，也不把未知认领判成已知终态。
+
 ### 准备与维护失败诊断（本地候选，未部署）
 
 正常宿主准备日线、宏观、趋势及身份时，异常保留原业务结果，附加固定的

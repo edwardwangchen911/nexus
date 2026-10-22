@@ -210,6 +210,13 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             }
         )
 
+        from helpers.formal_preparation import use_seeded_formal_preparation
+
+        # This recovery fixture already supplies authoritative research inputs;
+        # keep real scope, claim, execution and calendar gates at the source boundary.
+        use_seeded_formal_preparation(
+            monkeypatch, account_id=authority.account_id, batch_id=batch.batch_id
+        )
         # A process cancellation bypasses Exception; the claim transaction is already committed.
         async def interrupted(*args, **kwargs):
             raise asyncio.CancelledError()
