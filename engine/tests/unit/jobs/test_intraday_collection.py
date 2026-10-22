@@ -535,6 +535,38 @@ async def test_fosun_fetch_budget_includes_preflight_and_preserves_archive_reser
         ),
     )
 
+    clock = [100.0]
+    deadlines: list[float] = []
+
+    class _Deadline:
+        def __init__(self, deadline: float) -> None:
+            self.deadline = deadline
+            deadlines.append(deadline)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            if exc is None:
+                assert clock[0] < self.deadline
+            return False
+
+        def expired(self) -> bool:
+            return clock[0] >= self.deadline
+
+    # Replace only this module's clock/timer boundary, never the event loop.
+    # Real cancellation ownership remains covered by the adjacent async tests.
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "asyncio",
+        SimpleNamespace(
+            get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0]),
+            current_task=asyncio.current_task,
+            timeout_at=_Deadline,
+            CancelledError=asyncio.CancelledError,
+        ),
+    )
+
     class _CancelledProvider(_Provider):
         async def fetch_raw_snapshots(
             self,
@@ -544,17 +576,13 @@ async def test_fosun_fetch_budget_includes_preflight_and_preserves_archive_reser
         ) -> RawSnapshotEnvelope:
             del request, read_guard
             self.calls += 1
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                raise FosunSnapshotReadAborted(
-                    "INTRADAY_SNAPSHOT_READ_CANCELLED",
-                    partial,
-                ) from None
-            raise AssertionError("unreachable")
+            assert clock[0] == 102.0
+            assert deadlines == [123.0]
+            clock[0] = deadlines[0]
+            raise FosunSnapshotReadAborted("INTRADAY_SNAPSHOT_READ_CANCELLED", partial)
 
     async def slow_preflight(*_: object, **__: object) -> bool:
-        await asyncio.sleep(0.02)
+        clock[0] += 2.0
         return True
 
     archived: list[bytes] = []
@@ -565,28 +593,12 @@ async def test_fosun_fetch_budget_includes_preflight_and_preserves_archive_reser
         envelope: RawSnapshotEnvelope,
         **__: object,
     ) -> object:
-        await asyncio.sleep(0.045)
+        assert deadlines == [123.0, 129.0]
+        assert clock[0] == 123.0
+        clock[0] += 4.5
         archived.append(envelope.raw_payload)
         return SimpleNamespace(raw_artifact=SimpleNamespace())
 
-    monkeypatch.setattr(intraday_collection_module, "_FOSUN_FETCH_TIMEOUT_SECONDS", 0.24)
-    monkeypatch.setattr(
-        intraday_collection_module,
-        "_FOSUN_HANDLER_INTERNAL_TIMEOUT_SECONDS",
-        0.29,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        intraday_collection_module,
-        "_FOSUN_HANDLER_SAFETY_MARGIN_SECONDS",
-        0.01,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        intraday_collection_module,
-        "_FOSUN_ABORT_ARCHIVE_TIMEOUT_SECONDS",
-        0.05,
-    )
     provider = _CancelledProvider()
     registry = build_intraday_collection_registry(
         lambda _session: provider,
@@ -599,8 +611,10 @@ async def test_fosun_fetch_budget_includes_preflight_and_preserves_archive_reser
     spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
     assert spec is not None
 
-    async with asyncio.timeout(0.30):
-        result = await spec.handler(_context(_payload()))
+    result = await spec.handler(_context(_payload()))
+    assert deadlines == [123.0, 129.0]
+    assert clock[0] == 127.5
+    assert clock[0] < 130.0  # Original worker budget still includes the archive reserve.
 
     assert result.outcome == "skipped"
     assert result.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"

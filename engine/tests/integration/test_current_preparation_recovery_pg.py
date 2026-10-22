@@ -51,9 +51,11 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "concurrent_recovery",
         "accept_unknown",
         "accept_native_claim",
+        "accept_native_claim_direct",
         "accept_native_claim_wrong_hash",
         "accept_native_claim_late_finish",
         "accept_native_claim_corrupt_audit",
+        "accept_native_claim_changed",
         "accept_native_claim_late_cycle",
         "accept_native_claim_concurrent",
         "accept_native_claim_queued_job",
@@ -97,10 +99,13 @@ async def test_current_host_interruption_recovers_via_normal_cli(
     migrated_database_url, monkeypatch, tmp_path, failure_point
 ):
     acceptance_case = failure_point if failure_point.startswith("accept_") else None
-    direct_acceptance = acceptance_case in {"accept_direct", "accept_open_order"} or bool(
-        acceptance_case and acceptance_case.startswith("accept_prepared_")
-    )
+    direct_acceptance = acceptance_case in {
+        "accept_direct",
+        "accept_open_order",
+        "accept_native_claim_direct",
+    } or bool(acceptance_case and acceptance_case.startswith("accept_prepared_"))
     native_trigger = agent_paper_once.trigger_once
+    native_finish = agent_paper_once.finish_schwab_agent_paper_trigger
     if acceptance_case:
         failure_point = (
             "native_claim_unknown"
@@ -235,6 +240,19 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             else:
                 monkeypatch.setattr(agent_paper_once, "trigger_once", interrupted)
         elif failure_point in {"native_claim_unknown", "late_claim_change"}:
+            if direct_acceptance:
+                # Persisted failure shape: primary preparation error followed by a
+                # failed receipt write leaves the original committed claim empty.
+                async def interrupted(*_a, **_k):
+                    raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+
+                async def receipt_unavailable(*_a, **_k):
+                    raise RuntimeError("isolated receipt write failure")
+
+                monkeypatch.setattr(
+                    agent_paper_once, "finish_schwab_agent_paper_trigger", receipt_unavailable
+                )
+                expected_error = ValueError
             monkeypatch.setattr(agent_paper_once, "prepare_schwab_decision_authority", interrupted)
             monkeypatch.setattr(
                 agent_paper_once, "S3ProviderEvidenceStore", lambda *_a, **_k: object()
@@ -298,6 +316,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                 calendar_authority_id=CALENDAR_ID,
                 process_environment={},
             )
+        monkeypatch.setattr(agent_paper_once, "finish_schwab_agent_paper_trigger", native_finish)
         async with sessions.begin() as session:
             row = await session.get(ManualPaperRequest, request.request_id)
             assert (await manual_request.read_manual_request(session, row)).status == (
@@ -1431,6 +1450,28 @@ async def _check_explicit_acceptance(
                     session, reservation=reservation, error_code="CANDIDATE_BATCH_INVALID"
                 )
         assert await business_facts() == before
+    if case == "accept_changed":
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            claim.response_payload = {"outcome": "failed", "error_code": "CANDIDATE_BATCH_INVALID"}
+        async with sessions.begin() as session:
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await read_configured_manual_request(
+                    session, settings, request_id=request.request_id
+                )
+            with pytest.raises(ValueError, match=recovery.BLOCKED):
+                await finish_schwab_agent_paper_trigger(
+                    session, reservation=reservation, error_code="CANDIDATE_BATCH_INVALID"
+                )
+            with pytest.raises(ValueError):
+                await manual_request.admit_manual_request(
+                    session, **admission, idempotency_key="new"
+                )
+        return
     if case == "accept_corrupt_audit":
         from sqlalchemy import text
 
