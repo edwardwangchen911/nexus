@@ -42,3 +42,5 @@ Receipt additive: research_contract=research_only_v2; research manifest_id/resea
 
 
 部署前隔离真实备份升级发现旧准备接受证明的 hash 兼容缺陷：0084 新列被通用 row hash 计入，导致原 v1 fact_hash 不符。新增字面旧11列回归先 RED；最小修复只固定 v1 且无 research_profile 的旧列/原序列化，异常 v1 profile 拒绝，v2 全字段继续入 hash。共享 helper 覆盖原 preparation acceptance/close，未改历史审计或未知预算。定向复核无阻断；真实备份隔离升级后原业务摘要不变，正常账户历史准入、新 v2 回执在停止准入时可读、停止新请求有效、已有 v2 时降级拒绝，源库和模型调用均为零。完整备份2368引用对象及隔离恢复通过。镜像须按修复后提交重建，最终新head CI通过才部署。
+
+最终候选9355228的CI汇总：5项成功，engine-postgres为8失败/6811通过/6跳过。全部失败来自旧manual故障保护回归：新增纯研究分流的数据库读取位于原安全错误边界之外。修复将contract读取纳入同一保护，成功退出事务后才进入pure dispatch；pure自身阶段异常保持，外层清理不能覆盖Exception或取消。旧四类边界断言保留，新增routing及pure主错/取消×cleanup异常/取消覆盖；RED 6失败/4通过后，90项相关测试及Ruff/Mypy通过。定向审查指出的事务退出及BaseException清理两点已修。须重新核对新head全部必需CI；旧935镜像和部署计划已过期，不得直接部署。没有合并、服务切换或真实模型请求。

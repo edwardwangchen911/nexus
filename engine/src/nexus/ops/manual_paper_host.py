@@ -118,15 +118,22 @@ async def dispatch_manual_request(
 
     if manual_host_scope(settings) != manual_host_scope(trigger_settings):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
-    if await dispatch_pure_research_request(settings, request_id=request_id):
-        return
-    _validate_trigger_dependencies(trigger_settings)
     factory = session_factory(settings)
-    failure: ValueError | None = None
+    failure: BaseException | None = None
+    pure = False
     phase = "preparation_journal"
     execution_committed = False
     try:
         try:
+            # Route under the same safe failure and cleanup boundary as the claim.
+            async with factory.begin() as session:
+                row = await session.get(ManualPaperRequest, request_id)
+                is_pure = row is not None and row.contract_version == 2
+            if is_pure:
+                pure = True
+                await dispatch_pure_research_request(settings, request_id=request_id)
+                return
+            _validate_trigger_dependencies(trigger_settings)
             async with factory.begin() as session:
                 _, claimed = await claim_configured_manual_request(
                     session, settings, request_id=request_id
@@ -170,6 +177,10 @@ async def dispatch_manual_request(
                 process_environment=process_environment,
             )
         except Exception as error:
+            if pure:
+                # Pure research owns its persisted stage diagnostics and closeout.
+                failure = error
+                raise
             failure = ValueError("MANUAL_RESULT_UNKNOWN")
             phase = getattr(error, "_nexus_agent_paper_failure_phase", phase)
             annotate_manual_trigger_failure(error, phase=phase)
@@ -196,10 +207,13 @@ async def dispatch_manual_request(
                     # A preparing request also remains non-replayable if this transaction fails.
                     pass
             raise failure from None
+    except BaseException as error:
+        failure = error
+        raise
     finally:
         try:
             await factory.kw["bind"].dispose()
-        except Exception:
+        except BaseException:
             if failure is None:
                 raise
 
