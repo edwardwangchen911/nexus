@@ -323,7 +323,10 @@ def test_up_starts_host_service_after_compose_only_when_enabled(repo_root: Path)
     assert calls[10][2] == "status"
     assert "--service-status" in calls[11]
     assert [result.fact for result in results] == ["host_service"] + ["compose"] * 8 + [
-        "host_service", "host_service", "heartbeat", "preflight"
+        "host_service",
+        "host_service",
+        "heartbeat",
+        "preflight",
     ]
     assert all(result.exit_code == 0 for result in results)
 
@@ -1208,3 +1211,93 @@ def test_main_prints_only_safe_codes(
     assert exit_code == 0
     assert captured.out == "status step=1 code=LOCAL_STACK_STEP_OK exit=0\n"
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("enabled", "host", "heartbeat", "old_component", "expected_ok"),
+    [
+        (True, "running", "fresh", None, True),
+        (True, "inactive", "fresh", None, False),
+        (True, "stopped", "fresh", None, False),
+        (True, "running", "stale", None, False),
+        (True, "running", "missing", None, False),
+        (True, "running", "fresh", "host", False),
+        (True, "running", "fresh", "api", False),
+        (True, "running", "fresh", "worker", False),
+        (False, "inactive", "stale", None, True),
+        (False, "stopped", "missing", None, True),
+        (False, "running", "fresh", None, False),
+        (False, "inactive", "stale", "api", False),
+    ],
+)
+def test_deployment_checks_expected_host_mode_and_exact_release(
+    repo_root: Path, enabled, host, heartbeat, old_component, expected_ok
+) -> None:
+    """A retired foreground heartbeat cannot certify an enabled scheduler."""
+    env_file = repo_root / "infra/.env.local"
+    env_file.write_text(f"NEXUS_AGENT_PAPER_CYCLE_ENABLED={str(enabled).lower()}\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    old = "a" * 40 if revision != "a" * 40 else "b" * 40
+    calls = []
+
+    def runner(argv, **_):
+        calls.append(argv)
+        if "agent-paper-loop-service.py" in " ".join(argv):
+            assert argv[2] == "status"  # Verification must never restart a host.
+            payload = json.dumps({"status": host})
+        elif "--service-status" in argv:
+            payload = json.dumps(
+                {
+                    "heartbeat": {
+                        "status": heartbeat,
+                        "release_revision": old if old_component == "host" else revision,
+                    },
+                    "preflight": {
+                        "status": "ready",
+                        "execution_locked": True,
+                        "external_requests": 0,
+                        "blocking_codes": [],
+                        "optional_codes": [],
+                    },
+                }
+            )
+        elif "printenv" in argv:
+            service = argv[argv.index("printenv") - 1]
+            payload = old if old_component == service else revision
+        else:
+            assert argv[-2:] == ("ps", "-a")
+            payload = "private-compose"
+        return subprocess.CompletedProcess(argv, 0, payload, "private")
+
+    results = run_local_stack(
+        LocalStackAction("verify-deployment"),
+        repo_root=repo_root,
+        env_file=env_file,
+        project_name="nexus-phase3-local",
+        runner=runner,
+    )
+    assert all(r.exit_code == 0 for r in results) is expected_ok
+    assert all(r.action.value == "verify-deployment" for r in results)
+    assert {"api_release", "worker_release", "host_service"} <= {r.fact for r in results}
+    assert any("--service-status" in c for c in calls) is enabled
+    assert "private" not in repr(results)
+    if enabled and host != "running":
+        assert any(r.result_code == "AGENT_PAPER_REQUIRED_HOST_NOT_RUNNING" for r in results)

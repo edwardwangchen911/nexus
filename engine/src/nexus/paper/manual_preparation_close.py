@@ -209,7 +209,9 @@ def require_preparation_producers_stopped(
         raise PreparationCloseDiagnosticError("host_status", "STATUS_INVALID") from None
     if not isinstance(status, dict):
         raise PreparationCloseDiagnosticError("host_status", "STATUS_INVALID")
-    if status.get("status") != "inactive":
+    # The owner-aware adapter reports stopped only when launchd confirms absence.
+    # A normal stop unregisters the job; process quiescence is still required below.
+    if status.get("status") not in {"inactive", "stopped"}:
         raise PreparationCloseDiagnosticError("host_status", "HOST_NOT_INACTIVE")
     try:
         require_research_processes_quiescent()

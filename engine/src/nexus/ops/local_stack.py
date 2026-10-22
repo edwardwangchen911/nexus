@@ -25,6 +25,7 @@ class LocalStackAction(StrEnum):
     DOCTOR = "doctor"
     UP = "up"
     STATUS = "status"
+    VERIFY_DEPLOYMENT = "verify-deployment"
     DOWN = "down"
 
 
@@ -167,7 +168,7 @@ def build_local_stack_commands(
                 180,
             ),
         )
-    if action is LocalStackAction.STATUS:
+    if action in {LocalStackAction.STATUS, LocalStackAction.VERIFY_DEPLOYMENT}:
         return (LocalStackCommand((*compose, "ps", "-a"), 30),)
     if action is LocalStackAction.DOWN:
         return (
@@ -201,7 +202,9 @@ def run_local_stack(
         else _validate_local_env(root, env_file)
     )
     agent_paper_enabled = (
-        _agent_paper_enabled(resolved_env) if action is LocalStackAction.UP else False
+        _agent_paper_enabled(resolved_env)
+        if action in {LocalStackAction.UP, LocalStackAction.VERIFY_DEPLOYMENT}
+        else False
     )
     commands = build_local_stack_commands(
         action,
@@ -331,7 +334,10 @@ def run_local_stack(
 
     for command in commands:
         exit_code, _ = run_command(command)
-        if exit_code != 0 and action is not LocalStackAction.STATUS:
+        if exit_code != 0 and action not in {
+            LocalStackAction.STATUS,
+            LocalStackAction.VERIFY_DEPLOYMENT,
+        }:
             return tuple(results)
 
     if action is LocalStackAction.UP:
@@ -372,44 +378,60 @@ def run_local_stack(
                 pause(1.0)
         return tuple(results)
 
-    if action is LocalStackAction.STATUS:
-        run_host("status")
-        diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
-        try:
-            completed = runner(
-                diagnostic.argv,
-                cwd=root,
-                timeout=diagnostic.timeout_seconds,
-                check=False,
-                text=True,
-                capture_output=True,
-                env=command_environment,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            result_code = (
-                "LOCAL_STACK_STEP_TIMEOUT"
-                if isinstance(error, subprocess.TimeoutExpired)
-                else "LOCAL_STACK_STEP_UNAVAILABLE"
-            )
-            for fact in ("heartbeat", "preflight"):
-                results.append(
-                    LocalStackStepResult(
+    if action in {LocalStackAction.STATUS, LocalStackAction.VERIFY_DEPLOYMENT}:
+        host_ok = run_host("status")
+        if action is LocalStackAction.VERIFY_DEPLOYMENT and host_ok:
+            status = dict(results[-1].details).get("status")
+            expected = {"running"} if agent_paper_enabled else {"inactive", "stopped"}
+            if status not in expected:
+                results[-1] = replace(
+                    results[-1],
+                    exit_code=1,
+                    result_code=(
+                        "AGENT_PAPER_REQUIRED_HOST_NOT_RUNNING"
+                        if agent_paper_enabled
+                        else "AGENT_PAPER_DISABLED_HOST_RUNNING"
+                    ),
+                )
+        # A bounded research host may exit normally. Only an enabled scheduler
+        # is required to keep a fresh heartbeat; a stale audit is never deleted.
+        if action is LocalStackAction.STATUS or agent_paper_enabled:
+            diagnostic = _service_status_command(repo_root=root, env_file=resolved_env)
+            try:
+                completed = runner(
+                    diagnostic.argv,
+                    cwd=root,
+                    timeout=diagnostic.timeout_seconds,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    env=command_environment,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                result_code = (
+                    "LOCAL_STACK_STEP_TIMEOUT"
+                    if isinstance(error, subprocess.TimeoutExpired)
+                    else "LOCAL_STACK_STEP_UNAVAILABLE"
+                )
+                for fact in ("heartbeat", "preflight"):
+                    results.append(
+                        LocalStackStepResult(
+                            action=action,
+                            ordinal=len(results) + 1,
+                            exit_code=-1,
+                            result_code=result_code,
+                            fact=fact,
+                        )
+                    )
+            else:
+                results.extend(
+                    _parse_service_status_results(
                         action=action,
-                        ordinal=len(results) + 1,
-                        exit_code=-1,
-                        result_code=result_code,
-                        fact=fact,
+                        first_ordinal=len(results) + 1,
+                        stdout=completed.stdout,
+                        expected_release_revision=release_revision,
                     )
                 )
-        else:
-            results.extend(
-                _parse_service_status_results(
-                    action=action,
-                    first_ordinal=len(results) + 1,
-                    stdout=completed.stdout,
-                    expected_release_revision=release_revision,
-                )
-            )
         if results[0].exit_code == 0:
             compose_prefix = commands[0].argv[:-2]
             for service in ("api", "worker"):
