@@ -9,6 +9,15 @@ const labels: Record<ManualReceipt["status"], string> = {
   queued: "已登记，等待宿主处理", preparing: "正在准备研究输入", active: "周期正在运行",
   completed: "周期已完成", unavailable: "输入条件未满足，周期已结束", unknown: "周期结果尚未确认",
 };
+const researchLabels: Record<ManualReceipt["status"], string> = {
+  queued: "已登记，等待宿主处理", preparing: "正在准备研究输入", active: "研究正在处理",
+  completed: "研究处理已完成", unavailable: "研究条件未满足，请求已结束", unknown: "研究结果尚未确认",
+};
+const memberStatusLabels: Record<string, string> = {
+  prepared: "等待处理", running: "处理中", validated: "已校验", audited: "已审查", synthesized: "已综合",
+  completed: "处理完成", failed: "处理失败", abstained: "已停止研究",
+};
+const qualityLabels: Record<string, string> = { complete: "内容完整", partial: "内容受限" };
 
 export function ManualPaperStart(): React.ReactElement {
   const [attempt, setAttempt] = useState<Attempt | null>(null);
@@ -97,15 +106,30 @@ export function ManualPaperStart(): React.ReactElement {
     setAttempt(null); setReceipt(null); setRejected(false); setMessage("");
   };
   return <section className="pm-panel" aria-label="开始研究与内部模拟">
-    <div className="pm-panel__heading"><h2>开始新周期</h2><p>沿用已批准候选池与现有预算。内部模拟须通过数据、时段和风控检查。</p></div>
+    <div className="pm-panel__heading"><h2>开始研究或内部模拟</h2><p>沿用已批准候选池与现有预算。仅研究支持盘外处理；内部模拟须通过数据、时段和风控检查。</p></div>
     <div className="pm-panel__body">
       <div className="actions">
         <button type="button" className="button button--quiet" disabled={!restored || !!attempt || busy} onClick={() => start("research_only")}>仅研究</button>
         <button type="button" className="button" disabled={!restored || !!attempt || busy} onClick={() => start("research_and_paper")}>研究并内部模拟</button>
       </div>
-      <p>实盘执行保持锁定。浏览和刷新不会开始新周期。</p>
-      {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : "研究并内部模拟"} · <strong>{receipt.code === "MANUAL_PREPARATION_CANCELLED" ? "准备已安全取消" : labels[receipt.status]}</strong></p>
+      <p>实盘执行保持锁定。浏览和刷新不会开始新请求。</p>
+      {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : "研究并内部模拟"} · <strong>{receipt.code === "MANUAL_PREPARATION_CANCELLED" ? "准备已安全取消" : (receipt.research_contract === "research_only_v2" ? researchLabels : labels)[receipt.status]}</strong></p>
         <p>请求时间：<time dateTime={receipt.requested_at}>{receipt.requested_at}</time></p>
+        {receipt.research_contract === "research_only_v2" && <>
+          <p>基于历史观察资料开展研究，远端最新状态未核实。结果不构成正式决策，不产生组合目标、计划或订单。</p>
+          {receipt.research ? <>
+            <p>研究资料冻结时间：<time dateTime={receipt.research.research_as_of}>{receipt.research.research_as_of}</time>（UTC）</p>
+            <p>处理完成仅表示流程结束，内容质量须逐只核对；正式决策仍须重新核验当时资料与风控。</p>
+            <ul aria-label="各证券研究结果">
+              {receipt.research.members.map((member, index) => <li key={member.run_id}>
+                <a href={`/research/${member.instrument_id}?run_id=${member.run_id}`}>查看第 {index + 1} 只证券研究</a>
+                <p>处理状态：<strong>{Object.hasOwn(memberStatusLabels, member.status) ? memberStatusLabels[member.status] : "处理状态未知"}</strong></p>
+                <p>内容质量：<strong>{member.quality && Object.hasOwn(qualityLabels, member.quality) ? qualityLabels[member.quality] : "内容质量未知"}</strong></p>
+                <p>{member.usage_known ? "用量已确认" : "用量未知，保留预算占用"}</p>
+              </li>)}
+            </ul>
+          </> : <p>研究资料尚未冻结；请求时间不代表研究资料截止时间。</p>}
+        </>}
         {receipt.preparation_disposition === "unknown_acknowledged" && <p>准备结果未知已明确接受，调度占用已解除。历史调用、费用和预算保持原样；新请求仍需重新通过准入。</p>}
         {receipt.preparation_recovery?.disposition === "cancelled_before_call" && <p>已确认未开始外部操作，本次准备已取消。新请求仍需重新通过全部准入。</p>}
         {receipt.preparation_recovery?.disposition === "unknown_preserved" && <p>准备已收尾，但外部结果仍未知，费用和预算继续保留；当前不能开始新请求。</p>}
