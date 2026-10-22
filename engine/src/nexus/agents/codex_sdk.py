@@ -163,15 +163,30 @@ def _kill_sdk_process(client: AsyncCodex) -> None:
 
 async def _close_sdk_client(client: AsyncCodex) -> None:
     """Never let SDK cleanup outlive the research handler deadline."""
+    from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+    transport = getattr(getattr(client, "_client", None), "_sync", None)
+    process = getattr(transport, "_proc", None)
     close_task = asyncio.create_task(client.close())
-    done, _ = await asyncio.wait((close_task,), timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
-    if close_task not in done:
-        _kill_sdk_process(client)
-        done, _ = await asyncio.wait((close_task,), timeout=1)
-    if close_task in done:
-        await close_task
-    else:
-        close_task.cancel()
+    try:
+        done, _ = await asyncio.wait((close_task,), timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
+        if close_task not in done:
+            if process is not None and process.poll() is None:
+                with suppress(Exception):
+                    process.kill()
+            else:
+                _kill_sdk_process(client)
+            done, _ = await asyncio.wait((close_task,), timeout=1)
+        if close_task in done:
+            await close_task
+    finally:
+        if close_task.cancelled():
+            mark_host_drain_unconfirmed()
+        if not close_task.done():
+            mark_host_drain_unconfirmed()
+            close_task.cancel()
+        if process is not None and process.poll() is None:
+            mark_host_drain_unconfirmed()
 
 
 async def _close_portfolio_client(
@@ -228,8 +243,14 @@ async def _close_portfolio_client(
         while process is not None and process.poll() is None and loop.time() < deadline:
             await asyncio.sleep(min(0.01, max(0.0, deadline - loop.time())))
         if pending:
+            from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+            mark_host_drain_unconfirmed()
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
         if process is not None and process.poll() is None:
+            from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+            mark_host_drain_unconfirmed()
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
         if failure is not None:
             raise failure
@@ -639,6 +660,7 @@ async def _invoke_codex(
         with _invocation_boundary("client_init", state=invocation_state):
             client = AsyncCodex(sdk_config(directory))
         run_task = None
+        initialization_attempted = False
         phase: InvocationPhase = "account"
         invocation_timer = (
             asyncio.timeout_at(stage_deadline)
@@ -655,6 +677,7 @@ async def _invoke_codex(
                         error = _CodexInvocationTimeout("CODEX_TIMEOUT", phase="account")
                         error.timeout_source = "stage_deadline"
                         raise error
+                    initialization_attempted = True
                     account = await client.account(refresh_token=False)
                     if account.account is None or not isinstance(
                         account.account.root, ChatgptAccount
@@ -761,6 +784,13 @@ async def _invoke_codex(
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
             primary = sys.exc_info()[1]
+            # SDK initialization/close uses to_thread and may clear _proc before
+            # its child has stopped. Absence after an attempt is not exit proof.
+            sync = getattr(getattr(client, "_client", None), "_sync", None)
+            if initialization_attempted and getattr(sync, "_proc", None) is None:
+                from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+                mark_host_drain_unconfirmed()
             try:
                 if invocation_state.cleanup_deadline is not None:
                     with _invocation_boundary("client_close", state=invocation_state):
@@ -771,6 +801,9 @@ async def _invoke_codex(
                     with _invocation_boundary("client_close", state=invocation_state):
                         await _close_sdk_client(client)
             except CodexInvocationError as cleanup:
+                from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+                mark_host_drain_unconfirmed()
                 if isinstance(primary, CodexInvocationError):
                     primary.failure_facts = (primary.failure_facts or SdkFailureFacts()).model_copy(
                         update={
@@ -794,6 +827,9 @@ async def _invoke_codex(
                     # wait_for() may itself wait forever for a cancellation-resistant
                     # SDK stream. The child process is already closed or killed here.
                     run_task.cancel()
+                    from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+                    mark_host_drain_unconfirmed()
     with _invocation_boundary("response_check", state=invocation_state):
         measured_usage = invocation_state.measured_usage
         if invocation_state.cleanup_deadline is None and result.usage is not None:

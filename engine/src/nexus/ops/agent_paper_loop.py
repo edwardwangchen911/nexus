@@ -4749,6 +4749,8 @@ def _classify_agent_paper_service_heartbeat(
 
 async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[str, object]:
     """Read one persisted liveness fact and classify it against the database clock."""
+    from nexus.paper.manual_host_exit import valid_host_exit
+
     if not database_url:
         return {"status": "unavailable"}
     database = make_url(database_url)
@@ -4766,7 +4768,9 @@ async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[s
                 row = (
                     await session.execute(
                         select(func.clock_timestamp(), WorkerHeartbeat)
-                        .where(WorkerHeartbeat.queue == QueueName.AGENT_PAPER.value)
+                        .where(
+                            WorkerHeartbeat.queue == QueueName.AGENT_PAPER.value, ~valid_host_exit()
+                        )
                         .order_by(WorkerHeartbeat.seen_at.desc(), WorkerHeartbeat.id.desc())
                         .limit(1)
                     )

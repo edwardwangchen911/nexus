@@ -340,6 +340,19 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
                 assert response.status_code == 200 and response.json()["data"] == view.model_dump(
                     mode="json"
                 )
+                # The completed foreground host has retired. A new API request
+                # needs a genuinely live host, not the old host's recent heartbeat.
+                from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
+
+                async with factory.begin() as session:
+                    host_now = await session.scalar(select(func.clock_timestamp()))
+                await heartbeat_agent_paper_loop(
+                    settings,
+                    worker_id=f"agent-paper-loop-{uuid4()}",
+                    started_at=host_now,
+                    seen_at=host_now,
+                    account_id=settings.agent_paper_account_id,
+                )
                 response = await client.post(
                     path,
                     content=body,

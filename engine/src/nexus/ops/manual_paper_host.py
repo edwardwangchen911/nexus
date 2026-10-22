@@ -568,16 +568,21 @@ async def run_pure_research_once(
     from datetime import UTC
 
     from nexus.domain.ids import new_uuid7
-    from nexus.ops.agent_paper_loop import acquire_agent_paper_lock, heartbeat_agent_paper_loop
+    from nexus.ops.agent_paper_loop import (
+        acquire_agent_paper_lock,
+        agent_paper_host_identity,
+        heartbeat_agent_paper_loop,
+    )
     from nexus.paper.manual_entry import (
         read_configured_manual_request,
         start_configured_manual_request,
     )
+    from nexus.paper.manual_host_exit import host_drain_scope, record_host_exit
 
     factory = session_factory(settings)
     primary: BaseException | None = None
     try:
-        with acquire_agent_paper_lock():
+        with acquire_agent_paper_lock(), host_drain_scope() as drain:
             worker_id = f"agent-paper-loop-{new_uuid7()}"
             started = datetime.now(UTC)
 
@@ -608,9 +613,29 @@ async def run_pure_research_once(
                     return await read_configured_manual_request(
                         session, settings, request_id=view.request_id
                     )
+            except BaseException as error:
+                primary = error
+                raise
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                try:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    if not drain.confirmed:
+                        raise ValueError("MANUAL_HOST_EXIT_UNCONFIRMED")
+                    identity, version = agent_paper_host_identity(
+                        settings, worker_id=worker_id, account_id=settings.agent_paper_account_id
+                    )
+                    async with factory.begin() as session:
+                        await record_host_exit(
+                            session, worker_id=identity, started_at=started, process_version=version
+                        )
+                except BaseException as exit_error:
+                    if primary is None:
+                        if isinstance(exit_error, asyncio.CancelledError):
+                            exit_error.add_note("MANUAL_HOST_EXIT_UNCONFIRMED")
+                            raise
+                        raise ValueError("MANUAL_HOST_EXIT_UNCONFIRMED") from None
+                    primary.add_note("MANUAL_HOST_EXIT_UNCONFIRMED")
     except BaseException as error:
         primary = error
         raise

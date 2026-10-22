@@ -605,7 +605,13 @@ def test_provider_contract_attests_authority_input_mutation_triggers() -> None:
     assert _PROVIDER_TRIGGER_TOPOLOGY[
         ("provider_capabilities", "trg_provider_capabilities_append_only")
     ] == ("nexus_prevent_provider_capability_change", 27)
-    assert len(_PROVIDER_TRIGGER_TOPOLOGY) == 68
+    assert _PROVIDER_TRIGGER_TOPOLOGY[
+        ("worker_heartbeats", "trg_worker_heartbeats_closed_host")
+    ] == ("nexus_guard_closed_manual_host", 19)
+    assert _PROVIDER_TRIGGER_FUNCTIONS["nexus_guard_closed_manual_host"].source_sha256 == (
+        "811b201cdda9c3a5aee1881dafbf22a9c9b6964f0e5f25cc758cc6c0b4e580b5"
+    )
+    assert len(_PROVIDER_TRIGGER_TOPOLOGY) == 69
 
 
 @pytest.mark.asyncio

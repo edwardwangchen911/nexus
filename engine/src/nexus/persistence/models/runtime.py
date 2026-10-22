@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     Date,
+    FetchedValue,
     ForeignKey,
     Index,
     Integer,
@@ -21,6 +22,25 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
+
+
+class ManualHostExit(ImmutableCreatedAt, Base):
+    """Local dispatch ended; says nothing about remote use or business closeout."""
+
+    __tablename__ = "manual_host_exits"
+    __table_args__ = (
+        CheckConstraint(
+            "started_at <= final_seen_at AND final_seen_at <= ended_at", name="time_order"
+        ),
+    )
+    heartbeat_id: Mapped[UUID] = mapped_column(ForeignKey("worker_heartbeats.id"), primary_key=True)
+    queue: Mapped[str] = mapped_column(String(20))
+    worker_id: Mapped[str] = mapped_column(String(255))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    process_version: Mapped[str] = mapped_column(String(64))
+    migration_head: Mapped[str] = mapped_column(String(64))
+    final_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    ended_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=FetchedValue())
 
 
 class IntegrationStatus(ImmutableCreatedAt, Base):
