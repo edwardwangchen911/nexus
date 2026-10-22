@@ -223,6 +223,11 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Close a terminal failed research today; preserve unknown usage and reservations",
     )
+    seal.add_argument(
+        "--expired-attempt",
+        action="store_true",
+        help="Use native lost-attempt proof with --same-day; never infer SDK usage",
+    )
     for action in ("check-synthesis-acceptance", "accept-failed-synthesis-usage"):
         synthesis = commands.add_parser(action)
         synthesis.add_argument("--cycle-id", type=UUID, required=True)
@@ -252,7 +257,9 @@ async def run(
     lifecycle_guards = ExitStack()
     diagnostic = _OperationDiagnostic()
     try:
-        if args.action in {
+        if (
+            args.action == "seal-failed-research" and getattr(args, "expired_attempt", False)
+        ) or args.action in {
             "check-synthesis-acceptance",
             "accept-failed-synthesis-usage",
             "check-preparation-acceptance",
@@ -416,6 +423,7 @@ async def run(
                         now=now,
                         accept_unknown_usage=args.accept_unknown_usage,
                         same_day=getattr(args, "same_day", False),
+                        expired_attempt=getattr(args, "expired_attempt", False),
                     )
                     _require_maintenance_code(args.repo_root, settings.release_revision)
                     return receipt
