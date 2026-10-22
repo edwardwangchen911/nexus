@@ -41,7 +41,7 @@ def digest(value):
 
 
 async def seed_observation(
-    factory, version, defect=None, *, status="completed", usage=(None, None)
+    factory, version, defect=None, *, status="completed", usage=(None, None), sufficient=False
 ):
     prompt_ids = await _seed_authority(factory, model_version=version, include_base_evidence=False)
     prompts = load_prompt_assets()
@@ -84,6 +84,43 @@ async def seed_observation(
         intent = _synthesize(
             ("support",) * 6 + ("oppose", "abstain"), actionable=True, assessment_stance="watch"
         )
+        snapshot_id = _SNAPSHOT_ID
+        data_version = "v1"
+        if sufficient:
+            from nexus.persistence.models.data import DataSnapshot
+
+            intent = _synthesize(
+                ("support",) * 8,
+                actionable=True,
+                assessment_stance="watch",
+                price_authority_valid=False,
+            )
+            if defect != "ordinary_snapshot":
+                payload = {
+                    "purpose": "research_only_v2",
+                    "instrument_id": str(_INSTRUMENT_ID),
+                    "as_of": _NOW.isoformat(),
+                }
+                if defect == "purpose":
+                    payload["purpose"] = "formal"
+                if defect == "snapshot_instrument":
+                    payload["instrument_id"] = str(_MODEL_ID)
+                revision = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+                if defect == "snapshot_hash":
+                    revision = "f" * 64
+                snapshot = DataSnapshot(
+                    source="nexus_research_only",
+                    provider_object_id=str(_INSTRUMENT_ID),
+                    revision=revision,
+                    observed_at=_NOW,
+                    available_at=_NOW,
+                    received_at=_NOW,
+                    schema_version="research_only_v2",
+                    payload=payload,
+                )
+                session.add(snapshot)
+                await session.flush()
+                snapshot_id, data_version = snapshot.id, snapshot.revision
         if defect == "complete":
             intent = _synthesize(("support",) * 8, actionable=True)
         doc = intent.model_dump(mode="json")
@@ -100,12 +137,19 @@ async def seed_observation(
         doc = replace_refs(doc)
         doc.update(
             instrument_id=str(_INSTRUMENT_ID),
-            data_snapshot_id=str(_SNAPSHOT_ID),
+            data_snapshot_id=str(snapshot_id),
             decision_time=_NOW.isoformat().replace("+00:00", "Z"),
             model_version="fixture-model",
             prompt_version=prompts["orchestrator"].version,
-            data_version="v1",
+            data_version=data_version,
         )
+        if defect == "non_watch":
+            doc["stance"] = "buy_candidate"
+            doc["synthesis_assessment"]["stance"] = "buy_candidate"
+        if defect == "review_gap":
+            doc["synthesis_assessment"]["reviews"][0]["claim_id"] = "bear:2"
+        if defect == "exposure":
+            doc["exposure_action"] = "eligible_for_increase"
         if defect == "model_version":
             doc["model_version"] = "wrong-model"
         if defect == "prompt_version":
@@ -120,7 +164,7 @@ async def seed_observation(
             doc["data_snapshot_id"] = str(_MODEL_ID)
         run = AgentResearchRunRecord(
             instrument_id=_INSTRUMENT_ID,
-            data_snapshot_id=_SNAPSHOT_ID,
+            data_snapshot_id=snapshot_id,
             prompt_version_id=prompt_ids["orchestrator"],
             model_config_id=_MODEL_ID,
             decision_time=_NOW,
@@ -397,4 +441,64 @@ async def test_research_readback_preserves_billing_and_usage(
             if status == "failed"
             else "manual_unused_research_cancelled"
         )
+    assert await business_digest(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "defect",
+    [
+        None,
+        "ordinary_snapshot",
+        "purpose",
+        "snapshot_hash",
+        "snapshot_instrument",
+        "non_watch",
+        "review_gap",
+        "exposure",
+        "nested",
+        "hash",
+        "binding",
+        "frozen_hash",
+        "audit",
+    ],
+)
+async def test_sufficient_pure_observation_reads_without_formal_authority(
+    migrated_database_url, defect
+):
+    from nexus.agents.actionable_research import (
+        actionable_intent_shape_valid,
+        safe_no_trade_intent_shape_valid,
+    )
+    from nexus.agents.research_only import require_formal_research
+    from nexus.strategy.intents import ResearchIntent
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    run_id, doc = await seed_observation(factory, V11, defect, sufficient=True)
+    before = await business_digest(factory)
+    intent = ResearchIntent.model_validate(doc)
+    assert intent.synthesis_assessment.review_conclusion == "sufficient"
+    assert intent.quality_status == "partial"
+    assert not actionable_intent_shape_valid(intent)
+    assert not safe_no_trade_intent_shape_valid(intent)
+    assert not staged_intent_semantics_valid(intent, V11)
+    path = f"/internal/v1/research-runs/{run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://test"
+    ) as client:
+        for _ in range(2):
+            data = (await client.get(path, headers=headers("GET", path))).json()["data"]
+            assert data["intent"] == (doc if defect is None else None)
+            if defect is None:
+                assert data["quality_status"] == "partial"
+                assert data["abstention_reason"] is None
+    async with factory() as session:
+        summary = (
+            await read_position_research(session, (_INSTRUMENT_ID,), read_at=datetime.now(UTC))
+        )[_INSTRUMENT_ID]
+        assert summary.summary == (doc["theses"][0]["text"] if defect is None else None)
+        if defect is None:
+            run = await session.get(AgentResearchRunRecord, run_id)
+            with pytest.raises(ValueError, match="RESEARCH_ONLY_FORMAL_CONSUMPTION_FORBIDDEN"):
+                await require_formal_research(session, run)
     assert await business_digest(factory) == before

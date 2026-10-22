@@ -28,6 +28,7 @@ from nexus.agents.committee import AgentRole
 from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.portfolio_context import read_portfolio_context
+from nexus.agents.research_only import require_research_only_snapshot
 from nexus.agents.synthesis import domain_evidence, staged_intent_semantics_valid
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -52,13 +53,43 @@ _KNOWN_VERSIONS = (
 )
 
 
+def _sufficient_research_observation(intent: ResearchIntent) -> bool:
+    """Display shape only; the bound pure-research snapshot must also be verified."""
+    assessment = intent.synthesis_assessment
+    votes = {vote.role: vote.vote for vote in intent.role_votes}
+    if (
+        assessment is None
+        or intent.stance != "watch"
+        or assessment.stance != "watch"
+        or intent.exposure_action != "none"
+        or intent.quality_status != "partial"
+        or intent.evidence_audit != "complete"
+        or assessment.review_conclusion != "sufficient"
+        or len(votes) != 8
+        or votes.get("evidence_audit") != "support"
+        or not intent.theses
+        or not intent.counter_theses
+    ):
+        return False
+    reviews_by_role: dict[str, set[int]] = {"bear": set(), "evidence_audit": set()}
+    for review in assessment.reviews:
+        if not review.resolved:
+            return False
+        role, raw_index = review.claim_id.split(":", 1)
+        reviews_by_role[role].add(int(raw_index))
+    return all(
+        bool(indexes) and indexes == set(range(max(indexes) + 1))
+        for indexes in reviews_by_role.values()
+    )
+
+
 def readable_semantics(intent: ResearchIntent, version: str, *, observation_verified: bool) -> bool:
     if version.startswith("codex-sdk-") and version not in _KNOWN_VERSIONS:
         return False
     return staged_intent_semantics_valid(intent, version) or (
         version in _OBSERVATION_VERSIONS
         and observation_verified
-        and safe_no_trade_intent_shape_valid(intent)
+        and (safe_no_trade_intent_shape_valid(intent) or _sufficient_research_observation(intent))
     )
 
 
@@ -119,7 +150,8 @@ class ObservationReadback:
         except ValidationError:
             return False
         # Do not widen the old complete/legacy path or perform extra work for it.
-        if not safe_no_trade_intent_shape_valid(intent):
+        sufficient_observation = _sufficient_research_observation(intent)
+        if not (safe_no_trade_intent_shape_valid(intent) or sufficient_observation):
             return False
         if (
             run.status != "completed"
@@ -147,6 +179,17 @@ class ObservationReadback:
         terminals = self._terminals[run.id]
         model = self._models[run.model_config_id]
         snapshot = await self.session.get(DataSnapshot, run.data_snapshot_id)
+        if sufficient_observation:
+            try:
+                require_research_only_snapshot(snapshot)
+            except ValueError:
+                return False
+            if (
+                snapshot is None
+                or snapshot.provider_object_id != str(run.instrument_id)
+                or snapshot.payload.get("instrument_id") != str(run.instrument_id)
+            ):
+                return False
         if canonical_hash(run.prompt_manifest) != run.prompt_hash:
             return False
         prompt_key = (run.prompt_hash, run.prompt_version_id)
