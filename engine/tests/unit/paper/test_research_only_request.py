@@ -107,3 +107,54 @@ def test_bounded_research_entry_has_no_scope_or_scheduler_switch():
         parser().parse_args(
             ["run-research", "--idempotency-key", "independent", "--account-id", str(UUID(int=1))]
         )
+
+
+def test_version_one_manual_row_retains_pre_0084_audit_identity():
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper.history_seal import _row_hash
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+    row = ManualPaperRequest(
+        id=UUID(int=1),
+        account_id=UUID(int=2),
+        candidate_batch_id=UUID(int=3),
+        model_config_id=UUID(int=4),
+        model_hash="a" * 64,
+        batch_hash="b" * 64,
+        key_hash="c" * 64,
+        request_hash="d" * 64,
+        mode="research_only",
+        requested_at=AT,
+        created_at=AT,
+        contract_version=1,
+        research_profile=None,
+    )
+    # Literal pre-migration column set: a new mapper field must not rewrite old proofs.
+    old = {
+        name: getattr(row, name)
+        for name in (
+            "id",
+            "account_id",
+            "candidate_batch_id",
+            "model_config_id",
+            "model_hash",
+            "batch_hash",
+            "key_hash",
+            "request_hash",
+            "mode",
+            "requested_at",
+            "created_at",
+        )
+    }
+    import json
+
+    old = json.loads(json.dumps(old, default=str))
+    assert _row_hash(row) == job_input_hash(old)
+    row.contract_version = 2
+    assert _row_hash(row) != job_input_hash(old)
+    prior = _row_hash(row)
+    row.research_profile = {"changed": True}
+    assert _row_hash(row) != prior
+    row.contract_version = 1
+    with pytest.raises(ValueError, match="MANUAL_RESULT_UNKNOWN"):
+        _row_hash(row)

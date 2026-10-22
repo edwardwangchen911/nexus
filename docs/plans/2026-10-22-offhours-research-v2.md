@@ -39,3 +39,6 @@ Receipt additive: research_contract=research_only_v2; research manifest_id/resea
 最终定向复核无剩余 P1/资金/风控阻断；按 CI 模块导入方式，后端相关单测 1633 passed/6 skipped。新增准备清理错误回归先失败后通过。
 
 最终新增 PostgreSQL/单测 13 项按 CI importlib 模式通过。合成原件夹具在纽约午夜暴露默认两分钟前跨日问题，改用数据库纽约当日零点作合成接收时间；保留正式同日校验。手机/桌面浏览器及旧请求刷新 3 项通过，确认三股内容质量分开显示且刷新只 GET；截图位于本地 test-results/pure-research-{390,1440}.png，不属于真实业务证据。
+
+
+部署前隔离真实备份升级发现旧准备接受证明的 hash 兼容缺陷：0084 新列被通用 row hash 计入，导致原 v1 fact_hash 不符。新增字面旧11列回归先 RED；最小修复只固定 v1 且无 research_profile 的旧列/原序列化，异常 v1 profile 拒绝，v2 全字段继续入 hash。共享 helper 覆盖原 preparation acceptance/close，未改历史审计或未知预算。定向复核无阻断；真实备份隔离升级后原业务摘要不变，正常账户历史准入、新 v2 回执在停止准入时可读、停止新请求有效、已有 v2 时降级拒绝，源库和模型调用均为零。完整备份2368引用对象及隔离恢复通过。镜像须按修复后提交重建，最终新head CI通过才部署。
