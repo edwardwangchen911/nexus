@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from hashlib import sha256
@@ -1090,7 +1093,46 @@ def _single_exchange_record(
     return stock, record, [*record, proof]
 
 
+# Opt-in per-read memoization of pure parsing only. Storage bytes, receipts,
+# database bindings and current aliases are still verified by every caller.
+_PARSE_CACHE: ContextVar[dict[tuple[str, str, str], CurrentCommonStockIdentity] | None] = (
+    ContextVar("identity_parse_cache", default=None)
+)
+
+
+@contextmanager
+def identity_parse_scope() -> Iterator[None]:
+    token = _PARSE_CACHE.set({})
+    try:
+        yield
+    finally:
+        _PARSE_CACHE.reset(token)
+
+
 def parse_current_common_stock(
+    *,
+    symbol: str,
+    fmp_raw: bytes,
+    sec_raw: bytes,
+    _member_definition: dict[str, Any] | None = None,
+    _allow_outside_definition: bool = False,
+) -> CurrentCommonStockIdentity:
+    cache = _PARSE_CACHE.get()
+    # Custom member policies continue through their original uncached path.
+    use_cache = cache is not None and _member_definition is None and not _allow_outside_definition
+    key = (symbol, sha256(fmp_raw).hexdigest(), sha256(sec_raw).hexdigest()) if use_cache else None
+    if cache is not None and key is not None and key in cache:
+        return cache[key].model_copy(deep=True)
+    result = _parse_current_common_stock(
+        symbol=symbol, fmp_raw=fmp_raw, sec_raw=sec_raw,
+        _member_definition=_member_definition, _allow_outside_definition=_allow_outside_definition,
+    )
+    if cache is not None and key is not None and len(cache) < 16:
+        cache[key] = result.model_copy(deep=True)
+    return result
+
+
+def _parse_current_common_stock(
     *,
     symbol: str,
     fmp_raw: bytes,

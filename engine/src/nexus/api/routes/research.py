@@ -46,6 +46,7 @@ from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaRespon
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
+from nexus.market.current_identity import identity_parse_scope
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentResearchOutputEvidenceRecord,
@@ -316,44 +317,45 @@ async def _hydrate_response(
     *,
     observation_reader: ObservationReadback | None = None,
 ) -> ResearchRunResponse:
-    evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = ()
-    if output is not None:
-        evidence_records = tuple(
-            await session.scalars(
-                select(AgentResearchOutputEvidenceRecord)
-                .where(AgentResearchOutputEvidenceRecord.output_id == output.id)
-                .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
+    with identity_parse_scope():
+        evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = ()
+        if output is not None:
+            evidence_records = tuple(
+                await session.scalars(
+                    select(AgentResearchOutputEvidenceRecord)
+                    .where(AgentResearchOutputEvidenceRecord.output_id == output.id)
+                    .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
+                )
             )
+        if _declares_current_trends(run) and not await load_frozen_evidence(
+            session, run, allow_fixture_evidence=False
+        ):
+            # A saved conclusion cannot outlive the exact supplemental source it declares.
+            # _response turns the now-unbound output into the existing safe abstained view.
+            evidence_records = ()
+        context = await read_portfolio_context(
+            session, run.data_snapshot_id, run.instrument_id, run.decision_time
         )
-    if _declares_current_trends(run) and not await load_frozen_evidence(
-        session, run, allow_fixture_evidence=False
-    ):
-        # A saved conclusion cannot outlive the exact supplemental source it declares.
-        # _response turns the now-unbound output into the existing safe abstained view.
-        evidence_records = ()
-    context = await read_portfolio_context(
-        session, run.data_snapshot_id, run.instrument_id, run.decision_time
-    )
-    reader = observation_reader or ObservationReadback(session, read_at=utc_now())
-    observation_verified = await reader.verified(run, output, evidence_records)
-    response = _response(
-        run,
-        output,
-        evidence_records,
-        portfolio_context=context,
-        observation_verified=observation_verified,
-    )
-    return response.model_copy(
-        update={
-            "stage_trace": await read_stage_trace(session, run),
-            "inputs": await read_research_inputs(
-                session,
-                snapshot_id=run.data_snapshot_id,
-                instrument_id=run.instrument_id,
-                as_of=run.decision_time,
-            ),
-        }
-    )
+        reader = observation_reader or ObservationReadback(session, read_at=utc_now())
+        observation_verified = await reader.verified(run, output, evidence_records)
+        response = _response(
+            run,
+            output,
+            evidence_records,
+            portfolio_context=context,
+            observation_verified=observation_verified,
+        )
+        return response.model_copy(
+            update={
+                "stage_trace": await read_stage_trace(session, run),
+                "inputs": await read_research_inputs(
+                    session,
+                    snapshot_id=run.data_snapshot_id,
+                    instrument_id=run.instrument_id,
+                    as_of=run.decision_time,
+                ),
+            }
+        )
 
 
 def _declares_current_trends(run: AgentResearchRunRecord) -> bool:
