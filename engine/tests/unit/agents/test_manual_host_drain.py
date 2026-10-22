@@ -188,3 +188,23 @@ async def test_sdk_initialization_without_process_evidence_cannot_confirm_exit(m
         with pytest.raises(codex_sdk.CodexInvocationError):
             await codex_sdk.invoke_codex({})
         assert not state.confirmed
+
+
+@pytest.mark.asyncio
+async def test_normal_close_clearing_handle_keeps_confirmed_drain(monkeypatch):
+    from engine.tests.unit.agents.test_codex_sdk import _sdk
+
+    client, _, _, _ = _sdk(monkeypatch)
+    process = SimpleNamespace(returncode=None)
+    process.poll = lambda: process.returncode
+    client._client._sync = SimpleNamespace(_proc=process)
+
+    async def close():
+        client._client._sync._proc = None
+        process.returncode = 0
+
+    client.close.side_effect = close
+    with host_drain_scope() as state:
+        await codex_sdk.invoke_codex({})
+        assert client._client._sync._proc is None
+        assert state.confirmed
