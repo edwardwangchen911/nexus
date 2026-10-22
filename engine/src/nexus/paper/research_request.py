@@ -409,9 +409,14 @@ async def require_research_profile(
     from nexus.agents.research_only import RESEARCH_ONLY_INSTRUCTIONS, research_only_prompts_valid
 
     profile = row.research_profile
+    from nexus.agents.research_dispatch import uses_two_flight
+
+    parallel = uses_two_flight(profile)
     if (
         not isinstance(profile, dict)
-        or set(profile) != {"runtime_mode", "daily_limit_usd", "orchestrator_id", "prompt_hashes"}
+        or set(profile)
+        != {"runtime_mode", "daily_limit_usd", "orchestrator_id", "prompt_hashes"}
+        | ({"execution_policy"} if parallel else set())
         or settings.agent_runtime_mode is None
         or profile["runtime_mode"] != settings.agent_runtime_mode.value
         or profile["runtime_mode"] != "codex_sdk"

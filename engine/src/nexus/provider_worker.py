@@ -301,6 +301,10 @@ _PROVIDER_TRIGGER_FUNCTIONS = {
         "12d892a66db6e8f2bdaf80e472bf75b8d7bdbdf49c390d3954c64cf5bef17ee3",
         False,
     ),
+    "nexus_guard_closed_manual_host": _ProviderTriggerFunctionSpec(
+        "811b201cdda9c3a5aee1881dafbf22a9c9b6964f0e5f25cc758cc6c0b4e580b5",
+        False,
+    ),
     "nexus_lock_fosun_market_input_change": _ProviderTriggerFunctionSpec(
         "f23a03349b77378e580ce141ae9d0bfd3ed048e18f7190d741084f2d6f2b189b",
         True,
@@ -660,6 +664,10 @@ _PROVIDER_TRIGGER_TOPOLOGY = {
         "worker_heartbeats",
         "trg_worker_heartbeats_state",
     ): ("nexus_guard_worker_heartbeat", 27),
+    (
+        "worker_heartbeats",
+        "trg_worker_heartbeats_closed_host",
+    ): ("nexus_guard_closed_manual_host", 19),
 }
 _PROVIDER_POLICY_EXPRESSIONS = {
     "jobs": (

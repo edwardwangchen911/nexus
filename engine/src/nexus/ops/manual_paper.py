@@ -448,11 +448,14 @@ async def run(
                     )
                     _require_maintenance_code(args.repo_root, settings.release_revision)
                     return receipt
+                from nexus.paper.manual_host_exit import valid_host_exit
+
                 rows = (
                     await session.scalars(
                         select(WorkerHeartbeat).where(
                             WorkerHeartbeat.queue == "agent_paper",
                             WorkerHeartbeat.seen_at >= now - timedelta(seconds=30),
+                            ~valid_host_exit(),
                         )
                     )
                 ).all()

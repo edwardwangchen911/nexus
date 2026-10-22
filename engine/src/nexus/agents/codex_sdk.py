@@ -122,6 +122,7 @@ class CodexInvocationError(ValueError):
             "CODEX_USAGE_INVALID": "usage_invalid",
             "CODEX_TIMEOUT": "timeout",
             "CODEX_UNEXPECTED_EXCEPTION": "unexpected_exception",
+            "CODEX_RESEARCH_STOPPED": "unexpected_exception",
         }
         self.reason = reason if reason in kinds else "CODEX_UNEXPECTED_EXCEPTION"
         self.kind = kinds[self.reason]
@@ -163,15 +164,28 @@ def _kill_sdk_process(client: AsyncCodex) -> None:
 
 async def _close_sdk_client(client: AsyncCodex) -> None:
     """Never let SDK cleanup outlive the research handler deadline."""
+    from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+    transport = getattr(getattr(client, "_client", None), "_sync", None)
+    process = getattr(transport, "_proc", None)
     close_task = asyncio.create_task(client.close())
-    done, _ = await asyncio.wait((close_task,), timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
-    if close_task not in done:
-        _kill_sdk_process(client)
-        done, _ = await asyncio.wait((close_task,), timeout=1)
-    if close_task in done:
-        await close_task
-    else:
-        close_task.cancel()
+    try:
+        done, _ = await asyncio.wait((close_task,), timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
+        if close_task not in done:
+            if process is not None and process.poll() is None:
+                with suppress(Exception):
+                    process.kill()
+            else:
+                _kill_sdk_process(client)
+            done, _ = await asyncio.wait((close_task,), timeout=1)
+        if close_task in done:
+            await close_task
+    finally:
+        if not close_task.done():
+            mark_host_drain_unconfirmed()
+            close_task.cancel()
+        if process is not None and process.poll() is None:
+            mark_host_drain_unconfirmed()
 
 
 async def _close_portfolio_client(
@@ -228,8 +242,14 @@ async def _close_portfolio_client(
         while process is not None and process.poll() is None and loop.time() < deadline:
             await asyncio.sleep(min(0.01, max(0.0, deadline - loop.time())))
         if pending:
+            from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+            mark_host_drain_unconfirmed()
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
         if process is not None and process.poll() is None:
+            from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+            mark_host_drain_unconfirmed()
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase="client_close")
         if failure is not None:
             raise failure
@@ -272,6 +292,9 @@ def _invocation_boundary(
     try:
         yield
     except CodexInvocationError as error:
+        from nexus.agents.research_dispatch import stop_current_dispatch
+
+        stop_current_dispatch()
         if state is not None:
             error.provider_call_started = state.provider_call_started
             error.phase_elapsed_ms = dict(state.phase_elapsed_ms)
@@ -281,6 +304,9 @@ def _invocation_boundary(
                 error.usage = state.measured_usage
         raise
     except TimeoutError:
+        from nexus.agents.research_dispatch import stop_current_dispatch
+
+        stop_current_dispatch()
         raise _CodexInvocationTimeout(
             "CODEX_TIMEOUT",
             phase=phase,
@@ -288,6 +314,9 @@ def _invocation_boundary(
             usage=None if state is None else state.measured_usage,
         ) from None
     except Exception as original:
+        from nexus.agents.research_dispatch import stop_current_dispatch
+
+        stop_current_dispatch()
         failure = CodexInvocationError(
             "CODEX_UNEXPECTED_EXCEPTION",
             phase=phase,
@@ -749,6 +778,9 @@ async def _invoke_codex(
                         failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
                         failure.timeout_source = "stage_deadline"
                         raise failure
+            # Reject an already known bad response before cleanup can await.
+            with _invocation_boundary("response_check", state=invocation_state):
+                validated = _checked_codex_response(result, invocation_state)
         except TimeoutError as error:
             if invocation_timer.expired():
                 failure = _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase)
@@ -771,6 +803,9 @@ async def _invoke_codex(
                     with _invocation_boundary("client_close", state=invocation_state):
                         await _close_sdk_client(client)
             except CodexInvocationError as cleanup:
+                from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+                mark_host_drain_unconfirmed()
                 if isinstance(primary, CodexInvocationError):
                     primary.failure_facts = (primary.failure_facts or SdkFailureFacts()).model_copy(
                         update={
@@ -794,30 +829,36 @@ async def _invoke_codex(
                     # wait_for() may itself wait forever for a cancellation-resistant
                     # SDK stream. The child process is already closed or killed here.
                     run_task.cancel()
-    with _invocation_boundary("response_check", state=invocation_state):
-        measured_usage = invocation_state.measured_usage
-        if invocation_state.cleanup_deadline is None and result.usage is not None:
-            reported = result.usage.total
-            if reported.input_tokens >= 0 and reported.output_tokens >= 0:
-                measured_usage = UsageSnapshot(
-                    input_tokens=reported.input_tokens,
-                    output_tokens=reported.output_tokens,
-                    provider_calls=1,
-                )
-        if result.status is not TurnStatus.completed or not result.final_response:
-            raise CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured_usage)
-        if any(
-            item.root.type not in {"userMessage", "agentMessage", "reasoning"}
-            for item in result.items
-        ):
-            raise CodexInvocationError("CODEX_UNEXPECTED_TOOL", usage=measured_usage)
-        if len(result.final_response.encode()) > _MAX_OUTPUT_BYTES:
-            raise CodexInvocationError("CODEX_OUTPUT_TOO_LARGE", usage=measured_usage)
-        if result.usage is None:
-            raise CodexInvocationError("CODEX_USAGE_MISSING")
-        if measured_usage is None:
-            raise CodexInvocationError("CODEX_USAGE_INVALID")
-        return result.final_response, measured_usage
+                    from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+                    mark_host_drain_unconfirmed()
+    return validated
+
+
+def _checked_codex_response(result: Any, state: _InvocationState) -> tuple[str, UsageSnapshot]:
+    measured_usage = state.measured_usage
+    if state.cleanup_deadline is None and result.usage is not None:
+        reported = result.usage.total
+        if reported.input_tokens >= 0 and reported.output_tokens >= 0:
+            measured_usage = UsageSnapshot(
+                input_tokens=reported.input_tokens,
+                output_tokens=reported.output_tokens,
+                provider_calls=1,
+            )
+    if result.status is not TurnStatus.completed or not result.final_response:
+        raise CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured_usage)
+    if any(
+        item.root.type not in {"userMessage", "agentMessage", "reasoning"}
+        for item in result.items
+    ):
+        raise CodexInvocationError("CODEX_UNEXPECTED_TOOL", usage=measured_usage)
+    if len(result.final_response.encode()) > _MAX_OUTPUT_BYTES:
+        raise CodexInvocationError("CODEX_OUTPUT_TOO_LARGE", usage=measured_usage)
+    if result.usage is None:
+        raise CodexInvocationError("CODEX_USAGE_MISSING")
+    if measured_usage is None:
+        raise CodexInvocationError("CODEX_USAGE_INVALID")
+    return result.final_response, measured_usage
 
 
 class _DispatchOptions(TypedDict, total=False):

@@ -32,6 +32,7 @@ SAFE_ENTRY_CODES = frozenset(
         "MANUAL_ENTRY_DISABLED",
         "MANUAL_CONFIGURATION_UNAVAILABLE",
         "MANUAL_HOST_NOT_READY",
+        "MANUAL_HOST_EXIT_UNCONFIRMED",
         "MANUAL_SESSION_UNAVAILABLE",
         "MANUAL_BUDGET_PROTECTED",
         "MANUAL_NOT_FOUND",
@@ -191,11 +192,14 @@ async def start_configured_manual_request(
     await require_acknowledged_operation_scope(
         session, account_id=account_id, model_config_id=model_id, now=now
     )
+    from nexus.paper.manual_host_exit import valid_host_exit
+
     heartbeats = (
         await session.scalars(
             select(WorkerHeartbeat).where(
                 WorkerHeartbeat.queue == "agent_paper",
                 WorkerHeartbeat.seen_at >= now - timedelta(seconds=30),
+                ~valid_host_exit(),
             )
         )
     ).all()
@@ -216,6 +220,10 @@ async def start_configured_manual_request(
             calendar.market_open_at <= now < calendar.market_close_at
         ):
             raise ValueError("MANUAL_SESSION_UNAVAILABLE")
+    from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    model = await session.get(AgentModelConfigRecord, model_id)
     return await admit_manual_request(
         session,
         account_id=account_id,
@@ -228,4 +236,9 @@ async def start_configured_manual_request(
         if settings.agent_runtime_mode is None
         else settings.agent_runtime_mode.value,
         daily_limit_usd=settings.agent_daily_budget_usd,
+        two_flight=(
+            mode == "research_only"
+            and model is not None
+            and model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+        ),
     )

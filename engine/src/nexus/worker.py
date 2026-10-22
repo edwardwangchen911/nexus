@@ -628,6 +628,11 @@ def _agent_registry(
 
     async def handle(context: JobHandlerContext) -> JobHandlerResult:
         payload = cast(_AgentResearchJobPayload, context.payload)
+        from nexus.agents.research_dispatch import current_dispatch
+
+        dispatch = current_dispatch(UUID(payload.run_id))
+        if dispatch is not None:
+            dispatch.bind_claim(UUID(payload.run_id), context.claim)
         run = await context.session.get(
             AgentResearchRunRecord,
             UUID(payload.run_id),
@@ -698,7 +703,13 @@ def _agent_registry(
         from nexus.agents.codex_sdk import CodexCommittee
 
         if isinstance(committee, CodexCommittee):
-            committee.dispatch_guard = context.require_dispatch_lease
+
+            def require_dispatch() -> None:
+                context.require_dispatch_lease()
+                if dispatch is not None:
+                    dispatch.guard()
+
+            committee.dispatch_guard = require_dispatch
         result = await execute_research_run(
             context.session,
             run_id=run.id,

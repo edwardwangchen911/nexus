@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     Date,
+    FetchedValue,
     ForeignKey,
     Index,
     Integer,
@@ -23,6 +24,25 @@ from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
+class ManualHostExit(ImmutableCreatedAt, Base):
+    """Local dispatch ended; says nothing about remote use or business closeout."""
+
+    __tablename__ = "manual_host_exits"
+    __table_args__ = (
+        CheckConstraint(
+            "started_at <= final_seen_at AND final_seen_at <= ended_at", name="time_order"
+        ),
+    )
+    heartbeat_id: Mapped[UUID] = mapped_column(ForeignKey("worker_heartbeats.id"), primary_key=True)
+    queue: Mapped[str] = mapped_column(String(20))
+    worker_id: Mapped[str] = mapped_column(String(255))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    process_version: Mapped[str] = mapped_column(String(64))
+    migration_head: Mapped[str] = mapped_column(String(64))
+    final_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    ended_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=FetchedValue())
+
+
 class IntegrationStatus(ImmutableCreatedAt, Base):
     __tablename__ = "integration_status"
     __table_args__ = (UniqueConstraint("provider", name="uq_integration_status_provider"),)
@@ -31,9 +51,7 @@ class IntegrationStatus(ImmutableCreatedAt, Base):
     provider: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50))
     last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
-    version: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=1, server_default="1"
-    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     mode_changed_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now()
     )
@@ -133,8 +151,7 @@ class JobLease(ImmutableCreatedAt, Base):
         UniqueConstraint("job_id", name="uq_job_leases_job_id"),
         UniqueConstraint("lease_token", name="uq_job_leases_lease_token"),
         CheckConstraint(
-            "fence_token >= 1 AND expires_at > heartbeat_at "
-            "AND heartbeat_at >= acquired_at",
+            "fence_token >= 1 AND expires_at > heartbeat_at AND heartbeat_at >= acquired_at",
             name="job_leases_values",
         ),
     )
@@ -171,9 +188,7 @@ class JobAttempt(ImmutableCreatedAt, Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    job_id: Mapped[UUID] = mapped_column(
-        ForeignKey("jobs.id", name="fk_job_attempts_job")
-    )
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", name="fk_job_attempts_job"))
     attempt_no: Mapped[int] = mapped_column(Integer)
     lease_token: Mapped[UUID]
     fence_token: Mapped[int] = mapped_column(BigInteger)
@@ -196,9 +211,7 @@ class JobDependency(ImmutableCreatedAt, Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    job_id: Mapped[UUID] = mapped_column(
-        ForeignKey("jobs.id", name="fk_job_dependencies_job")
-    )
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", name="fk_job_dependencies_job"))
     depends_on_job_id: Mapped[UUID] = mapped_column(
         ForeignKey("jobs.id", name="fk_job_dependencies_parent")
     )
@@ -208,9 +221,7 @@ class JobDependency(ImmutableCreatedAt, Base):
 class WorkerHeartbeat(ImmutableCreatedAt, Base):
     __tablename__ = "worker_heartbeats"
     __table_args__ = (
-        UniqueConstraint(
-            "queue", "worker_id", name="uq_worker_heartbeats_queue_worker"
-        ),
+        UniqueConstraint("queue", "worker_id", name="uq_worker_heartbeats_queue_worker"),
         CheckConstraint(
             "queue IN ('general','provider','broker','strategy_rnd','agent_paper')",
             name="queue_allowed",
@@ -286,9 +297,7 @@ class OutboxDeliveryAttempt(ImmutableCreatedAt, Base):
             "attempt_no",
             name="uq_outbox_delivery_attempts_event_no",
         ),
-        UniqueConstraint(
-            "lease_token", name="uq_outbox_delivery_attempts_lease_token"
-        ),
+        UniqueConstraint("lease_token", name="uq_outbox_delivery_attempts_lease_token"),
         CheckConstraint("attempt_no >= 1", name="attempt_no_positive"),
         CheckConstraint(
             "outcome IN ('delivering','published','failed','lost')",
@@ -375,8 +384,7 @@ class AuditChainManifest(ImmutableCreatedAt, Base):
             name="seq_bounds",
         ),
         CheckConstraint(
-            "head_hash ~ '^[0-9a-f]{64}$' AND "
-            "object_sha256 ~ '^[0-9a-f]{64}$'",
+            "head_hash ~ '^[0-9a-f]{64}$' AND object_sha256 ~ '^[0-9a-f]{64}$'",
             name="hashes_canonical",
         ),
         CheckConstraint("byte_size > 0", name="byte_size_positive"),

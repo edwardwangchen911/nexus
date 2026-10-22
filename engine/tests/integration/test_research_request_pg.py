@@ -295,6 +295,18 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
         "nexus.ops.manual_paper_host.select_agent_paper_service_calendar_authority", no_calendar
     )
     try:
+        # Existing four-field requests retain their serial execution policy.
+        # The separate two-flight test exercises today's normal new admission.
+        async with factory.begin() as session:
+            await admit_manual_request(
+                session,
+                account_id=settings.agent_paper_account_id,
+                batch_id=settings.agent_paper_candidate_batch_id,
+                model_config_id=settings.agent_paper_formal_model_config_id,
+                mode="research_only",
+                idempotency_key="normal-v11",
+                contract_version=2,
+            )
         view = await run_pure_research_once(settings, idempotency_key="normal-v11")
         from nexus.agents.preparation_reuse import current_reuse
 

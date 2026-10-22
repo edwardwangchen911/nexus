@@ -507,7 +507,12 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
             raise
         assert view.research is not None
         try:
-            for member in view.research.members:
+            from nexus.agents.research_dispatch import uses_two_flight
+
+            parallel = uses_two_flight(row.research_profile)
+            if parallel:
+                await _dispatch_two_flight_members(settings, view=view)
+            for member in () if parallel else view.research.members:
                 worked = await run_cycle_job_once(
                     settings, job_id=member.job_id, formal_stage_capacity=True
                 )
@@ -560,6 +565,83 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
                 raise
 
 
+async def _dispatch_two_flight_members(
+    settings: EngineSettings, *, view: ManualRequestView
+) -> None:
+    import asyncio
+
+    from nexus.agents.research_dispatch import ResearchDispatch, dispatch_member
+    from nexus.ops.agent_paper_once import run_cycle_job_once
+    from nexus.paper.manual_request import ResearchMemberView
+
+    assert view.research is not None
+    state = ResearchDispatch(view.request_id, view.research)
+    factory = session_factory(settings)
+    pending: set[asyncio.Task[None]] = set()
+    primary: BaseException | None = None
+
+    async def execute(member: ResearchMemberView) -> None:
+        ready = state.active[member.run_id]
+        with dispatch_member(state, member.run_id):
+            try:
+                worked = await run_cycle_job_once(
+                    settings, job_id=member.job_id, formal_stage_capacity=True
+                )
+                async with factory.begin() as session:
+                    row = await session.get(ManualPaperRequest, view.request_id)
+                    assert row is not None
+                    result = await read_manual_request(session, row)
+                    assert result.research is not None
+                    completed = next(
+                        m for m in result.research.members if m.run_id == member.run_id
+                    )
+                    if not worked or completed.status != "completed" or not completed.usage_known:
+                        state.stopped = True
+            except BaseException:
+                state.stopped = True
+                raise
+            finally:
+                ready.set()
+                state.active.pop(member.run_id)
+
+    try:
+        remaining = iter(view.research.members)
+        exhausted = False
+        while pending or not exhausted:
+            while len(pending) < 2 and not exhausted and not state.stopped:
+                member = next(remaining, None)
+                if member is None:
+                    exhausted = True
+                    break
+                state.start(member.run_id)
+                ready = state.active[member.run_id]
+                pending.add(asyncio.create_task(execute(member)))
+                # Publish the native claim before another preclaim can inspect it.
+                # This wait is bounded by the original preclaim/handler lifecycle.
+                await ready.wait()
+            if not pending:
+                break
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    task.result()
+                except BaseException as error:
+                    state.stopped = True
+                    if primary is None:
+                        primary = error
+        if primary is not None:
+            raise primary
+    except BaseException:
+        state.stopped = True
+        # Only caller cancellation/exit reaches here with live siblings.
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        raise
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 async def run_pure_research_once(
     settings: EngineSettings, *, idempotency_key: str
 ) -> ManualRequestView:
@@ -568,16 +650,21 @@ async def run_pure_research_once(
     from datetime import UTC
 
     from nexus.domain.ids import new_uuid7
-    from nexus.ops.agent_paper_loop import acquire_agent_paper_lock, heartbeat_agent_paper_loop
+    from nexus.ops.agent_paper_loop import (
+        acquire_agent_paper_lock,
+        agent_paper_host_identity,
+        heartbeat_agent_paper_loop,
+    )
     from nexus.paper.manual_entry import (
         read_configured_manual_request,
         start_configured_manual_request,
     )
+    from nexus.paper.manual_host_exit import host_drain_scope, record_host_exit
 
     factory = session_factory(settings)
     primary: BaseException | None = None
     try:
-        with acquire_agent_paper_lock():
+        with acquire_agent_paper_lock(), host_drain_scope() as drain:
             worker_id = f"agent-paper-loop-{new_uuid7()}"
             started = datetime.now(UTC)
 
@@ -608,9 +695,26 @@ async def run_pure_research_once(
                     return await read_configured_manual_request(
                         session, settings, request_id=view.request_id
                     )
+            except BaseException as error:
+                primary = error
+                raise
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+                try:
+                    if not drain.confirmed:
+                        raise ValueError("MANUAL_HOST_EXIT_UNCONFIRMED")
+                    identity, version = agent_paper_host_identity(
+                        settings, worker_id=worker_id, account_id=settings.agent_paper_account_id
+                    )
+                    async with factory.begin() as session:
+                        await record_host_exit(
+                            session, worker_id=identity, started_at=started, process_version=version
+                        )
+                except BaseException:
+                    if primary is None:
+                        raise ValueError("MANUAL_HOST_EXIT_UNCONFIRMED") from None
+                    primary.add_note("MANUAL_HOST_EXIT_UNCONFIRMED")
     except BaseException as error:
         primary = error
         raise
