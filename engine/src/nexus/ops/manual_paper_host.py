@@ -699,9 +699,9 @@ async def run_pure_research_once(
                 primary = error
                 raise
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
                 try:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
                     if not drain.confirmed:
                         raise ValueError("MANUAL_HOST_EXIT_UNCONFIRMED")
                     identity, version = agent_paper_host_identity(
@@ -711,8 +711,11 @@ async def run_pure_research_once(
                         await record_host_exit(
                             session, worker_id=identity, started_at=started, process_version=version
                         )
-                except BaseException:
+                except BaseException as exit_error:
                     if primary is None:
+                        if isinstance(exit_error, asyncio.CancelledError):
+                            exit_error.add_note("MANUAL_HOST_EXIT_UNCONFIRMED")
+                            raise
                         raise ValueError("MANUAL_HOST_EXIT_UNCONFIRMED") from None
                     primary.add_note("MANUAL_HOST_EXIT_UNCONFIRMED")
     except BaseException as error:

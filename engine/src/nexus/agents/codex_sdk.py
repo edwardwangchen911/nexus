@@ -181,6 +181,8 @@ async def _close_sdk_client(client: AsyncCodex) -> None:
         if close_task in done:
             await close_task
     finally:
+        if close_task.cancelled():
+            mark_host_drain_unconfirmed()
         if not close_task.done():
             mark_host_drain_unconfirmed()
             close_task.cancel()
@@ -668,6 +670,7 @@ async def _invoke_codex(
         with _invocation_boundary("client_init", state=invocation_state):
             client = AsyncCodex(sdk_config(directory))
         run_task = None
+        initialization_attempted = False
         phase: InvocationPhase = "account"
         invocation_timer = (
             asyncio.timeout_at(stage_deadline)
@@ -684,6 +687,7 @@ async def _invoke_codex(
                         error = _CodexInvocationTimeout("CODEX_TIMEOUT", phase="account")
                         error.timeout_source = "stage_deadline"
                         raise error
+                    initialization_attempted = True
                     account = await client.account(refresh_token=False)
                     if account.account is None or not isinstance(
                         account.account.root, ChatgptAccount
@@ -793,6 +797,13 @@ async def _invoke_codex(
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
             primary = sys.exc_info()[1]
+            # SDK initialization/close uses to_thread and may clear _proc before
+            # its child has stopped. Absence after an attempt is not exit proof.
+            sync = getattr(getattr(client, "_client", None), "_sync", None)
+            if initialization_attempted and getattr(sync, "_proc", None) is None:
+                from nexus.paper.manual_host_exit import mark_host_drain_unconfirmed
+
+                mark_host_drain_unconfirmed()
             try:
                 if invocation_state.cleanup_deadline is not None:
                     with _invocation_boundary("client_close", state=invocation_state):
