@@ -95,3 +95,35 @@ queued 研究。经济通道不进入这项清理。清理不关闭未知手动�
 Worker 在每阶段、SDK 启动后和实际模型派发前检查原 wall-clock 租约；Mac 睡眠后即使 monotonic
 超时尚有余量，也不得在失效租约下继续派发。此保护不改变超时、预算、系统睡眠设置或执行权限。
 本次没有 schema 变更；代码可回退到前一镜像，已追加的收尾事实及未知预算应保留。
+
+
+## 本地失效尝试的显式同日封存
+
+`RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN` 是正常恢复追加的本地失联终态；它不含 SDK 原始
+阶段回执。该记录不能使用 `--same-day` 原有的 SDK 证明分支，更不能补造 `stage_input`。
+经明确接受具体未知用量后，可显式选择新增证明种类：
+
+```bash
+uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" \
+  seal-failed-research --cycle-id <原失败周期ID> --run-id <已确认停止的RunID> \
+  --accept-unknown-usage --same-day --expired-attempt
+```
+
+这是 `paper_expired_attempt_close_v1` 独立审计，不修改默认跨 UTC 日政策或
+`paper_same_day_close_v1` 的 SDK 证明语义。日期翻页仅改变旧政策适用性，并不补出上游结果。
+新增证明继续要求 common 周期/模型/账户/内部零单价与零预留守卫，且精确验证原生首次失效
+Attempt、worker/token/fence/起止时刻、JobKey、dead_letter/LEASE_EXPIRED、唯一失败输出与事件
+及哈希。额外尝试、角色输出、伪装原因、用量已改写、非 reserved 预算或活跃租约均拒绝。
+
+首次接受沿既有生命周期锁、schema 锁和账户锁，事务前后重新检查研究进程静止；原 Job 行锁和
+执行 fence 保证晚到 Worker 在业务回调前被拒绝。正常宿主 start/stop 共享生命周期锁；直接运行
+宿主不能绕过数据库账户准入或旧 Job 终态。进程静止检查本身不代替这些持久化执行约束。
+封存审计和原生 manual unavailable 收尾同事务；任一下游拒绝整体回滚。NVDA 等已完成成果、
+目标未知用量及预留不变；仅确实从未调用的其他研究可沿既有取消路径清零。
+
+同一回执读回绑定原接受时点、原证明种类及旧事实集合；合法新请求不影响其有效性，也不要求
+新生产者退出。迟到旧事实使豁免失效，但不恢复旧任务执行资格。账户准入通过与新输入时效、
+可用预算、行情、交易时段及宿主就绪分别验证，封存不启动任何新模型或订单。
+
+无 schema 迁移；回滚应用保留原审计、失败和预算。旧代码不认识新 schema 时会拒绝后续准入，
+不能通过删除审计、回写旧事实或释放预留规避这一限制。

@@ -10,11 +10,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-EXPIRES_AT = datetime(2026, 10, 22, tzinfo=UTC)
+EXPIRES_AT = datetime(2026, 10, 23, tzinfo=UTC)
 APPROVED_AT = datetime(2026, 10, 15, tzinfo=UTC)
 ADVISORY = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"
-LOCK_SHA256 = "f82d9d8deb646f0ab7d3a3ba5fc81305ee26321984b8872aa15c1945d830e2e1"
-SURFACE_SHA256 = "abcdae982f56c4caa504af65c1af718824bf80c15afd441efcedfca76889ea15"
+LOCK_SHA256 = "1d5954e6a769aa6818e39758cdf3930ddf54fa369da8ce7b345d916cca971b25"
+SURFACE_SHA256 = "7ef717842c5a8aecc0d44540acb8c97301252fc01493c37f078de2c18aae8485"
 # Node paths are part of the acceptance, including the second fast-glob installation.
 CHAIN = {
     "@next/eslint-plugin-next": ("fast-glob",),
@@ -172,7 +172,7 @@ def evaluate(
             raise AuditRejected("AUDIT_ACCEPTANCE_EXPIRED")
     except (KeyError, TypeError, AttributeError, OSError, subprocess.SubprocessError) as exc:
         raise AuditRejected("AUDIT_REPORT_OR_IDENTITY_INVALID") from exc
-    return "risk_accepted_until_2026-10-22T00:00:00Z"
+    return "risk_accepted_until_2026-10-23T00:00:00Z"
 
 
 def run(root: Path, report_path: Path, now: datetime | Callable[[], datetime]) -> str:

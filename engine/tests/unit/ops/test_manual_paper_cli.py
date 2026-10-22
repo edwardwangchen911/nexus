@@ -281,6 +281,9 @@ def test_same_day_closure_requires_explicit_option_and_keeps_default():
     ]
     assert manual_paper.parser().parse_args(arguments).same_day is False
     assert manual_paper.parser().parse_args([*arguments, "--same-day"]).same_day is True
+    assert manual_paper.parser().parse_args(arguments).expired_attempt is False
+    explicit = manual_paper.parser().parse_args([*arguments, "--same-day", "--expired-attempt"])
+    assert explicit.same_day and explicit.expired_attempt and explicit.accept_unknown_usage
 
 
 def test_unstarted_preparation_closure_is_explicit_and_request_scoped():
@@ -297,6 +300,7 @@ def test_unstarted_preparation_closure_is_explicit_and_request_scoped():
         "close-unstarted-preparation",
         "acknowledge-unknown-preparations",
         "check-preparation-acceptance",
+        "seal-failed-research",
     ],
 )
 @pytest.mark.asyncio
@@ -350,6 +354,9 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
 
     async def close_request(*_a, **_k):
         assert held[0]
+        if action == "seal-failed-research":
+            assert _k["expired_attempt"] is True and _k["same_day"] is True
+            return manual_paper.HistorySealReceipt(sealed_research=1, replayed=False)
         if action == "check-preparation-acceptance":
             return manual_paper.PreparationAcceptanceCheck(
                 request_id=UUID(int=1),
@@ -368,6 +375,7 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
     )
     monkeypatch.setattr(manual_paper, "preparation_service_control_lock", fence)
     monkeypatch.setattr(close, "close_unstarted_preparation", close_request)
+    monkeypatch.setattr(manual_paper, "seal_failed_research", close_request)
     monkeypatch.setattr(manual_paper, "check_current_unknown", close_request)
     from nexus.paper import preparation_unknown_ack
 
@@ -379,6 +387,11 @@ async def test_preparation_maintenance_holds_lifecycle_fence_through_commit(
         ),
         Namespace(
             action=action,
+            same_day=True,
+            expired_attempt=True,
+            accept_unknown_usage=True,
+            cycle_id=UUID(int=3),
+            run_ids=(UUID(int=4),),
             claim_ids=[UUID(int=i) for i in range(2, 6)],
             accept_unknown_effects=True,
             repo_root=tmp_path,

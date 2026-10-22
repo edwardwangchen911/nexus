@@ -43,6 +43,7 @@ from nexus.persistence.models.runtime import AuditEvent, Job, JobAttempt, JobLea
 _ACTION = "paper.legacy_research.sealed"
 _SCHEMA = "paper_legacy_seal_v1"
 _SAME_DAY_SCHEMA = "paper_same_day_close_v1"
+_EXPIRED_SCHEMA = "paper_expired_attempt_close_v1"
 _ACTOR = "local-manual-history-seal"
 _BLOCKED = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
 _DESKTOP_CHILD = (
@@ -394,10 +395,12 @@ async def _proof(
     run_id: UUID,
     now: datetime,
     same_day: bool = False,
+    expired_attempt: bool = False,
 ) -> dict[str, object]:
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if (
         cycle is None
+        or (expired_attempt and not same_day)
         or not cycle.execution_locked
         or cycle.decision_time > now
         or (same_day and cycle.decision_time.date() != now.date())
@@ -566,7 +569,30 @@ async def _proof(
         or attempts[0].attempt_no != job.attempt_count
     ):
         raise ValueError(_BLOCKED)
-    if any(output.role is not None for output in outputs):
+    research_events = tuple(
+        await session.scalars(
+            select(AgentResearchEventRecord)
+            .where(AgentResearchEventRecord.run_id == run_id)
+            .order_by(AgentResearchEventRecord.sequence)
+        )
+    )
+    if expired_attempt:
+        from nexus.paper.research_orphan_proof import require_expired_research_proof
+
+        if not formal_preparation_model_matches(model):
+            raise ValueError(_BLOCKED)
+        await require_expired_research_proof(
+            session,
+            run=run,
+            reservation=reservation,
+            job=job,
+            attempt=attempts[0],
+            lease=leases[0],
+            outputs=outputs,
+            events=research_events,
+            now=now,
+        )
+    elif any(output.role is not None for output in outputs):
         await _require_partial_usage_proof(session, run, outputs, model)
     elif same_day:
         await _require_initial_usage_proof(session, run, outputs, model)
@@ -576,15 +602,14 @@ async def _proof(
         or any(output.status != "failed" or output.intent is not None for output in outputs)
     ):
         raise ValueError(_BLOCKED)
-    research_events = tuple(
-        await session.scalars(
-            select(AgentResearchEventRecord)
-            .where(AgentResearchEventRecord.run_id == run_id)
-            .order_by(AgentResearchEventRecord.sequence)
-        )
-    )
     return {
-        **({"closure_policy": "same_day_terminal_failure_v1"} if same_day else {}),
+        **(
+            {"closure_policy": "same_day_expired_attempt_v1"}
+            if expired_attempt
+            else {"closure_policy": "same_day_terminal_failure_v1"}
+            if same_day
+            else {}
+        ),
         "account_id": str(cycle.account_id),
         "cycle_id": str(cycle_id),
         "run_id": str(run_id),
@@ -628,15 +653,19 @@ async def legacy_research_sealed(
     if len(rows) != 1:
         raise ValueError(_BLOCKED)
     row = rows[0]
-    if row.schema_version not in {_SCHEMA, _SAME_DAY_SCHEMA} or row.occurred_at > now:
+    if (
+        row.schema_version not in {_SCHEMA, _SAME_DAY_SCHEMA, _EXPIRED_SCHEMA}
+        or row.occurred_at > now
+    ):
         raise ValueError(_BLOCKED)
-    same_day = row.schema_version == _SAME_DAY_SCHEMA
+    same_day = row.schema_version in {_SAME_DAY_SCHEMA, _EXPIRED_SCHEMA}
     proof = await _proof(
         session,
         cycle_id=cycle_id,
         run_id=run_id,
         now=row.occurred_at if same_day else now,
         same_day=same_day,
+        expired_attempt=row.schema_version == _EXPIRED_SCHEMA,
     )
     canonical = canonical_audit_event(
         AuditChainInput(
@@ -673,10 +702,13 @@ async def seal_failed_research(
     now: datetime,
     accept_unknown_usage: bool,
     same_day: bool = False,
+    expired_attempt: bool = False,
 ) -> HistorySealReceipt:
     if (
         accept_unknown_usage is not True
         or type(same_day) is not bool
+        or type(expired_attempt) is not bool
+        or (expired_attempt and not same_day)
         or not 1 <= len(run_ids) <= 5
         or len(set(run_ids)) != len(run_ids)
     ):
@@ -685,6 +717,22 @@ async def seal_failed_research(
     cycle = await session.get(AgentPaperCycleRecord, cycle_id, with_for_update=True)
     if cycle is None or cycle.account_id != account_id:
         raise ValueError(_BLOCKED)
+    if expired_attempt:
+        from nexus.paper.manual_request import manual_request_for_cycle, read_manual_request
+
+        sealed = [
+            await legacy_research_sealed(session, cycle_id=cycle_id, run_id=run_id, now=now)
+            for run_id in run_ids
+        ]
+        if all(sealed):
+            target = await manual_request_for_cycle(session, cycle_id=cycle_id)
+            if target is None or (
+                target.account_id == account_id
+                and (await read_manual_request(session, target)).status == "unavailable"
+            ):
+                # A verified historical receipt does not require today's legitimate
+                # producer to stop. No closing, cancellation or new audit is done.
+                return HistorySealReceipt(sealed_research=len(run_ids), replayed=True)
     manual = await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id, now=now)
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_activation_projection_unoccupied(
@@ -695,12 +743,23 @@ async def seal_failed_research(
     for run_id in run_ids:
         if await legacy_research_sealed(session, cycle_id=cycle_id, run_id=run_id, now=now):
             continue
-        proof = await _proof(session, cycle_id=cycle_id, run_id=run_id, now=now, same_day=same_day)
+        proof = await _proof(
+            session,
+            cycle_id=cycle_id,
+            run_id=run_id,
+            now=now,
+            same_day=same_day,
+            expired_attempt=expired_attempt,
+        )
         await append_audit_event(
             session,
             actor_id=_ACTOR,
             action=_ACTION,
-            schema_version=_SAME_DAY_SCHEMA if same_day else _SCHEMA,
+            schema_version=_EXPIRED_SCHEMA
+            if expired_attempt
+            else _SAME_DAY_SCHEMA
+            if same_day
+            else _SCHEMA,
             payload=proof,
             occurred_at=now,
         )
