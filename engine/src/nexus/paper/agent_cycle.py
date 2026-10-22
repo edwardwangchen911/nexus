@@ -517,6 +517,9 @@ async def reserve_schwab_agent_paper_trigger(
     outcome = claim.response_payload.get("outcome")
     if outcome == "failed":
         error_code = claim.response_payload.get("error_code")
+        # A safe diagnostic is not a known external outcome or replay authority.
+        if error_code == "AGENT_PAPER_TRIGGER_FAILED":
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
         if isinstance(error_code, str) and error_code in _TRIGGER_FAILURE_CODES:
             raise ValueError(error_code)
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")

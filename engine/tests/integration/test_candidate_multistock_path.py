@@ -1324,6 +1324,13 @@ async def _start_manual_http_request(
             trade_ids={},
         )
 
+    from helpers.formal_preparation import use_seeded_formal_preparation
+
+    # The fixture already froze the research inputs; substitute source preparation
+    # explicitly while retaining native claim, execution, batch and calendar gates.
+    use_seeded_formal_preparation(
+        monkeypatch, account_id=authority.account_id, batch_id=batch.batch_id
+    )
     monkeypatch.setattr(once, "collect_source_proofs_batch", proofs)
     monkeypatch.setattr(once, "persist_query_authorities", persisted_risk)
     monkeypatch.setattr(once, "capture_and_import_schwab_level_one_batch", quotes)

@@ -4016,7 +4016,7 @@ async def test_trigger_once_persists_and_replays_safe_terminal_failure(
 
 
 @pytest.mark.asyncio
-async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
+async def test_trigger_once_preserves_unknown_with_safe_receipt_without_replay(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4085,6 +4085,26 @@ async def test_trigger_once_does_not_persist_or_replay_unknown_provider_failure(
     with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
         await agent_paper_once.trigger_once(settings, request, repo_root=ENGINE_ROOT.parent)
     assert provider_calls == 1
+    from nexus.paper.preparation_unknown_ack import _terminal_claim
+
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{seed.account_id}",
+                    IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                )
+            )
+            assert claim.response_payload == {
+                "outcome": "failed",
+                "error_code": "AGENT_PAPER_TRIGGER_FAILED",
+                "external_effects": "unknown",
+            }
+            assert not await _terminal_claim(session, claim, account_id=seed.account_id)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

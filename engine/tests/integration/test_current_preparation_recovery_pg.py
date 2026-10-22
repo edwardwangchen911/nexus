@@ -53,6 +53,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_native_claim",
         "accept_native_claim_direct",
         "accept_native_claim_wrong_hash",
+        "accept_native_claim_finish_first",
         "accept_native_claim_late_finish",
         "accept_native_claim_corrupt_audit",
         "accept_native_claim_changed",
@@ -217,6 +218,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
         use_seeded_formal_preparation(
             monkeypatch, account_id=authority.account_id, batch_id=batch.batch_id
         )
+
         # A process cancellation bypasses Exception; the claim transaction is already committed.
         async def interrupted(*args, **kwargs):
             raise asyncio.CancelledError()
@@ -902,6 +904,42 @@ async def _check_explicit_acceptance(
             claim.request_hash = "f" * 64
         with pytest.raises(ValueError, match=recovery.BLOCKED):
             await manual_paper.run(settings, args)
+        return
+    if case == "accept_native_claim_finish_first":
+        from nexus.paper.agent_cycle import finish_schwab_agent_paper_trigger
+        from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
+
+        async with sessions.begin() as session:
+            claim = await session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.idempotency_key == str(request.request_id)
+                )
+            )
+            reservation = AgentPaperTriggerReservation(
+                claim_id=claim.id,
+                trigger_mode="manual",
+                manual_request_id=request.request_id,
+                manual_execution_id=start.id,
+                decision_session=AT.date(),
+                decision_slot_at=AT,
+            )
+            await finish_schwab_agent_paper_trigger(
+                session, reservation=reservation, error_code="CANDIDATE_BATCH_INVALID"
+            )
+        finished = await business_facts()
+        assert {k: v for k, v in finished.items() if k != "idempotency_records"} == {
+            k: v for k, v in before.items() if k != "idempotency_records"
+        }
+        with pytest.raises(ValueError, match=recovery.BLOCKED):
+            await manual_paper.run(settings, args)
+        assert await business_facts() == finished
+        async with sessions() as session:
+            assert (
+                await session.scalar(
+                    select(AuditEvent.id).where(AuditEvent.action == acceptance.ACTION)
+                )
+                is None
+            )
         return
     native_claim_case = case.startswith("accept_native_claim")
     if native_claim_case and case not in {"accept_native_claim", "accept_native_claim_late_finish"}:
