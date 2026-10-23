@@ -211,17 +211,28 @@ async def test_bounded_setup_versions_scope_without_rewriting_frozen_prompt_auth
         session.add(previous)
         await session.flush()
         previous_id = previous.id
+    v6 = load_portfolio_synthesis_prompt(security_research_scope=True, claim_review_scope=True)
+    async with factory.begin() as session:
+        deployed = AgentPromptVersionRecord(
+            role=v6.role, version=v6.version, content=v6.content, content_hash=v6.content_hash
+        )
+        session.add(deployed)
+        await session.flush()
+        deployed_id = deployed.id
     options = V9_OPTIONS | {"formal_bounded_stage_budget": True}
     await openai_local.prepare_database(settings, **options)
     await openai_local.prepare_database(settings, **options)
     async with factory() as session:
         current = await load_complete_prompt_authority(session)
         assert current is not None
-        assert current["portfolio"].version == "local-portfolio-synthesis-v6-claim-review"
+        assert current["portfolio"].version == "local-portfolio-synthesis-v7-inference-review"
         assert "research_scope=single_security" in current["portfolio"].content
         assert "atomic claims" in current["portfolio"].content
+        assert "facts to conditional stance" in current["portfolio"].content
         preserved_v5 = await session.get(AgentPromptVersionRecord, previous_id)
         assert preserved_v5.content == v5.content and preserved_v5.content_hash == v5.content_hash
+        preserved_v6 = await session.get(AgentPromptVersionRecord, deployed_id)
+        assert preserved_v6.content == v6.content and preserved_v6.content_hash == v6.content_hash
         historical = await load_frozen_prompts(session, frozen)
         assert historical is not None
         assert historical["portfolio"].version == "local-portfolio-synthesis-v4"
@@ -238,7 +249,8 @@ async def test_bounded_setup_versions_scope_without_rewriting_frozen_prompt_auth
                 select(func.count())
                 .select_from(AgentPromptVersionRecord)
                 .where(
-                    AgentPromptVersionRecord.version == "local-portfolio-synthesis-v6-claim-review"
+                    AgentPromptVersionRecord.version
+                    == "local-portfolio-synthesis-v7-inference-review"
                 )
             )
             == 1
