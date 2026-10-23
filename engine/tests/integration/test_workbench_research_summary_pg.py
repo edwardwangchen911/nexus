@@ -282,3 +282,57 @@ async def test_failed_run_with_unknown_result_keeps_unknown_usage_reason(migrate
         assert result.limitations[0].source == "system"
         assert "未知" in result.limitations[0].text
         assert run.settled_cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_research_only_projection_uses_exact_manifest_without_business_writes(
+    migrated_database_url, tmp_path
+):
+    from nexus.paper.manual_request import (
+        admit_manual_request,
+        claim_manual_request,
+        read_manual_request,
+    )
+    from nexus.paper.research_request import prepare_research_request
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+    from nexus.workbench.research_summary import research_candidates
+
+    from engine.tests.integration.test_observation_readback_pg import business_digest
+    from engine.tests.integration.test_research_request_pg import prepare_scope
+
+    factory, settings, store, _ = await prepare_scope(migrated_database_url, tmp_path, bounded=True)
+    async with factory.begin() as session:
+        first = await admit_manual_request(
+            session,
+            account_id=settings.agent_paper_account_id,
+            batch_id=settings.agent_paper_candidate_batch_id,
+            model_config_id=settings.agent_paper_formal_model_config_id,
+            mode="research_only",
+            idempotency_key="workbench-pure-research",
+            contract_version=2,
+        )
+    async with factory.begin() as session:
+        _, claimed = await claim_manual_request(session, request_id=first.request_id)
+        assert claimed
+    async with factory.begin() as session:
+        session.info["sec_exhibit_store"] = store
+        active = await prepare_research_request(session, settings, request_id=first.request_id)
+        assert active.research is not None
+    before = await business_digest(factory)
+    async with factory() as session:
+        row = await session.get(ManualPaperRequest, first.request_id)
+        view = await read_manual_request(session, row)
+        at = datetime.now(UTC)
+        result = await research_candidates(session, row, view, read_at=at)
+        repeat = await research_candidates(session, row, view, read_at=at)
+        assert result == repeat
+        assert [item.run_id for item in result] == [item.run_id for item in view.research.members]
+        assert [item.instrument_id for item in result] == [
+            item.instrument_id for item in view.research.members
+        ]
+        assert {item.symbol for item in result} == {"AAPL", "NVDA", "AVGO"}
+        assert all(item.job_status == "queued" and item.run_status == "prepared" for item in result)
+        assert all(item.read_status == "verified" and item.quality is None for item in result)
+        assert all(item.research_as_of == view.research.research_as_of for item in result)
+        assert all(item.limitations == () for item in result)
+    assert await business_digest(factory) == before

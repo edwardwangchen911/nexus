@@ -125,3 +125,33 @@ async def test_cycle_without_a_valid_event_chain_is_not_verified():
     session = SimpleNamespace(scalars=AsyncMock(return_value=[]))
     with pytest.raises(ValueError, match="WORKBENCH_CANDIDATE_BINDING_INVALID"):
         await cycle_candidates(session, cycle, read_at=at)
+
+
+def test_impact_excerpt_and_standalone_conclusion_preserve_model_provenance():
+    intent = limited_intent()
+    review = intent.synthesis_assessment.reviews[0].model_copy(
+        update={"prevented_conclusion": "y" * 1100}
+    )
+    intent = intent.model_copy(
+        update={
+            "synthesis_assessment": intent.synthesis_assessment.model_copy(
+                update={"reviews": (review,)}
+            )
+        }
+    )
+    items, _ = _limitations(intent)
+    assert items[0].impact == "y" * 1000
+    assert items[0].truncated
+    review = review.model_copy(update={"missing_evidence": ()})
+    intent = intent.model_copy(
+        update={
+            "synthesis_assessment": intent.synthesis_assessment.model_copy(
+                update={"reviews": (review,)}
+            )
+        }
+    )
+    items, _ = _limitations(intent)
+    assert items[0].kind == "prevented_conclusion"
+    assert items[0].source == "model"
+    assert items[0].text == "y" * 1000
+    assert items[0].truncated

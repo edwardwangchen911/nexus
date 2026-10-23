@@ -267,7 +267,7 @@ async def _project(
     )
     if run.status in {"failed", "abstained"}:
         safe_reasons = {
-            "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN": "研究执行结果仍未知；未知用量与预算保护保留。",
+            "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN": "原研究执行结果仍未知。",
             "manual_unused_research_cancelled": "未使用的研究已按原取消记录收尾。",
         }
         reason = None
