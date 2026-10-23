@@ -382,16 +382,17 @@ async def inspect_or_accept_scheduled_unknown(
         is not None
     ):
         raise ValueError(BLOCKED)
-    if (
-        await session.scalar(
-            select(JobLease.job_id)
-            .join(Job, Job.id == JobLease.job_id)
-            .where(Job.job_type.in_(kinds), JobLease.expires_at > now)
-            .limit(1)
-        )
-        is not None
-    ):
-        raise ValueError(BLOCKED)
+    from nexus.jobs.repository import job_lease_consumed
+
+    leased = await session.execute(
+        select(Job, JobLease)
+        .join(JobLease, Job.id == JobLease.job_id)
+        .where(Job.job_type.in_(kinds), JobLease.expires_at > now)
+        .execution_options(populate_existing=True)
+    )
+    for job, lease in leased:
+        if not await job_lease_consumed(session, job=job, lease=lease, now=now):
+            raise ValueError(BLOCKED)
     await require_no_live_research_runs(session, now=now)
     allowed = await accepted_claim_ids(session, account_id) | await accepted_scheduled_claim_ids(
         session, account_id

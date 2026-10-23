@@ -26,7 +26,7 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
-from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
+from nexus.persistence.models.runtime import Job, JobLease
 
 ManualMode = Literal["research_only", "research_and_paper"]
 ManualStatus = Literal["queued", "preparing", "active", "completed", "unavailable", "unknown"]
@@ -604,6 +604,8 @@ async def _require_cycle_jobs_settled(
         ):
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     if require_no_live_lease:
+        from nexus.jobs.repository import job_lease_consumed
+
         leases = tuple(
             await session.scalars(
                 select(JobLease).where(
@@ -630,18 +632,7 @@ async def _require_cycle_jobs_settled(
                 or run.settled_cost_usd != 0
                 or run.input_tokens != 0
                 or run.output_tokens != 0
-                or not await session.scalar(
-                    select(JobAttempt.id)
-                    .where(
-                        JobAttempt.job_id == job.id,
-                        JobAttempt.lease_token == lease.lease_token,
-                        JobAttempt.fence_token == lease.fence_token,
-                        JobAttempt.attempt_no == 1,
-                        JobAttempt.outcome == "skipped",
-                        JobAttempt.finished_at <= now,
-                    )
-                    .limit(1)
-                )
+                or not await job_lease_consumed(session, job=job, lease=lease, now=now)
             ):
                 raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
 

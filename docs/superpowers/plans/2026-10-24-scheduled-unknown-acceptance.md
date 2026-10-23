@@ -84,3 +84,19 @@ Chat 终审 `nexus-scheduled-unknown-final-20261024-01` 完整答复已取回：
 全部 CI（有失败统一修）→ 最终镜像/回滚备份/合并部署 → 已部署正常 check 只读核验。
 私有证据 `.secrets/scheduled-unknown-acceptance/`：`chat-final-review.json`、
 `related-final.log`、`matrix-21.log`、`live-after.json`、`ci-dff67753.json`。
+
+
+## 已消耗租约修正（2026-10-24）
+
+已按原生 finalize 合同提取只读 `job_lease_consumed`，核对最新 Attempt、次数、归属、
+worker/token/fence、起止时刻和终态错误形状；仅支持 succeeded/skipped/failed。
+正常取消入口仍保留原专属取消码、owner 及零用量 Run 条件，不扩大取消资格。
+新入口不再把已精确消耗但未到期的审计租约误当执行占用，未知费用/预算检查不变。
+
+真实隔离 PG 正常手动入口创建、取消未领取任务、自然槽未知认领、CLI 检查和显式接受
+先 RED 后 GREEN；8 项覆盖正常成功及 worker/token/fence/时间/缺 Attempt/活动/未知用量
+反例，全部 Job/Attempt/Lease/Run/预算/认领哈希保持不变。
+本轮全 fast 6334 passed / 10 skipped / 1 deselected；相关 PG 104 passed；
+Ruff 和全源 Mypy 609 文件通过。独立代码复核无 P1/P2。
+Chat 定向终审 `nexus-scheduled-unknown-final-20261024-02` 已送实际增量，待回复；
+最终候选 CI、合并部署和正常只读检查尚未完成，未接受真实未知影响或启动宿主。

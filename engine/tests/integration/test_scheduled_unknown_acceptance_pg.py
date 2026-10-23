@@ -490,3 +490,203 @@ async def test_normal_scheduled_check_and_accept_preserve_unknown(
                 )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault", ["none", "worker", "token", "fence", "finished", "missing", "active", "unknown_usage"]
+)
+async def test_consumed_future_lease_uses_native_terminal_proof(
+    migrated_database_url, monkeypatch, tmp_path, fault
+):
+    from uuid import UUID, uuid4
+
+    from nexus.ops.manual_paper_host import finish_configured_manual_request
+    from nexus.paper.history_seal import _row_hash
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        AgentResearchRunRecord,
+    )
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+    from nexus.persistence.models.paper import AgentPaperCycleRecord
+    from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
+
+    await prepare_database(
+        EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
+        **(V9_OPTIONS | {"formal_flexible_stage_budget": True}),
+    )
+    now = AT - timedelta(seconds=30)
+    engine, sessions, authority, manifest = await seed_normal_path(
+        migrated_database_url, monkeypatch, decision_time=now, candidate_instruments=INSTRUMENTS
+    )
+    original_scalar = AsyncSession.scalar
+
+    async def clock(self, statement, *args, **kwargs):
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return now
+        if getattr(statement, "is_insert", False) and statement.table.name == "idempotency_records":
+            statement = statement.values(created_at=now)
+        return await original_scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", clock)
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_: None)
+    monkeypatch.setattr(manual_paper, "preparation_service_control_lock", lambda *_: nullcontext())
+    monkeypatch.setattr(
+        manual_preparation_close, "require_preparation_producers_stopped", lambda *_a, **_k: None
+    )
+    try:
+        async with sessions.begin() as s:
+            model = await s.scalar(
+                select(AgentModelConfigRecord).where(
+                    AgentModelConfigRecord.version == "codex-sdk-chatgpt-v10-flexible-stage-budget"
+                )
+            )
+            batch = await create_agent_paper_candidate_batch(
+                s,
+                account_id=authority.account_id,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                instrument_ids=tuple(i.instrument_id for i in manifest),
+                idempotency_key="pre-slot-manual",
+                created_at=now,
+            )
+            settings = EngineSettings(
+                database_url=migrated_database_url,
+                agent_runtime_mode="codex_sdk",
+                agent_paper_account_id=authority.account_id,
+                agent_paper_candidate_batch_id=batch.batch_id,
+                agent_paper_formal_model_config_id=model.id,
+            )
+            manual = await manual_request.admit_manual_request(
+                s,
+                account_id=authority.account_id,
+                batch_id=batch.batch_id,
+                model_config_id=model.id,
+                mode="research_and_paper",
+                idempotency_key="before-natural-slot",
+            )
+            _, claimed = await manual_request.claim_manual_request(s, request_id=manual.request_id)
+            assert claimed
+            reservation = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                s,
+                account_id=authority.account_id,
+                candidate_batch_id=batch.batch_id,
+                now=now,
+                client_idempotency_key=f"manual-entry:{manual.request_id}",
+                trigger_mode="manual",
+                manual_request_id=manual.request_id,
+                formal_stage_capacity=True,
+                formal_model_config_id=model.id,
+            )
+            result = await agent_cycle.start_schwab_agent_paper_cycle(
+                s,
+                authority=authority,
+                decision_slot_at=now,
+                idempotency_key=f"manual-entry:{manual.request_id}",
+                requested_instrument_ids=batch.instrument_ids,
+                candidate_batch_id=batch.batch_id,
+                formal_stage_capacity=True,
+                formal_model_config_id=model.id,
+                manual_request_id=manual.request_id,
+            )
+            await agent_cycle.finish_schwab_agent_paper_trigger(
+                s, reservation=reservation, result=result
+            )
+            cycle = await s.get(AgentPaperCycleRecord, result.cycle_id)
+            await agent_cycle._stop_failed(
+                s, cycle, await agent_cycle._events(s, cycle.id), "RESEARCH_OUTPUT_NOT_ACTIONABLE"
+            )
+        now += timedelta(seconds=5)
+        async with sessions.begin() as s:
+            closed = await finish_configured_manual_request(
+                s, settings, request_id=manual.request_id, cancel_unused=True
+            )
+            assert closed.status == "unavailable"
+            assert (await s.get(ManualPaperRequest, manual.request_id)) is not None
+        now = AT
+        async with sessions.begin() as s:
+            unknown = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                s,
+                account_id=authority.account_id,
+                candidate_batch_id=batch.batch_id,
+                now=now,
+                client_idempotency_key=f"agent-paper-loop:{AT.isoformat()}",
+                formal_stage_capacity=True,
+                formal_model_config_id=model.id,
+            )
+            await agent_cycle.finish_schwab_agent_paper_trigger(
+                s, reservation=unknown, error_code="AGENT_PAPER_TRIGGER_FAILED"
+            )
+        now = AT + timedelta(seconds=10)
+        async with sessions.begin() as s:
+            lease = await s.scalar(select(JobLease).order_by(JobLease.id))
+            assert lease.expires_at > now
+            attempt = await s.scalar(
+                select(JobAttempt).where(JobAttempt.lease_token == lease.lease_token)
+            )
+            job = await s.get(Job, lease.job_id)
+            assert job.status == attempt.outcome == "skipped"
+            # Deliberate isolated corruption; normal immutable writers remain unchanged.
+            if fault != "none":
+                for table in ("job_attempts", "jobs", "agent_research_runs"):
+                    await s.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+            if fault == "worker":
+                attempt.worker_id = "wrong-worker"
+            elif fault == "token":
+                attempt.lease_token = uuid4()
+            elif fault == "fence":
+                attempt.fence_token += 1
+            elif fault == "finished":
+                attempt.finished_at = lease.expires_at + timedelta(seconds=1)
+            elif fault == "missing":
+                await s.delete(attempt)
+            elif fault == "active":
+                attempt.outcome, attempt.finished_at = "running", None
+                job.status, job.finished_at = "running", None
+            elif fault == "unknown_usage":
+                run = await s.get(AgentResearchRunRecord, UUID(job.payload["run_id"]))
+                run.settled_cost_usd = None
+            await s.flush()
+            if fault != "none":
+                for table in ("job_attempts", "jobs", "agent_research_runs"):
+                    await s.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER USER"))
+
+        async def preserved():
+            async with sessions() as s:
+                return {
+                    table.__tablename__: sorted(
+                        _row_hash(r) for r in await s.scalars(select(table))
+                    )
+                    for table in (
+                        Job,
+                        JobAttempt,
+                        JobLease,
+                        AgentResearchRunRecord,
+                        AgentDailyBudgetReservationRecord,
+                        IdempotencyRecord,
+                    )
+                }
+
+        before = await preserved()
+        args = Namespace(
+            action="check-scheduled-acceptance",
+            claim_id=unknown.claim_id,
+            repo_root=tmp_path,
+            env_file=tmp_path / "env",
+        )
+        if fault == "none":
+            check = await manual_paper.run(settings, args)
+            assert check.status == "eligible_at_check"
+            args.action, args.accept_unknown_effects = "accept-scheduled-unknown", True
+            assert (
+                await manual_paper.run(settings, args)
+            ).status == "scheduled_unknown_acknowledged"
+            async with sessions.begin() as s:
+                await manual_request.require_manual_account_available(
+                    s, account_id=authority.account_id, now=now
+                )
+        else:
+            with pytest.raises(ValueError):
+                await manual_paper.run(settings, args)
+        assert await preserved() == before
+    finally:
+        await engine.dispose()
