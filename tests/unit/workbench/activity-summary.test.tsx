@@ -142,3 +142,8 @@ it.each(["ambiguous", "unavailable"] as const)("does not infer cycle absence fro
   expect(scope).not.toHaveTextContent("尚未创建周期");
   expect(scope).not.toHaveTextContent("组合判断尚未开始");
 });
+
+it("does not invent a job/run terminal pairing beyond the verified backend projection", () => {
+  render(<ActivitySummary activity={activity(activityScope({ candidates: [{ ...candidate(), job_status: "failed" }] }))} />);
+  expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).toHaveTextContent("研究已完成");
+});

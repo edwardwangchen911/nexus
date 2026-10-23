@@ -105,7 +105,7 @@ function CandidateSummary({ candidate }: { candidate: ActivityCandidate }): Reac
         : candidate.reason_code === "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN" ? "研究结果未知"
           : candidate.run_status === "abstained" && candidate.job_status === "skipped"
             && candidate.reason_code === "manual_unused_research_cancelled" ? "未执行（已核验取消）"
-            : candidate.run_status === "completed" && candidate.job_status === "succeeded" ? "研究已完成"
+            : candidate.run_status === "completed" ? "研究已完成"
               : candidate.run_status === "failed" ? "研究失败"
                 : candidate.run_status === "unknown" ? "研究结果未知" : "研究状态尚未核验";
   return <article aria-label={`${candidate.symbol} 本轮研究`} className="workbench-activity__candidate">
