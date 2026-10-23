@@ -67,7 +67,7 @@ function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
   return <section aria-label={title} className="workbench-activity__scope">
     <h3>{title}</h3>
     <p>手动登记统计日期（纽约）：{scope.registration_date} · {countCopy(scope.today_registered, "今日手动", "登记", "请求")} · {countCopy(scope.today_started, scope.mode === "research_only" ? "今日" : "本交易日", "启动", scope.mode === "research_only" ? "研究请求" : "周期")}</p>
-    <p>启动计数交易日{scope.mode === "research_only" ? "：本模式不适用，按纽约登记日期统计" : scope.decision_session ?? "：尚未确定"}</p>
+    <p>启动计数交易日：{scope.mode === "research_only" ? "本模式不适用，按纽约登记日期统计" : scope.decision_session ?? "尚未确定"}</p>
     <p><strong>{selections[scope.selection]}</strong>{scope.historical && scope.selection !== "historical_unresolved" ? "（历史记录）" : ""}
       {scope.selection !== "none" && <> · {uncertain ? "当前状态待核对" : statuses[scope.status ?? ""] ?? "运行状态待核对"}
         {scope.status === "preparing" && scope.cycle_id === null ? "；尚未创建周期" : ""}</>}</p>
@@ -104,7 +104,7 @@ function CandidateSummary({ candidate }: { candidate: ActivityCandidate }): Reac
           : candidate.job_status === "queued" ? "等待执行" : "研究状态尚未核验";
   return <article aria-label={`${candidate.symbol} 本轮研究`} className="workbench-activity__candidate">
     <h4>{candidate.symbol}</h4>
-    <p><strong>{runStatus}</strong> · {candidate.quality === "partial" ? "结论受限" : candidate.quality === "complete" ? "研究内容完整；采用资格仍须独立核验" : "研究质量尚未核验"}</p>
+    <p><strong>{runStatus}</strong> · {valid && candidate.quality === "partial" ? "结论受限" : valid && candidate.quality === "complete" ? "研究内容完整；采用资格仍须独立核验" : "研究质量尚未核验"}</p>
     <p>研究证据截止：{formatDisplayTime(candidate.research_as_of)}</p>
     <p>阶段细节未记录／未核验。</p>
     {!valid ? <p>摘要暂不可核验；未展示模型正文。</p> : <>
@@ -154,13 +154,13 @@ export function validActivity(value: unknown): value is WorkbenchActivity {
       && [null, "manual", "scheduled"].includes(scope.trigger as null | string) && typeof scope.historical === "boolean"
       && ["unresolved", "released", "not_indicated", "unverified"].includes(String(scope.occupancy))
       && ["decision_session", "request_id", "cycle_id", "requested_at", "status", "reason_code", "portfolio_status", "portfolio_reason_code", "href"].every((key) => nullableString(scope[key]))
-      && Array.isArray(scope.candidates) && scope.candidates.length <= 50 && scope.candidates.every(validCandidate));
+      && Array.isArray(scope.candidates) && scope.candidates.length <= 5 && scope.candidates.every(validCandidate));
 }
 function validCandidate(value: unknown): boolean {
   return plain(value) && typeof value.instrument_id === "string" && typeof value.symbol === "string"
     && ["run_id", "snapshot_id", "research_as_of", "run_status", "job_status", "quality", "reason_code", "href"].every((key) => nullableString(value[key]))
     && ["verified", "unavailable"].includes(String(value.read_status)) && typeof value.has_more === "boolean"
-    && Array.isArray(value.limitations) && value.limitations.length <= 50 && value.limitations.every((item) => plain(item)
+    && Array.isArray(value.limitations) && value.limitations.length <= 20 && value.limitations.every((item) => plain(item)
       && ["system", "model"].includes(String(item.source)) && typeof item.kind === "string" && typeof item.text === "string"
       && typeof item.truncated === "boolean" && nullableString(item.impact));
 }

@@ -71,6 +71,8 @@ describe("frozen round and research limits", () => {
     render(<ActivitySummary activity={activity(activityScope({ candidates: [bad, { ...candidate(), instrument_id: requestId, symbol: "NVDA", run_status: "running", quality: null, limitations: [] }] }))} />);
     expect(screen.queryByText("UNVERIFIED_SECRET")).not.toBeInTheDocument();
     expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).toHaveTextContent("摘要暂不可核验");
+    expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).toHaveTextContent("研究质量尚未核验");
+    expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).not.toHaveTextContent("结论受限");
     expect(screen.getByRole("article", { name: "NVDA 本轮研究" })).toHaveTextContent("研究中");
     expect(screen.queryByRole("link", { name: "查看 AAPL 原研究" })).not.toBeInTheDocument();
   });
@@ -90,6 +92,26 @@ it("keeps today's count session distinct from a selected historical cycle and la
   const scope = screen.getByRole("region", { name: "正式研究与内部模拟" });
   expect(scope).toHaveTextContent("今日手动未登记");
   expect(scope).toHaveTextContent("本交易日已启动 1 周期");
-  expect(scope).toHaveTextContent("启动计数交易日2026-10-23");
+  expect(scope).toHaveTextContent("启动计数交易日：2026-10-23");
   expect(scope).toHaveTextContent("选中周期交易日2026-10-22");
+});
+
+it.each(["unavailable", "ambiguous"] as const)("keeps a verified sibling scope when one scope is %s", (selection) => {
+  render(<ActivitySummary activity={{ ...activity(), read_status: "partial", scopes: [
+    activityScope({ selection, today_registered: null, today_started: null, candidates: [] }),
+    activityScope({ mode: "research_only", selection: "today", status: "completed", historical: false, candidates: [candidate()] }),
+  ] }} />);
+  expect(screen.getByRole("region", { name: "正式研究与内部模拟" })).toHaveTextContent("当前状态待核对");
+  const research = screen.getByRole("region", { name: "纯研究" });
+  expect(research).toHaveTextContent("研究已完成");
+  expect(research).toHaveTextContent("历史分母适用范围仍需核对");
+});
+
+it.each(["candidates", "limitations"] as const)("rejects oversized %s instead of rendering an unbounded response", (field) => {
+  const scope = activityScope({ candidates: [candidate()] });
+  if (field === "candidates") scope.candidates = Array.from({ length: 6 }, (_, index) => ({ ...candidate(), instrument_id: `candidate-${index}` }));
+  else scope.candidates[0].limitations = Array.from({ length: 21 }, () => candidate().limitations[1]);
+  render(<ActivitySummary activity={activity(scope)} />);
+  expect(screen.getByText("本轮摘要格式不可核验；未展示未核验正文。")).toBeVisible();
+  expect(screen.queryByText("历史分母适用范围仍需核对")).not.toBeInTheDocument();
 });
