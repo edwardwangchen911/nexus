@@ -73,6 +73,24 @@ def _limitations(intent: ResearchIntent) -> tuple[tuple[WorkbenchLimitationRespo
     items = []
     assessment = intent.synthesis_assessment
     if assessment is not None:
+        audit = next(
+            (vote.vote for vote in intent.role_votes if vote.role == "evidence_audit"), None
+        )
+        audit_label = {"support": "支持", "oppose": "反对", "abstain": "弃权"}.get(
+            audit or "", "未记录"
+        )
+        conclusion = {"sufficient": "充分", "limited": "受限", "insufficient": "不足"}.get(
+            assessment.review_conclusion, assessment.review_conclusion
+        )
+        unresolved = sum(not review.resolved for review in assessment.reviews)
+        items.append(
+            WorkbenchLimitationResponse(
+                source="system",
+                kind="review_status",
+                text=f"审计票：{audit_label}；综合结论：{conclusion}；未解决审查项：{unresolved}。"
+                "这些是原记录状态；异议得到回应不改变原审计票，也不代表正式准入。",
+            )
+        )
         for review in assessment.reviews:
             for text in review.missing_evidence:
                 items.append(
@@ -100,6 +118,10 @@ def _limitations(intent: ResearchIntent) -> tuple[tuple[WorkbenchLimitationRespo
     else:
         uncertainties = intent.uncertainties
     for text in dict.fromkeys(uncertainties):
+        if assessment is not None and text == "Evidence review has unresolved objections.":
+            # This historical fallback also covered an audit veto with zero unresolved
+            # reviews. Preserve the stored intent; project its exact components above.
+            continue
         items.append(
             WorkbenchLimitationResponse(
                 source="model",

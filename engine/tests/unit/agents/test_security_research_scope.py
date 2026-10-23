@@ -13,13 +13,24 @@ SCOPE_VERSION = "local-portfolio-synthesis-v5-paper-scope"
 STAGES = ("research", "critique", "synthesis")
 
 
-def _wire(stage, *, new=False, context=True, scope=True, capacity=True, security_extra=None):
+def _wire(
+    stage,
+    *,
+    new=False,
+    context=True,
+    scope=True,
+    capacity=True,
+    security_extra=None,
+    claim_review=False,
+):
     request, evidence, prompts = _authority()
     request = request.model_copy(
         update={"instrument_id": UUID(int=1), "data_snapshot_id": UUID(int=2)}
     )
     prompts = dict(prompts)
-    prompts["portfolio"] = load_portfolio_synthesis_prompt(security_research_scope=new)
+    prompts["portfolio"] = load_portfolio_synthesis_prompt(
+        security_research_scope=new, claim_review_scope=claim_review
+    )
     model = StructuredStagedCodexCommittee(
         prompts=prompts, tools=_tools(), paper_stage_scope=scope, inline_citations=capacity
     )
@@ -154,6 +165,7 @@ def test_frozen_v4_full_wire_is_unchanged(stage, capacity):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("claim_review", [False, True])
 @pytest.mark.parametrize(
     "audit_vote,resolved,quality",
     [
@@ -167,6 +179,7 @@ async def test_new_scope_through_sdk_and_synthesis_keeps_real_audit_gate(
     audit_vote,
     resolved,
     quality,
+    claim_review,
 ):
     import asyncio
     import json
@@ -186,7 +199,9 @@ async def test_new_scope_through_sdk_and_synthesis_keeps_real_audit_gate(
 
     request, evidence, prompts = _authority()
     prompts = dict(prompts)
-    prompts["portfolio"] = load_portfolio_synthesis_prompt(security_research_scope=True)
+    prompts["portfolio"] = load_portfolio_synthesis_prompt(
+        security_research_scope=True, claim_review_scope=claim_review
+    )
     _, thread, result, _ = _sdk(monkeypatch)
     seen = []
 
@@ -277,3 +292,48 @@ async def test_new_scope_through_sdk_and_synthesis_keeps_real_audit_gate(
     else:
         assert intent.stance == "buy_candidate"
     assert next(v.vote for v in intent.role_votes if v.role == "evidence_audit") == audit_vote
+
+
+V5_HASHES = {
+    ("research", False): "b836c01675203134fb337dc8b389f81abfa2119286ff9e14103f4b3a2c8dd2f7",
+    ("research", True): "c90129555790eecc07cef61324e5372fb9db2e7bd71299260f9d989572a16ff4",
+    ("critique", False): "4fa5dab79147f9714248bd8f8ba12da21235ce8f286c49eca76581e439820114",
+    ("critique", True): "04e95e44311f098ac4c0d75a63fffe169908c916073e0997e45c5fd2f49a8bfc",
+    ("synthesis", False): "9f9182a514962940a1c41cb1e5e280599536c9a4554c6ce97b0a67bd31690ba8",
+    ("synthesis", True): "83d7353236bb92b432dd5f4596dd088537e70701da0a0cd20d539a3cd40da309",
+}
+
+
+@pytest.mark.parametrize("stage,capacity", V5_HASHES)
+def test_frozen_v5_full_wire_is_unchanged(stage, capacity):
+    assert (
+        codex_request_hash(*_wire(stage, new=True, capacity=capacity)) == V5_HASHES[stage, capacity]
+    )
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_v6_claim_and_audit_guidance_reaches_every_stage(stage):
+    payload, _ = _wire(stage, new=True, claim_review=True)
+    instructions = payload["instructions"]
+    for rule in (
+        "atomic claims",
+        "frozen benchmark",
+        "specific observable input",
+        "not proof of an accounting error",
+        "every frozen audit vote",
+    ):
+        assert rule in instructions
+    assert payload["research_scope"] == "single_security"
+    assert (
+        load_portfolio_synthesis_prompt(
+            security_research_scope=True, claim_review_scope=True
+        ).version
+        == "local-portfolio-synthesis-v6-claim-review"
+    )
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_v6_guidance_does_not_expand_unrelated_scope(stage):
+    payload, _ = _wire(stage, new=True, claim_review=True, context=False)
+    assert "atomic claims" not in payload["instructions"]
+    assert "research_scope" not in payload

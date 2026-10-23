@@ -79,7 +79,9 @@ async def test_partial_completed_preserves_runtime_and_expired_readback(migrated
         assert result.read_status == "verified"
         assert result.href == f"/research/{run.instrument_id}?run_id={run_id}"
         assert result.limitations
-        assert all(item.source == "model" for item in result.limitations)
+        assert result.limitations[0].kind == "review_status"
+        assert result.limitations[0].source == "system"
+        assert all(item.source == "model" for item in result.limitations[1:])
         duplicate_job = job
         damaged = await _project(
             session,
@@ -142,6 +144,8 @@ async def test_valid_saved_review_excerpt_never_becomes_verified_system_gap(migr
         from nexus.workbench.research_summary import _limitations
 
         items, _ = _limitations(intent)
+        assert items[0].kind == "review_status"
+        items = tuple(item for item in items if item.kind != "review_status")
         assert items[0].source == "model"
         assert items[0].text == "synthetic missing EPS scope"
         assert items[0].impact == "synthetic denominator limited"

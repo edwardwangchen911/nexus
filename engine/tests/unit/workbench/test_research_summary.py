@@ -29,7 +29,8 @@ def test_model_gaps_and_uncertainty_have_distinct_provenance():
     items, more = _limitations(intent)
     assert items
     assert not more
-    assert all(item.source == "model" for item in items)
+    assert items[0].kind == "review_status" and items[0].source == "system"
+    assert all(item.source == "model" for item in items[1:])
     assert any(item.kind == "missing_evidence" and item.impact for item in items)
     assert any(item.kind == "uncertainties" and item.impact is None for item in items)
     assert not any("已解决" in item.text for item in items)
@@ -50,6 +51,7 @@ def test_saved_text_is_bounded_and_explicitly_truncated():
         }
     )
     items, _ = _limitations(intent)
+    items = tuple(item for item in items if item.kind != "review_status")
     assert items[0].text == "x" * 1000
     assert items[0].truncated is True
 
@@ -78,7 +80,8 @@ def test_limitation_count_is_bounded_without_claiming_a_total():
     items, more = _limitations(intent)
     assert len(items) == 20
     assert more is True
-    assert items[0].text == "gap 0:0"
+    assert items[0].kind == "review_status"
+    assert items[1].text == "gap 0:0"
 
 
 @pytest.mark.asyncio
@@ -140,6 +143,7 @@ def test_impact_excerpt_and_standalone_conclusion_preserve_model_provenance():
         }
     )
     items, _ = _limitations(intent)
+    items = tuple(item for item in items if item.kind != "review_status")
     assert items[0].impact == "y" * 1000
     assert items[0].truncated
     review = review.model_copy(update={"missing_evidence": ()})
@@ -151,6 +155,7 @@ def test_impact_excerpt_and_standalone_conclusion_preserve_model_provenance():
         }
     )
     items, _ = _limitations(intent)
+    items = tuple(item for item in items if item.kind != "review_status")
     assert items[0].kind == "prevented_conclusion"
     assert items[0].source == "model"
     assert items[0].text == "y" * 1000

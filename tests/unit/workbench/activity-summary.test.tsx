@@ -147,3 +147,15 @@ it("does not invent a job/run terminal pairing beyond the verified backend proje
   render(<ActivitySummary activity={activity(activityScope({ candidates: [{ ...candidate(), job_status: "failed" }] }))} />);
   expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).toHaveTextContent("研究已完成");
 });
+
+it("labels saved audit state without presenting it as new independent verification", () => {
+  const row = { ...candidate(), limitations: [{ source: "system" as const, kind: "review_status",
+    text: "审计票：反对；综合结论：受限；未解决审查项：0。", truncated: false, impact: null }] };
+  render(<ActivitySummary activity={activity(activityScope({ candidates: [row] }))} />);
+  const card = screen.getByRole("article", { name: "AAPL 本轮研究" });
+  expect(card).toHaveTextContent("已保存审查状态");
+  expect(card).toHaveTextContent("审计票：反对；综合结论：受限；未解决审查项：0");
+  expect(card).toHaveTextContent("结论受限");
+  expect(card).not.toHaveTextContent("系统核验");
+  expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+});
