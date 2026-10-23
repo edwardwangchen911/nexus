@@ -100,3 +100,8 @@ worker/token/fence、起止时刻和终态错误形状；仅支持 succeeded/ski
 Ruff 和全源 Mypy 609 文件通过。独立代码复核无 P1/P2。
 Chat 定向终审 `nexus-scheduled-unknown-final-20261024-02` 已送实际增量，待回复；
 最终候选 CI、合并部署和正常只读检查尚未完成，未接受真实未知影响或启动宿主。
+
+终审补充：final-02 完整答复已取回，原 1 P1 / 2 P2 均关闭，无新增 P1/P2。
+按其覆盖确认要求，新增原生 execute_and_finalize_job 的 succeeded/failed/skipped 三态
+直接验证：运行中拒绝，合法终结后未来租约可识别，尚未到完成时刻拒绝。
+该文件 6 项真实 PG 通过，生产修复未再变化。最终同 head CI 仍须全部通过。
