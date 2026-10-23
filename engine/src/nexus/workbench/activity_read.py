@@ -123,6 +123,9 @@ async def _read_activity(
                     selection="unavailable",
                     occupancy="unverified",
                     reason_code="WORKBENCH_ACTIVITY_UNVERIFIED",
+                    portfolio_status="unavailable"
+                    if mode == "research_and_paper"
+                    else "not_applicable",
                 )
             )
     return WorkbenchActivityResponse(
@@ -176,7 +179,15 @@ async def _scope(
     )
     unsettled_cycle = exists().where(
         ManualPaperRequestEvent.request_id == ManualPaperRequest.id,
-        ManualPaperRequestEvent.cycle_id.in_(_unsettled_cycles(now)),
+        ManualPaperRequestEvent.occurred_at <= now,
+        ManualPaperRequestEvent.created_at <= now,
+        ManualPaperRequestEvent.cycle_id == AgentPaperCycleRecord.id,
+        AgentPaperCycleRecord.account_id == ManualPaperRequest.account_id,
+        AgentPaperCycleRecord.account_id == account_id,
+        AgentPaperCycleRecord.decision_time <= now,
+        AgentPaperCycleRecord.created_at <= now,
+        ManualPaperRequest.mode == mode,
+        AgentPaperCycleRecord.id.in_(_unsettled_cycles(now)),
     )
     unsettled_pure = exists(
         select(ResearchRequestMember.id)
@@ -208,7 +219,7 @@ async def _scope(
         registration_date=day,
         decision_session=decision_session if mode == "research_and_paper" else None,
         selection="none",
-        portfolio_status="not_applicable" if mode == "research_only" else "awaiting_cycle",
+        portfolio_status="not_applicable" if mode == "research_only" else None,
     )
     if len(pending) > _LIMIT:
         return result.model_copy(
@@ -216,6 +227,9 @@ async def _scope(
                 "selection": "unavailable",
                 "reason_code": "WORKBENCH_ACTIVITY_LIMIT",
                 "occupancy": "unverified",
+                "portfolio_status": "unavailable"
+                if mode == "research_and_paper"
+                else "not_applicable",
             }
         )
     latest = await session.scalar(
@@ -266,7 +280,22 @@ async def _scope(
         views[row.id] = view
         released[row.id] = closed
     # Scheduled cycles are independently scoped. Manual cycles are represented once via request.
-    manual_cycle = exists().where(ManualPaperRequestEvent.cycle_id == AgentPaperCycleRecord.id)
+    linked_cycle = (
+        select(ManualPaperRequestEvent.id)
+        .join(ManualPaperRequest, ManualPaperRequest.id == ManualPaperRequestEvent.request_id)
+        .where(
+            ManualPaperRequestEvent.cycle_id == AgentPaperCycleRecord.id,
+            ManualPaperRequestEvent.occurred_at <= now,
+            ManualPaperRequestEvent.created_at <= now,
+            ManualPaperRequest.requested_at <= now,
+            ManualPaperRequest.created_at <= now,
+            ManualPaperRequest.account_id == account_id,
+            ManualPaperRequest.account_id == AgentPaperCycleRecord.account_id,
+            ManualPaperRequest.mode.in_(("research_only", "research_and_paper")),
+        )
+        .correlate(AgentPaperCycleRecord)
+    )
+    manual_cycle = exists(linked_cycle)
     cyclebase = (
         AgentPaperCycleRecord.account_id == account_id,
         AgentPaperCycleRecord.decision_time <= now,
@@ -277,11 +306,7 @@ async def _scope(
         .select_from(AgentPaperCycleRecord)
         .where(*cyclebase, AgentPaperCycleRecord.decision_session == decision_session)
     )
-    pure_cycle = exists().where(
-        ManualPaperRequestEvent.cycle_id == AgentPaperCycleRecord.id,
-        ManualPaperRequestEvent.request_id == ManualPaperRequest.id,
-        ManualPaperRequest.mode == "research_only",
-    )
+    pure_cycle = exists(linked_cycle.where(ManualPaperRequest.mode == "research_only"))
     if mode == "research_and_paper":
         result.today_started = (
             await session.scalar(started_cycles.where(~pure_cycle)) if decision_session else None
@@ -339,6 +364,9 @@ async def _scope(
                     "selection": "unavailable",
                     "reason_code": "WORKBENCH_ACTIVITY_LIMIT",
                     "occupancy": "unverified",
+                    "portfolio_status": "unavailable"
+                    if mode == "research_and_paper"
+                    else "not_applicable",
                 }
             )
         last_cycle = await session.scalar(
@@ -369,6 +397,9 @@ async def _scope(
         if selection == "ambiguous":
             result.occupancy = "unverified"
             result.reason_code = "WORKBENCH_ACTIVITY_AMBIGUOUS"
+            result.portfolio_status = (
+                "unavailable" if mode == "research_and_paper" else "not_applicable"
+            )
         return result
     result.historical = selection in {"historical", "historical_unresolved"}
     result.occupancy = "unresolved" if selected.unresolved else "not_indicated"
@@ -382,6 +413,8 @@ async def _scope(
         result.reason_code = view.code
         result.trigger = "manual"
         result.cycle_id = view.cycle_id
+        if mode == "research_and_paper" and view.cycle_id is None:
+            result.portfolio_status = "awaiting_cycle"
         if released[row.id]:
             result.occupancy = "released"
         if view.cycle_id is not None:

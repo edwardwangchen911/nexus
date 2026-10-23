@@ -445,3 +445,205 @@ async def test_foreign_live_lease_cannot_push_21_settled_cycles_into_pending_lim
             assert formal.today_started == 0
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cycle_count,selection", [(2, "ambiguous"), (21, "unavailable")])
+async def test_unresolved_cycle_selection_never_claims_waiting_for_cycle(
+    migrated_database_url, monkeypatch, cycle_count, selection
+):
+    engine, sessions, authority, _, _, _ = await scope_fixture(migrated_database_url, monkeypatch)
+    try:
+        async with sessions.begin() as session:
+            for index in range(cycle_count):
+                await cycle_row(session, authority, AT + timedelta(minutes=index))
+        async with sessions() as session:
+            result = await read_activity(
+                session, read_at=AT + timedelta(hours=1), decision_session=AT.date()
+            )
+            formal = result.scopes[0]
+            assert formal.selection == selection
+            assert formal.portfolio_status == "unavailable"
+            assert formal.cycle_id is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "defect", ["event_occurred_future", "event_created_future", "request_future", "foreign_account"]
+)
+async def test_unavailable_manual_link_cannot_hide_valid_scheduled_cycle_or_count(
+    migrated_database_url, monkeypatch, defect
+):
+    engine, sessions, authority, _, model, batch = await scope_fixture(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        async with sessions.begin() as session:
+            scheduled = await cycle_row(session, authority, AT)
+            owner = await foreign_account(session) if defect == "foreign_account" else None
+            at = AT + timedelta(hours=2) if defect == "request_future" else AT
+            row = ManualPaperRequest(
+                id=uuid4(),
+                account_id=authority.account_id if owner is None else owner.id,
+                candidate_batch_id=batch.batch_id,
+                model_config_id=model.id,
+                mode="research_only",
+                contract_version=1,
+                research_profile=None,
+                key_hash="d" * 64,
+                request_hash=manual_request_hash(
+                    account_id=authority.account_id if owner is None else owner.id,
+                    batch_id=batch.batch_id,
+                    mode="research_only",
+                ),
+                batch_hash=batch.batch_hash,
+                model_hash=model.config_hash,
+                requested_at=at,
+                created_at=at,
+            )
+            session.add(row)
+            await session.flush()
+            # Deliberately unverified linkage: reading it must never reclassify
+            # the valid current-account cycle before time/account validation.
+            event = ManualPaperRequestEvent(
+                request_id=row.id,
+                sequence=1,
+                status="active",
+                code="MANUAL_CYCLE_CREATED",
+                cycle_id=scheduled.id,
+                occurred_at=AT + timedelta(hours=2) if defect == "event_occurred_future" else AT,
+                created_at=AT + timedelta(hours=2) if defect == "event_created_future" else AT,
+            )
+            event.event_hash = _event_hash(row, event, None)
+            session.add(event)
+        async with sessions() as session:
+            result = await read_activity(
+                session, read_at=AT + timedelta(hours=1), decision_session=AT.date()
+            )
+            formal = result.scopes[0]
+            assert formal.today_started == 1
+            assert formal.selection == "active"
+            assert formal.cycle_id == scheduled.id
+            assert formal.trigger == "scheduled"
+            assert formal.portfolio_status != "awaiting_cycle"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pending_request_limit_does_not_claim_a_specific_cycle_is_absent(
+    migrated_database_url, monkeypatch
+):
+    engine, sessions, authority, _, model, batch = await scope_fixture(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        async with sessions.begin() as session:
+            for index in range(21):
+                await request_row(session, authority, model, batch, AT + timedelta(minutes=index))
+        async with sessions() as session:
+            formal = (
+                await read_activity(
+                    session, read_at=AT + timedelta(hours=1), decision_session=AT.date()
+                )
+            ).scopes[0]
+            assert formal.selection == "unavailable"
+            assert formal.reason_code == "WORKBENCH_ACTIVITY_LIMIT"
+            assert formal.portfolio_status == "unavailable"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("future_field", ["occurred_at", "created_at"])
+async def test_future_cycle_links_do_not_pull_21_closed_requests_into_pending(
+    migrated_database_url, monkeypatch, future_field
+):
+    engine, sessions, authority, manifest, model, batch = await scope_fixture(
+        migrated_database_url, monkeypatch
+    )
+    try:
+        async with sessions.begin() as session:
+            candidate = LegacyCandidateManifestEntry(
+                instrument_id=manifest[0].instrument_id,
+                symbol=manifest[0].symbol,
+                inclusion_reason="synthetic future association",
+                research_snapshot_id=manifest[0].research_snapshot_id,
+            )
+            cycle = await cycle_row(
+                session, authority, AT, batch_id=batch.batch_id, manifest=(candidate,)
+            )
+            prompt = await session.scalar(
+                select(AgentPromptVersionRecord)
+                .where(AgentPromptVersionRecord.role == "orchestrator")
+                .limit(1)
+            )
+            await run_and_job(
+                session,
+                kind="research",
+                cycle=cycle,
+                model=model,
+                prompt=prompt,
+                candidate=candidate,
+                batch_id=batch.batch_id,
+                live=True,
+            )
+            for index in range(21):
+                at = AT + timedelta(minutes=index)
+                row = await request_row(session, authority, model, batch, at)
+                await _append(
+                    session,
+                    row,
+                    status="unavailable",
+                    code="MANUAL_INPUTS_UNAVAILABLE",
+                    cycle_id=None,
+                    at=at + timedelta(seconds=1),
+                )
+                prior = await session.scalar(
+                    select(ManualPaperRequestEvent)
+                    .where(ManualPaperRequestEvent.request_id == row.id)
+                    .order_by(ManualPaperRequestEvent.sequence.desc())
+                    .limit(1)
+                )
+                event = ManualPaperRequestEvent(
+                    request_id=row.id,
+                    sequence=3,
+                    status="unavailable",
+                    code="MANUAL_INPUTS_UNAVAILABLE",
+                    cycle_id=cycle.id,
+                    occurred_at=AT + timedelta(hours=2)
+                    if future_field == "occurred_at"
+                    else at + timedelta(seconds=2),
+                    created_at=AT + timedelta(hours=2)
+                    if future_field == "created_at"
+                    else at + timedelta(seconds=2),
+                )
+                event.event_hash = _event_hash(row, event, prior.event_hash)
+                session.add(event)
+                await session.flush()
+            # Keep the latest request independently valid; old future associations
+            # must be excluded before the bounded pending scan is materialized.
+            latest = await request_row(session, authority, model, batch, AT + timedelta(minutes=25))
+            await _append(
+                session,
+                latest,
+                status="unavailable",
+                code="MANUAL_INPUTS_UNAVAILABLE",
+                cycle_id=None,
+                at=AT + timedelta(minutes=25, seconds=1),
+            )
+        async with sessions() as session:
+            formal = (
+                await read_activity(
+                    session, read_at=AT + timedelta(hours=1), decision_session=AT.date()
+                )
+            ).scopes[0]
+            assert formal.reason_code != "WORKBENCH_ACTIVITY_LIMIT"
+            assert formal.selection == "active"
+            assert formal.trigger == "scheduled"
+            assert formal.cycle_id == cycle.id
+            assert formal.today_started == 1
+    finally:
+        await engine.dispose()
