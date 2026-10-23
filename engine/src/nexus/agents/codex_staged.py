@@ -382,12 +382,16 @@ class StagedCodexCommittee(CodexCommittee):
             isinstance(item, dict) and isinstance(item.get("agent_paper_context"), dict)
             for item in security.get("items", [])
         )
-        from nexus.agents.committee import SECURITY_RESEARCH_SCOPE_PROMPT_VERSION
+        from nexus.agents.committee import (
+            CLAIM_REVIEW_SCOPE_PROMPT_VERSION,
+            SECURITY_RESEARCH_SCOPE_PROMPT_VERSION,
+        )
 
         # The frozen prompt version owns this wire revision. Old manifests keep
         # byte-identical instructions; registration never rewrites existing Runs.
         security_research_scope = (
-            self._prompts["portfolio"].version == SECURITY_RESEARCH_SCOPE_PROMPT_VERSION
+            self._prompts["portfolio"].version
+            in {SECURITY_RESEARCH_SCOPE_PROMPT_VERSION, CLAIM_REVIEW_SCOPE_PROMPT_VERSION}
             and self._paper_stage_scope
             and paper_context_present
             and isinstance(security, dict)
@@ -485,6 +489,16 @@ class StagedCodexCommittee(CodexCommittee):
                 "and deterministic risk. Audit unsupported claims against their actual "
                 "scope; preserve genuine evidence gaps and every frozen audit vote."
             )
+        if (
+            security_research_scope
+            and stage != "synthesis"
+            and self._prompts["portfolio"].version == CLAIM_REVIEW_SCOPE_PROMPT_VERSION
+        ):
+            # The initial claims and audit vote need the new frozen guidance too.
+            # Synthesis already carries the full portfolio asset; do not duplicate it.
+            # Existing prompt versions remain exact.
+            guidance = self._prompts["portfolio"].content.split("## Claim and audit scope", 1)[1]
+            payload["instructions"] = cast(str, payload["instructions"]) + " " + guidance.strip()
         payload["text_constraints"] = {
             "forbidden_substrings_case_insensitive": list(_UNSAFE_TEXT),
         }

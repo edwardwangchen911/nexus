@@ -129,7 +129,7 @@ function CandidateSummary({ candidate }: { candidate: ActivityCandidate }): Reac
 }
 
 function Limitation({ item }: { item: ActivityLimitation }): React.ReactElement {
-  return <li><p><strong>{item.source === "system" ? "系统核验" : "模型陈述"}</strong>
+  return <li><p><strong>{item.kind === "review_status" && item.source === "system" ? "已保存审查状态" : item.source === "system" ? "系统核验" : "模型陈述"}</strong>
     {item.kind === "uncertainties" ? " · 研究限制／未来不确定性" : ""}{item.truncated ? " · 截断摘录" : ""}</p>
     <p>{item.text}</p>{item.impact && <p>{item.source === "model" ? "模型指出的受限结论" : "已记录的阻断影响"}：{item.impact}</p>}
     {item.source === "model" && <p>引用与绑定已核验；模型所述限制不等于系统已独立证实。</p>}

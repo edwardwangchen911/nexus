@@ -359,12 +359,21 @@ def load_prompt_assets() -> Mapping[AgentRole, PromptAsset]:
 SECURITY_RESEARCH_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v5-paper-scope"
 
 
-def load_portfolio_synthesis_prompt(*, security_research_scope: bool = False) -> PromptAsset:
+CLAIM_REVIEW_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v6-claim-review"
+
+
+def load_portfolio_synthesis_prompt(
+    *, security_research_scope: bool = False, claim_review_scope: bool = False
+) -> PromptAsset:
     """Load the immutable cross-source final-role prompt used by normal local setup."""
     if type(security_research_scope) is not bool:
         raise ValueError("SECURITY_RESEARCH_SCOPE_INVALID")
+    if type(claim_review_scope) is not bool or (claim_review_scope and not security_research_scope):
+        raise ValueError("CLAIM_REVIEW_SCOPE_INVALID")
     version = (
-        SECURITY_RESEARCH_SCOPE_PROMPT_VERSION
+        CLAIM_REVIEW_SCOPE_PROMPT_VERSION
+        if claim_review_scope
+        else SECURITY_RESEARCH_SCOPE_PROMPT_VERSION
         if security_research_scope
         else "local-portfolio-synthesis-v4"
     )

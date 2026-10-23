@@ -200,14 +200,28 @@ async def test_bounded_setup_versions_scope_without_rewriting_frozen_prompt_auth
                 json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
         )
+    # A previously registered v5 authority remains readable and byte-identical.
+    from nexus.agents.committee import load_portfolio_synthesis_prompt
+
+    v5 = load_portfolio_synthesis_prompt(security_research_scope=True)
+    async with factory.begin() as session:
+        previous = AgentPromptVersionRecord(
+            role=v5.role, version=v5.version, content=v5.content, content_hash=v5.content_hash
+        )
+        session.add(previous)
+        await session.flush()
+        previous_id = previous.id
     options = V9_OPTIONS | {"formal_bounded_stage_budget": True}
     await openai_local.prepare_database(settings, **options)
     await openai_local.prepare_database(settings, **options)
     async with factory() as session:
         current = await load_complete_prompt_authority(session)
         assert current is not None
-        assert current["portfolio"].version == "local-portfolio-synthesis-v5-paper-scope"
+        assert current["portfolio"].version == "local-portfolio-synthesis-v6-claim-review"
         assert "research_scope=single_security" in current["portfolio"].content
+        assert "atomic claims" in current["portfolio"].content
+        preserved_v5 = await session.get(AgentPromptVersionRecord, previous_id)
+        assert preserved_v5.content == v5.content and preserved_v5.content_hash == v5.content_hash
         historical = await load_frozen_prompts(session, frozen)
         assert historical is not None
         assert historical["portfolio"].version == "local-portfolio-synthesis-v4"
@@ -224,7 +238,7 @@ async def test_bounded_setup_versions_scope_without_rewriting_frozen_prompt_auth
                 select(func.count())
                 .select_from(AgentPromptVersionRecord)
                 .where(
-                    AgentPromptVersionRecord.version == "local-portfolio-synthesis-v5-paper-scope"
+                    AgentPromptVersionRecord.version == "local-portfolio-synthesis-v6-claim-review"
                 )
             )
             == 1
