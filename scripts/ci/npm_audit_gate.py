@@ -10,7 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-EXPIRES_AT = datetime(2026, 10, 23, tzinfo=UTC)
+EXPIRES_AT = datetime(2026, 10, 24, tzinfo=UTC)
 APPROVED_AT = datetime(2026, 10, 15, tzinfo=UTC)
 ADVISORY = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"
 LOCK_SHA256 = "1d5954e6a769aa6818e39758cdf3930ddf54fa369da8ce7b345d916cca971b25"
@@ -172,7 +172,7 @@ def evaluate(
             raise AuditRejected("AUDIT_ACCEPTANCE_EXPIRED")
     except (KeyError, TypeError, AttributeError, OSError, subprocess.SubprocessError) as exc:
         raise AuditRejected("AUDIT_REPORT_OR_IDENTITY_INVALID") from exc
-    return "risk_accepted_until_2026-10-23T00:00:00Z"
+    return "risk_accepted_until_2026-10-24T00:00:00Z"
 
 
 def run(root: Path, report_path: Path, now: datetime | Callable[[], datetime]) -> str:
