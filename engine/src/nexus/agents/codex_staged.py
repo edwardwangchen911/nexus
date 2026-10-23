@@ -491,10 +491,12 @@ class StagedCodexCommittee(CodexCommittee):
             )
         if (
             security_research_scope
+            and stage != "synthesis"
             and self._prompts["portfolio"].version == CLAIM_REVIEW_SCOPE_PROMPT_VERSION
         ):
-            # The new frozen asset owns these instructions for every stage, including
-            # the initial claims and audit vote. Existing prompt versions remain exact.
+            # The initial claims and audit vote need the new frozen guidance too.
+            # Synthesis already carries the full portfolio asset; do not duplicate it.
+            # Existing prompt versions remain exact.
             guidance = self._prompts["portfolio"].content.split("## Claim and audit scope", 1)[1]
             payload["instructions"] = cast(str, payload["instructions"]) + " " + guidance.strip()
         payload["text_constraints"] = {

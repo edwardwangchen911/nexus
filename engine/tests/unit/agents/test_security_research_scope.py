@@ -314,13 +314,16 @@ def test_frozen_v5_full_wire_is_unchanged(stage, capacity):
 @pytest.mark.parametrize("stage", STAGES)
 def test_v6_claim_and_audit_guidance_reaches_every_stage(stage):
     payload, _ = _wire(stage, new=True, claim_review=True)
-    instructions = payload["instructions"]
+    instructions = payload["instructions"] + " ".join(
+        prompt["content"] for prompt in payload["prompts"]
+    )
     for rule in (
         "atomic claims",
         "frozen benchmark",
         "specific observable input",
         "not proof of an accounting error",
         "every frozen audit vote",
+        "Only when research_scope=single_security",
     ):
         assert rule in instructions
     assert payload["research_scope"] == "single_security"
@@ -337,3 +340,13 @@ def test_v6_guidance_does_not_expand_unrelated_scope(stage):
     payload, _ = _wire(stage, new=True, claim_review=True, context=False)
     assert "atomic claims" not in payload["instructions"]
     assert "research_scope" not in payload
+
+
+def test_v6_synthesis_wire_fits_the_existing_v5_capacity_envelope():
+    from nexus.agents.codex_sdk import codex_request_wire
+
+    old, _ = _wire("synthesis", new=True)
+    new, _ = _wire("synthesis", new=True, claim_review=True)
+    # The frozen AVGO v5 envelope has only 21 bytes of spare wire capacity.
+    # Prompt clarification must fit the old bound, not raise the configured limit.
+    assert len(codex_request_wire(new).encode()) <= len(codex_request_wire(old).encode())
