@@ -312,8 +312,10 @@ async def _require_other_claims_settled(
 
     audits = await _audits(session, row.account_id)
     from nexus.paper.current_preparation_acceptance import accepted_claim_ids
+    from nexus.paper.scheduled_unknown_acceptance import accepted_scheduled_claim_ids
 
     allowed = await accepted_claim_ids(session, row.account_id)
+    allowed.update(await accepted_scheduled_claim_ids(session, row.account_id))
     if excluding_claim_id is not None:
         allowed.add(excluding_claim_id)
     if audits:

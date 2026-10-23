@@ -617,6 +617,39 @@ async def _lock_active_claim(
     return job, lease, attempt
 
 
+async def job_lease_consumed(
+    session: AsyncSession, *, job: Job, lease: JobLease, now: datetime
+) -> bool:
+    """Prove native finalization consumed this lease; says nothing about model usage."""
+    now = _utc(now, field="now")
+    attempt = await session.scalar(
+        select(JobAttempt)
+        .where(JobAttempt.job_id == job.id)
+        .order_by(JobAttempt.attempt_no.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    # Only execute_and_finalize_job's finished states are supported. In particular,
+    # orphan recovery/dead_letter/lost require their own proof, never this shortcut.
+    return bool(
+        attempt is not None
+        and job.status in {"succeeded", "skipped", "failed"}
+        and attempt.outcome == job.status
+        and lease.job_id == job.id == attempt.job_id
+        and attempt.attempt_no == job.attempt_count
+        and attempt.worker_id == lease.worker_id
+        and attempt.lease_token == lease.lease_token
+        and attempt.fence_token == lease.fence_token
+        and attempt.started_at == lease.acquired_at
+        and job.finished_at is not None
+        and attempt.finished_at == job.finished_at
+        and lease.acquired_at <= lease.heartbeat_at <= job.finished_at <= now
+        and job.finished_at < lease.expires_at
+        and job.last_error_code == attempt.error_code
+        and ((job.status == "failed") == (attempt.error_code is not None))
+    )
+
+
 async def heartbeat_job(
     session: AsyncSession,
     *,

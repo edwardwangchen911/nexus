@@ -59,6 +59,15 @@ async def require_preparation_scope(
     from nexus.paper.manual_request import require_preparing_manual_request
 
     r = context.reservation
+    if r.trigger_mode == "scheduled":
+        from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+        await require_scheduled_execution_open(
+            session,
+            account_id=context.account_id,
+            slot=r.decision_slot_at,
+            claim_id=r.claim_id,
+        )
     invalid = "AGENT_PAPER_TRIGGER_FAILED"
     if not r.formal_stage_capacity or r.trigger_mode not in {"manual", "scheduled"}:
         raise ValueError(invalid)

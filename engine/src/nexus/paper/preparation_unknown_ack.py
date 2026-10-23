@@ -379,10 +379,10 @@ async def require_acknowledged_native_claims(
 ) -> None:
     audits = await _audits(session, account_id)
     from nexus.paper.current_preparation_acceptance import accepted_claim_ids
+    from nexus.paper.scheduled_unknown_acceptance import accepted_scheduled_claim_ids
 
     allowed = await accepted_claim_ids(session, account_id)
-    if not audits and not allowed:
-        return
+    allowed.update(await accepted_scheduled_claim_ids(session, account_id))
     prior_request_id = None
     if audits:
         if len(audits) != 1:
@@ -441,7 +441,9 @@ async def require_acknowledged_operation_scope(
     now: datetime,
     economic: bool = False,
 ) -> None:
-    if not await _audits(session, account_id):
+    from nexus.paper.scheduled_unknown_acceptance import _audits as scheduled_audits
+
+    if not await _audits(session, account_id) and not await scheduled_audits(session, account_id):
         return
     from nexus.agents.persistence import _lock_budget_day
     from nexus.paper.formal_budget_protection import latest_binding

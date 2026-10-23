@@ -166,3 +166,35 @@ async def _claim(factory: object, *, lease_seconds: int):
         )
     assert claim is not None
     return claim
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["succeeded", "failed", "skipped"])
+async def test_native_terminal_job_consumes_future_lease(migrated_database_url, outcome):
+    from nexus.jobs.repository import JobCompletion, execute_and_finalize_job, job_lease_consumed
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    claim = await _claim(factory, lease_seconds=30)
+    finished = NOW + timedelta(seconds=5)
+
+    async def execute(session):
+        return JobCompletion(
+            outcome=outcome,
+            result_code="NATIVE_TERMINAL",
+            error_code="NATIVE_FAILURE" if outcome == "failed" else None,
+            finished_at=finished,
+        )
+
+    async with factory() as session, session.begin():
+        job = await session.get(Job, claim.job_id)
+        lease = await session.scalar(select(JobLease).where(JobLease.job_id == claim.job_id))
+        assert not await job_lease_consumed(session, job=job, lease=lease, now=finished)
+        await execute_and_finalize_job(session, claim=claim, checked_at=finished, execute=execute)
+    async with factory() as session:
+        job = await session.get(Job, claim.job_id)
+        lease = await session.scalar(select(JobLease).where(JobLease.job_id == claim.job_id))
+        assert lease.expires_at > finished
+        assert await job_lease_consumed(session, job=job, lease=lease, now=finished)
+        assert not await job_lease_consumed(
+            session, job=job, lease=lease, now=finished - timedelta(microseconds=1)
+        )

@@ -14,6 +14,7 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
@@ -55,6 +56,11 @@ from nexus.paper.manual_preparation_close import (
 )
 from nexus.paper.manual_request import ManualRequestView
 from nexus.paper.preparation_unknown_ack import UnknownPreparationReceipt
+from nexus.paper.scheduled_unknown_acceptance import (
+    ScheduledAcceptanceCheck,
+    ScheduledAcceptanceReceipt,
+    inspect_or_accept_scheduled_unknown,
+)
 from nexus.paper.synthesis_usage_acceptance import (
     SynthesisUsageDiagnosticError,
     SynthesisUsageReceipt,
@@ -244,6 +250,11 @@ def parser() -> argparse.ArgumentParser:
         synthesis.add_argument("--recovery-producer-env-file", type=Path)
         if action == "accept-failed-synthesis-usage":
             synthesis.add_argument("--accept-unknown-usage", action="store_true", required=True)
+    for action in ("check-scheduled-acceptance", "accept-scheduled-unknown"):
+        scheduled = commands.add_parser(action)
+        scheduled.add_argument("--claim-id", type=UUID, required=True)
+        if action == "accept-scheduled-unknown":
+            scheduled.add_argument("--accept-unknown-effects", action="store_true", required=True)
     return result
 
 
@@ -259,6 +270,8 @@ async def run(
     | PreparationAcceptanceReceipt
     | PreparationAcceptanceCheck
     | SynthesisUsageReceipt
+    | ScheduledAcceptanceCheck
+    | ScheduledAcceptanceReceipt
 ):
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
@@ -284,6 +297,8 @@ async def run(
             "check-synthesis-acceptance",
             "accept-failed-synthesis-usage",
             "check-preparation-acceptance",
+            "check-scheduled-acceptance",
+            "accept-scheduled-unknown",
             "close-unstarted-preparation",
             "acknowledge-unknown-preparations",
             "recover-preparation",
@@ -304,6 +319,8 @@ async def run(
                 "check-synthesis-acceptance",
                 "accept-failed-synthesis-usage",
                 "check-preparation-acceptance",
+                "check-scheduled-acceptance",
+                "accept-scheduled-unknown",
                 "close-unstarted-preparation",
                 "acknowledge-unknown-preparations",
                 "recover-preparation",
@@ -316,11 +333,26 @@ async def run(
                 now = await session.scalar(select(func.clock_timestamp()))
                 if not isinstance(now, datetime) or now.utcoffset() is None:
                     raise ValueError("MANUAL_RESULT_UNKNOWN")
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
-                    {"key": SCHEMA_ADMISSION_LOCK_KEY},
-                )
-                await session.execute(text("LOCK TABLE public.alembic_version IN SHARE MODE"))
+                if args.action in {"check-scheduled-acceptance", "accept-scheduled-unknown"}:
+                    if not await session.scalar(
+                        text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key,0))"),
+                        {"key": SCHEMA_ADMISSION_LOCK_KEY},
+                    ):
+                        raise ValueError("SCHEDULED_UNKNOWN_ACCEPTANCE_BLOCKED")
+                    try:
+                        await session.execute(
+                            text("LOCK TABLE public.alembic_version IN SHARE MODE NOWAIT")
+                        )
+                    except DBAPIError as error:
+                        if getattr(error.orig, "sqlstate", None) == "55P03":
+                            raise ValueError("SCHEDULED_UNKNOWN_ACCEPTANCE_BLOCKED") from None
+                        raise
+                else:
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                        {"key": SCHEMA_ADMISSION_LOCK_KEY},
+                    )
+                    await session.execute(text("LOCK TABLE public.alembic_version IN SHARE MODE"))
                 if (
                     await session.scalar(
                         text(
@@ -331,6 +363,18 @@ async def run(
                     != CURRENT_MIGRATION_HEAD
                 ):
                     raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+                if args.action in {"check-scheduled-acceptance", "accept-scheduled-unknown"}:
+                    scheduled_receipt = await inspect_or_accept_scheduled_unknown(
+                        session,
+                        settings=settings,
+                        claim_id=args.claim_id,
+                        repo_root=args.repo_root,
+                        env_file=args.env_file,
+                        accept=args.action == "accept-scheduled-unknown",
+                        accept_unknown_effects=getattr(args, "accept_unknown_effects", False),
+                    )
+                    _require_maintenance_code(args.repo_root, settings.release_revision)
+                    return scheduled_receipt
                 if args.action in {"check-synthesis-acceptance", "accept-failed-synthesis-usage"}:
                     recovery = load_recovery_producer(settings, args)
                     if recovery is not None:
