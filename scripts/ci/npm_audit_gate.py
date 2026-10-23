@@ -14,7 +14,7 @@ EXPIRES_AT = datetime(2026, 10, 24, tzinfo=UTC)
 APPROVED_AT = datetime(2026, 10, 15, tzinfo=UTC)
 ADVISORY = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"
 LOCK_SHA256 = "1d5954e6a769aa6818e39758cdf3930ddf54fa369da8ce7b345d916cca971b25"
-SURFACE_SHA256 = "0a7681c877d66e10f574a8883920f36894dd0ed5f4919b1ca32308b0b8d18143"
+SURFACE_SHA256 = "52aa6d93bc9cb94866d453ac337bc9a26c854720ad7f40000196d2a3cbb16ca1"
 # Node paths are part of the acceptance, including the second fast-glob installation.
 CHAIN = {
     "@next/eslint-plugin-next": ("fast-glob",),

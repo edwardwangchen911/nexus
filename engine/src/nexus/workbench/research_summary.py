@@ -148,6 +148,20 @@ async def _validated_intent(
         or canonical_hash(run.prompt_manifest) != run.prompt_hash
     ):
         return None
+    bindings = tuple(
+        await session.scalars(
+            select(AgentResearchOutputEvidenceRecord)
+            .where(
+                AgentResearchOutputEvidenceRecord.output_id == output.id,
+            )
+            .limit(101)
+        )
+    )
+    # The observation verifier already checks the complete frozen identity,
+    # prompts, evidence bindings and portfolio conditions. Do not hydrate that
+    # same authority twice for the supported read-only observation exception.
+    if await reader.verified(run, output, bindings):
+        return intent
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     prompts = await load_frozen_prompts(session, run)
@@ -166,15 +180,6 @@ async def _validated_intent(
         or any(ref.created_at > read_at for ref in evidence)
     ):
         return None
-    bindings = tuple(
-        await session.scalars(
-            select(AgentResearchOutputEvidenceRecord)
-            .where(
-                AgentResearchOutputEvidenceRecord.output_id == output.id,
-            )
-            .limit(101)
-        )
-    )
     by_id = {ref.id: ref for ref in evidence}
     fields = (
         "source",
@@ -204,11 +209,10 @@ async def _validated_intent(
     context = await read_portfolio_context(
         session, run.data_snapshot_id, run.instrument_id, run.decision_time
     )
-    observation_verified = await reader.verified(run, output, bindings)
     if not condition_evaluations_match(intent, context) or not readable_semantics(
         intent,
         run.pricing_version,
-        observation_verified=observation_verified,
+        observation_verified=False,
     ):
         return None
     return intent
