@@ -1,7 +1,7 @@
 """Explicit scheduled uncertainty acceptance; never settle or revive the old slot."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -100,6 +100,9 @@ async def require_scheduled_execution_open(
     session: AsyncSession, *, account_id: UUID, slot: datetime, claim_id: UUID | None = None
 ) -> None:
     """Permanent denial is independent of whether an acceptance proof is valid."""
+    if not isinstance(slot, datetime) or slot.utcoffset() is None:
+        raise ValueError(BLOCKED)
+    slot = slot.astimezone(UTC)
     await lock_portfolio_account(session, account_id)
     # An advisory lock cannot refresh an already established repeatable-read snapshot.
     # Normal producers use READ COMMITTED; unsupported old snapshots fail closed.

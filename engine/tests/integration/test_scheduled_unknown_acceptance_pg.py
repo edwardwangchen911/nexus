@@ -5,6 +5,7 @@ from argparse import Namespace
 from contextlib import nullcontext
 from datetime import timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from helpers.paper_batch import INSTRUMENTS
@@ -41,6 +42,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "accept_first",
         "writer_first",
         "next_cycle",
+        "next_natural_slot",
         "late_cycle",
         "damaged_batch",
         "damaged_audit_identity",
@@ -304,6 +306,33 @@ async def test_normal_scheduled_check_and_accept_preserve_unknown(
             await manual_request.require_manual_account_available(
                 s, account_id=authority.account_id, now=AT + timedelta(minutes=10)
             )
+        if fault == "next_natural_slot":
+            async with sessions.begin() as s:
+                with pytest.raises(ValueError, match="AGENT_PAPER_OUTSIDE_WINDOW"):
+                    await agent_cycle.reserve_schwab_agent_paper_trigger(
+                        s,
+                        account_id=authority.account_id,
+                        candidate_batch_id=batch.batch_id,
+                        now=AT + timedelta(minutes=5),
+                        client_idempotency_key="extra-same-day",
+                        formal_stage_capacity=True,
+                        formal_model_config_id=model.id,
+                    )
+                next_slot = AT + timedelta(days=3)  # Friday to the next Monday, 10:00 New York.
+                later = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    s,
+                    account_id=authority.account_id,
+                    candidate_batch_id=batch.batch_id,
+                    now=next_slot,
+                    client_idempotency_key=f"agent-paper-loop:{next_slot.isoformat()}",
+                    formal_stage_capacity=True,
+                    formal_model_config_id=model.id,
+                )
+                assert later.claim_id != reservation.claim_id
+                assert later.decision_slot_at == next_slot
+            args.action = "check-scheduled-acceptance"
+            assert (await manual_paper.run(settings, args)).status == "already_acknowledged"
+            return
         if fault == "next_cycle":
             # Normal native creation for another slot preserves the prior acceptance proof.
             async with sessions.begin() as s:
@@ -399,6 +428,16 @@ async def test_normal_scheduled_check_and_accept_preserve_unknown(
         from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
 
         async with sessions() as s:
+            if fault == "none":
+                for same_slot in (
+                    AT,
+                    AT.astimezone(ZoneInfo("America/New_York")),
+                    AT.replace(tzinfo=None),
+                ):
+                    with pytest.raises(ValueError, match="SCHEDULED_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                        await require_scheduled_execution_open(
+                            s, account_id=authority.account_id, slot=same_slot
+                        )
             if fault == "late_cycle":
                 with pytest.raises(ValueError, match="SCHEDULED_UNKNOWN_ACCEPTANCE_BLOCKED"):
                     await agent_cycle.resume_schwab_agent_paper_cycle(

@@ -54,3 +54,33 @@
 - 独立代码审查两项发现（迟到周期 resume、历史批次 canonical）修复并定向复核通过。
 - Chat 终审请求 `nexus-scheduled-unknown-final-20261024-01` 已发送，待完整答复。
 - 尚未真实接受、重放、启宿主或更改主库；合并/部署必须等待最终 CI 与终审收口。
+
+## 终审收口检查点（2026-10-24 北京时间）
+
+PR #28，首候选 dff67753320fc8b7e4f3e24bc4cb064ec03555e7 已推送，CI 已启动；尚未合并部署。
+Chat 终审 `nexus-scheduled-unknown-final-20261024-01` 完整答复已取回：
+
+1. 审计 action 损坏漏查：已在首候选补 ACTION/ACTOR/SCHEMA 候选检索，真实 PG 先 RED 后 GREEN。
+2. slot 时区规范化：已补拒绝 naive、统一 UTC；相同时刻的 UTC/纽约表示均不能绕过旧槽拦截。
+3. **待修：有效租约不能仅看 expires_at。** 新入口当前保守拒绝所有未来到期研究租约，
+   会误阻塞已通过精确终态证明且仅保留审计的租约。不得简化成忽略 terminal Job，也不得删除
+   lease 或释放未知预算。优先复用 `manual_request._require_cycle_jobs_settled` 约 610–652 行
+   对正常取消的 Job/Run/Attempt/token/fence/finished_at 精确证明；必要时提取共享纯校验。
+   结合 `jobs.repository.execute_and_finalize_job` 的终态原生合同核对其他支持形状，未证明继续拒绝。
+   必须新增已精确消耗的未来租约可通过、未终结/错误绑定/缺证明仍拒绝的真实 PG 对照。
+
+验证更新：全 fast 6334 passed；相关 PG 完整复验 155 passed（覆盖诊断优先级修复）；
+新增 20 项矩阵通过，随后追加下一交易日自然槽 reserve 和时区用例，最终矩阵另存私有日志。
+下一槽 native cycle 的 10:05 用例仅证明独立周期不污染接受，不能称完整自然槽验收；
+新增 Friday→Monday 10:00 正常 reserve 与同日 10:05 拒绝的对照也不代替模型或交易验收。
+旧版本回滚不具备新围栏：实际接受后禁止恢复无围栏写入者，须保留围栏的修复版本。
+
+实际主库只读复核：业务事实及保护未变，API/Worker 仍 788eb332，宿主 inactive；
+根目录 22 个用户文件与暂存内容的指纹与部署基线相同（HEAD 按 PR27 已合法前移）。
+本轮未实际接受、重放、启宿主、解除未知预算或改旧结果。真实接受问题留到入口交付、
+正常 check 资格成立后一次确认；不提前询问。
+
+后续：修有效租约并补回归 → 向同一 Chat 发送最终差异/验证做定向收口 → 汇总最终 head
+全部 CI（有失败统一修）→ 最终镜像/回滚备份/合并部署 → 已部署正常 check 只读核验。
+私有证据 `.secrets/scheduled-unknown-acceptance/`：`chat-final-review.json`、
+`related-final.log`、`matrix-21.log`、`live-after.json`、`ci-dff67753.json`。
