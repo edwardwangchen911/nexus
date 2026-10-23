@@ -268,3 +268,118 @@ def test_trailing_valuation_does_not_qualify_eps_pending_amendment_review():
     result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
     assert result["status"] == "unavailable"
     assert result["reason"] == "sec_amendment_accounting_review_unverified"
+
+
+def _reviewed_facts() -> dict:
+    facts = _financial_facts()
+    facts["accounting_review_contract"] = "as_disclosed_eps_v1"
+    for row in facts["items"]:
+        row["amendment_review_status"] = "as_disclosed_not_replaced"
+        row["accounting_review_evidence_ref_ids"] = ["00000000-0000-4000-8000-000000000009"]
+        row["amendment_evidence_ref_ids"] = ["00000000-0000-4000-8000-000000000010"]
+    return facts
+
+
+def test_scoped_review_consumes_only_selected_eps_and_labels_narrow_basis():
+    facts = _reviewed_facts()
+    # The standalone quarter is not one of the three cumulative components.
+    facts["items"][3]["amendment_review_status"] = "unverified"
+    old = _eps_fact("6.00", "2023-10-01", "2024-09-28", evidence_ref_id="older-annual")
+    old["amendment_review_status"] = "unverified"
+    facts["items"].append(old)
+    original = deepcopy(facts)
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    assert result["status"] == "available"
+    assert result["ttm_eps"]["value"] == "8.720000000000"
+    assert result["metrics"]["trailing_pe"] == "37.795298165138"
+    assert result["accounting_basis"] == "historical_as_disclosed"
+    assert result["accounting_limitations"]
+    assert facts == original
+
+
+@pytest.mark.parametrize("component", [0, 1, 2])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("amendment_review_status", "unverified"),
+        ("amendment_review_status", "conflict"),
+        ("amendment_review_status", "unknown"),
+        ("amendment_review_status", None),
+        ("accounting_review_evidence_ref_ids", []),
+        ("accounting_review_evidence_ref_ids", [""]),
+        ("accounting_review_evidence_ref_ids", "not-a-reference-list"),
+        ("amendment_evidence_ref_ids", []),
+        ("amendment_evidence_ref_ids", [None]),
+        ("amendment_evidence_ref_ids", None),
+    ],
+)
+def test_scoped_review_requires_each_selected_component_status_and_references(
+    component, field, value
+):
+    facts = _reviewed_facts()
+    if value is None:
+        facts["items"][component].pop(field)
+    else:
+        facts["items"][component][field] = value
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    assert result == {
+        "schema_version": "agent_trailing_valuation_v1",
+        "status": "unavailable",
+        "reason": "sec_amendment_accounting_review_unverified",
+    }
+
+
+def test_scoped_review_never_falls_back_to_reviewed_older_reporting_period():
+    facts = _multiple_interim_facts()
+    facts["accounting_review_contract"] = "as_disclosed_eps_v1"
+    for row in facts["items"]:
+        row.update(
+            amendment_review_status="as_disclosed_not_replaced",
+            accounting_review_evidence_ref_ids=["review"],
+            amendment_evidence_ref_ids=["amendment"],
+        )
+    facts["items"][4]["amendment_review_status"] = "unverified"
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "sec_amendment_accounting_review_unverified"
+
+
+def test_scoped_review_keeps_conflicting_latest_fact_in_period_selection():
+    facts = _reviewed_facts()
+    conflicting = deepcopy(facts["items"][2])
+    conflicting["value"] = "9.00"
+    conflicting["amendment_review_status"] = "conflict"
+    facts["items"].append(conflicting)
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "aligned_diluted_eps_unavailable"
+
+
+def test_scoped_review_without_opt_in_preserves_legacy_all_eps_gate():
+    facts = _reviewed_facts()
+    facts.pop("accounting_review_contract")
+    facts["items"][3]["amendment_review_status"] = "unverified"
+    result = codex_sdk.derive_trailing_valuation(_security_snapshot(), facts)
+    assert result == {
+        "schema_version": "agent_trailing_valuation_v1",
+        "status": "unavailable",
+        "reason": "sec_amendment_accounting_review_unverified",
+    }
+
+
+@pytest.mark.parametrize("mutation", ["missing", "delayed", "crossed"])
+def test_scoped_review_preserves_decision_quote_gate(mutation):
+    security = _security_snapshot()
+    quote = security["items"][0]["agent_paper_context"]["decision_quote"]
+    if mutation == "missing":
+        security["items"] = []
+    elif mutation == "delayed":
+        quote["delayed"] = True
+    else:
+        quote["bid"] = "400"
+    result = codex_sdk.derive_trailing_valuation(security, _reviewed_facts())
+    assert result == {
+        "schema_version": "agent_trailing_valuation_v1",
+        "status": "unavailable",
+        "reason": "decision_quote_unavailable",
+    }

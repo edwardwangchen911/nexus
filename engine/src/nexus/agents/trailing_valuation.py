@@ -19,6 +19,7 @@ class _EpsFact(NamedTuple):
     revision: str
     raw_taxonomy: str
     raw_tag: str
+    scoped_review_valid: bool
 
 
 def _unavailable(reason: str) -> dict[str, object]:
@@ -119,7 +120,23 @@ def _parse_eps_fact(item: object) -> _EpsFact | None:
         revision=str(item["revision"]),
         raw_taxonomy=str(item["raw_taxonomy"]),
         raw_tag=str(item["raw_tag"]),
+        scoped_review_valid=_scoped_review_valid(item),
     )
+
+
+def _scoped_review_valid(item: Mapping[str, object]) -> bool:
+    if item.get("amendment_review_status") != "as_disclosed_not_replaced":
+        return False
+    for field in ("accounting_review_evidence_ref_ids", "amendment_evidence_ref_ids"):
+        references = item.get(field)
+        if (
+            not isinstance(references, Sequence)
+            or isinstance(references, str | bytes)
+            or not references
+            or any(not isinstance(ref, str) or not ref.strip() for ref in references)
+        ):
+            return False
+    return True
 
 
 def _aligned_eps_components(
@@ -196,8 +213,10 @@ def derive_trailing_valuation(
     """Derive trailing P/E only when frozen quote and EPS periods align exactly."""
 
     items = financial_facts.get("items")
+    scoped_review = financial_facts.get("accounting_review_contract") == "as_disclosed_eps_v1"
     if (
-        isinstance(items, Sequence)
+        not scoped_review
+        and isinstance(items, Sequence)
         and not isinstance(items, str | bytes)
         and any(
             isinstance(item, Mapping)
@@ -213,6 +232,10 @@ def derive_trailing_valuation(
     components = _aligned_eps_components(financial_facts)
     if components is None:
         return _unavailable("aligned_diluted_eps_unavailable")
+    # Select by reporting period before checking review eligibility. Filtering
+    # reviewed facts first could silently fall back from an unresolved latest period.
+    if scoped_review and not all(fact.scoped_review_valid for fact in components):
+        return _unavailable("sec_amendment_accounting_review_unverified")
     annual, prior_ytd, current_ytd = components
     ttm_eps = annual.value - prior_ytd.value + current_ytd.value
     if not ttm_eps.is_finite() or ttm_eps <= 0:
@@ -220,7 +243,7 @@ def derive_trailing_valuation(
     bid, ask, observed_at, quote_evidence_ref_id = quote
     midpoint = (bid + ask) / 2
     trailing_pe = midpoint / ttm_eps
-    return {
+    result: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
         "status": "available",
         "reason": None,
@@ -244,3 +267,16 @@ def derive_trailing_valuation(
         },
         "metrics": {"trailing_pe": format(trailing_pe.quantize(_TWELVE_PLACES), "f")},
     }
+    if scoped_review:
+        result.update(
+            accounting_basis="historical_as_disclosed",
+            accounting_limitations=[
+                "Uses only the selected historical EPS as disclosed; the scoped amendments "
+                "did not replace those facts.",
+                "Does not certify accounting correctness, absence of retrospective effects, "
+                "future EPS, or other financial facts.",
+                "Review receipt does not reconcile source acceptance-time conflicts or "
+                "establish historical point-in-time availability.",
+            ],
+        )
+    return result
