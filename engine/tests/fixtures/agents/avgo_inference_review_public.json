@@ -1,0 +1,404 @@
+{
+  "description": "Public role prose from frozen AVGO research on 2026-10-23. Evidence identities, hashes and usage replaced with synthetic values; not source or investment authority. No account data or run identities.",
+  "outputs": [
+    {
+      "role": "orchestrator",
+      "vote": "support",
+      "claims": [
+        {
+          "text": "研究对象为AVGO，身份绑定显示其发行人CIK为0001730168且在XNAS交易。近期已提供发行人第三财季业绩与第四财季指引，故可形成以业绩兑现为条件的正向单一证券研究立场。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "该立场不构成配置或执行结论。纸面上下文明确执行仍被锁定，且仓位和集中度判断属于后续组合阶段。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "fundamental",
+      "vote": "support",
+      "claims": [
+        {
+          "text": "公司披露的截至2026年8月2日第三财季收入为295.91亿美元，较上年同期159.52亿美元增长86%，GAAP净利润为130.88亿美元，较上年同期41.40亿美元增长。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "公司对截至2026年11月1日的第四财季给出约348亿美元收入指引及约66%的非GAAP营业利润率指引，但该前瞻指引可能出现重大偏差，且相关业绩材料为未经审计并以8-K附件形式提供。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "market_state",
+      "vote": "oppose",
+      "claims": [
+        {
+          "text": "截至2026年10月22日，收盘价为323.24美元，低于20日均线350.2665美元及200日均线367.93235美元，所给趋势特征偏弱。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "该价格特征数据连续覆盖253个预期交易日且无缺失，但其不具备市场价格或执行资格，因此只能用于研究趋势描述。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "macro_sector",
+      "vote": "abstain",
+      "claims": [
+        {
+          "text": "宏观快照显示2026年10月21日联邦基金有效利率为3.88%，十年期国债收益率为5.13%，两年期国债收益率为4.81%。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "现有材料未提供半导体行业需求、竞争格局或这些宏观数据向AVGO业绩传导的权威证据，不能据此形成行业方向立场。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "bull",
+      "vote": "support",
+      "claims": [
+        {
+          "text": "上行论据在于公司第三财季AI半导体收入为167亿美元，同比增221%，并预计第四财季该项收入约217亿美元，同比增236%。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "第三财季经营现金流为141.97亿美元，自由现金流为136.65亿美元，分别较上年同期增长98%和95%，为业绩增长提供现金流佐证。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "bear",
+      "vote": "oppose",
+      "claims": [
+        {
+          "text": "第四财季收入及非GAAP营业利润率仅为公司估计，公司明确表示实际结果可能与指引存在重大差异，因此该指引不能作为已实现业绩。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "截至2026年10月22日，收盘价323.24美元低于20日均线350.2665美元和200日均线367.93235美元，构成与上行业绩论据并存的价格层面反证。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [
+        "fundamental:1",
+        "market_state:0",
+        "bull:0",
+        "bull:1"
+      ],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "evidence_audit",
+      "vote": "oppose",
+      "claims": [
+        {
+          "text": "反对orchestrator:0中“正向”研究立场：身份绑定和第三财季披露可确认对象与已披露业绩，但未提供把这些事实映射为正向立场的判断阈值或标准。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "反对market_state:0中“趋势偏弱”的定性：收盘价低于两条均线的数值成立，但缺少将该相对位置界定为“偏弱”的明确比较阈值。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [
+        "orchestrator:0",
+        "market_state:0"
+      ],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    {
+      "role": "portfolio",
+      "vote": "abstain",
+      "claims": [
+        {
+          "text": "第三财季收入为295.91亿美元，同比增86%，GAAP净利润为130.88亿美元。第四财季收入指引约348亿美元，但属于公司估计且实际结果可能有重大偏差，因此已披露的经营增长尚待下一季兑现验证。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        },
+        {
+          "text": "截至2026年10月22日，收盘价323.24美元，低于20日均线350.2665美元和200日均线367.93235美元。该研究趋势事实与强劲业绩并存，但未提供把经营与价格信息映射为正向投资判断的标准，故条件性单一证券立场为观察。",
+          "evidence_refs": [
+            {
+              "source": "sec",
+              "object_id": "filing:test",
+              "available_at": "2026-09-02T00:00:00Z",
+              "location": "s3://test/filing",
+              "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      ],
+      "conflicting_facts": false,
+      "reviewed_claim_ids": [
+        "bear:0",
+        "bear:1",
+        "evidence_audit:0",
+        "evidence_audit:1"
+      ],
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "synthesis_assessment": {
+        "claims": [
+          {
+            "text": "第三财季收入为295.91亿美元，同比增86%，GAAP净利润为130.88亿美元。第四财季收入指引约348亿美元，但属于公司估计且实际结果可能有重大偏差，因此已披露的经营增长尚待下一季兑现验证。",
+            "evidence_refs": [
+              {
+                "source": "sec",
+                "object_id": "filing:test",
+                "available_at": "2026-09-02T00:00:00Z",
+                "location": "s3://test/filing",
+                "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ]
+          },
+          {
+            "text": "截至2026年10月22日，收盘价323.24美元，低于20日均线350.2665美元和200日均线367.93235美元。该研究趋势事实与强劲业绩并存，但未提供把经营与价格信息映射为正向投资判断的标准，故条件性单一证券立场为观察。",
+            "evidence_refs": [
+              {
+                "source": "sec",
+                "object_id": "filing:test",
+                "available_at": "2026-09-02T00:00:00Z",
+                "location": "s3://test/filing",
+                "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ]
+          }
+        ],
+        "stance": "watch",
+        "reviews": [
+          {
+            "status": "accepted",
+            "claim_id": "bear:0",
+            "resolved": true,
+            "rationale": "第四财季收入及非GAAP营业利润率是公司前瞻估计，不是已实现业绩。综合结论已将其限定为待验证的指引。",
+            "evidence_refs": [
+              {
+                "source": "sec",
+                "object_id": "filing:test",
+                "available_at": "2026-09-02T00:00:00Z",
+                "location": "s3://test/filing",
+                "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "missing_evidence": [],
+            "prevented_conclusion": null
+          },
+          {
+            "status": "accepted",
+            "claim_id": "bear:1",
+            "resolved": true,
+            "rationale": "收盘价低于两条均线的数值关系成立，说明业绩信息并未与所给研究趋势同向。该事实本身不构成减持结论。",
+            "evidence_refs": [
+              {
+                "source": "sec",
+                "object_id": "filing:test",
+                "available_at": "2026-09-02T00:00:00Z",
+                "location": "s3://test/filing",
+                "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "missing_evidence": [],
+            "prevented_conclusion": null
+          },
+          {
+            "status": "accepted",
+            "claim_id": "evidence_audit:0",
+            "resolved": false,
+            "rationale": "身份和业绩披露只能确认对象与经营事实，未提供将这些事实映射为正向投资立场的判断标准。",
+            "evidence_refs": [
+              {
+                "source": "sec",
+                "object_id": "filing:test",
+                "available_at": "2026-09-02T00:00:00Z",
+                "location": "s3://test/filing",
+                "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "missing_evidence": [
+              "将经营与市场信息映射为正向投资立场的冻结判断标准"
+            ],
+            "prevented_conclusion": "不能据此形成买入候选结论。"
+          },
+          {
+            "status": "accepted",
+            "claim_id": "evidence_audit:1",
+            "resolved": true,
+            "rationale": "低于均线的数值关系有证据支持，但缺少将该关系定性为趋势偏弱的明确阈值。综合主张仅陈述数值关系，未使用该定性。",
+            "evidence_refs": [
+              {
+                "source": "sec",
+                "object_id": "filing:test",
+                "available_at": "2026-09-02T00:00:00Z",
+                "location": "s3://test/filing",
+                "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "missing_evidence": [],
+            "prevented_conclusion": null
+          }
+        ],
+        "uncertainties": [
+          "第四财季指引能否兑现仍不确定。",
+          "未来市场价格与收益无法由现有材料证明。"
+        ],
+        "review_conclusion": "limited"
+      }
+    }
+  ]
+}

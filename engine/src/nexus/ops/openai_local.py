@@ -452,6 +452,7 @@ async def prepare_database(
         synthesis_prompt = load_portfolio_synthesis_prompt(
             security_research_scope=formal_bounded_stage_budget,
             claim_review_scope=formal_bounded_stage_budget,
+            inference_review_scope=formal_bounded_stage_budget,
         )
         prompts.append(
             (

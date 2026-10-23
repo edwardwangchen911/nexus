@@ -22,6 +22,7 @@ def _wire(
     capacity=True,
     security_extra=None,
     claim_review=False,
+    inference_review=False,
 ):
     request, evidence, prompts = _authority()
     request = request.model_copy(
@@ -29,7 +30,9 @@ def _wire(
     )
     prompts = dict(prompts)
     prompts["portfolio"] = load_portfolio_synthesis_prompt(
-        security_research_scope=new, claim_review_scope=claim_review
+        security_research_scope=new,
+        claim_review_scope=claim_review,
+        inference_review_scope=inference_review,
     )
     model = StructuredStagedCodexCommittee(
         prompts=prompts, tools=_tools(), paper_stage_scope=scope, inline_citations=capacity
@@ -165,11 +168,14 @@ def test_frozen_v4_full_wire_is_unchanged(stage, capacity):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("claim_review", [False, True])
+@pytest.mark.parametrize(
+    "claim_review,inference_review", [(False, False), (True, False), (True, True)]
+)
 @pytest.mark.parametrize(
     "audit_vote,resolved,quality",
     [
         ("abstain", True, "partial"),
+        ("oppose", True, "partial"),
         ("support", False, "partial"),
         ("support", True, "complete"),
     ],
@@ -180,6 +186,7 @@ async def test_new_scope_through_sdk_and_synthesis_keeps_real_audit_gate(
     resolved,
     quality,
     claim_review,
+    inference_review,
 ):
     import asyncio
     import json
@@ -200,7 +207,9 @@ async def test_new_scope_through_sdk_and_synthesis_keeps_real_audit_gate(
     request, evidence, prompts = _authority()
     prompts = dict(prompts)
     prompts["portfolio"] = load_portfolio_synthesis_prompt(
-        security_research_scope=True, claim_review_scope=claim_review
+        security_research_scope=True,
+        claim_review_scope=claim_review,
+        inference_review_scope=inference_review,
     )
     _, thread, result, _ = _sdk(monkeypatch)
     seen = []
@@ -350,3 +359,87 @@ def test_v6_synthesis_wire_fits_the_existing_v5_capacity_envelope():
     # The frozen AVGO v5 envelope has only 21 bytes of spare wire capacity.
     # Prompt clarification must fit the old bound, not raise the configured limit.
     assert len(codex_request_wire(new).encode()) <= len(codex_request_wire(old).encode())
+
+
+V6_HASHES = {
+    ("research", False): "cac2a8f8a1b1456f5c5b71caedd165f301ae0368c42fb79965ee0c664d1e171f",
+    ("research", True): "02a2335a8f122f8b14362fc834e02be6f5b432774c93717962f0c7a3b37cf2f6",
+    ("critique", False): "40992517d0a3e4a18c2cd22d1e260679ce51c56e4db22737c4ca293cbc4636e9",
+    ("critique", True): "9693e74e36032887271c05da825f56a5b46d70608a41b9bf917abb7d62b09c7b",
+    ("synthesis", False): "035998c6447da3949773c697d22ebc17f2c37ee4b4e274dcb09802a430449cfd",
+    ("synthesis", True): "6f9c24c66dcbb5b35172d7e0fb8b82f66618a17bd4c85f7a4d5e1a24b82c8b92",
+}
+
+
+@pytest.mark.parametrize("stage,capacity", V6_HASHES)
+def test_frozen_v6_full_wire_is_unchanged(stage, capacity):
+    assert (
+        codex_request_hash(*_wire(stage, new=True, claim_review=True, capacity=capacity))
+        == V6_HASHES[stage, capacity]
+    )
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_v7_reasoned_thesis_and_audit_scope_reach_all_stages(stage):
+    payload, _ = _wire(stage, new=True, claim_review=True, inference_review=True)
+    text = payload["instructions"] + " ".join(p["content"] for p in payload["prompts"])
+    for rule in (
+        "facts to conditional stance",
+        "counterevidence and invalidation",
+        "issuer identity or disclosure existence alone",
+        "missing facts",
+        "unsupported inference",
+        "ordinary uncertainty",
+        "pre-existing buy formula",
+        "Reject unsupported conclusions",
+        "Never force a direction or audit support",
+        "every frozen audit vote",
+    ):
+        assert rule in text
+    assert payload["research_scope"] == "single_security"
+
+
+@pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize(
+    "extra,context,scope",
+    [
+        ({}, False, True),
+        ({}, True, False),
+        ({"purpose": "research_only_v2"}, True, True),
+        ({"diagnostic_synthetic_paper_load": True}, True, True),
+    ],
+)
+def test_v7_guidance_does_not_expand_other_scopes(stage, extra, context, scope):
+    payload, _ = _wire(
+        stage,
+        new=True,
+        claim_review=True,
+        inference_review=True,
+        security_extra=extra,
+        context=context,
+        scope=scope,
+    )
+    assert "research_scope" not in payload
+    assert "facts to conditional stance" not in payload["instructions"]
+
+
+def test_v7_fits_the_existing_v6_capacity_envelope():
+    from nexus.agents.codex_sdk import codex_request_wire
+
+    for stage in STAGES:
+        old, _ = _wire(stage, new=True, claim_review=True)
+        new, _ = _wire(stage, new=True, claim_review=True, inference_review=True)
+        assert len(codex_request_wire(new).encode()) <= len(codex_request_wire(old).encode())
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"inference_review_scope": True},
+        {"security_research_scope": True, "inference_review_scope": True},
+        {"security_research_scope": True, "claim_review_scope": True, "inference_review_scope": 1},
+    ],
+)
+def test_inference_scope_requires_explicit_valid_parent_scope(options):
+    with pytest.raises(ValueError, match="INFERENCE_REVIEW_SCOPE_INVALID"):
+        load_portfolio_synthesis_prompt(**options)

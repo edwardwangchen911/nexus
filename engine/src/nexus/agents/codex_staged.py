@@ -384,6 +384,7 @@ class StagedCodexCommittee(CodexCommittee):
         )
         from nexus.agents.committee import (
             CLAIM_REVIEW_SCOPE_PROMPT_VERSION,
+            INFERENCE_REVIEW_SCOPE_PROMPT_VERSION,
             SECURITY_RESEARCH_SCOPE_PROMPT_VERSION,
         )
 
@@ -391,7 +392,11 @@ class StagedCodexCommittee(CodexCommittee):
         # byte-identical instructions; registration never rewrites existing Runs.
         security_research_scope = (
             self._prompts["portfolio"].version
-            in {SECURITY_RESEARCH_SCOPE_PROMPT_VERSION, CLAIM_REVIEW_SCOPE_PROMPT_VERSION}
+            in {
+                SECURITY_RESEARCH_SCOPE_PROMPT_VERSION,
+                CLAIM_REVIEW_SCOPE_PROMPT_VERSION,
+                INFERENCE_REVIEW_SCOPE_PROMPT_VERSION,
+            }
             and self._paper_stage_scope
             and paper_context_present
             and isinstance(security, dict)
@@ -492,7 +497,8 @@ class StagedCodexCommittee(CodexCommittee):
         if (
             security_research_scope
             and stage != "synthesis"
-            and self._prompts["portfolio"].version == CLAIM_REVIEW_SCOPE_PROMPT_VERSION
+            and self._prompts["portfolio"].version
+            in {CLAIM_REVIEW_SCOPE_PROMPT_VERSION, INFERENCE_REVIEW_SCOPE_PROMPT_VERSION}
         ):
             # The initial claims and audit vote need the new frozen guidance too.
             # Synthesis already carries the full portfolio asset; do not duplicate it.
