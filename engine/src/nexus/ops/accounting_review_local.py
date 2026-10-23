@@ -37,6 +37,77 @@ async def database_action(args: argparse.Namespace) -> dict[str, object]:
     factory = session_factory(settings)
     try:
         async with factory() as session, session.begin():
+            if args.action in ("designate", "adopt", "inspect-adoption"):
+                from sqlalchemy import func, select
+
+                from nexus.persistence.models.research import ResearchEvidenceRef
+                from nexus.research.accounting_adoption import SOURCE as ADOPTION_SOURCE
+                from nexus.research.accounting_adoption_storage import (
+                    adopt_review,
+                    read_adoptions,
+                    register_designation,
+                )
+
+                if args.submission_id is None:
+                    raise ValueError("ACCOUNTING_REVIEW_INPUT_INVALID")
+                if args.action == "designate":
+                    if not args.operator_confirmed:
+                        raise ValueError("ACCOUNTING_OWNER_OPERATOR_CONFIRMATION_REQUIRED")
+                    if args.designation is None:
+                        raise ValueError("ACCOUNTING_REVIEW_INPUT_INVALID")
+                    designation = await register_designation(
+                        session, args.submission_id, read_json(args.designation)
+                    )
+                    return {
+                        "status": "owner_designation_registered",
+                        "designation_id": designation.provider_object_id,
+                        "registered_at": designation.created_at.isoformat(),
+                        "model_calls": 0,
+                        "provider_calls": 0,
+                    }
+                if args.designation_id is None:
+                    raise ValueError("ACCOUNTING_REVIEW_INPUT_INVALID")
+                ref: ResearchEvidenceRef | None
+                if args.action == "adopt":
+                    if args.sources is None:
+                        raise ValueError("ACCOUNTING_REVIEW_INPUT_INVALID")
+                    ref = await adopt_review(
+                        session, args.submission_id, args.designation_id, source_root=args.sources
+                    )
+                else:
+                    await session.execute(text("SET TRANSACTION READ ONLY"))
+                    ref = await session.scalar(
+                        select(ResearchEvidenceRef).where(
+                            ResearchEvidenceRef.source == ADOPTION_SOURCE,
+                            ResearchEvidenceRef.provider_object_id
+                            == f"{args.submission_id}:{args.designation_id}",
+                        )
+                    )
+                    receipt = await read_receipt(session, args.submission_id)
+                    if ref is None or receipt is None:
+                        raise ValueError("ACCOUNTING_REVIEW_INPUT_INVALID")
+                    from nexus.research.accounting_review import ReviewMaterial
+
+                    material = ReviewMaterial.model_validate(receipt.payload["material"])
+                    now = await session.scalar(select(func.clock_timestamp()))
+                    if not isinstance(now, datetime):
+                        raise ValueError("ACCOUNTING_RECEIPT_TIME_INVALID")
+                    await read_adoptions(
+                        session,
+                        instrument_id=material.instrument_id,
+                        as_of=now,
+                        evidence_ids=(ref.id,),
+                    )
+                assert ref is not None
+                return {
+                    "status": "adopted_as_disclosed_scope",
+                    "evidence_ref_id": str(ref.id),
+                    "content_hash": ref.content_hash,
+                    "available_at": ref.available_at.isoformat(),
+                    "accounting_authority": False,
+                    "model_calls": 0,
+                    "provider_calls": 0,
+                }
             if args.action == "check-bindings":
                 await session.execute(text("SET TRANSACTION READ ONLY"))
                 if args.material is None or args.sources is None:
@@ -97,7 +168,17 @@ def read_json(path: Path) -> object:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("export", "check", "check-bindings", "receive", "inspect")
+        "action",
+        choices=(
+            "export",
+            "check",
+            "check-bindings",
+            "receive",
+            "inspect",
+            "designate",
+            "adopt",
+            "inspect-adoption",
+        ),
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--material", type=Path)
@@ -105,9 +186,23 @@ def main() -> int:
     parser.add_argument("--submission", type=Path)
     parser.add_argument("--submission-id", type=UUID)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--designation", type=Path)
+    parser.add_argument("--designation-id", type=UUID)
+    parser.add_argument(
+        "--operator-confirmed",
+        action="store_true",
+        help="Local operator has independently verified the owner instruction and report source",
+    )
     args = parser.parse_args()
     try:
-        if args.action in ("receive", "inspect", "check-bindings"):
+        if args.action in (
+            "receive",
+            "inspect",
+            "check-bindings",
+            "designate",
+            "adopt",
+            "inspect-adoption",
+        ):
             print(json.dumps(asyncio.run(database_action(args))))
             return 0
         if args.material is None or args.sources is None:

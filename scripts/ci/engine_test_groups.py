@@ -85,6 +85,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_full_input_capacity_cycle.py::test_formal_v11_deadline_keeps_late_result_unknown_and_closes_cycle",
     "engine/tests/integration/test_formal_resume_observation_clock.py",
     "engine/tests/integration/test_accounting_review_intake.py",
+    "engine/tests/integration/test_accounting_adoption.py",
 )
 
 # CI progress timestamps place this boundary near half of PostgreSQL wall time.

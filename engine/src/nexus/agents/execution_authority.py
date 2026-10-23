@@ -61,6 +61,19 @@ async def load_frozen_evidence(
         for index, record in enumerate(ordered)
     ):
         return ()
+    review_ids = tuple(ref.id for ref in ordered if ref.source == "nexus_accounting_adoption")
+    if review_ids:
+        from nexus.research.accounting_adoption_storage import read_adoptions
+
+        try:
+            await read_adoptions(
+                session,
+                instrument_id=run.instrument_id,
+                as_of=run.decision_time,
+                evidence_ids=review_ids,
+            )
+        except ValueError:
+            return ()
     trend_ids = tuple(record.id for record in ordered if record.source == "alpaca_current_trends")
     if trend_ids and set(
         await read_current_price_trends(
