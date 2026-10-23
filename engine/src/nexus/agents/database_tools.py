@@ -402,7 +402,21 @@ class _BoundDatabaseExecutors:
                 select(fact).order_by(ranked.c.field_rank, fact.canonical_fact).limit(50)
             )
         )
-        return self._result(
+        from nexus.research.accounting_adoption import SOURCE as REVIEW_SOURCE
+        from nexus.research.accounting_adoption import fact_review_fields
+        from nexus.research.accounting_adoption_storage import read_adoptions
+
+        review_ids = tuple(ref.id for ref in self._evidence if ref.source == REVIEW_SOURCE)
+        try:
+            reviews = await read_adoptions(
+                self._session,
+                instrument_id=self._instrument_id,
+                as_of=self._decision_time,
+                evidence_ids=review_ids,
+            )
+        except ValueError:
+            return self._invalid_frozen_evidence_authority("get_financial_facts")
+        result = self._result(
             "get_financial_facts",
             [
                 {
@@ -431,9 +445,14 @@ class _BoundDatabaseExecutors:
                         if amendment_ids
                         else {}
                     ),
+                    **(fact_review_fields(record.id, amendment_ids, reviews) if reviews else {}),
                 }
                 for record in records
             ],
+        )
+
+        return (
+            {**result, "accounting_review_contract": "as_disclosed_eps_v1"} if reviews else result
         )
 
     async def filing_evidence(self, payload: Mapping[str, object]) -> Mapping[str, object]:

@@ -257,6 +257,30 @@ async def prepare_research_snapshot(
                 identity_capacity_exhausted = True
     if research_only and identity_capacity_exhausted:
         raise ValueError("RESEARCH_ONLY_IDENTITY_CAPACITY_EXHAUSTED")
+    # Add reviews only after final base selection. Never evict limitations or choose
+    # a favorable/latest opinion: every visible overlapping adoption is frozen.
+    from nexus.research.accounting_adoption_storage import read_adoptions
+    from nexus.research.accounting_review import ReviewMaterial
+
+    adoptions = await read_adoptions(session, instrument_id=instrument_id, as_of=as_of)
+    selected_ids = {item.id for item in evidence}
+    review_ids = []
+    for review_id, review in adoptions.items():
+        material = ReviewMaterial.model_validate(review["material"])
+        fact_refs = {UUID(str(f.binding["evidence_ref_id"])) for f in material.facts}
+        amendment_refs = {a.evidence_ref_id for a in material.amendments}
+        if fact_refs & selected_ids and amendment_refs & selected_ids:
+            review_ids.append(review_id)
+    if len(evidence) + len(review_ids) > MAX_FROZEN_EVIDENCE - 2:
+        raise ValueError("ACCOUNTING_REVIEW_CAPACITY_EXHAUSTED")
+    if review_ids:
+        evidence.extend(
+            await session.scalars(
+                select(ResearchEvidenceRef)
+                .where(ResearchEvidenceRef.id.in_(review_ids))
+                .order_by(ResearchEvidenceRef.id)
+            )
+        )
     context = (
         None
         if research_only

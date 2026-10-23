@@ -125,6 +125,8 @@ def test_derived_frozen_input_is_preserved_while_tool_rows_receive_citations():
         "status": "available",
         "price": {"midpoint": "329.575000000000", "evidence_ref_id": "ref-1"},
         "metrics": {"trailing_pe": "37.795298165138"},
+        "accounting_basis": "historical_as_disclosed",
+        "accounting_limitations": ["Not audit assurance or historical point-in-time clearance."],
     }
     before = deepcopy(raw)
 
@@ -132,6 +134,10 @@ def test_derived_frozen_input_is_preserved_while_tool_rows_receive_citations():
     inputs = restore(projected["frozen_inputs"])
 
     assert inputs["trailing_valuation"] == before["frozen_inputs"]["trailing_valuation"]
+    assert inputs["trailing_valuation"]["accounting_basis"] == "historical_as_disclosed"
+    assert inputs["trailing_valuation"]["accounting_limitations"] == [
+        "Not audit assurance or historical point-in-time clearance."
+    ]
     assert inputs["financial_facts"]["items"][0]["citation_index"] == 0
     assert raw == before
 
