@@ -368,6 +368,12 @@ async def reserve_schwab_agent_paper_trigger(
         claim_key = f"synthesis-recovery:{local_time.date().isoformat()}"
     else:
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    if trigger_mode == "scheduled":
+        from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+        await require_scheduled_execution_open(
+            session, account_id=account_id, slot=decision_slot_at
+        )
     from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
 
     await require_acknowledged_operation_scope(
@@ -587,6 +593,18 @@ async def finish_schwab_agent_paper_trigger(
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
     if error_code is not None and error_code not in _TRIGGER_FAILURE_CODES:
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    if reservation.trigger_mode == "scheduled":
+        from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+        owner = await session.get(IdempotencyRecord, reservation.claim_id, populate_existing=True)
+        if owner is None or not owner.actor_id.startswith("local-agent-paper-schwab:"):
+            raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+        await require_scheduled_execution_open(
+            session,
+            account_id=UUID(owner.actor_id.removeprefix("local-agent-paper-schwab:")),
+            slot=reservation.decision_slot_at,
+            claim_id=reservation.claim_id,
+        )
     if reservation.trigger_mode == "manual":
         from nexus.paper.current_preparation_acceptance import require_execution_not_accepted
         from nexus.paper.target_service import lock_portfolio_account
@@ -826,6 +844,12 @@ async def start_schwab_agent_paper_cycle(
         or len(idempotency_key) > 255
     ):
         raise ValueError("AGENT_PAPER_REQUEST_INVALID")
+    if manual_request_id is None:
+        from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+        await require_scheduled_execution_open(
+            session, account_id=authority.account_id, slot=decision_slot_at
+        )
     explicit_version = version_prompt_id is not None or version_model_id is not None
     if version_evaluation_id is None:
         if version_lane is not None or version_source_run_id is not None or explicit_version:
@@ -1008,6 +1032,11 @@ async def resume_schwab_agent_paper_cycle(
         or cycle.execution_session != cycle.decision_session
     ):
         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
+    from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+    await require_scheduled_execution_open(
+        session, account_id=cycle.account_id, slot=cycle.decision_slot_at
+    )
     if formal_stage_capacity and now is not None:
         from nexus.paper.synthesis_orphan import recover_formal_synthesis_orphan
         from nexus.paper.target_service import lock_portfolio_account
@@ -1406,6 +1435,14 @@ async def _start_cycle(
         )
     ):
         raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+    if manual_request_id is None and economic_lane_ref is None:
+        from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+        await require_scheduled_execution_open(
+            session,
+            account_id=authority.account_id,
+            slot=decision_slot_at,
+        )
     from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
 
     await require_acknowledged_operation_scope(

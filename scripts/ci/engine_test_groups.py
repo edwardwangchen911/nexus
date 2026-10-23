@@ -76,6 +76,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_candidate_multistock_path.py::test_v11_delayed_research_observation_keeps_session_boundary",
     "engine/tests/integration/test_capacity_rejection_pg.py",
     "engine/tests/integration/test_unknown_preparation_ack_pg.py",
+    "engine/tests/integration/test_scheduled_unknown_acceptance_pg.py",
     "engine/tests/integration/test_formal_v10_runtime_admission.py",
     "engine/tests/integration/test_formal_v11_output_migration.py",
     "engine/tests/integration/test_formal_stage_registration.py",

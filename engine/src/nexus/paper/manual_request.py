@@ -286,10 +286,12 @@ async def require_manual_account_available(
 
     # Exactly the target activation lock and projection authority, not a parallel lock system.
     await lock_portfolio_account(session, account_id)
-    await require_acknowledged_native_claims(
+    # Keep the primary request/occupancy diagnostic before its auxiliary claim.
+    # Both guards remain required before admitting any new request.
+    await require_manual_account_state_available(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
     )
-    await require_manual_account_state_available(
+    await require_acknowledged_native_claims(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
     )
 
@@ -301,7 +303,7 @@ async def require_manual_account_state_available(
     now: datetime,
     excluding_request_id: UUID | None = None,
 ) -> None:
-    """Account state gates shared after the caller validates all native claims."""
+    """Account state gates independent of native claim acceptance checks."""
     await lock_portfolio_account(session, account_id)
     await require_manual_request_history(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
