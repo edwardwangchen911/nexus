@@ -11,17 +11,13 @@ type Actual = components["schemas"]["PaperPlanActualResponse"];
 test("one persisted portfolio cycle agrees across four read-only pages", async ({ page, request }) => {
   test.skip(!enabled, "explicit local read-only acceptance only");
 
-  const latestResponse = await request.get("/api/v1/paper/cycles/latest");
+  const [latestResponse, summaryResponse] = await Promise.all([
+    request.get("/api/v1/paper/cycles/latest"),
+    request.get("/api/v1/paper/management/portfolio"),
+  ]);
   expect(latestResponse.status()).toBe(200);
   const latest = (await latestResponse.json()).data as Cycle;
   expect(latest.execution_locked).toBe(true);
-  const latestDetailResponse = await request.get(`/api/v1/paper/management/cycles/${latest.cycle_id}`);
-  expect(latestDetailResponse.status()).toBe(200);
-  const latestDetail = (await latestDetailResponse.json()).data as Detail;
-  expect(latestDetail.cycle.cycle_id).toBe(latest.cycle_id);
-  expect(latestDetail.cycle.result_code).toBe(latest.result_code);
-
-  const summaryResponse = await request.get("/api/v1/paper/management/portfolio");
   expect(summaryResponse.status()).toBe(200);
   const summary = (await summaryResponse.json()).data as Summary;
   expect(summary.latest_proposal, "a persisted portfolio proposal is required").not.toBeNull();
@@ -29,9 +25,14 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   const proposalSession = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
   }).format(new Date(summary.latest_proposal.as_of));
-  const cyclesResponse = await request.get(
-    `/api/v1/paper/cycles?decision_session=${proposalSession}&limit=20`,
-  );
+  const [latestDetailResponse, cyclesResponse] = await Promise.all([
+    request.get(`/api/v1/paper/management/cycles/${latest.cycle_id}`),
+    request.get(`/api/v1/paper/cycles?decision_session=${proposalSession}&limit=20`),
+  ]);
+  expect(latestDetailResponse.status()).toBe(200);
+  const latestDetail = (await latestDetailResponse.json()).data as Detail;
+  expect(latestDetail.cycle.cycle_id).toBe(latest.cycle_id);
+  expect(latestDetail.cycle.result_code).toBe(latest.result_code);
   expect(cyclesResponse.status()).toBe(200);
   const cyclePage = (await cyclesResponse.json()).data as CyclePage;
   const cycle = (cyclePage.items as Cycle[]).find(
@@ -43,8 +44,13 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   if (!cycle) return;
   expect(cycle.execution_locked).toBe(true);
 
-  const detailResponse = await request.get(`/api/v1/paper/management/cycles/${cycle.cycle_id}`);
-  const actualResponse = await request.get("/api/v1/paper/actual");
+  const [detailResponse, actualResponse] = await Promise.all([
+    // The latest and selected persisted cycles may have the same exact identity.
+    latest.cycle_id === cycle.cycle_id
+      ? Promise.resolve(latestDetailResponse)
+      : request.get(`/api/v1/paper/management/cycles/${cycle.cycle_id}`),
+    request.get("/api/v1/paper/actual"),
+  ]);
   expect(detailResponse.status()).toBe(200);
   expect(actualResponse.status()).toBe(200);
   const actual = (await actualResponse.json()).data as Actual;
@@ -124,12 +130,14 @@ test("one persisted portfolio cycle agrees across four read-only pages", async (
   await expect(page.getByRole("heading", { name: "组合事实" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "内部模拟目标与计划" })).toBeVisible();
 
-  const readbackResponse = await request.get("/api/v1/paper/management/portfolio");
+  const [readbackResponse, latestReadbackResponse] = await Promise.all([
+    request.get("/api/v1/paper/management/portfolio"),
+    request.get("/api/v1/paper/cycles/latest"),
+  ]);
   expect(readbackResponse.status()).toBe(200);
   const readback = (await readbackResponse.json()).data as Summary;
   expect(readback.current_target?.target_version_id).toBe(targetId);
   expect(readback.latest_proposal?.strategy_decision_id).toBe(detail.proposal?.strategy_decision_id);
-  const latestReadbackResponse = await request.get("/api/v1/paper/cycles/latest");
   expect(latestReadbackResponse.status()).toBe(200);
   const latestReadback = (await latestReadbackResponse.json()).data as Cycle;
   expect(latestReadback.cycle_id).toBe(latest.cycle_id);
