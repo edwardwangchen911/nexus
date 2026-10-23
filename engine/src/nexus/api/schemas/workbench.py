@@ -12,6 +12,7 @@ from nexus.api.schemas.paper import (
     PaperOrderResponse,
 )
 from nexus.domain.decimal import DecimalString
+from nexus.workbench.activity_schema import WorkbenchActivityResponse
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
@@ -111,6 +112,7 @@ class WorkbenchCompatibilityResponse(_StrictSchema):
 
 
 class WorkbenchResponse(_StrictSchema):
+    activity: WorkbenchActivityResponse | None = None
     mode: Literal["internal_paper"]
     execution_locked: Literal[True]
     loop: WorkbenchLoopResponse

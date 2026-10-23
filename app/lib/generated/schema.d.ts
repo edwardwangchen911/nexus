@@ -8230,6 +8230,81 @@ export interface components {
             /** Unrealized Pnl */
             unrealized_pnl: string | null;
         };
+        /** WorkbenchActivityResponse */
+        WorkbenchActivityResponse: {
+            /**
+             * Read At
+             * Format: date-time
+             */
+            read_at: string;
+            /**
+             * Read Status
+             * @enum {string}
+             */
+            read_status: "complete" | "partial";
+            /** Scopes */
+            scopes: components["schemas"]["WorkbenchActivityScopeResponse"][];
+        };
+        /** WorkbenchActivityScopeResponse */
+        WorkbenchActivityScopeResponse: {
+            /**
+             * Candidates
+             * @default []
+             */
+            candidates: components["schemas"]["WorkbenchCandidateResponse"][];
+            /** Cycle Id */
+            cycle_id?: string | null;
+            /** Decision Session */
+            decision_session: string | null;
+            /**
+             * Historical
+             * @default false
+             */
+            historical: boolean;
+            /** Href */
+            href?: string | null;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "research_and_paper" | "research_only";
+            /**
+             * Occupancy
+             * @default not_indicated
+             * @enum {string}
+             */
+            occupancy: "unresolved" | "released" | "not_indicated" | "unverified";
+            /** Portfolio Reason Code */
+            portfolio_reason_code?: string | null;
+            /** Portfolio Status */
+            portfolio_status?: ("not_applicable" | "awaiting_cycle" | "pending" | "deferred" | "no_order_required" | "recorded" | "unavailable") | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /**
+             * Registration Date
+             * Format: date
+             */
+            registration_date: string;
+            /** Request Id */
+            request_id?: string | null;
+            /** Requested At */
+            requested_at?: string | null;
+            /** Selected Decision Session */
+            selected_decision_session?: string | null;
+            /**
+             * Selection
+             * @enum {string}
+             */
+            selection: "active" | "historical_unresolved" | "today" | "historical" | "none" | "ambiguous" | "unavailable";
+            /** Status */
+            status?: string | null;
+            /** Today Registered */
+            today_registered?: number | null;
+            /** Today Started */
+            today_started?: number | null;
+            /** Trigger */
+            trigger?: ("manual" | "scheduled") | null;
+        };
         /** WorkbenchAttentionResponse */
         WorkbenchAttentionResponse: {
             /** Cycle Id */
@@ -8257,6 +8332,48 @@ export interface components {
             severity: "info" | "warning" | "critical";
             /** Title Code */
             title_code: string;
+        };
+        /** WorkbenchCandidateResponse */
+        WorkbenchCandidateResponse: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+            /** Href */
+            href?: string | null;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Job Status */
+            job_status?: string | null;
+            /**
+             * Limitations
+             * @default []
+             */
+            limitations: components["schemas"]["WorkbenchLimitationResponse"][];
+            /** Quality */
+            quality?: string | null;
+            /**
+             * Read Status
+             * @default unavailable
+             * @enum {string}
+             */
+            read_status: "verified" | "unavailable";
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Research As Of */
+            research_as_of?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Run Status */
+            run_status?: string | null;
+            /** Snapshot Id */
+            snapshot_id?: string | null;
+            /** Symbol */
+            symbol: string;
         };
         /** WorkbenchCompatibilityResponse */
         WorkbenchCompatibilityResponse: {
@@ -8289,6 +8406,25 @@ export interface components {
         WorkbenchEnvelope: {
             data: components["schemas"]["WorkbenchResponse"];
             meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** WorkbenchLimitationResponse */
+        WorkbenchLimitationResponse: {
+            /** Impact */
+            impact?: string | null;
+            /** Kind */
+            kind: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "system" | "model";
+            /** Text */
+            text: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
         };
         /** WorkbenchLoopResponse */
         WorkbenchLoopResponse: {
@@ -8335,6 +8471,7 @@ export interface components {
             account: components["schemas"]["WorkbenchAccountSummaryResponse"] | null;
             /** Active Orders */
             active_orders: components["schemas"]["PaperOrderResponse"][];
+            activity?: components["schemas"]["WorkbenchActivityResponse"] | null;
             /** Attention */
             attention: components["schemas"]["WorkbenchAttentionResponse"][];
             compatibility?: components["schemas"]["WorkbenchCompatibilityResponse"] | null;

@@ -507,6 +507,7 @@ async def _require_cycle_jobs_settled(
     now: datetime,
     require_no_live_lease: bool = True,
     allow_accepted_synthesis: bool = False,
+    read_only: bool = False,
 ) -> None:
     """A terminal cycle cannot hide a queued job, lease, or unknown model usage."""
     events = (
@@ -566,7 +567,7 @@ async def _require_cycle_jobs_settled(
         if isinstance(candidate_run, AgentPortfolioSynthesisRunRecord):
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
         if not await legacy_research_sealed(
-            session, cycle_id=cycle_id, run_id=candidate_run.id, now=now
+            session, cycle_id=cycle_id, run_id=candidate_run.id, now=now, read_only=read_only
         ):
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     if not runs:

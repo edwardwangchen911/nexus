@@ -60,7 +60,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
     await expect(page.getByText("实盘锁定")).toBeVisible();
     const readiness = page.getByRole("region", { name: "运行就绪与阻断" });
     await expect(readiness.getByText("本周期已完成", { exact: true })).toBeVisible();
-    await expect(readiness).toContainText("下一五分钟槽");
+    await expect(readiness).toContainText("下一定时启动区间");
     await readiness.getByText("查看版本与迁移证据", { exact: true }).click();
     await expect(readiness.getByText("代码预期迁移", { exact: true })).toBeVisible();
     await readiness.getByText("查看版本与迁移证据", { exact: true }).click();
@@ -266,5 +266,64 @@ for (const width of [390, 1440]) {
     expect(methods.every((method) => method === "GET")).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await panel.screenshot({ path: `test-results/pure-research-${width}.png` });
+  });
+}
+
+for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
+  test(`${viewport.name} frozen activity keeps sources, modes and original round through refresh failure`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const payload = readyWorkbench();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const instrument = "00000000-0000-4000-8000-000000000002";
+    const run = "00000000-0000-4000-8000-000000000003";
+    Object.assign(payload.data, { activity: {
+      read_at: "2026-10-23T08:00:00Z", read_status: "complete", scopes: [{
+        mode: "research_and_paper", today_registered: 1, today_started: 1, registration_date: "2026-10-23", decision_session: "2026-10-23",
+        selection: "today", request_id: id, cycle_id: agentPaperCycle.cycle_id, requested_at: "2026-10-23T07:00:00Z", status: "completed",
+        reason_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE", trigger: "manual", historical: false, occupancy: "not_indicated",
+        portfolio_status: "deferred", portfolio_reason_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE", href: `/decisions/${agentPaperCycle.cycle_id}`,
+        candidates: [{ instrument_id: instrument, symbol: "AAPL", run_id: run, snapshot_id: id, research_as_of: "2026-10-23T07:30:00Z",
+          run_status: "completed", job_status: "succeeded", quality: "partial", read_status: "verified", reason_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+          href: `/research/${instrument}?run_id=${run}`, has_more: false, limitations: [
+            { source: "system", kind: "reason", text: "研究未通过交易准入", impact: null, truncated: false },
+            { source: "model", kind: "missing_evidence", text: "历史分母适用范围仍需核对", impact: "估值判断受限", truncated: true },
+            { source: "model", kind: "uncertainties", text: "未来需求仍存在不确定性", impact: null, truncated: false },
+          ] },
+        { instrument_id: id, symbol: "NVDA", run_id: null, snapshot_id: null, research_as_of: null, run_status: null, job_status: "queued", quality: null,
+          read_status: "unavailable", reason_code: null, href: null, limitations: [], has_more: false }],
+      }, { mode: "research_only", today_registered: 0, today_started: 0, registration_date: "2026-10-23", decision_session: null,
+        selection: "none", request_id: null, cycle_id: null, requested_at: null, status: null, reason_code: null, trigger: null,
+        historical: false, occupancy: "not_indicated", portfolio_status: "not_applicable", portfolio_reason_code: null, href: null, candidates: [] }],
+    } });
+    const methods: string[] = [];
+    await installFixtures(page, payload, methods);
+    await page.goto("/workspace");
+    await page.waitForLoadState("networkidle");
+    const summary = page.getByRole("region", { name: "本轮运行与研究限制" });
+    await expect(summary).toContainText("组合判断暂缓");
+    await expect(summary.getByRole("region", { name: "纯研究" })).toContainText("今日手动未登记");
+    await expect(summary.getByRole("article", { name: "AAPL 本轮研究" })).toContainText("研究已完成 · 结论受限");
+    await expect(summary.getByRole("article", { name: "NVDA 本轮研究" })).toContainText("等待执行");
+    const expand = summary.getByText("展开更多已保存限制", { exact: true });
+    await expand.focus();
+    await page.keyboard.press("Enter");
+    await expect(summary.getByText("未来需求仍存在不确定性", { exact: true })).toBeVisible();
+    await expect(summary).toContainText("模型所述限制不等于系统已独立证实");
+    await expect(summary.getByRole("link", { name: "查看 AAPL 原研究" })).toHaveAttribute("href", `/research/${instrument}?run_id=${run}`);
+    await summary.getByText("查看本轮对象信息", { exact: true }).click();
+    await expect(summary.locator("details").filter({ has: page.getByText("查看本轮对象信息", { exact: true }) }).getByText(id, { exact: true })).toBeVisible();
+    await assertReleaseAccessibility(page);
+    await summary.screenshot({ path: `test-results/workbench-activity-${viewport.name}.png` });
+    const text = await summary.textContent();
+    await page.route("**/api/v1/workbench", (route) => { methods.push(route.request().method()); return route.fulfill({ status: 503, json: { error: { code: "UNAVAILABLE" } } }); });
+    await page.getByRole("button", { name: "刷新工作台" }).click();
+    await expect(page.getByRole("region", { name: "交易工作台页面" })).toHaveAttribute("data-state", "stale");
+    expect(await summary.textContent()).toBe(text);
+    expect(methods.length).toBeGreaterThanOrEqual(2);
+    expect(methods.every((method) => method === "GET")).toBe(true);
+    await page.route("**/api/v1/workbench", (route) => route.fulfill({ status: 403, json: { error: { code: "FORBIDDEN" } } }));
+    await page.getByRole("button", { name: "刷新工作台" }).click();
+    await expect(summary).toHaveCount(0);
   });
 }

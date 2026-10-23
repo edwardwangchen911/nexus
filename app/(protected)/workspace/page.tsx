@@ -5,6 +5,7 @@ import { EconomicContextBoundary } from "../../components/paper/economic-context
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ActivitySummary, validActivity } from "../../components/workbench/activity-summary";
 import { ManualPaperStart } from "../../components/workbench/manual-paper-start";
 import { CurrentCash } from "../../components/workbench/current-cash";
 import { AccountSummary } from "../../components/workbench/account-summary";
@@ -119,6 +120,7 @@ export function WorkbenchPanel({
 
       {payload ? <>
         <ModeStrip workbench={payload.data} />
+        <ActivitySummary activity={"activity" in payload.data ? payload.data.activity : undefined} />
         <ManagementSummaryCard />
         <ReadinessSummary workbench={payload.data} />
         <div className="workbench-primary-grid">
@@ -134,7 +136,10 @@ export function WorkbenchPanel({
 }
 
 function deriveState(workbench: WorkbenchPayload["data"]): WorkbenchPageState {
-  if (!workbench.latest_cycle && !workbench.account && workbench.active_orders.length === 0 && workbench.attention.length === 0) return "empty";
+  const activity = "activity" in workbench ? workbench.activity : undefined;
+  if (activity != null && (!validActivity(activity) || activity.read_status === "partial")) return "partial";
+  const hasActivity = validActivity(activity) && activity.scopes.some((scope) => scope.selection !== "none" || (scope.today_registered ?? 0) > 0 || (scope.today_started ?? 0) > 0);
+  if (!hasActivity && !workbench.latest_cycle && !workbench.account && workbench.active_orders.length === 0 && workbench.attention.length === 0) return "empty";
   if (workbench.account?.data_state === "STALE") return "stale";
   if (workbench.account?.data_state === "PARTIAL") return "partial";
   return "ready";

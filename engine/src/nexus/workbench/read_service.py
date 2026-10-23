@@ -31,6 +31,7 @@ from nexus.persistence.migrations import (
     CURRENT_MIGRATION_HEAD,
 )
 from nexus.persistence.models.runtime import WorkerHeartbeat
+from nexus.workbench.activity_read import read_activity
 from nexus.workbench.readiness import cycle_blocker, runtime_readiness
 
 
@@ -56,6 +57,11 @@ class WorkbenchReadService:
         latest = cycles.items[0] if cycles.items else None
         loop, compatibility = await self._loop_status()
         return WorkbenchResponse(
+            activity=await read_activity(
+                self._session,
+                read_at=self._request_time,
+                decision_session=cycles.summary.decision_session,
+            ),
             mode="internal_paper",
             execution_locked=True,
             loop=loop,

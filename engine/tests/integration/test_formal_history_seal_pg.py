@@ -276,5 +276,20 @@ async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_
                     run_id=run_id,
                     now=seal_now + timedelta(days=2),
                 )
+        if not rejected:
+            from nexus.paper.history_seal import legacy_research_sealed
+            from sqlalchemy import text
+
+            async with sessions.begin() as read_session:
+                await read_session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                )
+                assert await legacy_research_sealed(
+                    read_session,
+                    cycle_id=result.cycle_id,
+                    run_id=run_id,
+                    now=seal_now + timedelta(days=2),
+                    read_only=True,
+                )
     finally:
         await engine.dispose()

@@ -19,8 +19,8 @@ const changes: Record<Readiness["changes"][number], string> = {
   stage: "周期阶段", blocker: "阻断分类", result: "结果代码", risk: "风控结论", orders: "订单数量",
 };
 const nextReasons: Record<NonNullable<Workbench["session"]["next_eligible_reason"]>, string> = {
-  CURRENT_SLOT: "当前五分钟槽", NEXT_SLOT: "下一五分钟槽", SESSION_OPEN: "本交易日开始",
-  NEXT_SESSION: "下一交易日开始", CURRENT_CYCLE_IN_PROGRESS: "当前周期结束后再判断",
+  CURRENT_SLOT: "当前定时启动区间", NEXT_SLOT: "下一定时启动区间", SESSION_OPEN: "本交易日定时启动时点",
+  NEXT_SESSION: "下一交易日定时启动时点", CURRENT_CYCLE_IN_PROGRESS: "当前周期结束后再判断",
   CALENDAR_UNAVAILABLE: "等待交易日历证据",
 };
 

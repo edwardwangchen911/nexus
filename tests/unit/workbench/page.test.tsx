@@ -272,3 +272,63 @@ it("rejects malformed readiness instead of rendering an invented phase", async (
   await waitFor(() => expect(screen.getByRole("status", { name: "工作台状态" })).toHaveTextContent("工作台加载失败"));
   expect(screen.queryByRole("region", { name: "运行就绪与阻断" })).not.toBeInTheDocument();
 });
+
+const frozenActivity = () => ({ read_at: "2026-10-23T08:00:00Z", read_status: "complete", scopes: [{
+  mode: "research_and_paper", today_registered: 1, today_started: 0, registration_date: "2026-10-23", decision_session: "2026-10-23",
+  selection: "active", request_id: "00000000-0000-4000-8000-000000000001", cycle_id: null, requested_at: "2026-10-23T07:00:00Z",
+  status: "preparing", reason_code: null, trigger: "manual", historical: false, occupancy: "not_indicated",
+  portfolio_status: "awaiting_cycle", portfolio_reason_code: null, href: null, candidates: [],
+}] });
+
+it("recognizes a preparing request without a cycle as saved facts and retains the same round on timeout", async () => {
+  const payload = readyPayload();
+  payload.data.latest_cycle = null;
+  payload.data.account = null;
+  Object.assign(payload.data, { activity: frozenActivity() });
+  const workbenchRead = vi.fn().mockResolvedValueOnce(Response.json(payload)).mockRejectedValueOnce(new DOMException("Timeout", "TimeoutError"));
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => String(input) === "/api/v1/workbench" ? workbenchRead() : Promise.resolve(new Response(null, { status: 404 }))));
+  const timeout = vi.spyOn(AbortSignal, "timeout");
+  render(<WorkspacePage />);
+  expect(await screen.findByText(/正在准备；尚未创建周期/)).toBeVisible();
+  expect(screen.getByRole("region", { name: "交易工作台页面" })).toHaveAttribute("data-state", "ready");
+  const before = screen.getByRole("region", { name: "本轮运行与研究限制" }).textContent;
+  fireEvent.click(screen.getByRole("button", { name: "刷新工作台" }));
+  await waitFor(() => expect(screen.getByRole("region", { name: "交易工作台页面" })).toHaveAttribute("data-state", "stale"));
+  expect(screen.getByRole("region", { name: "本轮运行与研究限制" }).textContent).toBe(before);
+  expect(timeout).toHaveBeenCalledWith(10_000);
+});
+
+it.each([401, 403])("clears frozen round detail after access is lost (%s)", async (status) => {
+  const payload = readyPayload();
+  Object.assign(payload.data, { activity: frozenActivity() });
+  const workbenchRead = vi.fn().mockResolvedValueOnce(Response.json(payload)).mockResolvedValueOnce(new Response(null, { status }));
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => String(input) === "/api/v1/workbench" ? workbenchRead() : Promise.resolve(new Response(null, { status: 404 }))));
+  render(<WorkspacePage />);
+  expect(await screen.findByText(/正在准备；尚未创建周期/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "刷新工作台" }));
+  expect(await screen.findByText("无权访问工作台")).toBeVisible();
+  expect(screen.queryByRole("region", { name: "本轮运行与研究限制" })).not.toBeInTheDocument();
+  expect(screen.queryByText("00000000-0000-4000-8000-000000000001")).not.toBeInTheDocument();
+});
+
+it("isolates malformed activity without discarding other valid workbench facts", async () => {
+  const payload = readyPayload();
+  Object.assign(payload.data, { activity: { ...frozenActivity(), scopes: "malformed" } });
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(String(input) === "/api/v1/workbench" ? Response.json(payload) : new Response(null, { status: 404 }))));
+  render(<WorkspacePage />);
+  expect(await screen.findByText("本轮摘要格式不可核验；未展示未核验正文。")).toBeVisible();
+  expect(screen.getByRole("region", { name: "最新决策" })).toHaveTextContent("AAPL");
+  expect(screen.getByRole("region", { name: "交易工作台页面" })).toHaveAttribute("data-state", "partial");
+});
+
+it.each([
+  ["CURRENT_SLOT", "当前定时启动区间"], ["NEXT_SLOT", "下一定时启动区间"], ["SESSION_OPEN", "本交易日定时启动时点"],
+] as const)("describes %s as the producer's scheduled window", (reason, label) => {
+  const payload = readyPayload();
+  payload.data.session.next_eligible_reason = reason;
+  render(<WorkbenchPanel state="ready" payload={payload} refreshing={false} onRefresh={vi.fn()} />);
+  const readiness = screen.getByRole("region", { name: "运行就绪与阻断" });
+  expect(readiness).toHaveTextContent(label);
+  expect(readiness).not.toHaveTextContent("五分钟槽");
+  expect(readiness).not.toHaveTextContent("开盘时间");
+});

@@ -323,15 +323,30 @@ async def test_workbench_never_calls_invalid_heartbeat_online(
 ) -> None:
     request_time = datetime.now(UTC)
     worker_id = "agent-paper-loop-72000000-0000-0000-0000-000000000399"
-    if invalid == "identity":
-        worker_id = "agent-paper-loop-not-a-uuid"
-    await heartbeat_agent_paper_loop(
-        settings(migrated_database_url),
-        worker_id=worker_id,
-        started_at=request_time - timedelta(minutes=1),
-        seen_at=request_time + timedelta(hours=1) if invalid == "future" else request_time,
-    )
     factory = session_factory(settings(migrated_database_url))
+    if invalid == "identity":
+        # The normal producer now rejects malformed identities. Seed a historical
+        # bad receipt directly to exercise the independent read-side protection.
+        from nexus.persistence.migrations import AGENT_PAPER_LOOP_PROCESS_VERSION
+
+        async with factory.begin() as session:
+            session.add(
+                WorkerHeartbeat(
+                    queue="agent_paper",
+                    worker_id="agent-paper-loop-not-a-uuid",
+                    process_version=AGENT_PAPER_LOOP_PROCESS_VERSION,
+                    migration_head=CURRENT_MIGRATION_HEAD,
+                    started_at=request_time - timedelta(minutes=1),
+                    seen_at=request_time,
+                )
+            )
+    else:
+        await heartbeat_agent_paper_loop(
+            settings(migrated_database_url),
+            worker_id=worker_id,
+            started_at=request_time - timedelta(minutes=1),
+            seen_at=request_time + timedelta(hours=1),
+        )
     async with factory() as session:
         result = await WorkbenchReadService(session, request_time).read()
     assert result.loop.status == "unknown"

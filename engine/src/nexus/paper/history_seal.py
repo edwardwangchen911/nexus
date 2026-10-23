@@ -417,6 +417,7 @@ async def _proof(
     now: datetime,
     same_day: bool = False,
     expired_attempt: bool = False,
+    read_only: bool = False,
 ) -> dict[str, object]:
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if (
@@ -475,7 +476,7 @@ async def _proof(
         .limit(1)
     ):
         raise ValueError(_BLOCKED)
-    run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
+    run = await session.get(AgentResearchRunRecord, run_id, with_for_update=not read_only)
     if run is None or (
         run.status not in {"prepared", "failed"}
         or (same_day and run.status != "failed")
@@ -488,10 +489,11 @@ async def _proof(
     ):
         raise ValueError(_BLOCKED)
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    reservation_query = select(AgentDailyBudgetReservationRecord).where(
+        AgentDailyBudgetReservationRecord.run_id == run_id
+    )
     reservation = await session.scalar(
-        select(AgentDailyBudgetReservationRecord)
-        .where(AgentDailyBudgetReservationRecord.run_id == run_id)
-        .with_for_update()
+        reservation_query if read_only else reservation_query.with_for_update()
     )
     if (
         model is None
@@ -528,16 +530,11 @@ async def _proof(
             )
         except ValueError:
             raise ValueError(_BLOCKED) from None
-    jobs = tuple(
-        await session.scalars(
-            select(Job)
-            .where(
-                Job.job_type == "agent.paper.research",
-                Job.payload["run_id"].as_string() == str(run_id),
-            )
-            .with_for_update()
-        )
+    jobs_query = select(Job).where(
+        Job.job_type == "agent.paper.research",
+        Job.payload["run_id"].as_string() == str(run_id),
     )
+    jobs = tuple(await session.scalars(jobs_query if read_only else jobs_query.with_for_update()))
     if len(jobs) != 1:
         raise ValueError(_BLOCKED)
     job = jobs[0]
@@ -659,7 +656,7 @@ async def _proof(
 
 
 async def legacy_research_sealed(
-    session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime
+    session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime, read_only: bool = False
 ) -> bool:
     rows = tuple(
         await session.scalars(
@@ -687,6 +684,7 @@ async def legacy_research_sealed(
         now=row.occurred_at if same_day else now,
         same_day=same_day,
         expired_attempt=row.schema_version == _EXPIRED_SCHEMA,
+        read_only=read_only,
     )
     canonical = canonical_audit_event(
         AuditChainInput(

@@ -16581,6 +16581,270 @@ export const runtimeContractSchemas = {
     "title": "WorkbenchAccountSummaryResponse",
     "type": "object"
   },
+  "WorkbenchActivityResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "read_at": {
+        "format": "date-time",
+        "title": "Read At",
+        "type": "string"
+      },
+      "read_status": {
+        "enum": [
+          "complete",
+          "partial"
+        ],
+        "title": "Read Status",
+        "type": "string"
+      },
+      "scopes": {
+        "items": {
+          "$ref": "#/components/schemas/WorkbenchActivityScopeResponse"
+        },
+        "maxItems": 2,
+        "minItems": 2,
+        "title": "Scopes",
+        "type": "array"
+      }
+    },
+    "required": [
+      "read_at",
+      "read_status",
+      "scopes"
+    ],
+    "title": "WorkbenchActivityResponse",
+    "type": "object"
+  },
+  "WorkbenchActivityScopeResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "candidates": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/WorkbenchCandidateResponse"
+        },
+        "maxItems": 5,
+        "title": "Candidates",
+        "type": "array"
+      },
+      "cycle_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cycle Id"
+      },
+      "decision_session": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Decision Session"
+      },
+      "historical": {
+        "default": false,
+        "title": "Historical",
+        "type": "boolean"
+      },
+      "href": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Href"
+      },
+      "mode": {
+        "enum": [
+          "research_and_paper",
+          "research_only"
+        ],
+        "title": "Mode",
+        "type": "string"
+      },
+      "occupancy": {
+        "default": "not_indicated",
+        "enum": [
+          "unresolved",
+          "released",
+          "not_indicated",
+          "unverified"
+        ],
+        "title": "Occupancy",
+        "type": "string"
+      },
+      "portfolio_reason_code": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Portfolio Reason Code"
+      },
+      "portfolio_status": {
+        "anyOf": [
+          {
+            "enum": [
+              "not_applicable",
+              "awaiting_cycle",
+              "pending",
+              "deferred",
+              "no_order_required",
+              "recorded",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Portfolio Status"
+      },
+      "reason_code": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason Code"
+      },
+      "registration_date": {
+        "format": "date",
+        "title": "Registration Date",
+        "type": "string"
+      },
+      "request_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Request Id"
+      },
+      "requested_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Requested At"
+      },
+      "selected_decision_session": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Selected Decision Session"
+      },
+      "selection": {
+        "enum": [
+          "active",
+          "historical_unresolved",
+          "today",
+          "historical",
+          "none",
+          "ambiguous",
+          "unavailable"
+        ],
+        "title": "Selection",
+        "type": "string"
+      },
+      "status": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Status"
+      },
+      "today_registered": {
+        "anyOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Today Registered"
+      },
+      "today_started": {
+        "anyOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Today Started"
+      },
+      "trigger": {
+        "anyOf": [
+          {
+            "enum": [
+              "manual",
+              "scheduled"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Trigger"
+      }
+    },
+    "required": [
+      "mode",
+      "registration_date",
+      "decision_session",
+      "selection"
+    ],
+    "title": "WorkbenchActivityScopeResponse",
+    "type": "object"
+  },
   "WorkbenchAttentionResponse": {
     "additionalProperties": false,
     "properties": {
@@ -16667,6 +16931,140 @@ export const runtimeContractSchemas = {
       "href"
     ],
     "title": "WorkbenchAttentionResponse",
+    "type": "object"
+  },
+  "WorkbenchCandidateResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "has_more": {
+        "default": false,
+        "title": "Has More",
+        "type": "boolean"
+      },
+      "href": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Href"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "job_status": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Job Status"
+      },
+      "limitations": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/WorkbenchLimitationResponse"
+        },
+        "maxItems": 20,
+        "title": "Limitations",
+        "type": "array"
+      },
+      "quality": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Quality"
+      },
+      "read_status": {
+        "default": "unavailable",
+        "enum": [
+          "verified",
+          "unavailable"
+        ],
+        "title": "Read Status",
+        "type": "string"
+      },
+      "reason_code": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason Code"
+      },
+      "research_as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Research As Of"
+      },
+      "run_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Run Id"
+      },
+      "run_status": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Run Status"
+      },
+      "snapshot_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Snapshot Id"
+      },
+      "symbol": {
+        "title": "Symbol",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "symbol"
+    ],
+    "title": "WorkbenchCandidateResponse",
     "type": "object"
   },
   "WorkbenchCompatibilityResponse": {
@@ -16767,6 +17165,52 @@ export const runtimeContractSchemas = {
       "database_migration_heads"
     ],
     "title": "WorkbenchCompatibilityResponse",
+    "type": "object"
+  },
+  "WorkbenchLimitationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "impact": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Impact"
+      },
+      "kind": {
+        "title": "Kind",
+        "type": "string"
+      },
+      "source": {
+        "enum": [
+          "system",
+          "model"
+        ],
+        "title": "Source",
+        "type": "string"
+      },
+      "text": {
+        "maxLength": 1000,
+        "title": "Text",
+        "type": "string"
+      },
+      "truncated": {
+        "default": false,
+        "title": "Truncated",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "source",
+      "kind",
+      "text"
+    ],
+    "title": "WorkbenchLimitationResponse",
     "type": "object"
   },
   "WorkbenchLoopResponse": {
@@ -16947,6 +17391,16 @@ export const runtimeContractSchemas = {
         "maxItems": 20,
         "title": "Active Orders",
         "type": "array"
+      },
+      "activity": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/WorkbenchActivityResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "attention": {
         "items": {
