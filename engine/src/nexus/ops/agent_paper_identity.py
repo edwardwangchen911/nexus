@@ -104,17 +104,20 @@ async def _read_scope(
                 )
             if calendar.session != calendar.local_date or not calendar.market_open_at <= now < slot:
                 return None
-            if (
-                execution is None or execution.reservation.trigger_mode != "manual"
-            ) and await session.scalar(
-                select(AgentPaperCycleRecord.id)
-                .where(
+            if execution is None or execution.reservation.trigger_mode != "manual":
+                existing_cycle = select(AgentPaperCycleRecord.id).where(
                     AgentPaperCycleRecord.account_id == account_id,
                     AgentPaperCycleRecord.decision_session == calendar.session,
                 )
-                .limit(1)
-            ):
-                return None
+                if execution is not None:
+                    # The native scheduled claim already checks account occupancy.
+                    # An earlier independent manual cycle does not own this slot.
+                    existing_cycle = existing_cycle.where(
+                        AgentPaperCycleRecord.decision_slot_at
+                        == execution.reservation.decision_slot_at
+                    )
+                if await session.scalar(existing_cycle.limit(1)):
+                    return None
             _, candidates = await validate_agent_paper_candidate_batch(
                 session, account_id=account_id, batch_id=batch_id, as_of=now
             )

@@ -83,7 +83,7 @@ async def test_required_preparation_failure_never_freezes_or_retries(monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_at", [None, "prepare", "trigger", "secondary"])
+@pytest.mark.parametrize("fail_at", [None, "prepare", "identity_scope", "trigger", "secondary"])
 @pytest.mark.parametrize("trigger_mode", ["scheduled", "manual_recovery", "synthesis_recovery"])
 async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
     monkeypatch, tmp_path, fail_at, trigger_mode, capsys
@@ -93,12 +93,13 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
     from nexus.ops import agent_paper_once as once
     from nexus.paper.agent_cycle_models import AgentPaperTriggerReservation
 
-    if fail_at == "prepare" and trigger_mode != "scheduled":
+    if fail_at in {"prepare", "identity_scope"} and trigger_mode != "scheduled":
         pytest.skip("Recovery bypasses collection by contract")
     events = []
     original = RuntimeError("private-source-response")
     reservation = AgentPaperTriggerReservation(
         claim_id=UUID(int=8),
+        candidate_batch_id=UUID(int=2),
         decision_session=datetime(2026, 10, 22).date(),
         decision_slot_at=datetime(2026, 10, 22, 15, tzinfo=UTC),
         formal_stage_capacity=trigger_mode == "scheduled",
@@ -131,8 +132,27 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
         events.append("claim")
         return reservation
 
+    original_prepare = preparation.prepare_formal_trigger_inputs
+    if fail_at == "identity_scope":
+        from nexus.ops import agent_paper_identity as identity
+
+        monkeypatch.setattr(
+            preparation,
+            "read_preparation_scope",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    now=datetime(2026, 10, 22, 15, tzinfo=UTC),
+                    calendar_id=UUID(int=10),
+                    candidates=(),
+                )
+            ),
+        )
+        monkeypatch.setattr(identity, "_read_scope", AsyncMock(return_value=None))
+
     async def prepare(*a, **kw):
         events.append("prepare")
+        if fail_at == "identity_scope":
+            return await original_prepare(*a, **kw)
         if fail_at == "prepare":
             raise original
 
@@ -169,9 +189,34 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
         trigger_mode=trigger_mode,
     )
     if fail_at:
-        with pytest.raises(RuntimeError) as caught:
-            await once.trigger_once(settings, request, repo_root=tmp_path, process_environment={})
-        assert caught.value is original
+        with pytest.raises(ValueError if fail_at == "identity_scope" else RuntimeError) as caught:
+            await once.trigger_once(
+                settings,
+                request,
+                repo_root=tmp_path,
+                process_environment={"SEC_CONTACT": "synthetic@example.invalid"},
+            )
+        if fail_at == "identity_scope":
+            import json
+
+            from nexus.ops import agent_paper_loop as loop
+
+            assert str(caught.value) == "AGENT_PAPER_TRIGGER_FAILED"
+            loop._emit_agent_paper_unknown_failure(
+                "execute",
+                datetime(2026, 10, 22, 15, tzinfo=UTC),
+                action=loop.AgentPaperLoopAction.TRIGGER,
+                error=caught.value,
+            )
+            rows = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+            assert rows[0]["failure_phase"] == "research_identity"
+            assert rows[0]["failure_code"] == "SCOPE_UNAVAILABLE"
+            assert rows[-1]["failure_code"] == "AGENT_PAPER_TRIGGER_FAILED"
+            assert rows[-1]["failure_kind"] == "validation"
+            assert rows[-1]["failure_phase"] == "trigger_provider"
+            assert rows[-1]["failure_action"] == "trigger"
+        else:
+            assert caught.value is original
         if fail_at != "secondary":
             assert events[-2:] == ["AGENT_PAPER_TRIGGER_FAILED", "commit"]
         else:
@@ -186,7 +231,7 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
         )
     assert events[:2] == ["claim", "commit"]
     assert events.count("prepare") == (1 if trigger_mode == "scheduled" else 0)
-    assert events.count("trigger") == (0 if fail_at == "prepare" else 1)
+    assert events.count("trigger") == (0 if fail_at in {"prepare", "identity_scope"} else 1)
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,10 @@ from unit.market.test_object_store import FakeS3Client
         "ready",
         "manual_after_slot",
         "scheduled_after_slot",
+        "scheduled_reuse_prior_cycle",
+        "scheduled_reuse_same_slot",
+        "scheduled_reuse_closed",
+        "preopen_reuse_prior_cycle",
         "partially_registered",
         "source_failure",
         "import_mismatch",
@@ -285,6 +289,75 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     collection_dir=prior_dir,
                 )
             clock[0] = now
+        reuse_case = case.startswith(("scheduled_reuse_", "preopen_reuse_"))
+        if reuse_case:
+            # A successful earlier preparation is immutable input, not a reason
+            # to replay the collector when an independent scheduled slot starts.
+            assert await identity.prepare_agent_paper_identity_once(settings, **args) == "prepared"
+            assert len(calls) == 3
+            from integration.test_agent_paper_candidate_batch_pg import PORTFOLIO_ID
+            from nexus.ops import formal_research_preparation as preparation
+            from nexus.paper.agent_cycle import _append_event
+            from nexus.paper.agent_cycle_authority import (
+                load_agent_paper_service_calendar_authority,
+            )
+            from nexus.persistence.models.paper import (
+                PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+            )
+
+            scheduled_slot = now + timedelta(minutes=25)
+            prior_slot = scheduled_slot if case == "scheduled_reuse_same_slot" else now
+            async with factory() as session, session.begin():
+                cycle = AgentPaperCycleRecord(
+                    account_id=ACCOUNT_ID,
+                    portfolio_id=PORTFOLIO_ID,
+                    decision_session=day,
+                    decision_time=prior_slot,
+                    decision_slot_at=prior_slot,
+                    execution_session=day,
+                    universe_snapshot_id=UNIVERSE_ID,
+                    quality_report_id=None,
+                    candidate_batch_id=batch.batch_id,
+                    decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+                    execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+                    candidate_manifest=[],
+                    candidate_hash="a" * 64,
+                    sizing_policy_version="portfolio_allocation_v1",
+                    sizing_policy_hash="d7b719f47edbf3cb7ebb40dbe555a51f717ca581162a72d05c23391b8b083dd7",
+                    execution_locked=True,
+                    created_at=prior_slot,
+                )
+                session.add(cycle)
+                await session.flush()
+                await _append_event(session, cycle, None, "prepared", "CYCLE_PREPARED", {})
+                await _append_event(
+                    session, cycle, "prepared", "unavailable", "RESEARCH_OUTPUT_NOT_ACTIONABLE", {}
+                )
+            if case.startswith("scheduled_reuse_"):
+                clock[0] = scheduled_slot + timedelta(
+                    minutes=5 if case == "scheduled_reuse_closed" else 1
+                )
+
+                # Claim/hash/window authority is tested separately. Keep this
+                # regression on the real DB cycle lookup and identity readback.
+                async def authorized_execution(session, context, *, now):
+                    assert context is args["execution"]
+                    return await load_agent_paper_service_calendar_authority(
+                        session, now=now, expected_calendar_authority_id=calendar_id
+                    )
+
+                monkeypatch.setattr(preparation, "require_preparation_scope", authorized_execution)
+                args["execution"] = SimpleNamespace(
+                    account_id=ACCOUNT_ID,
+                    calendar_id=calendar_id,
+                    reservation=SimpleNamespace(
+                        candidate_batch_id=batch.batch_id,
+                        decision_session=day,
+                        trigger_mode="scheduled",
+                        decision_slot_at=scheduled_slot,
+                    ),
+                )
         if case == "unsafe_parent":
             with pytest.raises(ValueError, match="AGENT_PAPER_IDENTITY_DIRECTORY_INVALID"):
                 await identity.prepare_agent_paper_identity_once(settings, **args)
@@ -292,13 +365,20 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
         else:
             result = await identity.prepare_agent_paper_identity_once(settings, **args)
         success = case in ("ready", "partially_registered", "manual_after_slot")
-        assert result == ("prepared" if success else "unavailable")
+        expected = (
+            "ready"
+            if case == "scheduled_reuse_prior_cycle"
+            else "prepared"
+            if success
+            else "unavailable"
+        )
+        assert result == expected
         diagnostics = [
             json.loads(line)
             for line in capsys.readouterr().err.splitlines()
             if line.startswith('{"event": "agent_paper_preparation_unavailable"')
         ]
-        if not success and case != "unsafe_parent":
+        if not success and case not in {"unsafe_parent", "scheduled_reuse_prior_cycle"}:
             assert len(diagnostics) == 1
             assert diagnostics[0]["failure_phase"] == "research_identity"
             assert (
@@ -308,6 +388,9 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     "import_mismatch": "import",
                     "closed_window": "scope",
                     "scheduled_after_slot": "scope",
+                    "scheduled_reuse_same_slot": "scope",
+                    "scheduled_reuse_closed": "scope",
+                    "preopen_reuse_prior_cycle": "scope",
                     "closed_during_collect": "readback",
                     "closed_during_import": "import",
                     "existing_incomplete": "archive",
@@ -315,7 +398,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             )
         if case != "unsafe_parent":
             assert await identity.prepare_agent_paper_identity_once(settings, **args) == (
-                "ready" if success else "unavailable"
+                "ready" if success or case == "scheduled_reuse_prior_cycle" else "unavailable"
             )
         assert len(calls) == (
             0
@@ -371,9 +454,11 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                 select(func.count())
                 .select_from(ResearchEvidenceRef)
                 .where(ResearchEvidenceRef.source == SOURCE)
-            ) == (2 if success else 0)
+            ) == (2 if success or reuse_case else 0)
             for model in (AgentPaperCycleRecord, Job, PaperOrderRecord, PaperFillRecord):
-                assert await session.scalar(select(func.count()).select_from(model)) == 0
+                assert await session.scalar(select(func.count()).select_from(model)) == (
+                    1 if reuse_case and model is AgentPaperCycleRecord else 0
+                )
     finally:
         await factory.kw["bind"].dispose()
 
