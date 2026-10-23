@@ -336,3 +336,33 @@ async def test_research_only_projection_uses_exact_manifest_without_business_wri
         assert all(item.research_as_of == view.research.research_as_of for item in result)
         assert all(item.limitations == () for item in result)
     assert await business_digest(factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["future", "missing"])
+async def test_completed_run_requires_job_completion_visible_at_read_time(
+    migrated_database_url, finish
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    run_id, _ = await seed_observation(factory, V11)
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, run_id)
+        at = datetime.now(UTC)
+        job = Job(
+            payload={"run_id": str(run_id)}, scope_id=str(run.instrument_id),
+            job_type="agent.paper.research", effective_at=run.decision_time,
+            created_at=run.created_at, started_at=run.created_at,
+            finished_at=at + timedelta(minutes=1) if finish == "future" else None,
+            status="succeeded",
+        )
+        reader = ObservationReadback(session, read_at=at)
+        await reader.prime([run])
+        result = await _project(
+            session, instrument_id=run.instrument_id, symbol="AAPL", run=run,
+            jobs=(job,), reader=reader, read_at=at,
+        )
+        assert result.job_status == "running"
+        assert result.read_status == "unavailable"
+        assert result.quality is None
+        assert result.limitations == ()
+        assert result.reason_code == "RESEARCH_TERMINAL_TIME_UNVERIFIED"

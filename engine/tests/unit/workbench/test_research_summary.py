@@ -155,3 +155,38 @@ def test_impact_excerpt_and_standalone_conclusion_preserve_model_provenance():
     assert items[0].source == "model"
     assert items[0].text == "y" * 1000
     assert items[0].truncated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_verified_job_running_or_cancelled_is_projected(cancelled):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    from nexus.workbench.research_summary import _project, canonical_hash
+
+    at = datetime.now(UTC)
+    run = SimpleNamespace(id=UUID(int=1), instrument_id=UUID(int=2),
+                          data_snapshot_id=UUID(int=3), decision_time=at,
+                          status="abstained" if cancelled else "prepared")
+    job = SimpleNamespace(payload={"run_id": str(run.id)}, scope_id=str(run.instrument_id),
+                          effective_at=at, job_type="agent.paper.research", created_at=at,
+                          started_at=at, finished_at=at if cancelled else None,
+                          status="skipped" if cancelled else "running")
+    content = {"status": "abstained", "role": None,
+               "payload": {"reason": "manual_unused_research_cancelled"}, "intent": None}
+    output = SimpleNamespace(**content, created_at=at, content_hash=canonical_hash(content))
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[output]))
+    result = await _project(session, instrument_id=run.instrument_id, symbol="AAPL",
+                            run=run, jobs=(job,), reader=None, read_at=at)
+    assert result.read_status == "verified"
+    assert result.job_status == ("skipped" if cancelled else "running")
+    assert result.run_status == ("abstained" if cancelled else "prepared")
+    if cancelled:
+        assert result.reason_code == "manual_unused_research_cancelled"
+        assert len(result.limitations) == 1
+        assert result.limitations[0].source == "system"
+    else:
+        session.scalars.assert_not_awaited()

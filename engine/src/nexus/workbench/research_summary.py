@@ -258,6 +258,14 @@ async def _project(
     base = base.model_copy(update={"job_status": status})
     if run.status not in {"completed", "failed", "abstained"}:
         return base.model_copy(update={"read_status": "verified"})
+    # A run/output timestamp can predate its transaction's eventual completion.
+    # Only a terminal job visible at this read cutoff licenses terminal content.
+    if (
+        job.finished_at is None
+        or job.finished_at > read_at
+        or status not in {"succeeded", "failed", "skipped", "dead_letter"}
+    ):
+        return base.model_copy(update={"reason_code": "RESEARCH_TERMINAL_TIME_UNVERIFIED"})
     outputs = tuple(
         await session.scalars(
             select(AgentResearchOutputRecord)
