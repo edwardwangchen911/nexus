@@ -68,7 +68,7 @@ describe("frozen round and research limits", () => {
   });
   it("does not expose unverified text or links and retains sibling candidates", () => {
     const bad = { ...candidate(), read_status: "unavailable" as const, limitations: [{ source: "model" as const, kind: "missing_evidence", text: "UNVERIFIED_SECRET", truncated: false, impact: null }], href: "https://example.test/secret" };
-    render(<ActivitySummary activity={activity(activityScope({ candidates: [bad, { ...candidate(), instrument_id: requestId, symbol: "NVDA", run_status: "running", quality: null, limitations: [] }] }))} />);
+    render(<ActivitySummary activity={activity(activityScope({ candidates: [bad, { ...candidate(), instrument_id: requestId, symbol: "NVDA", run_status: "prepared", job_status: "running", quality: null, limitations: [] }] }))} />);
     expect(screen.queryByText("UNVERIFIED_SECRET")).not.toBeInTheDocument();
     expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).toHaveTextContent("摘要暂不可核验");
     expect(screen.getByRole("article", { name: "AAPL 本轮研究" })).toHaveTextContent("研究质量尚未核验");
@@ -114,4 +114,31 @@ it.each(["candidates", "limitations"] as const)("rejects oversized %s instead of
   render(<ActivitySummary activity={activity(scope)} />);
   expect(screen.getByText("本轮摘要格式不可核验；未展示未核验正文。")).toBeVisible();
   expect(screen.queryByText("历史分母适用范围仍需核对")).not.toBeInTheDocument();
+});
+
+it.each([
+  { run_status: "prepared", job_status: "running", read_status: "verified", reason_code: null, expected: "研究中" },
+  { run_status: "abstained", job_status: "skipped", read_status: "verified", reason_code: "manual_unused_research_cancelled", expected: "未执行（已核验取消）" },
+  { run_status: "completed", job_status: "succeeded", read_status: "unavailable", reason_code: "RESEARCH_OUTPUT_UNAVAILABLE", expected: "研究状态尚未核验" },
+  { run_status: "completed", job_status: "running", read_status: "unavailable", reason_code: null, expected: "研究中" },
+  { run_status: "completed", job_status: "queued", read_status: "unavailable", reason_code: null, expected: "等待执行" },
+  { run_status: "failed", job_status: "failed", read_status: "verified", reason_code: "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN", expected: "研究结果未知" },
+] as const)("uses verified read-time job evidence for $run_status/$job_status/$read_status", ({ expected, ...state }) => {
+  render(<ActivitySummary activity={activity(activityScope({ candidates: [{ ...candidate(), ...state, quality: null, limitations: [] }] }))} />);
+  const card = screen.getByRole("article", { name: "AAPL 本轮研究" });
+  expect(card).toHaveTextContent(expected);
+  expect(card).not.toHaveTextContent("研究已完成");
+  expect(card).toHaveTextContent("本摘要未核验阶段轨迹");
+  if (state.reason_code === "manual_unused_research_cancelled") {
+    expect(card).toHaveTextContent("未使用的研究已按原取消记录收尾");
+    expect(card).not.toHaveTextContent("原因不可核验");
+  }
+});
+
+it.each(["ambiguous", "unavailable"] as const)("does not infer cycle absence from an %s scope", (selection) => {
+  render(<ActivitySummary activity={activity(activityScope({ selection, status: "preparing", cycle_id: null, portfolio_status: "awaiting_cycle" }))} />);
+  const scope = screen.getByRole("region", { name: "正式研究与内部模拟" });
+  expect(scope).toHaveTextContent("组合结论尚未核验");
+  expect(scope).not.toHaveTextContent("尚未创建周期");
+  expect(scope).not.toHaveTextContent("组合判断尚未开始");
 });

@@ -44,6 +44,8 @@ const portfolioStatuses: Record<string, string> = {
 const reasonCopy: Record<string, string> = {
   RESEARCH_OUTPUT_NOT_ACTIONABLE: "研究未通过交易准入；现有原因不说明具体资料缺口",
   MANUAL_PREPARATION_RESULT_UNKNOWN: "原准备操作结果未知", AGENT_PAPER_LOOP_RESULT_UNKNOWN: "原周期结果未知",
+  RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN: "原研究执行结果仍未知",
+  manual_unused_research_cancelled: "未使用的研究已按原取消记录收尾",
   RESEARCH_OUTPUT_UNAVAILABLE: "原研究输出暂不可核验", NO_ORDER_REQUIRED: "按已保存决定，本轮无需下单",
 };
 
@@ -70,7 +72,7 @@ function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
     <p>启动计数交易日：{scope.mode === "research_only" ? "本模式不适用，按纽约登记日期统计" : scope.decision_session ?? "尚未确定"}</p>
     <p><strong>{selections[scope.selection]}</strong>{scope.historical && scope.selection !== "historical_unresolved" ? "（历史记录）" : ""}
       {scope.selection !== "none" && <> · {uncertain ? "当前状态待核对" : statuses[scope.status ?? ""] ?? "运行状态待核对"}
-        {scope.status === "preparing" && scope.cycle_id === null ? "；尚未创建周期" : ""}</>}</p>
+        {!uncertain && scope.status === "preparing" && scope.cycle_id === null ? "；尚未创建周期" : ""}</>}</p>
     {scope.selection !== "none" && <>
       <dl className="workbench-readiness-facts">
         <div><dt>触发来源</dt><dd>{scope.trigger === "manual" ? "手动登记" : scope.trigger === "scheduled" ? "定时调度" : "尚未核验"}</dd></div>
@@ -78,7 +80,7 @@ function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
         <div><dt>选中周期交易日</dt><dd>{scope.mode === "research_only" ? "本模式不适用" : scope.selected_decision_session ?? "尚未提供"}</dd></div>
         <div><dt>历史占用</dt><dd>{occupancyCopy[scope.occupancy]}</dd></div>
       </dl>
-      <p>{scope.mode === "research_only" ? "组合决策与执行：本模式不适用" : portfolioStatuses[scope.portfolio_status ?? ""] ?? "组合结论尚未核验"}</p>
+      <p>{scope.mode === "research_only" ? "组合决策与执行：本模式不适用" : uncertain ? "组合结论尚未核验" : portfolioStatuses[scope.portfolio_status ?? ""] ?? "组合结论尚未核验"}</p>
       {scope.reason_code && <Reason code={scope.reason_code} />}
       {scope.portfolio_reason_code && scope.portfolio_reason_code !== scope.reason_code && <Reason code={scope.portfolio_reason_code} />}
       {scope.candidates.length > 0 ? <div className="workbench-activity__candidates">
@@ -97,16 +99,20 @@ function CandidateSummary({ candidate }: { candidate: ActivityCandidate }): Reac
   const valid = candidate.read_status === "verified";
   const href = valid ? safeDetailHref(candidate.href) : null;
   const limitations = valid ? candidate.limitations : [];
-  const runStatus = candidate.run_status === "completed" ? "研究已完成"
-    : candidate.run_status === "running" ? "研究中"
-      : candidate.run_status === "failed" ? "研究失败"
-        : candidate.run_status === "unknown" ? "研究结果未知"
-          : candidate.job_status === "queued" ? "等待执行" : "研究状态尚未核验";
+  const runStatus = candidate.job_status === "running" ? "研究中"
+    : candidate.job_status === "queued" ? "等待执行"
+      : !valid ? "研究状态尚未核验"
+        : candidate.reason_code === "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN" ? "研究结果未知"
+          : candidate.run_status === "abstained" && candidate.job_status === "skipped"
+            && candidate.reason_code === "manual_unused_research_cancelled" ? "未执行（已核验取消）"
+            : candidate.run_status === "completed" && candidate.job_status === "succeeded" ? "研究已完成"
+              : candidate.run_status === "failed" ? "研究失败"
+                : candidate.run_status === "unknown" ? "研究结果未知" : "研究状态尚未核验";
   return <article aria-label={`${candidate.symbol} 本轮研究`} className="workbench-activity__candidate">
     <h4>{candidate.symbol}</h4>
     <p><strong>{runStatus}</strong> · {valid && candidate.quality === "partial" ? "结论受限" : valid && candidate.quality === "complete" ? "研究内容完整；采用资格仍须独立核验" : "研究质量尚未核验"}</p>
     <p>研究证据截止：{formatDisplayTime(candidate.research_as_of)}</p>
-    <p>阶段细节未记录／未核验。</p>
+    <p>本摘要未核验阶段轨迹。</p>
     {!valid ? <p>摘要暂不可核验；未展示模型正文。</p> : <>
       {limitations.length ? <ul>{limitations.slice(0, 2).map((item, index) => <Limitation key={index} item={item} />)}</ul>
         : <p>{candidate.quality === "partial" ? "结论受限，细分原因未记录／未核验。" : "未提供具体研究限制；不代表已通过正式准入。"}</p>}
@@ -130,7 +136,7 @@ function Limitation({ item }: { item: ActivityLimitation }): React.ReactElement 
   </li>;
 }
 function Reason({ code }: { code: string }): React.ReactElement {
-  return <p>{reasonCopy[code] ?? "已保存固定原因；具体含义请核对原记录"} · <code>{/^[A-Z][A-Z0-9_]{0,120}$/.test(code) ? code : "原因不可核验"}</code></p>;
+  return <p>{reasonCopy[code] ?? "已保存固定原因；具体含义请核对原记录"} · <code>{Object.hasOwn(reasonCopy, code) || /^[A-Z][A-Z0-9_]{0,120}$/.test(code) ? code : "原因不可核验"}</code></p>;
 }
 function countCopy(count: number | null, period: string, verb: string, unit: string): string {
   return count === null ? `${period}${verb}情况待核对` : count === 0 ? `${period}未${verb}` : `${period}已${verb} ${count} ${unit}`;
