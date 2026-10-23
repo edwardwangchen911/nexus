@@ -11,7 +11,7 @@ export type ActivityCandidate = {
 };
 export type ActivityScope = {
   mode: "research_and_paper" | "research_only"; today_registered: number | null; today_started: number | null;
-  registration_date: string; decision_session: string | null;
+  registration_date: string; decision_session: string | null; selected_decision_session?: string | null;
   selection: "active" | "historical_unresolved" | "today" | "historical" | "none" | "ambiguous" | "unavailable";
   request_id: string | null; cycle_id: string | null; requested_at: string | null; status: string | null;
   reason_code: string | null; trigger: "manual" | "scheduled" | null; historical: boolean;
@@ -66,7 +66,8 @@ function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
   const uncertain = ["ambiguous", "unavailable"].includes(scope.selection);
   return <section aria-label={title} className="workbench-activity__scope">
     <h3>{title}</h3>
-    <p>登记日期：{scope.registration_date} · {countCopy(scope.today_registered, "登记")} · {countCopy(scope.today_started, "启动")}</p>
+    <p>手动登记统计日期（纽约）：{scope.registration_date} · {countCopy(scope.today_registered, "今日手动", "登记", "请求")} · {countCopy(scope.today_started, scope.mode === "research_only" ? "今日" : "本交易日", "启动", scope.mode === "research_only" ? "研究请求" : "周期")}</p>
+    <p>启动计数交易日{scope.mode === "research_only" ? "：本模式不适用，按纽约登记日期统计" : scope.decision_session ?? "：尚未确定"}</p>
     <p><strong>{selections[scope.selection]}</strong>{scope.historical && scope.selection !== "historical_unresolved" ? "（历史记录）" : ""}
       {scope.selection !== "none" && <> · {uncertain ? "当前状态待核对" : statuses[scope.status ?? ""] ?? "运行状态待核对"}
         {scope.status === "preparing" && scope.cycle_id === null ? "；尚未创建周期" : ""}</>}</p>
@@ -74,7 +75,7 @@ function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
       <dl className="workbench-readiness-facts">
         <div><dt>触发来源</dt><dd>{scope.trigger === "manual" ? "手动登记" : scope.trigger === "scheduled" ? "定时调度" : "尚未核验"}</dd></div>
         <div><dt>请求登记时间</dt><dd>{formatDisplayTime(scope.requested_at)}</dd></div>
-        <div><dt>权威交易日</dt><dd>{scope.mode === "research_only" ? "本模式不适用" : scope.decision_session ?? "尚未确定"}</dd></div>
+        <div><dt>选中周期交易日</dt><dd>{scope.mode === "research_only" ? "本模式不适用" : scope.selected_decision_session ?? "尚未提供"}</dd></div>
         <div><dt>历史占用</dt><dd>{occupancyCopy[scope.occupancy]}</dd></div>
       </dl>
       <p>{scope.mode === "research_only" ? "组合决策与执行：本模式不适用" : portfolioStatuses[scope.portfolio_status ?? ""] ?? "组合结论尚未核验"}</p>
@@ -131,8 +132,8 @@ function Limitation({ item }: { item: ActivityLimitation }): React.ReactElement 
 function Reason({ code }: { code: string }): React.ReactElement {
   return <p>{reasonCopy[code] ?? "已保存固定原因；具体含义请核对原记录"} · <code>{/^[A-Z][A-Z0-9_]{0,120}$/.test(code) ? code : "原因不可核验"}</code></p>;
 }
-function countCopy(count: number | null, verb: string): string {
-  return count === null ? `今日${verb}情况待核对` : count === 0 ? `今日未${verb}` : `今日已${verb} ${count} 轮`;
+function countCopy(count: number | null, period: string, verb: string, unit: string): string {
+  return count === null ? `${period}${verb}情况待核对` : count === 0 ? `${period}未${verb}` : `${period}已${verb} ${count} ${unit}`;
 }
 function safeDetailHref(href: string | null): string | null {
   const uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -147,6 +148,7 @@ export function validActivity(value: unknown): value is WorkbenchActivity {
   return plain(value) && typeof value.read_at === "string" && ["complete", "partial"].includes(String(value.read_status))
     && Array.isArray(value.scopes) && value.scopes.length <= 2 && new Set(value.scopes.map((scope) => plain(scope) ? scope.mode : null)).size === value.scopes.length
     && value.scopes.every((scope) => plain(scope) && ["research_and_paper", "research_only"].includes(String(scope.mode))
+      && (scope.selected_decision_session === undefined || nullableString(scope.selected_decision_session))
       && nullableCount(scope.today_registered) && nullableCount(scope.today_started) && typeof scope.registration_date === "string"
       && ["active", "historical_unresolved", "today", "historical", "none", "ambiguous", "unavailable"].includes(String(scope.selection))
       && [null, "manual", "scheduled"].includes(scope.trigger as null | string) && typeof scope.historical === "boolean"

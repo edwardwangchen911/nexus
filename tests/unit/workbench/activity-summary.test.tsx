@@ -27,8 +27,8 @@ describe("frozen round and research limits", () => {
   it("separates today's absence, historical unknown, occupancy and registration time", () => {
     render(<ActivitySummary activity={activity()} />);
     const scope = screen.getByRole("region", { name: "正式研究与内部模拟" });
-    expect(scope).toHaveTextContent("今日未登记");
-    expect(scope).toHaveTextContent("今日未启动");
+    expect(scope).toHaveTextContent("今日手动未登记");
+    expect(scope).toHaveTextContent("本交易日未启动");
     expect(scope).toHaveTextContent("历史未决");
     expect(scope).toHaveTextContent("结果未知");
     expect(scope).toHaveTextContent("仍有未解除占用");
@@ -82,4 +82,14 @@ describe("frozen round and research limits", () => {
     rerender(<ActivitySummary activity={{ scopes: [{ candidates: "bad" }] }} />);
     expect(screen.getByText("本轮摘要格式不可核验；未展示未核验正文。")).toBeVisible();
   });
+});
+
+it("keeps today's count session distinct from a selected historical cycle and labels manual registration", () => {
+  render(<ActivitySummary activity={activity(activityScope({ today_registered: 0, today_started: 1,
+    decision_session: "2026-10-23", selected_decision_session: "2026-10-22", selection: "historical_unresolved" }))} />);
+  const scope = screen.getByRole("region", { name: "正式研究与内部模拟" });
+  expect(scope).toHaveTextContent("今日手动未登记");
+  expect(scope).toHaveTextContent("本交易日已启动 1 周期");
+  expect(scope).toHaveTextContent("启动计数交易日2026-10-23");
+  expect(scope).toHaveTextContent("选中周期交易日2026-10-22");
 });

@@ -302,7 +302,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
     await page.waitForLoadState("networkidle");
     const summary = page.getByRole("region", { name: "本轮运行与研究限制" });
     await expect(summary).toContainText("组合判断暂缓");
-    await expect(summary.getByRole("region", { name: "纯研究" })).toContainText("今日未登记");
+    await expect(summary.getByRole("region", { name: "纯研究" })).toContainText("今日手动未登记");
     await expect(summary.getByRole("article", { name: "AAPL 本轮研究" })).toContainText("研究已完成 · 结论受限");
     await expect(summary.getByRole("article", { name: "NVDA 本轮研究" })).toContainText("等待执行");
     const expand = summary.getByText("展开更多已保存限制", { exact: true });
