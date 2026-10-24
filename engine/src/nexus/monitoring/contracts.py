@@ -37,8 +37,12 @@ class PriceReviewCondition(MonitoringModel):
     def _positive_decimal(cls, value: str) -> str:
         parsed = Decimal(value)
         exponent = parsed.as_tuple().exponent
-        if (parsed <= 0 or len(parsed.as_tuple().digits) > 38
-                or not isinstance(exponent, int) or exponent < -12):
+        if (
+            parsed <= 0
+            or len(parsed.as_tuple().digits) > 38
+            or not isinstance(exponent, int)
+            or exponent < -12
+        ):
             raise ValueError("MONITOR_THRESHOLD_INVALID")
         return value
 

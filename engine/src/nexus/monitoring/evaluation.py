@@ -103,7 +103,9 @@ def compile_proposal(
             review.decision != "accepted"
             or review.proposal_hash != proposal.content_hash
             or not review.rationale.strip()
-            or any(ref not in evidence_refs or ref.available_at > now for ref in review.evidence_refs)
+            or any(
+                ref not in evidence_refs or ref.available_at > now for ref in review.evidence_refs
+            )
             for review in reviews.values()
         )
     ):
