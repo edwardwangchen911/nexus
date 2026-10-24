@@ -5,6 +5,7 @@ normal preview and add bounded synthetic bytes only to a tool projection. Native
 snapshot, claim, Job, budget and transactions remain real; no Worker or SDK runs.
 """
 
+import asyncio
 from datetime import timedelta
 from uuid import UUID
 
@@ -74,6 +75,8 @@ async def normal_slot(factory, settings, captured, pointer):
         "published_replay",
         "actual_wire",
         "actual_base_wire",
+        "deadline",
+        "deadline_exit",
     ],
 )
 async def test_unpublished_daily_capacity_rollback_is_exact(
@@ -121,6 +124,25 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
     actual_wire = mode in {"actual_wire", "actual_base_wire"}
     real_preview = module.preview_daily_event_capacity
     measured_wire = []
+    deadlines = []
+    timeout_waiter = asyncio.Event()
+    timeout_exited = []
+    admission_task = asyncio.current_task()
+    if mode == "deadline_exit":
+        original_exit = module.DailyEventCapacityScope.__aexit__
+        real_monotonic = module._monotonic
+
+        async def expired_exit(scope, exc_type, exc_value, traceback):
+            if exc_type is None and scope.deadline is not None:
+                # The real scope performs its final synchronous expiry check on
+                # exit. Advance only its clock, after all native Job/hold writes.
+                monkeypatch.setattr(module, "_monotonic", lambda: scope.deadline + 1)
+            try:
+                return await original_exit(scope, exc_type, exc_value, traceback)
+            finally:
+                monkeypatch.setattr(module, "_monotonic", real_monotonic)
+
+        monkeypatch.setattr(module.DailyEventCapacityScope, "__aexit__", expired_exit)
     if actual_wire:
         original_tools = module.database_read_only_tools
         original_envelope = module.candidate_capacity_envelope
@@ -163,6 +185,13 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
         bundle = paper.get("pending_monitoring_v2")
         gap = paper.get("pending_monitoring_v2_gap")
         seen.append((run.id, run.instrument_id, bundle is not None, gap is not None))
+        if mode in {"typed_only", "late_member", "deadline", "deadline_exit"}:
+            scope = module._current_scope.get()
+            assert scope is not None, "normal pool must own the common capacity deadline"
+            if bundle is not None or gap is not None:
+                scope.activate()
+            if scope.deadline is not None:
+                deadlines.append(scope.deadline)
         if run.instrument_id != pointer.instrument_id:
             return
         if bundle is not None:
@@ -197,6 +226,18 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
                     ),
                 )
             )
+            if mode == "deadline":
+                assert staged_counts == [(2, 2)]
+                assert asyncio.current_task() is admission_task
+                assert scope._timeout is not None
+                # Event control, not a subsecond wall-clock correctness window:
+                # cancel on the next loop tick, with two unpublished Jobs/holds.
+                scope._timeout.reschedule(asyncio.get_running_loop().time() - 1)
+                try:
+                    await timeout_waiter.wait()
+                finally:
+                    timeout_exited.append(True)
+                raise AssertionError("expired admission scope must cancel the waiting preview")
             if actual_wire:
                 await real_preview(session, run)
                 return
@@ -211,7 +252,7 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
 
     monkeypatch.setattr(module, "preview_daily_event_capacity", preview, raising=False)
     monkeypatch.setattr(codex_staged, "invoke_codex", no_sdk)
-    if mode == "late_member":
+    if mode in {"late_member", "deadline", "deadline_exit"}:
         # Change only deterministic loop iteration, not the frozen candidate set,
         # identity, hash, materials or admission entry; exercise two prior holds.
         parse = agent_cycle.parse_candidate_manifest
@@ -228,15 +269,33 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
     try:
         async with factory() as session, session.begin():
             result = await agent_cycle.start_schwab_agent_paper_cycle(session, **arguments)
-        success = mode not in {"base_too_large", "actual_base_wire", "noncapacity"}
+        success = mode not in {
+            "base_too_large",
+            "actual_base_wire",
+            "noncapacity",
+            "deadline",
+            "deadline_exit",
+        }
         assert result.result_code == (
             "RESEARCH_JOBS_PREPARED" if success else "RESEARCH_ADMISSION_UNAVAILABLE"
         ), result
         assert sdk_calls == []
         target_calls = [row for row in seen if row[1] == pointer.instrument_id]
         assert [row[2:] for row in target_calls] == (
-            [(True, False), (False, True)] if mode != "noncapacity" else [(True, False)]
+            [(True, False), (False, True)]
+            if mode not in {"noncapacity", "deadline"}
+            else [(True, False)]
         )
+        if mode in {"typed_only", "late_member"}:
+            assert len(deadlines) >= 2 and len(set(deadlines)) == 1
+        if mode == "deadline":
+            assert timeout_exited == [True]
+            assert not timeout_waiter.is_set()
+            checkpoint = list(seen)
+            timeout_waiter.set()
+            await asyncio.sleep(0)
+            assert seen == checkpoint and asyncio.current_task() is admission_task
+            assert module._current_scope.get() is None
         if actual_wire:
             assert len(measured_wire) == 2
             assert measured_wire[0][0] > measured_wire[0][1]
