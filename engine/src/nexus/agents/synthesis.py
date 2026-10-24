@@ -263,6 +263,7 @@ def synthesize_intent(
     daily_pending_proposal = None
     from nexus.monitoring.daily_contracts import (
         compile_daily_pending_proposal,
+        daily_context_from_paper,
         daily_context_identity,
     )
 
@@ -274,8 +275,8 @@ def synthesize_intent(
         paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
             "monitor_context"
         )
-        context = paper.get("pending_monitoring") if isinstance(paper, dict) else None
         try:
+            context = daily_context_from_paper(paper)
             context_hash, trigger_ids = daily_context_identity(context)
             daily_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
             daily_pending_proposal = compile_daily_pending_proposal(

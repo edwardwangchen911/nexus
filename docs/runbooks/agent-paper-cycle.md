@@ -289,6 +289,14 @@ orchestrator 对冻结集合逐项标记 addressed 或 unresolved，bear 与 evi
 此可选字段不新增表或迁移；有gap的新快照须使用支持该字段的读取版本。部署回滚仍需
 保留0096及新冻结输入的读取支持，不把旧镜像能启动当作数据兼容证明。
 
+新typed历史复核使用独立`pending_monitoring_v2`及0097消费回执，不改旧Run/Trigger归属。
+原已分配成员只允许精确原Output中unresolved且known settled的正常终态；known-failed或
+已接受unknown不能借此变为known。原件缺失/容量超限明确`pending_monitoring_v2_gap`，
+两种pending与两种gap互斥。新daily两审/审计支持/精确采纳后仅消费addressed；与当前两kind
+接替原子提交，迟到冲突或第二类失败不留下半份消费。存在v2 context/proof后禁止降级0097，
+兼容回滚镜像须保留其读取及原0096支持。本地候选的wire/token退包与完整页面验收尚待收口，
+不得据正常case通过就开启业务调度或宣称全容量可用。
+
 `NEXUS_MONITOR_DAILY_SDK_CALL_LIMIT` 默认 9，范围 3–90；每笔准入持有 3 次调用额度，
 按账户及交易日累计，同日生效上限不超过此前已冻结上限。此约束独立于美元费用，
 订阅估价为零也不能无限调用，未知或失败不返还调用额度。

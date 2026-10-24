@@ -898,7 +898,31 @@ class StagedCodexCommittee(CodexCommittee):
             )
         if daily:
             context = daily_context_from_inputs(frozen_inputs)
-            if daily_gap_from_inputs(frozen_inputs) is not None:
+            if isinstance(context, dict) and context.get("purpose") == "daily_monitor_context_v2":
+                payload["instructions"] = cast(str, payload["instructions"]) + (
+                    " This daily study includes a frozen historical event bundle. Review exactly "
+                    "trigger_checks, their original theses and exact filing text in materials. "
+                    "materials.payload.parents reference the complete parent_theses by output_id; "
+                    "each thesis and its original audit appears once. Custody bytes remain in "
+                    "the immutable source snapshot; every declared document text remains here. "
+                    "Other archived batch members are historical context, not additional pending "
+                    "members. Only orchestrator proposes the complete daily_pending_proposal. "
+                    "A new baseline or plan does not consume an event. Mark missing or unsupported "
+                    "effects unresolved; do not reinterpret old outcomes, fees or trading gates. "
+                    "Bear and evidence_audit review the unchanged exact proposal and each member; "
+                    "portfolio may echo its hash only after both accept and the audit supports it."
+                )
+            gap = daily_gap_from_inputs(frozen_inputs)
+            if isinstance(gap, dict) and gap.get("purpose") == "daily_monitor_gap_v2":
+                payload["instructions"] = cast(str, payload["instructions"]) + (
+                    " The frozen pending_monitoring_v2_gap records the exact reason an optional "
+                    "historical event bundle is unavailable. Those events are not reviewed or "
+                    "consumed here. Do not infer coverage from a newer baseline or monitor plan. "
+                    "Return null daily_pending_proposal, daily_pending_review and "
+                    "daily_pending_adoption_hash; continue the normal study under all existing "
+                    "evidence, audit and execution gates."
+                )
+            elif gap is not None:
                 payload["instructions"] = cast(str, payload["instructions"]) + (
                     " The frozen pending_monitoring_gap records an optional historical review "
                     "price bundle exceeding capacity. These events are not reviewed or consumed by "

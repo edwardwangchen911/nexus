@@ -489,3 +489,33 @@ Worker已知/未知结算及无消费、非法原件拒绝、旧消费回执/增
 复核无新增P1/P2。初始新拒绝测试误假定内部异常透传及cycle有可变status，已改为核对正常
 unavailable回执和append-only事件；失败日志保留，生产拒绝及原有断言未放宽。全部模型/
 来源/通知为替身，未接业务数据库或启动业务宿主；完整Goal继续保持未完成。
+
+### 2026-10-25 独立日研究消费旧typed未解决事件（本地集成）
+
+正常三股准备可冻结daily_monitor_context_v2。原assigned成员须精确对应原批次/Run/Job/
+Output/正文、known settled且原market_state明确unresolved；不接known-failed，不把已接受
+unknown当known。历史依据按原prepared_at/Job.finished_at核验，新T0另冻当前两kind前代。
+缺件、损坏、完整count>32或总材料>256KiB转gap，不截集合，不豁免日研究自身门禁。
+
+SDK复用原daily proposal/双审/采纳schema，完整context hash绑定精确typed成员与正文。
+模型视图只移除重复父论点和归档bytes副本，完整正文、原论点与原审计仍在；原Snapshot不改，
+frozen_context_hash绑定原完整材料。原wire/token/时效/执行门禁及调用数保持。
+
+0097独立append-only event receipt与旧0092/0096跨表锁同trigger排他；新两类coverage/
+合法plan/addressed proof同事务。前代冲突两类superseded且零proof；第二类安装失败回滚
+所有新plan/proof再落双gap。unknown无proof、不释放费用预算。historical reader不因其余
+未消费成员后来正常准入而改变原冻结，当前被消费项自身仍精确核live归属。pending/API统一
+读新proof；损坏proof拒绝且presence继续围栏，API用量回归原Run，不自动重派旧请求。
+
+材料6PG+9unit（127.47秒）、历史后分配RED→GREEN；最终typed DB21项通过（286.34秒）。
+根正常旧3unresolved→新三股九阶段→3proof+两类实际installed+API读回最终强正例通过
+（261.10秒）；新超时未知与第二类失败整体回滚2项通过（389.39秒）。旧Run/Output/hash/
+触发归属/快照保持。最初完整wire超限在模型前真实拒绝，去重复后原cap通过，不改业务断言。
+完整fast6826通过/10skip/1deselected，但旧固定head断言失败；已同步实际0097authority，
+57定向及最后12项unit通过，659源Mypy、Ruff/format/diff通过。非远端CI或真实模型验收。
+
+尚需收口：≤256KiB材料仍可能超实际wire/token，须在首次调用前整组退gap，不能放宽限额
+或让可选包永久挡日研究；部分覆盖后其余准入/损坏proof身份用量定向PG、旧plan过期换代、
+veto/unresolved完整native矩阵亦待补。之后API/BFF/实际页面、全diff指定Chat终审、最终
+同head全部必需CI、最终镜像/兼容0097及新输入回滚/合入部署、自然市场证据。业务schema
+未迁移，真实模型/来源/通知/业务宿主未调用，旧未知保护保持，完整Goal未完成。

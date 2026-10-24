@@ -140,7 +140,10 @@ async def install_disclosure_plan(
     source = await load_qualified_source(
         session, account_id=account_id, output_id=output_id, now=now
     )
-    if isinstance(source.context, MixedMonitorContext):
+    if isinstance(source.context, MixedMonitorContext) or (
+        isinstance(source.context, AgentPaperResearchContext)
+        and getattr(source.context, "pending_monitoring_v2", None) is not None
+    ):
         raise ValueError("MONITOR_MIXED_ATOMIC_RECONCILIATION_REQUIRED")
     return await _install_mixed_or_legacy_disclosure(
         session,

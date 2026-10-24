@@ -20,6 +20,7 @@ from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.monitoring import (
     MonitorCheck,
     MonitorCoverageReceipt,
+    MonitorDailyEventReceipt,
     MonitorDailyTriggerReceipt,
     MonitorPlan,
     MonitorTrigger,
@@ -150,6 +151,7 @@ async def read_monitoring_view(
                 AgentResearchRunRecord,
                 OutboxEvent,
                 MonitorDailyTriggerReceipt,
+                MonitorDailyEventReceipt,
             )
             .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
             .outerjoin(
@@ -157,9 +159,19 @@ async def read_monitoring_view(
                 MonitorDailyTriggerReceipt.trigger_id == MonitorTrigger.id,
             )
             .outerjoin(
+                MonitorDailyEventReceipt,
+                (MonitorDailyEventReceipt.trigger_id == MonitorTrigger.id)
+                & (MonitorDailyEventReceipt.created_at <= now)
+                & (MonitorDailyEventReceipt.observed_at <= now),
+            )
+            .outerjoin(
                 AgentResearchRunRecord,
                 AgentResearchRunRecord.id
-                == func.coalesce(MonitorTrigger.research_run_id, MonitorDailyTriggerReceipt.run_id),
+                == func.coalesce(
+                    MonitorDailyEventReceipt.run_id,
+                    MonitorDailyTriggerReceipt.run_id,
+                    MonitorTrigger.research_run_id,
+                ),
             )
             .outerjoin(OutboxEvent, OutboxEvent.id == MonitorTrigger.outbox_id)
             .where(
@@ -192,7 +204,22 @@ async def read_monitoring_view(
         )
     )
     triggers = []
-    for trigger, checked, child, notification, daily in rows:
+    for trigger, checked, child, notification, daily, daily_v2 in rows:
+        invalid_proof = False
+        if daily_v2 is not None and max(daily_v2.created_at, daily_v2.observed_at) <= now:
+            from nexus.monitoring.daily_v2_consumption import validate_daily_event_receipt
+
+            invalid_proof = not await validate_daily_event_receipt(session, daily_v2.id)
+            if not invalid_proof:
+                daily = daily_v2
+            else:
+                # A rejected proof cannot supply another Run's usage for the
+                # original trigger identity returned below.
+                child = (
+                    None
+                    if trigger.research_run_id is None
+                    else await session.get(AgentResearchRunRecord, trigger.research_run_id)
+                )
         covered = daily is not None and max(daily.created_at, daily.observed_at) <= now
         usage: UsageStatus = (
             "not_started"
@@ -224,7 +251,7 @@ async def read_monitoring_view(
                 trigger_id=trigger.id,
                 cause=trigger.cause,
                 checked_at=checked.checked_at,
-                status="covered" if covered else trigger.status,
+                status="unknown" if invalid_proof else "covered" if covered else trigger.status,
                 blocked_reason=blocked,
                 run_id=(daily.run_id if covered else trigger.research_run_id),
                 usage_status=usage,

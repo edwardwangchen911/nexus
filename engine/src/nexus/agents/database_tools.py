@@ -14,7 +14,7 @@ from sqlalchemy.orm import aliased
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
 from nexus.agents.paper_context import SOURCE as PAPER_CONTEXT_SOURCE
-from nexus.agents.paper_context import read_agent_paper_research_context
+from nexus.agents.paper_context import AgentPaperResearchContext, read_agent_paper_research_context
 from nexus.agents.portfolio_context import (
     ContextDiagnostic,
     PortfolioResearchContext,
@@ -133,6 +133,18 @@ def _context_payload(context: PortfolioResearchContext, *, exclude: set[str]) ->
     if isinstance(comparison, dict) and context.proposal_comparison is not None:
         comparison["economic_comparison"] = assess_frozen_comparison(context.proposal_comparison)
     return payload
+
+
+def _paper_monitor_model_view(context: AgentPaperResearchContext) -> dict[str, object]:
+    value = context.model_dump(mode="json")
+    if context.pending_monitoring_v2 is not None:
+        from nexus.monitoring.daily_v2_view import daily_context_model_view
+
+        value["pending_monitoring_v2"] = daily_context_model_view(
+            value["pending_monitoring_v2"],
+            frozen_context_hash=context.pending_monitoring_v2.content_hash,
+        )
+    return value
 
 
 class _BoundDatabaseExecutors:
@@ -349,7 +361,7 @@ class _BoundDatabaseExecutors:
                         else {}
                     ),
                     **(
-                        {"agent_paper_context": paper_context_value.model_dump(mode="json")}
+                        {"agent_paper_context": _paper_monitor_model_view(paper_context_value)}
                         if record.source == PAPER_CONTEXT_SOURCE
                         and record.id == paper_context_id
                         and paper_context_value is not None

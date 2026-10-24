@@ -11,14 +11,20 @@ from sqlalchemy.sql.elements import ColumnElement
 from nexus.agents.committee import AgentRole
 from nexus.agents.paper_context import AgentPaperResearchContext
 from nexus.monitoring.daily_contracts import DailyPendingReview
-from nexus.persistence.models.monitoring import MonitorDailyTriggerReceipt, MonitorTrigger
+from nexus.persistence.models.monitoring import (
+    MonitorDailyEventReceipt,
+    MonitorDailyTriggerReceipt,
+    MonitorTrigger,
+)
 
 if TYPE_CHECKING:
     from nexus.monitoring.source_qualification import QualifiedSource
 
 
 def not_daily_covered() -> ColumnElement[bool]:
-    return ~exists(
+    from nexus.monitoring.daily_v2_consumption import not_daily_event_consumed
+
+    return not_daily_event_consumed() & ~exists(
         select(MonitorDailyTriggerReceipt.id).where(
             MonitorDailyTriggerReceipt.trigger_id == MonitorTrigger.id
         )
@@ -27,7 +33,16 @@ def not_daily_covered() -> ColumnElement[bool]:
 
 async def daily_receipt(
     session: AsyncSession, trigger_id: UUID
-) -> MonitorDailyTriggerReceipt | None:
+) -> MonitorDailyTriggerReceipt | MonitorDailyEventReceipt | None:
+    from nexus.monitoring.daily_v2_consumption import validate_daily_event_receipt
+
+    newer = await session.scalar(
+        select(MonitorDailyEventReceipt).where(MonitorDailyEventReceipt.trigger_id == trigger_id)
+    )
+    if newer is not None:
+        if not await validate_daily_event_receipt(session, newer.id):
+            raise ValueError("MONITOR_DAILY_EVENT_RESULT_UNVERIFIED")
+        return newer
     row: MonitorDailyTriggerReceipt | None = await session.scalar(
         select(MonitorDailyTriggerReceipt).where(
             MonitorDailyTriggerReceipt.trigger_id == trigger_id

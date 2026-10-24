@@ -11,9 +11,10 @@ from nexus.persistence.models.monitoring import MonitorTrigger
 
 
 def not_mixed_consumed() -> ColumnElement[bool]:
+    from nexus.monitoring.daily_v2_consumption import not_daily_event_consumed
     from nexus.persistence.models.monitoring import MonitorMixedEventReceipt
 
-    return ~exists(
+    return not_daily_event_consumed() & ~exists(
         select(MonitorMixedEventReceipt.id).where(
             MonitorMixedEventReceipt.trigger_id == MonitorTrigger.id
         )
@@ -27,7 +28,12 @@ class MixedBatchReadback(TypedDict):
 
 
 async def mixed_batch_readback(session: AsyncSession, batch_id: UUID) -> MixedBatchReadback:
-    from nexus.persistence.models.monitoring import MonitorCoverageReceipt, MonitorIncrement
+    from nexus.monitoring.daily_v2_consumption import validate_daily_event_receipt
+    from nexus.persistence.models.monitoring import (
+        MonitorCoverageReceipt,
+        MonitorDailyEventReceipt,
+        MonitorIncrement,
+    )
 
     total = (
         await session.scalar(
@@ -53,8 +59,21 @@ async def mixed_batch_readback(session: AsyncSession, batch_id: UUID) -> MixedBa
         )
     )
     kinds = {row.kind for row in rows}
+    invalid = 0
+    for proof in await session.scalars(
+        select(MonitorDailyEventReceipt)
+        .join(MonitorTrigger, MonitorTrigger.id == MonitorDailyEventReceipt.trigger_id)
+        .where(MonitorTrigger.batch_id == batch_id)
+    ):
+        if not await validate_daily_event_receipt(session, proof.id):
+            invalid += 1
+    unresolved += invalid
     return {
-        "impact_review": "verified" if total > 0 and unresolved == 0 else "not_verified",
+        "impact_review": "unverified"
+        if invalid
+        else "verified"
+        if total > 0 and unresolved == 0
+        else "not_verified",
         "coverage": (
             "unresolved"
             if kinds != {"price", "disclosure"}

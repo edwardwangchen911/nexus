@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from typing import Literal
 from uuid import UUID
@@ -14,7 +15,10 @@ from nexus.monitoring.contracts import MonitoringModel
 
 def daily_context_identity(value: object) -> tuple[str, tuple[UUID, ...]]:
     """Read the identity of a context already qualified by the normal snapshot reader."""
-    if not isinstance(value, dict) or value.get("purpose") != "daily_monitor_context_v1":
+    if not isinstance(value, dict) or value.get("purpose") not in {
+        "daily_monitor_context_v1",
+        "daily_monitor_context_v2",
+    }:
         raise ValueError("DAILY_PENDING_CONTEXT_INVALID")
     checks = value.get("trigger_checks")
     if not isinstance(checks, list) or not 1 <= len(checks) <= 32:
@@ -25,26 +29,45 @@ def daily_context_identity(value: object) -> tuple[str, tuple[UUID, ...]]:
         raise ValueError("DAILY_PENDING_CONTEXT_INVALID") from None
     if len(set(ids)) != len(ids):
         raise ValueError("DAILY_PENDING_CONTEXT_INVALID")
+    if value.get("purpose") == "daily_monitor_context_v2" and "frozen_context_hash" in value:
+        digest = value["frozen_context_hash"]
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("DAILY_PENDING_CONTEXT_INVALID")
+        return digest, ids
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest(), ids
 
 
 def daily_context_from_inputs(inputs: dict[str, object]) -> object | None:
-    return _daily_field_from_inputs(inputs, "pending_monitoring")
+    return _daily_fields_from_inputs(inputs, ("pending_monitoring", "pending_monitoring_v2"))
+
+
+def daily_context_from_paper(paper: object) -> object | None:
+    if not isinstance(paper, dict):
+        return None
+    found = [
+        paper[key] for key in ("pending_monitoring", "pending_monitoring_v2") if paper.get(key)
+    ]
+    if len(found) > 1:
+        raise ValueError("DAILY_PENDING_CONTEXT_INVALID")
+    return found[0] if found else None
 
 
 def daily_gap_from_inputs(inputs: dict[str, object]) -> object | None:
-    return _daily_field_from_inputs(inputs, "pending_monitoring_gap")
+    return _daily_fields_from_inputs(
+        inputs, ("pending_monitoring_gap", "pending_monitoring_v2_gap")
+    )
 
 
-def _daily_field_from_inputs(inputs: dict[str, object], field: str) -> object | None:
+def _daily_fields_from_inputs(inputs: dict[str, object], fields: tuple[str, ...]) -> object | None:
     security = inputs.get("security_snapshot")
     if not isinstance(security, dict):
         return None
     contexts = [
         paper[field]
         for item in security.get("items", [])
+        for field in fields
         if isinstance(item, dict)
         and isinstance(paper := item.get("agent_paper_context"), dict)
         and paper.get(field) is not None

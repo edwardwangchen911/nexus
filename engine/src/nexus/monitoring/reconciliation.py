@@ -251,6 +251,36 @@ async def reconcile_account_results(
         "awaiting_native_finish": 0,
     }
     for run in candidates:
+        snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        paper = None if snapshot is None else snapshot.payload.get("agent_paper_context")
+        if isinstance(paper, dict) and paper.get("pending_monitoring_v2") is not None:
+            from nexus.monitoring.daily_v2_reconciliation import (
+                DailyEventReplacementRejected,
+                reconcile_daily_event_run,
+                record_daily_event_replacement_gap,
+            )
+
+            try:
+                async with session.begin_nested():
+                    daily_receipts = await reconcile_daily_event_run(
+                        session, account_id=account_id, run=run, now=now
+                    )
+            except DailyEventReplacementRejected:
+                daily_receipts = await record_daily_event_replacement_gap(
+                    session, account_id=account_id, run=run, now=now
+                )
+            except ValueError:
+                # Existing damaged/partial proof is a refusal, not an empty queue
+                # that may dispatch another research job.
+                counts["unverified"] += 1
+                continue
+            if daily_receipts is None:
+                counts["awaiting_native_finish"] += 1
+            else:
+                for daily_receipt in daily_receipts:
+                    counts["recorded"] += 1
+                    counts[daily_receipt.status] += 1
+            continue
         existing = await session.scalar(
             select(MonitorCoverageReceipt).where(
                 MonitorCoverageReceipt.kind == "price",

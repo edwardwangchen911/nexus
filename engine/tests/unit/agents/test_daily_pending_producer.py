@@ -62,7 +62,15 @@ def test_v9_is_explicit_and_v8_remains_available():
 
 
 async def produce(
-    monkeypatch, *, mutation=None, inline=False, pending=True, n=2, capture=None, gap=False
+    monkeypatch,
+    *,
+    mutation=None,
+    inline=False,
+    pending=True,
+    n=2,
+    capture=None,
+    gap=False,
+    v2=False,
 ):
     request, evidence, _ = _authority()
     evidence = tuple(
@@ -72,9 +80,11 @@ async def produce(
         evidence += (evidence[0].model_copy(update={"source": "sec", "object_id": "other"}),)
     prompts = prompts_for()
     frozen = context(n) if pending else None
+    if frozen is not None and v2:
+        frozen = {**frozen, "purpose": "daily_monitor_context_v2", "materials": []}
     paper = {"execution_locked": True}
     if frozen is not None:
-        paper["pending_monitoring"] = frozen
+        paper["pending_monitoring_v2" if v2 else "pending_monitoring"] = frozen
     if gap:
         assert frozen is None
         paper["pending_monitoring_gap"] = {
@@ -278,6 +288,23 @@ async def test_daily_capacity_gap_remains_unreviewed_through_all_stages(monkeypa
 async def test_daily_capacity_gap_rejects_isolated_adoption_hash(monkeypatch):
     with pytest.raises(ValueError, match="DAILY_PENDING_ADOPTION_WITHOUT_CONTEXT"):
         await produce(monkeypatch, pending=False, gap=True, mutation="adoption")
+
+
+@pytest.mark.asyncio
+async def test_daily_v2_uses_exact_frozen_context_without_changing_output_schema(monkeypatch):
+    intent, outputs, seen, _ = await produce(monkeypatch, v2=True)
+    proposal = outputs[0].daily_pending_proposal
+    assert proposal is not None and intent.daily_pending_proposal == proposal
+    assert all("historical event" in payload["instructions"] for payload in seen)
+    assert all(payload["daily_pending_context_hash"] == proposal.context_hash for payload in seen)
+    assert len(seen) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["context", "missing_member", "foreign_member"])
+async def test_daily_v2_rejects_wrong_or_incomplete_frozen_members(monkeypatch, mutation):
+    with pytest.raises(ValueError):
+        await produce(monkeypatch, v2=True, mutation=mutation)
 
 
 @pytest.mark.asyncio
