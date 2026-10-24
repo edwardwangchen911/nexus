@@ -368,3 +368,34 @@ class MonitorMixedEventReceipt(ImmutableCreatedAt, Base):
     proposal_hash: Mapped[str] = mapped_column(String(64))
     review_hash: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class MonitorDailyEventReceipt(ImmutableCreatedAt, Base):
+    """A future normal daily result addresses an old event without rewriting ownership."""
+
+    __tablename__ = "research_monitor_daily_event_receipts"
+    __table_args__ = (
+        UniqueConstraint("trigger_id"),
+        CheckConstraint("kind IN ('price','disclosure')", name="kind_allowed"),
+        CheckConstraint("context_hash ~ '^[0-9a-f]{64}$'", name="context_hash_canonical"),
+        CheckConstraint("proposal_hash ~ '^[0-9a-f]{64}$'", name="proposal_hash_canonical"),
+        CheckConstraint("review_hash ~ '^[0-9a-f]{64}$'", name="review_hash_canonical"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    trigger_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_triggers.id"))
+    kind: Mapped[str] = mapped_column(String(16))
+    event_key: Mapped[str] = mapped_column(String(128))
+    original_run_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_research_runs.id"))
+    original_output_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_research_outputs.id"))
+    batch_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_monitor_batches.id"))
+    materials_snapshot_id: Mapped[UUID | None] = mapped_column(ForeignKey("data_snapshots.id"))
+    cycle_id: Mapped[UUID] = mapped_column(ForeignKey("agent_paper_cycles.id"))
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    output_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_outputs.id"))
+    snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    context_hash: Mapped[str] = mapped_column(String(64))
+    proposal_hash: Mapped[str] = mapped_column(String(64))
+    review_hash: Mapped[str] = mapped_column(String(64))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
