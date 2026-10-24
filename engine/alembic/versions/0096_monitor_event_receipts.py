@@ -39,6 +39,21 @@ BEGIN
 END $$;
 """
 
+_REFS = r"""
+CREATE FUNCTION public.nexus_mixed_receipt_refs_valid(refs jsonb, snapshot_id uuid, instrument_id uuid, context_hash text)
+RETURNS boolean LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $$
+BEGIN
+ IF jsonb_typeof(refs) IS DISTINCT FROM 'array' THEN RETURN false; END IF;
+ IF jsonb_array_length(refs) NOT BETWEEN 1 AND 3 THEN RETURN false; END IF;
+ RETURN EXISTS(SELECT 1 FROM jsonb_array_elements(refs) x WHERE x->>'source'='nexus_monitor_increment_v2' AND x->>'content_hash'=$4)
+  AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(refs) x WHERE NOT EXISTS(
+    SELECT 1 FROM public.agent_data_snapshot_evidence e WHERE e.data_snapshot_id=$2 AND e.instrument_id=$3
+      AND e.source=x->>'source' AND e.provider_object_id=x->>'object_id'
+      AND e.available_at=(x->>'available_at')::timestamptz AND e.location=x->>'location'
+      AND e.content_hash=x->>'content_hash'));
+END $$;
+"""
+
 _RECEIPT = r"""
 CREATE FUNCTION public.nexus_mixed_event_receipt_guard()
 RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
@@ -109,6 +124,8 @@ BEGIN
   OR jsonb_array_length(bear->'mixed_event_review'->'evidence_refs') NOT BETWEEN 1 AND 3
   OR jsonb_typeof(audit->'mixed_event_review'->'evidence_refs') IS DISTINCT FROM 'array'
   OR jsonb_array_length(audit->'mixed_event_review'->'evidence_refs') NOT BETWEEN 1 AND 3
+  OR NOT public.nexus_mixed_receipt_refs_valid(bear->'mixed_event_review'->'evidence_refs',s.id,NEW.instrument_id,NEW.context_hash)
+  OR NOT public.nexus_mixed_receipt_refs_valid(audit->'mixed_event_review'->'evidence_refs',s.id,NEW.instrument_id,NEW.context_hash)
   OR bear->'mixed_event_review'->>'decision' IS DISTINCT FROM 'accepted'
   OR audit->'mixed_event_review'->>'decision' IS DISTINCT FROM 'accepted' OR audit->>'vote' IS DISTINCT FROM 'support'
   OR bear->'mixed_event_review'->>'proposal_hash' IS DISTINCT FROM hash
@@ -126,7 +143,7 @@ BEGIN
  FOR item IN SELECT value FROM jsonb_array_elements(proposal->'items') LOOP
   IF item->>'status' IS NULL OR item->>'status' NOT IN ('addressed','unresolved')
    OR jsonb_typeof(item->'evidence_refs') IS DISTINCT FROM 'array'
-   OR jsonb_array_length(item->'evidence_refs')>3
+   OR NOT public.nexus_mixed_receipt_refs_valid(item->'evidence_refs',s.id,NEW.instrument_id,NEW.context_hash)
    OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(c->'trigger_checks') x
      WHERE x->>'trigger_id'=item->>'trigger_id' AND x->>'kind'=item->>'kind' AND x->>'event_key'=item->>'event_key')
    OR ((item->>'kind'='price' AND item->'content_snapshot_id'='null'::jsonb)
@@ -165,6 +182,39 @@ END $$;
 """
 
 
+_PLAN = r"""
+CREATE FUNCTION public.nexus_mixed_plan_coverage_guard()
+RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+DECLARE m public.research_monitor_increments%ROWTYPE;
+BEGIN
+ SELECT * INTO m FROM public.research_monitor_increments WHERE run_id=NEW.source_run_id FOR UPDATE;
+ IF NOT FOUND OR m.batch_id IS NULL THEN RETURN NULL; END IF;
+ IF NEW.account_id<>m.account_id OR NEW.instrument_id<>m.instrument_id
+  OR NEW.data_snapshot_id<>m.snapshot_id
+  OR NOT EXISTS(SELECT 1 FROM public.agent_research_outputs o
+    WHERE o.id=NEW.source_output_id AND o.run_id=m.run_id AND o.role IS NULL
+     AND o.status='completed' AND o.content_hash=NEW.source_hash)
+  OR (SELECT count(*) FROM public.research_monitor_coverage v WHERE v.run_id=m.run_id
+    AND v.account_id=m.account_id AND v.instrument_id=m.instrument_id
+    AND v.research_as_of=m.research_as_of AND v.observed_at=NEW.effective_at
+    AND v.output_id=NEW.source_output_id AND v.kind IN ('price','disclosure'))<>2
+  OR NOT EXISTS(SELECT 1 FROM public.research_monitor_triggers t WHERE t.batch_id=m.batch_id AND t.kind=NEW.kind)
+  OR EXISTS(SELECT 1 FROM public.research_monitor_triggers t WHERE t.batch_id=m.batch_id AND t.kind=NEW.kind
+    AND NOT EXISTS(SELECT 1 FROM public.research_monitor_mixed_event_receipts e
+      WHERE e.trigger_id=t.id AND e.batch_id=m.batch_id AND e.run_id=m.run_id
+       AND e.account_id=m.account_id AND e.instrument_id=m.instrument_id
+       AND e.output_id=NEW.source_output_id AND e.context_hash=m.context_hash
+       AND e.observed_at=NEW.effective_at))
+  OR NOT EXISTS(SELECT 1 FROM public.research_monitor_coverage v WHERE v.run_id=m.run_id
+    AND v.account_id=m.account_id AND v.instrument_id=m.instrument_id
+    AND v.kind=NEW.kind AND v.status='installed' AND v.active_plan_id=NEW.id
+    AND v.output_id=NEW.source_output_id)
+ THEN RAISE EXCEPTION 'MONITOR_MIXED_PLAN_COVERAGE_INVALID'; END IF;
+ RETURN NULL;
+END $$;
+"""
+
+
 def upgrade():
     op.create_table(
         "research_monitor_mixed_event_receipts",
@@ -195,9 +245,22 @@ def upgrade():
             for name in ("context_hash", "proposal_hash", "review_hash")
         ],
     )
+    op.execute("""DO $$ DECLARE definition text; seam text := 'PERFORM 1 FROM public.outbox_events WHERE id=b.outbox_id FOR UPDATE;'; BEGIN
+      SELECT pg_get_functiondef('public.nexus_monitor_validate_batch(uuid)'::regprocedure) INTO definition;
+      IF (length(definition)-length(replace(definition,seam,'')))/length(seam)<>1
+       OR (length(definition)-length(replace(definition,'FOR UPDATE','')))/length('FOR UPDATE')<>1
+      THEN RAISE EXCEPTION 'MONITOR_READONLY_BATCH_GUARD_UNEXPECTED'; END IF;
+      EXECUTE replace(replace(definition,'FUNCTION public.nexus_monitor_validate_batch(',
+       'FUNCTION public.nexus_monitor_validate_batch_readonly('),seam,
+       'PERFORM 1 FROM public.outbox_events WHERE id=b.outbox_id;'); END $$""")
     op.execute(_CANONICAL)
+    op.execute(_REFS)
     op.execute(_RECEIPT)
     op.execute(_COVERAGE)
+    op.execute(_PLAN)
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_mixed_plan_coverage AFTER INSERT ON research_monitor_plans DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION nexus_mixed_plan_coverage_guard()"
+    )
     op.execute(
         "CREATE CONSTRAINT TRIGGER trg_mixed_coverage_atomic AFTER INSERT ON research_monitor_coverage DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION nexus_mixed_coverage_atomic_guard()"
     )
@@ -218,6 +281,10 @@ def downgrade():
       THEN RAISE EXCEPTION 'MONITOR_EVENT_HISTORY_DOWNGRADE_FORBIDDEN'; END IF; END $$""")
     op.execute("DROP TRIGGER trg_mixed_coverage_atomic ON research_monitor_coverage")
     op.execute("DROP FUNCTION public.nexus_mixed_coverage_atomic_guard()")
+    op.execute("DROP TRIGGER trg_mixed_plan_coverage ON research_monitor_plans")
+    op.execute("DROP FUNCTION public.nexus_mixed_plan_coverage_guard()")
+    op.execute("DROP FUNCTION public.nexus_monitor_validate_batch_readonly(uuid)")
     op.drop_table("research_monitor_mixed_event_receipts")
     op.execute("DROP FUNCTION public.nexus_mixed_event_receipt_guard()")
+    op.execute("DROP FUNCTION public.nexus_mixed_receipt_refs_valid(jsonb,uuid,uuid,text)")
     op.execute("DROP FUNCTION public.nexus_mixed_receipt_canonical(jsonb)")

@@ -75,7 +75,10 @@ async def native_result(url, monkeypatch, root, mode):
     from integration.test_monitor_increment_pg import append_fresh_inputs
     from nexus.agents import execution
     from nexus.ops.research_monitor import run
-    from nexus.persistence.models.agents import AgentResearchRunRecord
+    from nexus.persistence.models.agents import (
+        AgentDataSnapshotEvidenceRecord,
+        AgentResearchRunRecord,
+    )
     from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
     from nexus.persistence.models.data import DataSnapshot
     from nexus.persistence.models.monitoring import MonitorIncrement
@@ -127,6 +130,21 @@ async def native_result(url, monkeypatch, root, mode):
             select(MonitorIncrement).where(MonitorIncrement.run_id == UUID(admitted["run_id"]))
         )
         frozen = await session.get(DataSnapshot, member.snapshot_id)
+        binding = await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == member.snapshot_id,
+                AgentDataSnapshotEvidenceRecord.source == "nexus_monitor_increment_v2",
+            )
+        )
+    from nexus.domain.evidence import EvidenceRef
+
+    context_ref = EvidenceRef(
+        source=binding.source,
+        object_id=binding.provider_object_id,
+        available_at=binding.available_at,
+        location=binding.location,
+        content_hash=binding.content_hash,
+    ).model_dump(mode="json")
     context = frozen.payload["monitor_context"]
     proposal = {"context_hash": member.context_hash, "items": []}
     for event in context["trigger_checks"]:
@@ -143,12 +161,16 @@ async def native_result(url, monkeypatch, root, mode):
                 trigger_id=event["trigger_id"],
                 kind=event["kind"],
                 event_key=event["event_key"],
-                status="unresolved" if mode == "all_unresolved" else "addressed",
+                status="unresolved"
+                if mode in {"all_unresolved", "unresolved_receipt"}
+                else "addressed",
                 rationale="原件已审阅😀",
-                evidence_refs=[],
+                evidence_refs=[context_ref],
                 content_snapshot_id=content,
             )
         )
+    if mode == "missing_context_ref":
+        proposal["items"][0]["evidence_refs"] = []
     if mode == "wrong_member":
         proposal["items"][0]["kind"] = "disclosure"
 
@@ -158,10 +180,15 @@ async def native_result(url, monkeypatch, root, mode):
     ph = digest(proposal)
     reviews = {
         role: dict(
-            proposal_hash=ph, decision="accepted", rationale="独立审阅通过", evidence_refs=[]
+            proposal_hash=ph,
+            decision="accepted",
+            rationale="独立审阅通过",
+            evidence_refs=[context_ref],
         )
         for role in ("bear", "evidence_audit")
     }
+    if mode == "foreign_review_ref":
+        reviews["bear"]["evidence_refs"] = [{**context_ref, "object_id": "not-frozen"}]
     original = execution._append_output
 
     async def with_original_aux(session, research, **kwargs):
@@ -173,11 +200,10 @@ async def native_result(url, monkeypatch, root, mode):
         if role == "market_state":
             payload["mixed_event_proposal"] = proposal
         elif role in reviews:
-            reviews[role]["evidence_refs"] = payload["claims"][0]["evidence_refs"][:1]
             payload["mixed_event_review"] = reviews[role]
             if role == "evidence_audit" and mode == "veto":
                 payload["vote"] = "oppose"
-        elif role == "portfolio":
+        elif role == "portfolio" and mode != "unadopted":
             payload["mixed_event_adoption_hash"] = ph
         return await original(session, research, **{**kwargs, "payload": payload})
 
@@ -211,6 +237,9 @@ async def native_result(url, monkeypatch, root, mode):
         "veto",
         "zero_events_partial",
         "all_unresolved",
+        "missing_context_ref",
+        "foreign_review_ref",
+        "unresolved_receipt",
     ],
 )
 async def test_original_mixed_receipts_and_atomic_coverage(
@@ -318,6 +347,9 @@ async def test_original_mixed_receipts_and_atomic_coverage(
                 "wrong_member": "ITEMS",
                 "unknown": "NATIVE",
                 "veto": "REVIEW",
+                "missing_context_ref": "ITEMS",
+                "foreign_review_ref": "REVIEW",
+                "unresolved_receipt": "ITEMS",
             }[mode]
             with pytest.raises(DBAPIError, match="MONITOR_EVENT_RECEIPT_" + code + "_INVALID"):
                 await consume()
@@ -344,3 +376,176 @@ async def test_legacy_price_admission_ignores_mixed_receipt_guard(
         monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", HEAD)
     monkeypatch.setattr(legacy, "runtime_head", lambda patch: None)
     await legacy.test_legacy_single_price_admission_stays_valid(migrated_database_url, monkeypatch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "adopted,paired",
+    [(False, False), (True, False), (True, True), (False, True), ("unknown", True)],
+)
+async def test_mixed_plan_requires_atomic_coverage(
+    migrated_database_url, monkeypatch, tmp_path, adopted, paired
+):
+    from datetime import timedelta
+
+    from integration.test_monitor_mixed_db_pg import clone
+    from nexus.persistence.models.agents import AgentResearchOutputRecord
+    from nexus.persistence.models.monitoring import (
+        MonitorCoverageReceipt,
+        MonitorMixedEventReceipt,
+        MonitorPlan,
+        MonitorTrigger,
+    )
+    from sqlalchemy import select, update
+    from sqlalchemy.exc import DBAPIError
+
+    factory, member, context, ph, rh, now = await native_result(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        "unknown" if adopted == "unknown" else "valid" if adopted else "unadopted",
+    )
+    try:
+        async with factory() as session:
+            prior = await session.get(MonitorPlan, member.plan_id)
+            output = await session.scalar(
+                select(AgentResearchOutputRecord)
+                .where(
+                    AgentResearchOutputRecord.run_id == member.run_id,
+                    AgentResearchOutputRecord.role.is_(None),
+                )
+                .order_by(AgentResearchOutputRecord.sequence.desc())
+            )
+
+        async def install():
+            async with factory() as session, session.begin():
+                plan = clone(
+                    prior,
+                    generation=prior.generation + 1,
+                    predecessor_id=prior.id,
+                    source_run_id=member.run_id,
+                    source_output_id=output.id,
+                    source_hash=output.content_hash,
+                    data_snapshot_id=member.snapshot_id,
+                    effective_at=now,
+                    review_due_at=now + timedelta(minutes=30),
+                    valid_until=now + timedelta(hours=1),
+                )
+                session.add(plan)
+                await session.flush()
+                if paired:
+                    for kind in ("price", "disclosure"):
+                        session.add(
+                            MonitorCoverageReceipt(
+                                account_id=member.account_id,
+                                instrument_id=member.instrument_id,
+                                run_id=member.run_id,
+                                output_id=output.id,
+                                kind=kind,
+                                prior_plan_id=prior.id if kind == "price" else None,
+                                active_plan_id=plan.id if kind == "price" else None,
+                                research_as_of=member.research_as_of,
+                                observed_at=now,
+                                status="installed" if kind == "price" else "gap",
+                                reason="MONITOR_TEST_ATOMIC",
+                                quality_status=None,
+                            )
+                        )
+                    if adopted is True:
+                        await session.execute(
+                            update(MonitorTrigger)
+                            .where(MonitorTrigger.batch_id == member.batch_id)
+                            .values(status="completed")
+                        )
+                        for event in context["trigger_checks"]:
+                            session.add(
+                                MonitorMixedEventReceipt(
+                                    account_id=member.account_id,
+                                    instrument_id=member.instrument_id,
+                                    batch_id=member.batch_id,
+                                    trigger_id=event["trigger_id"],
+                                    run_id=member.run_id,
+                                    output_id=output.id,
+                                    materials_snapshot_id=context["materials_snapshot_id"],
+                                    context_hash=member.context_hash,
+                                    proposal_hash=ph,
+                                    review_hash=rh,
+                                    observed_at=now,
+                                )
+                            )
+                    await session.flush()
+                await session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+        if paired and adopted is True:
+            await install()
+        else:
+            with pytest.raises(DBAPIError, match="MONITOR_MIXED_PLAN_COVERAGE_INVALID"):
+                await install()
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_readonly_batch_validator_is_exact_lock_free_copy(migrated_database_url):
+    engine = create_async_engine(migrated_database_url)
+    try:
+        async with engine.connect() as conn:
+            original = await conn.scalar(
+                text(
+                    "SELECT pg_get_functiondef('nexus_monitor_validate_batch(uuid)'::regprocedure)"
+                )
+            )
+            readonly = await conn.scalar(
+                text(
+                    "SELECT pg_get_functiondef("
+                    "'nexus_monitor_validate_batch_readonly(uuid)'::regprocedure)"
+                )
+            )
+            assert readonly == original.replace(
+                "FUNCTION public.nexus_monitor_validate_batch(",
+                "FUNCTION public.nexus_monitor_validate_batch_readonly(",
+            ).replace(
+                "PERFORM 1 FROM public.outbox_events WHERE id=b.outbox_id FOR UPDATE;",
+                "PERFORM 1 FROM public.outbox_events WHERE id=b.outbox_id;",
+            )
+            assert original.count("FOR UPDATE") == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_readonly_batch_revalidates_original_members(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from integration import test_monitor_mixed_db_pg as legacy
+    from sqlalchemy.exc import DBAPIError
+
+    for path in ("nexus.persistence.migrations", "nexus.ops.research_monitor"):
+        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", HEAD)
+    monkeypatch.setattr(legacy, "runtime_head", lambda patch: None)
+    factory, batch, now, context = await legacy.mixed_fixture(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await session.execute(
+                text("SELECT nexus_monitor_validate_batch_readonly(:batch)"), {"batch": batch.id}
+            )
+        # Deliberate corruption producer in this disposable synthetic database only.
+        # Do not weaken the production immutable/deferred guards to fabricate damage.
+        async with factory() as session, session.begin():
+            await session.execute(text("SET LOCAL session_replication_role=replica"))
+            await session.execute(
+                text("UPDATE research_monitor_batches SET trigger_ids='[]'::jsonb WHERE id=:batch"),
+                {"batch": batch.id},
+            )
+        with pytest.raises(DBAPIError, match="MONITOR_BATCH_MEMBERS_INVALID"):
+            async with factory() as session, session.begin():
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+                await session.execute(
+                    text("SELECT nexus_monitor_validate_batch_readonly(:batch)"),
+                    {"batch": batch.id},
+                )
+    finally:
+        await factory.kw["bind"].dispose()
