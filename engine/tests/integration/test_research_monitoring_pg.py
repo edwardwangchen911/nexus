@@ -370,37 +370,66 @@ async def test_episode_history_cannot_be_erased_or_rewound(migrated_database_url
 @pytest.mark.asyncio
 async def test_unknown_trigger_cannot_reopen_and_late_check_cannot_change_facts(
     migrated_database_url,
+    monkeypatch,
 ):
+    from integration.test_monitor_preclaim_pg import admitted
+    from nexus.agents import codex_staged
+    from nexus.ops.research_monitor import parser
+    from nexus.ops.research_monitor import run as monitor_entry
+    from nexus.worker import run_agent_worker_once
     from sqlalchemy import update
     from sqlalchemy.exc import DBAPIError
 
-    factory, plan = await seed(migrated_database_url)
-    async with factory() as session, session.begin():
-        original = await record_check(
-            session,
-            plan_id=plan.id,
-            scheduled_at=_NOW,
-            checked_at=_NOW,
-            observation=quote(plan, _NOW),
-        )
-        trigger = await session.scalar(select(MonitorTrigger))
-        # Controlled lifecycle fixture: the future admission service must bind a new run.
-        trigger.status, trigger.research_run_id = "admitted", plan.source_run_id
-        await session.flush()
-        trigger.status = "unknown"
+    factory, settings, trigger, run_id, job_id, _now = await admitted(
+        migrated_database_url, monkeypatch
+    )
+    async with factory() as session:
+        original = await session.get(MonitorCheck, trigger.check_id)
+        plan = await session.get(MonitorPlan, original.plan_id)
+    native = codex_staged.invoke_codex
+
+    async def invoke(payload, **kwargs):
+        if payload["stage"] == "critique":
+            raise TimeoutError("controlled unknown trigger transition")
+        return await native(payload, **kwargs)
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    assert await run_agent_worker_once(settings, job_ids=(job_id,), formal_stage_capacity=True)
+    await monitor_entry(settings, parser().parse_args(["finish", "--trigger-id", str(trigger.id)]))
     with pytest.raises(DBAPIError, match="MONITOR_TRIGGER_TRANSITION_INVALID"):
         async with factory() as session, session.begin():
             await session.execute(
                 update(MonitorTrigger).values(status="pending", research_run_id=None)
             )
+    from decimal import Decimal
+
+    from nexus.monitoring.evaluation import evaluate_price
+
+    condition = PriceReviewCondition.model_validate(plan.condition)
+    opposite = (
+        Decimal(condition.threshold) + 1
+        if condition.operator == "lte"
+        else Decimal(condition.threshold) / 2
+    )
+    other = PriceObservation.model_validate(original.observation).model_copy(
+        update={"bid": opposite, "ask": opposite}
+    )
+    assert (
+        evaluate_price(
+            condition, other, instrument_id=plan.instrument_id, now=original.checked_at
+        ).result
+        == "false"
+    )
     async with factory() as session, session.begin():
         replay = await record_check(
             session,
             plan_id=plan.id,
-            scheduled_at=_NOW,
-            checked_at=_NOW,
-            observation=quote(plan, _NOW, False),
+            scheduled_at=original.scheduled_at,
+            checked_at=original.checked_at,
+            observation=other,
         )
         assert replay.id == original.id and replay.result == "true"
-        trigger = await session.scalar(select(MonitorTrigger))
-        assert trigger.status == "unknown" and trigger.research_run_id == plan.source_run_id
+        persisted = await session.get(MonitorTrigger, trigger.id)
+        assert persisted.status == "unknown" and persisted.research_run_id == run_id
+        assert replay.observation == original.observation
+    await factory.kw["bind"].dispose()
