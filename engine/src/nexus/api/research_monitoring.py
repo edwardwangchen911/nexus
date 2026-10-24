@@ -34,6 +34,11 @@ _REASONS: dict[str, CoverageReason] = {
     "MONITOR_NO_APPROVED_CONDITION": "no_condition",
     "MONITOR_RUN_FAILED": "run_failed",
     "MONITOR_UNKNOWN_USAGE": "usage_unknown",
+    "MONITOR_KIND_EVENTS_UNRESOLVED": "events_unresolved",
+    "MONITOR_DAILY_EVENT_REVIEW_UNVERIFIED": "review_unverified",
+    "MONITOR_DAILY_REPLACEMENT_REJECTED": "replacement_rejected",
+    "MONITOR_AUDIT_OR_EVENT_REVIEW_UNVERIFIED": "review_unverified",
+    "MONITOR_CONDITION_REPLACEMENT_REJECTED": "replacement_rejected",
 }
 
 
