@@ -1,5 +1,6 @@
 """Daily material preview is local and never grants a complete-pool admission."""
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -216,12 +217,10 @@ async def test_preview_profile_matches_actual_formal_worker_composition(monkeypa
         run,
         responses_client=None,
         tools=_tools(),
-        deadline=1000,
+        deadline=(started := asyncio.get_running_loop().time()) + 195,
         formal_stage_capacity=True,
     )
-    monkeypatch.setattr(
-        module.asyncio, "get_running_loop", lambda: SimpleNamespace(time=lambda: 805)
-    )
+    monkeypatch.setattr(module, "_monotonic", lambda: started)
     captured = []
     original = module.candidate_capacity_envelope
 
@@ -283,3 +282,110 @@ async def test_real_daily_envelope_rejects_complete_material_bytes_without_sdk(m
     )
     with pytest.raises(module.DailyEventCapacityExceeded, match="^MONITOR_CONTENT_CAPACITY$"):
         await module.preview_daily_event_capacity(session, run)
+
+
+@pytest.mark.asyncio
+async def test_scope_deadline_activates_once_and_is_inherited(monkeypatch):
+    module, session, run, snapshot, *_ = setup_preview(monkeypatch)
+    clock = [asyncio.get_running_loop().time()]
+    monkeypatch.setattr(module, "_monotonic", lambda: clock[0])
+    async with module.DailyEventCapacityScope() as scope:
+        original = snapshot.payload
+        snapshot.payload = {}
+        await module.preview_daily_event_capacity(session, run)
+        assert scope.deadline is None
+        snapshot.payload = original
+        await module.preview_daily_event_capacity(session, run)
+        deadline = scope.deadline
+        assert deadline == clock[0] + 195
+        clock[0] += 10
+        await module.preview_daily_event_capacity(session, run)
+        assert scope.deadline == deadline
+    async with module.DailyEventCapacityScope(deadline=deadline) as rebuilt:
+        clock[0] += 10
+        await module.preview_daily_event_capacity(session, run)
+        assert rebuilt.deadline == deadline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["envelope", "tokenizer"])
+async def test_sync_capacity_work_cannot_overrun_scope_or_request_gap(monkeypatch, stage):
+    module, session, run, *_ = setup_preview(monkeypatch)
+    clock = [asyncio.get_running_loop().time()]
+    monkeypatch.setattr(module, "_monotonic", lambda: clock[0])
+    original = getattr(
+        module, "candidate_capacity_envelope" if stage == "envelope" else "codex_input_allowance"
+    )
+
+    def exhaust(*args, **kwargs):
+        value = original(*args, **kwargs)
+        clock[0] += 195
+        return value
+
+    monkeypatch.setattr(
+        module,
+        "candidate_capacity_envelope" if stage == "envelope" else "codex_input_allowance",
+        exhaust,
+    )
+    with pytest.raises(ValueError, match="^CODEX_CAPACITY_PRECLAIM_TIMEOUT$") as caught:
+        await module.preview_daily_event_capacity(session, run)
+    assert not isinstance(caught.value, module.DailyEventCapacityExceeded)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", ["scope_timeout", "external"])
+async def test_blocked_inputs_are_cancelled_and_collected(monkeypatch, cancel):
+    module, session, run, *_ = setup_preview(monkeypatch)
+    assert hasattr(module, "DailyEventCapacityScope")
+    entered, closed = asyncio.Event(), asyncio.Event()
+    scopes = []
+
+    async def blocked(*args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(module.StructuredStagedCodexCommittee, "_inputs", blocked)
+
+    async def preview():
+        async with module.DailyEventCapacityScope() as scope:
+            scopes.append(scope)
+            await module.preview_daily_event_capacity(session, run)
+
+    task = asyncio.create_task(preview())
+    await entered.wait()
+    if cancel == "scope_timeout":
+        scopes[0]._timeout.reschedule(asyncio.get_running_loop().time())
+        with pytest.raises(ValueError, match="^CODEX_CAPACITY_PRECLAIM_TIMEOUT$"):
+            await task
+    else:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert task.done() and closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_upstream_timeout_keeps_original_error(monkeypatch):
+    module, session, run, *_ = setup_preview(monkeypatch)
+    error = TimeoutError("ORIGINAL_SOURCE_TIMEOUT")
+    module.database_read_only_tools.side_effect = error
+    with pytest.raises(TimeoutError) as caught:
+        await module.preview_daily_event_capacity(session, run)
+    assert caught.value is error
+    assert module._current_scope.get() is None
+
+
+@pytest.mark.asyncio
+async def test_inherited_exhausted_deadline_refuses_before_rebuilding_inputs(monkeypatch):
+    module, session, run, *_ = setup_preview(monkeypatch)
+    now = asyncio.get_running_loop().time()
+    monkeypatch.setattr(module, "_monotonic", lambda: now)
+    with pytest.raises(ValueError, match="^CODEX_CAPACITY_PRECLAIM_TIMEOUT$"):
+        async with module.DailyEventCapacityScope(deadline=now):
+            await module.preview_daily_event_capacity(session, run)
+    module.load_frozen_evidence.assert_not_awaited()
+    module.database_read_only_tools.assert_not_awaited()
+    assert module._current_scope.get() is None

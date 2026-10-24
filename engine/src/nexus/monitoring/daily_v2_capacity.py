@@ -1,7 +1,12 @@
 """Read-only daily material preview; never a substitute for full-pool preflight."""
 
+from __future__ import annotations
+
 import asyncio
-from typing import cast
+from contextvars import ContextVar, Token
+from math import isfinite
+from types import TracebackType
+from typing import Self, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +38,65 @@ from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearc
 from nexus.persistence.models.data import DataSnapshot
 
 
+def _monotonic() -> float:
+    return asyncio.get_running_loop().time()
+
+
+class DailyEventCapacityScope:
+    """One lazy absolute allowance, shared by a pool and its unpublished rebuilds."""
+
+    def __init__(self, deadline: float | None = None) -> None:
+        if deadline is not None and (type(deadline) not in {int, float} or not isfinite(deadline)):
+            raise ValueError("CODEX_STAGE_BUDGET_CLOCK_INVALID")
+        self.deadline = deadline
+        self._timeout: asyncio.Timeout | None = None
+        self._token: Token[DailyEventCapacityScope | None] | None = None
+
+    async def __aenter__(self) -> Self:
+        if self._timeout is not None:
+            raise RuntimeError("daily capacity scope cannot be reused")
+        self._timeout = asyncio.timeout_at(self.deadline)
+        await self._timeout.__aenter__()
+        self._token = _current_scope.set(self)
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        assert self._timeout is not None and self._token is not None
+        try:
+            try:
+                await self._timeout.__aexit__(exc_type, exc_value, traceback)
+            except TimeoutError:
+                if self._timeout.expired():
+                    raise ValueError("CODEX_CAPACITY_PRECLAIM_TIMEOUT") from None
+                raise
+            if exc_type is None:
+                self.check_deadline()
+        finally:
+            _current_scope.reset(self._token)
+
+    def activate(self) -> None:
+        if self._timeout is None:
+            raise RuntimeError("daily capacity scope must be entered")
+        if self.deadline is None:
+            self.deadline = _monotonic() + CAPACITY_PRECLAIM_TIMEOUT_SECONDS
+            self._timeout.reschedule(self.deadline)
+        self.check_deadline()
+
+    def check_deadline(self) -> None:
+        if self.deadline is not None and _monotonic() >= self.deadline:
+            raise ValueError("CODEX_CAPACITY_PRECLAIM_TIMEOUT")
+
+
+_current_scope: ContextVar[DailyEventCapacityScope | None] = ContextVar(
+    "daily_event_capacity_scope", default=None
+)
+
+
 class DailyEventCapacityExceeded(ValueError):
     """Only an intact daily event bundle may request an atomic whole-bundle gap."""
 
@@ -45,12 +109,17 @@ class DailyEventCapacityExceeded(ValueError):
 
 
 async def preview_daily_event_capacity(session: AsyncSession, run: AgentResearchRunRecord) -> None:
+    scope = _current_scope.get()
+    if scope is None:
+        async with DailyEventCapacityScope():
+            return await preview_daily_event_capacity(session, run)
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     paper = None if snapshot is None else snapshot.payload.get("agent_paper_context")
     if not isinstance(paper, dict) or all(
         paper.get(key) is None for key in ("pending_monitoring_v2", "pending_monitoring_v2_gap")
     ):
         return
+    scope.activate()
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     if model is None or model.version not in (
         ISOLATED_CAPACITY_CONFIG_VERSIONS | {FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
@@ -79,7 +148,9 @@ async def preview_daily_event_capacity(session: AsyncSession, run: AgentResearch
         raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
     # Mirror worker._committee's formal preclaim composition. This deadline is
     # local to a discarded preview; no Job/SDK budget or pool authority is granted.
-    deadline = asyncio.get_running_loop().time() + CAPACITY_PRECLAIM_TIMEOUT_SECONDS
+    scope.check_deadline()
+    assert scope.deadline is not None
+    deadline = scope.deadline
     deadline -= FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS - FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS
     committee = StructuredStagedCodexCommittee(
         prompts={
@@ -111,9 +182,11 @@ async def preview_daily_event_capacity(session: AsyncSession, run: AgentResearch
     )
     refs = tuple(domain_evidence(row) for row in evidence)
     inputs = await committee._inputs(request)
+    scope.check_deadline()
     envelope = candidate_capacity_envelope(
         committee, request=request, evidence_refs=refs, inputs=inputs
     )
+    scope.check_deadline()
     reason = None
     if cast(int, envelope["wire_upper_bytes"]) > committee._max_wire_bytes:
         reason = "CODEX_CAPACITY_POOL_WIRE_EXCEEDED"
@@ -124,6 +197,7 @@ async def preview_daily_event_capacity(session: AsyncSession, run: AgentResearch
         allowance = codex_input_allowance(
             codex_request_wire(payload), codex_output_schema(output_model)
         )
+        scope.check_deadline()
         if allowance > MAX_INPUT_TOKENS or allowance > committee._aggregate_input_tokens:
             reason = "CODEX_CAPACITY_POOL_INPUT_EXCEEDED"
     if reason is not None:
