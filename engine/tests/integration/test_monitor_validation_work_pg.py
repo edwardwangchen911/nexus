@@ -131,3 +131,33 @@ async def test_one_daily_validation_reuses_original_source_but_rechecks_events_a
             assert snapshot.revision == before and context.decision_time == now
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_shared_parent_still_rejects_current_pricing_expiry_between_members(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    factory, _, _, captured, _, _, material_id = await prepared_materials(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    original = source_qualification.load_qualified_source
+    as_of = captured["clock"][0]
+    qualified = []
+
+    async def expire_after_qualification(session, **kwargs):
+        result = await original(session, **kwargs)
+        qualified.append(result.output.id)
+        model = await session.get(AgentModelConfigRecord, result.run.model_config_id)
+        captured["clock"][0] = model.pricing_expires_at
+        return result
+
+    monkeypatch.setattr(source_qualification, "load_qualified_source", expire_after_qualification)
+    try:
+        async with factory() as session:
+            assert await read_batch_inputs(session, snapshot_id=material_id, as_of=as_of) is None
+            assert len(qualified) == 1
+    finally:
+        captured["clock"][0] = as_of
+        await factory.kw["bind"].dispose()

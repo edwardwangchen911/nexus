@@ -63,6 +63,8 @@ async def _inputs(
     *,
     current_eligibility: bool = True,
 ) -> BatchInputs:
+    from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+    from nexus.agents.paper_context import AgentPaperResearchContext
     from nexus.monitoring.batches import disclosure_source_current
     from nexus.monitoring.disclosure_observations import read_disclosure_observation
     from nexus.monitoring.reconciliation import plan_covered
@@ -126,7 +128,40 @@ async def _inputs(
                 qualified = await load_qualified_source(
                     session, account_id=batch.account_id, output_id=plan.source_output_id, now=now
                 )
-                qualified_sources[plan.source_output_id] = qualified
+                # Only an ordinary formal leaf has no other source-pricing
+                # dependencies. Complex contexts retain full qualification.
+                context = qualified.context
+                if isinstance(context, AgentPaperResearchContext) and not any(
+                    (
+                        context.pending_monitoring,
+                        context.pending_monitoring_gap,
+                        context.pending_monitoring_v2,
+                        context.pending_monitoring_v2_gap,
+                    )
+                ):
+                    qualified_sources[plan.source_output_id] = qualified
+            else:
+                # The historical proof is shared; live pricing validity is not.
+                checked_at = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    not isinstance(checked_at, datetime)
+                    or checked_at.utcoffset() is None
+                    or now > checked_at
+                ):
+                    raise MaterialGap("MONITOR_SOURCE_INVALID")
+                try:
+                    model = await require_formal_stage_model_profile(
+                        session, model_config_id=qualified.run.model_config_id, now=checked_at
+                    )
+                except ValueError:
+                    raise MaterialGap("MONITOR_SOURCE_INVALID") from None
+                if (
+                    model.created_at > now
+                    or not model.pricing_available_at <= now < model.pricing_expires_at
+                    or qualified.run.model_hash != model.config_hash
+                    or qualified.run.pricing_version != model.version
+                ):
+                    raise MaterialGap("MONITOR_SOURCE_INVALID")
             if (
                 qualified.run.id != plan.source_run_id
                 or qualified.output.content_hash != plan.source_hash
