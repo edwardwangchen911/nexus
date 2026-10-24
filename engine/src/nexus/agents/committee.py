@@ -16,6 +16,7 @@ from pydantic import (
 
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
+from nexus.monitoring.contracts import PriceMonitoringProposal, PriceMonitoringReview
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
 type AgentRole = Literal[
@@ -281,6 +282,25 @@ class CommitteeRoleOutput(BaseModel):
     frozen_inputs_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     synthesis_assessment: SynthesisAssessment | None = None
+    monitoring_proposal: PriceMonitoringProposal | None = None
+    monitoring_review: PriceMonitoringReview | None = None
+    monitoring_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _monitoring_role(self) -> "CommitteeRoleOutput":
+        if (
+            self.monitoring_proposal is not None
+            and self.role != "market_state"
+            or self.monitoring_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.monitoring_adoption_hash is not None
+            and self.role != "portfolio"
+        ):
+            raise ValueError("MONITOR_ROLE_INVALID")
+        for item in (self.monitoring_proposal, self.monitoring_review):
+            if item is not None:
+                ResearchClaim(text=item.rationale, evidence_refs=item.evidence_refs)
+        return self
 
     @model_serializer(mode="wrap")
     # A return annotation would replace the closed model serialization schema.
@@ -288,6 +308,9 @@ class CommitteeRoleOutput(BaseModel):
         payload = cast(dict[str, object], handler(self))
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
+        for name in ("monitoring_proposal", "monitoring_review", "monitoring_adoption_hash"):
+            if getattr(self, name) is None:
+                payload.pop(name, None)
         return payload
 
 
@@ -365,11 +388,15 @@ CLAIM_REVIEW_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v6-claim-review"
 INFERENCE_REVIEW_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v7-inference-review"
 
 
+MONITORING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v8-price-monitor"
+
+
 def load_portfolio_synthesis_prompt(
     *,
     security_research_scope: bool = False,
     claim_review_scope: bool = False,
     inference_review_scope: bool = False,
+    monitoring_scope: bool = False,
 ) -> PromptAsset:
     """Load the immutable cross-source final-role prompt used by normal local setup."""
     if type(security_research_scope) is not bool:
@@ -380,8 +407,12 @@ def load_portfolio_synthesis_prompt(
         inference_review_scope and not (security_research_scope and claim_review_scope)
     ):
         raise ValueError("INFERENCE_REVIEW_SCOPE_INVALID")
+    if type(monitoring_scope) is not bool or (monitoring_scope and not inference_review_scope):
+        raise ValueError("MONITORING_SCOPE_INVALID")
     version = (
-        INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
+        MONITORING_SCOPE_PROMPT_VERSION
+        if monitoring_scope
+        else INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
         if inference_review_scope
         else CLAIM_REVIEW_SCOPE_PROMPT_VERSION
         if claim_review_scope

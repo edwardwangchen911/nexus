@@ -1160,7 +1160,7 @@ async def _admit_research_run(
             "data_snapshot_id": str(request.data_snapshot_id),
             "decision_time": request.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "request_hash": request_hash,
-            "schema_hash": _schema_hash(),
+            "schema_hash": _schema_hash(portfolio_prompt_version=prompts["portfolio"].version),
             "model_hash": model.config_hash,
             "prompt_hash": prompt_manifest_hash,
             "evidence_hash": evidence_manifest_hash,
@@ -1220,7 +1220,7 @@ async def _admit_research_run(
         idempotency_key=idempotency_key,
         status="prepared",
         retry_count=0,
-        schema_hash=_schema_hash(),
+        schema_hash=_schema_hash(portfolio_prompt_version=prompts["portfolio"].version),
         model_hash=model.config_hash,
         prompt_hash=prompt_manifest_hash,
         prompt_manifest=prompt_manifest,
@@ -1402,11 +1402,16 @@ def _require_nonnegative_decimal(value: Decimal, name: str, *, positive: bool = 
         raise ValueError(f"{name} must be positive")
 
 
-def _schema_hash() -> str:
+def _schema_hash(*, portfolio_prompt_version: str | None = None) -> str:
+    from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSION
+
+    name = (
+        "research-intent-v8-price-monitor.schema.json"
+        if portfolio_prompt_version == MONITORING_SCOPE_PROMPT_VERSION
+        else "research-intent-v1.schema.json"
+    )
     return hashlib.sha256(
-        (
-            Path(__file__).resolve().parents[4] / "contracts/agent/research-intent-v1.schema.json"
-        ).read_bytes()
+        (Path(__file__).resolve().parents[4] / "contracts/agent" / name).read_bytes()
     ).hexdigest()
 
 

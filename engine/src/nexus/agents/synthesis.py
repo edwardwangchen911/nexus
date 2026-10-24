@@ -22,6 +22,7 @@ from nexus.agents.committee import AgentRole, CommitteeRoleOutput
 from nexus.agents.concentration import evaluate_frozen_concentration_conditions
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.domain.evidence import EvidenceRef
+from nexus.monitoring.evaluation import compile_proposal
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -206,7 +207,31 @@ def synthesize_intent(
         or portfolio_context.research_as_of > run.decision_time
     ):
         raise ValueError("research observation context does not bind the run")
+    monitoring_proposal = None
+    from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSION
+
+    proposal = by_role["market_state"].monitoring_proposal
+    if (
+        prompts["portfolio"].version == MONITORING_SCOPE_PROMPT_VERSION
+        and proposal is not None
+        and by_role["evidence_audit"].vote == "support"
+        and by_role["portfolio"].monitoring_adoption_hash == proposal.content_hash
+    ):
+        monitor_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+        reviews = {
+            str(role): review
+            for role in monitor_reviewers
+            if (review := by_role[role].monitoring_review) is not None
+        }
+        try:
+            monitoring_proposal = compile_proposal(
+                proposal, reviews, now=run.decision_time, evidence_refs=evidence_refs
+            )
+        except ValueError:
+            # A rejected or unbound plan leaves research quality and stance unchanged.
+            monitoring_proposal = None
     return ResearchIntent(
+        monitoring_proposal=monitoring_proposal,
         synthesis_assessment=assessment,
         condition_evaluations=evaluate_frozen_concentration_conditions(portfolio_context),
         schema_version="research_intent_v1",
