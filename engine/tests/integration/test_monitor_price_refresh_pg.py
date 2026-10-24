@@ -175,8 +175,9 @@ async def test_tick_claim_native_capture_and_no_replay(
 
         @asynccontextmanager
         async def timeout(seconds):
-            assert seconds == 90
-            state["envelope"] = seconds
+            assert seconds in {90, 5}
+            if seconds == 90:
+                state["envelope"] = seconds
             yield
 
         monkeypatch.setattr(
@@ -459,4 +460,111 @@ async def test_native_installed_plan_fresh_then_real_l1_import(
         assert closed["status"] == "skipped" and closed["reason"] == "MONITOR_MARKET_CLOSED", closed
         assert closed["provider_requests"] == 0 and calls == [["AAPL"]]
     finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["timeout", "cancel"])
+async def test_cancellation_during_close_has_no_background_writer(
+    migrated_database_url, monkeypatch, tmp_path, first
+):
+    account, calendar, instrument, candidate, model = [uuid4() for _ in range(5)]
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    identity = SimpleNamespace(
+        instrument_id=instrument,
+        symbol="SYNTHETIC",
+        model_dump=lambda **kw: {"instrument_id": str(instrument)},
+    )
+    scope = refresh.PriceScope(
+        account,
+        calendar,
+        candidate,
+        uuid4(),
+        model,
+        "a" * 64,
+        ((str(uuid4()), "b" * 64),),
+        (identity,),
+        (identity,),
+        (),
+    )
+    settings = EngineSettings(
+        database_url=migrated_database_url,
+        agent_paper_cycle_enabled=True,
+        agent_paper_account_id=account,
+        agent_paper_formal_model_config_id=model,
+    )
+    capture_entered, close_entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    state = {"lock_calls": 0, "active_close": 0, "source_calls": 0, "scan_calls": 0}
+    original_locks = refresh._locks
+
+    async def locks(session, owner):
+        state["lock_calls"] += 1
+        if state["lock_calls"] == 2:
+            state["cleanup_task"] = asyncio.current_task()
+            state["active_close"] += 1
+            close_entered.set()
+            try:
+                await release.wait()
+            finally:
+                state["active_close"] -= 1
+        await original_locks(session, owner)
+
+    async def clock(session):
+        return now
+
+    async def select_scope(*args, **kwargs):
+        return scope
+
+    async def produce(*args, **kwargs):
+        state["source_calls"] += 1
+        capture_entered.set()
+        if first == "timeout":
+            raise TimeoutError("controlled source timeout")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(refresh, "_locks", locks)
+    monkeypatch.setattr(refresh, "_clock", clock)
+    monkeypatch.setattr(refresh, "_select_scope", select_scope)
+    monkeypatch.setattr(refresh, "_configured", lambda *args: None)
+    monkeypatch.setattr(refresh, "_produce", produce)
+    kwargs = dict(
+        account_id=account,
+        calendar_authority_id=calendar,
+        scheduled_at=now,
+        environment={},
+        repo_root=tmp_path,
+    )
+
+    async def coordinator():
+        await refresh.refresh_price_observations(settings, **kwargs)
+        state["scan_calls"] += 1
+
+    task = asyncio.create_task(coordinator())
+    factory = session_factory(settings)
+    try:
+        await asyncio.wait_for(capture_entered.wait(), 10)
+        if first == "cancel":
+            task.cancel()
+        await asyncio.wait_for(close_entered.wait(), 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert state["active_close"] == state["scan_calls"] == 0
+        assert state["cleanup_task"] is task
+        async with factory() as session:
+            events = tuple(await session.scalars(select(AuditEvent)))
+            assert len(events) == 1 and events[0].payload["phase"] == "claimed"
+            for table in (Job, JobLease, AgentResearchRunRecord, AgentDailyBudgetReservationRecord):
+                assert await session.scalar(select(func.count()).select_from(table)) == 0
+        repeated = await refresh.refresh_price_observations(settings, **kwargs)
+        assert repeated["status"] == "unknown" and repeated["provider_requests"] is None
+        assert state["source_calls"] == 1 and state["scan_calls"] == 0
+    finally:
+        release.set()
+        cleanup = state.get("cleanup_task")
+        if cleanup is not None and cleanup is not task:
+            await asyncio.gather(cleanup, return_exceptions=True)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await factory.kw["bind"].dispose()

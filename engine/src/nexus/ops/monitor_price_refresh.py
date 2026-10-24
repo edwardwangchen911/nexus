@@ -24,6 +24,7 @@ from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 
 PRICE_REFRESH_SECONDS = 90
+_PRICE_CLOSE_SECONDS = 5
 _ACTION = "research.monitor.price_refresh"
 _SCHEMA = "monitor_price_refresh_v1"
 _FEED = "schwab.l1"
@@ -448,8 +449,13 @@ async def refresh_price_observations(
                         await _record(session, claim, result, await _clock(session))
 
             try:
-                await asyncio.shield(close())
-            except BaseException:
+                async with asyncio.timeout(_PRICE_CLOSE_SECONDS):
+                    await close()
+            except asyncio.CancelledError:
+                # No detached writer survives the caller; an unresolved claim is
+                # sufficient to fence this tick without continuing the scan.
+                raise
+            except Exception:
                 pass  # The unresolved committed claim fences this tick permanently.
         elif isinstance(error, _Skip):
             result = _result("skipped", str(error))
