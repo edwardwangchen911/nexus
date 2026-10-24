@@ -159,6 +159,24 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
             ],
             name="fk_monitor_trigger_check_kind",
         ),
+        Index(
+            "uq_monitor_legacy_outbox",
+            "outbox_id",
+            unique=True,
+            postgresql_where=text("batch_id IS NULL"),
+        ),
+        ForeignKeyConstraint(
+            ["batch_id", "account_id", "instrument_id", "outbox_id"],
+            [
+                "research_monitor_batches.id",
+                "research_monitor_batches.account_id",
+                "research_monitor_batches.instrument_id",
+                "research_monitor_batches.outbox_id",
+            ],
+            name="fk_monitor_trigger_batch_scope",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
         UniqueConstraint("check_id"),
         CheckConstraint(
             "(kind='price' AND event_key='' AND episode IS NOT NULL "
@@ -184,7 +202,12 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     reason: Mapped[str | None] = mapped_column(String(64))
     research_run_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_research_runs.id"))
-    outbox_id: Mapped[UUID] = mapped_column(ForeignKey("outbox_events.id"), unique=True)
+    batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("research_monitor_batches.id", deferrable=True, initially="DEFERRED"), index=True
+    )
+    outbox_id: Mapped[UUID] = mapped_column(
+        ForeignKey("outbox_events.id", deferrable=True, initially="DEFERRED")
+    )
 
 
 class MonitorIncrement(ImmutableCreatedAt, Base):
@@ -293,3 +316,28 @@ class MonitorDailyTriggerReceipt(ImmutableCreatedAt, Base):
     context_hash: Mapped[str] = mapped_column(String(64))
     review_bundle_hash: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class MonitorObservationBatch(ImmutableCreatedAt, Base):
+    """One sealed stock observation set; no research or device delivery is implied."""
+
+    __tablename__ = "research_monitor_batches"
+    __table_args__ = (
+        UniqueConstraint("account_id", "instrument_id", "scheduled_at", "observation_hash"),
+        UniqueConstraint(
+            "id", "account_id", "instrument_id", "outbox_id", name="uq_monitor_batch_scope"
+        ),
+        CheckConstraint("observation_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
+        CheckConstraint("scheduled_at<=checked_at AND checked_at<=sealed_at", name="time_order"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    scheduled_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    sealed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    observation_hash: Mapped[str] = mapped_column(String(64))
+    plan_ids: Mapped[list[str]] = mapped_column(JSONB)
+    check_ids: Mapped[list[str]] = mapped_column(JSONB)
+    trigger_ids: Mapped[list[str]] = mapped_column(JSONB)
+    outbox_id: Mapped[UUID | None] = mapped_column(ForeignKey("outbox_events.id"), unique=True)

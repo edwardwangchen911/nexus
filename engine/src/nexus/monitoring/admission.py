@@ -245,6 +245,8 @@ async def _admit_trigger(
     trigger = await session.get(MonitorTrigger, trigger_id)
     if trigger is None or trigger.kind != "price" or trigger.account_id != account_id:
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+    if trigger.batch_id is not None:
+        raise ValueError("MONITOR_TYPED_CONTEXT_REQUIRED")
     # A concurrent request may have populated this session before the account lock.
     await session.refresh(trigger)
     from nexus.monitoring.daily_consumption import daily_receipt

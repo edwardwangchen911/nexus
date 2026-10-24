@@ -135,6 +135,7 @@ async def inspect_monitor_queue(
                 select(MonitorTrigger)
                 .where(
                     MonitorTrigger.kind == "price",
+                    MonitorTrigger.batch_id.is_(None),
                     MonitorTrigger.account_id == account_id,
                     MonitorTrigger.instrument_id.in_(batch.instrument_ids),
                     MonitorTrigger.status.in_(("pending", "blocked")),

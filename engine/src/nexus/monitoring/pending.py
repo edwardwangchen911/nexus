@@ -38,6 +38,7 @@ async def pending_stock(
             .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
             .where(
                 MonitorTrigger.kind == "price",
+                MonitorTrigger.batch_id.is_(None),
                 MonitorCheck.kind == "price",
                 MonitorTrigger.account_id == account_id,
                 MonitorTrigger.instrument_id == instrument_id,

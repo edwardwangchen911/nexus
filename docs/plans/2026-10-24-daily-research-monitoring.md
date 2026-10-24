@@ -226,3 +226,32 @@ Ruff/format/diff、23源Mypy、生成合同检查、pg-b 434项收集、迁移of
 验证：来源module13 PG+3unit（agent原16项，根串行集成）；根正常/邻域28 PG通过185.63秒。v10/旧hash/闭集schema/伪造及上下文50/52项定向unit均通过；最终正常producer2+真实protected-binding6共8 PG通过38.70秒，最终producer+loop344 unit通过9.09秒。整fast在最终authority修正前6645 passed/10skip/1deselected（224.81秒），后续采用上述定向复验，不冒称最终head全量fast或GitHub CI已完成。最终Mypy11源、Ruff/format/diff、生成客户端检查、Web typecheck通过。审查的版本选择P2已RED→GREEN，最终定向复核无新增确定P1/P2；所有源失败日志保留。
 
 该片仅交付正常冻结与审核后的条件生产/持久化，SEC plan安装、封口观测批次、聚合outbox、精确accession内容准入、v2混合单股消费及双kind原子接替仍待下一片；不启用半成品SEC扫描或把索引状态冒充正文影响复核。未来实际v10落盘后回滚需保留v10 schema/prompt/读取支持，不删除新事实。完整Goal继续active，最终CI/镜像/部署/回滚和自然交易验收尚未完成。
+
+
+### 2026-10-24 正常 SEC 安装、封口批次与聚合通知（本地候选）
+
+本片以原 v10 冻结来源为输入，经正常 `install --kind disclosure` 安装审核后条件；价格与SEC独立。
+可靠 current reader 精确复验原件/receipt/hash/issuer/四个可见时间，要求真实网络收取≤300秒，
+partial 无新增为unknown，合格正例含partial新增及33项新增均保留true与完整集合；坏件不fallback。
+正常 scan 对同股封口形成batch；价格+两份披露=三触发/一个outbox，重复扫描不重复通知，
+迟到新capture只生成新成员批次，不改原batch。34项触发全部保留，自动复核容量明确blocked。
+旧v1增量/每日冻结/派发入口及DB绑定围栏排除batch成员，显式准入返回typed context required；
+尚未交付v2内容冻结/单股模型/消费/双kind接替，不冒称完整监控Goal完成。
+
+0094新增不可变batch、精确成员及outbox payload范围校验，旧price-only outbox唯一性保留。
+集中审查发现并修复两项P2：legacy复用batch outbox及并发不可见（双向校验先锁同一outbox）；
+后继v8/v9研究被SEC current筛选漏掉（纳入全部监控版本，未证明保留前停止旧计划）。
+定向静态复核无剩余确认阻塞，PG验证实际锁阻塞后拒绝晚到legacy成员。
+正常CLI扫描覆盖三股独立通知：目标股混合一份，其余两股各自价格通知，不将全账户消息数误当单股数。
+正常Bark worker以MockTransport验证并发、503后稳定message_id及回执；全部不创建Run/Job。
+初版通知测试误以全账户只有一份通知导致等待，已查原隔离outbox并按三股事实修正测试，不改生产断言或旧outbox。
+
+验证证据在writer `.secrets/daily-research-monitoring/`。完整fast 6716通过/10skip/1deselected
+（214.72秒，早于最后source-current/SQL锁修正）；最终定向74项unit、Mypy全642源及增量、
+Ruff全engine通过。来源/批次/迁移/旧类型/旧通知合并23 PG通过182.61秒；正常CLI→worker
+2 PG通过30.92秒；最终并发迟到围栏及v8/v9后继3 PG通过37.30秒。最终批次显式旧入口拒绝及无新增Run/Job的2 PG通过27.56秒；空pending读取显式使用allow_empty，保留默认拒绝空集合的契约。
+所有外部传输为合成/Mock，无真实模型、来源、Bark、业务库写入、宿主启动或未知占用变更。
+新迁移仅隔离数据库应用；空表可回滚，有新批次拒绝降级，部署回滚镜像需兼容0094。
+
+下一片继续精确accession正文准入、v2混合冻结/消费、双kind原子接替及页面矩阵，随后完整终审、
+同head必需CI、最终镜像/部署及自然交易验收。本片未push/PR/远端CI/合入部署，完整Goal保持active。

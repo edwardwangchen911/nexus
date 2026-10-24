@@ -33,12 +33,16 @@ async def record_check(
     scheduled_at: datetime,
     checked_at: datetime,
     observation: PriceObservation | None,
+    batch_id: UUID | None = None,
+    batch_outbox_id: UUID | None = None,
 ) -> MonitorCheck:
     """Persist one current tick using a verified loader projection, never enqueue here.
 
     The caller commits this transaction before trying normal research admission, so
     exhausted budget or unknown occupancy cannot erase a real trigger.
     """
+    if (batch_id is None) != (batch_outbox_id is None):
+        raise ValueError("MONITOR_BATCH_IDENTITY_INVALID")
     scheduled_at, checked_at = require_utc(scheduled_at), require_utc(checked_at)
     if (
         scheduled_at.second
@@ -120,28 +124,30 @@ async def record_check(
     state.observed_false, state.checked_at = updated.observed_false, checked_at
     await session.flush()
     if cause is not None:
-        trigger_id, outbox_id = new_uuid7(), new_uuid7()
-        event = OutboxEvent(
-            id=outbox_id,
-            aggregate_id=trigger_id,
-            event_type="research.monitor.triggered",
-            schema_version="research_price_trigger_v1",
-            payload={
-                "schema_version": "research_price_trigger_v1",
-                "trigger_id": str(trigger_id),
-                "plan_id": str(plan.id),
-                "source_run_id": str(plan.source_run_id),
-                "instrument_id": str(plan.instrument_id),
-                "cause": cause,
-                "occurred_at": checked_at.isoformat(),
-            },
-            available_at=checked_at,
-        )
-        session.add(event)
-        await session.flush()
+        trigger_id, outbox_id = new_uuid7(), batch_outbox_id or new_uuid7()
+        if batch_id is None:
+            event = OutboxEvent(
+                id=outbox_id,
+                aggregate_id=trigger_id,
+                event_type="research.monitor.triggered",
+                schema_version="research_price_trigger_v1",
+                payload={
+                    "schema_version": "research_price_trigger_v1",
+                    "trigger_id": str(trigger_id),
+                    "plan_id": str(plan.id),
+                    "source_run_id": str(plan.source_run_id),
+                    "instrument_id": str(plan.instrument_id),
+                    "cause": cause,
+                    "occurred_at": checked_at.isoformat(),
+                },
+                available_at=checked_at,
+            )
+            session.add(event)
+            await session.flush()
         session.add(
             MonitorTrigger(
                 id=trigger_id,
+                batch_id=batch_id,
                 account_id=plan.account_id,
                 instrument_id=plan.instrument_id,
                 condition_hash=plan.condition_hash,

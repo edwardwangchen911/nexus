@@ -51,7 +51,6 @@ async def scan_account(
         await session.scalars(
             select(MonitorPlan)
             .where(
-                MonitorPlan.kind == "price",
                 MonitorPlan.account_id == account_id,
                 true() if instrument_ids is None else MonitorPlan.instrument_id.in_(instrument_ids),
             )
@@ -69,6 +68,29 @@ async def scan_account(
         # Lock in instrument order, then reload: installation may have advanced
         # the generation after the bounded scope query and before this lock.
         await lock_security(session, account_id=account_id, instrument_id=selected.instrument_id)
+        disclosure_plan = await session.scalar(
+            select(MonitorPlan.id)
+            .where(
+                MonitorPlan.kind == "disclosure",
+                MonitorPlan.account_id == account_id,
+                MonitorPlan.instrument_id == selected.instrument_id,
+            )
+            .limit(1)
+        )
+        if disclosure_plan is not None:
+            from nexus.monitoring.batches import scan_stock_batch
+
+            batch = await scan_stock_batch(
+                session, account_id=account_id, instrument_id=selected.instrument_id, now=now
+            )
+            counts["checks"] += batch["checks"]
+            counts["true"] += batch["true"]
+            counts["false"] += batch["false"]
+            counts["unknown"] += batch["unknown"]
+            counts["new_triggers"] = counts.get("new_triggers", 0) + batch["new_triggers"]
+            counts["notifications"] = counts.get("notifications", 0) + batch["notifications"]
+            counts["batches"] = counts.get("batches", 0) + 1
+            continue
         plan = await session.scalar(
             select(MonitorPlan)
             .where(

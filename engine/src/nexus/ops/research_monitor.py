@@ -31,6 +31,7 @@ def parser() -> argparse.ArgumentParser:
         "reconcile", help="Reconcile persisted research results into monitor coverage"
     )
     install = commands.add_parser("install", help="Install one original audited research proposal")
+    install.add_argument("--kind", choices=("price", "disclosure"), default="price")
     install.add_argument("--output-id", type=UUID, required=True)
     install.add_argument("--expected-predecessor-id", type=UUID)
     inspect = commands.add_parser(
@@ -209,6 +210,7 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                         else "MONITOR_INPUTS_UNAVAILABLE"
                     )
                     safe_codes = {
+                        "MONITOR_TYPED_CONTEXT_REQUIRED",
                         "MONITOR_PENDING_OVERFLOW",
                         "MONITOR_PENDING_CONDITION_UNRESOLVED",
                         "MONITOR_DAILY_CALL_LIMIT",
@@ -281,6 +283,27 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 )
                 return {**scanned, "reconciled_results": reconciled["recorded"]}
             if args.action == "install":
+                if getattr(args, "kind", "price") == "disclosure":
+                    from nexus.monitoring.disclosure_installation import install_disclosure_plan
+
+                    plan = await install_disclosure_plan(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        output_id=args.output_id,
+                        expected_predecessor_id=args.expected_predecessor_id,
+                        now=now,
+                    )
+                    return {
+                        "status": "installed",
+                        "kind": "disclosure",
+                        "plan_id": str(plan.id),
+                        "source_run_id": str(plan.source_run_id),
+                        "generation": plan.generation,
+                        "baseline_snapshot_id": str(plan.baseline_snapshot_id),
+                        "execution_locked": True,
+                        "model_requests": 0,
+                        "provider_requests": 0,
+                    }
                 plan = await install_plan_from_output(
                     session,
                     account_id=settings.agent_paper_account_id,
