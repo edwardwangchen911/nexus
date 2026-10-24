@@ -697,3 +697,12 @@ helper默认路径的实际BFF/页面1项兼容通过。typed已知/未知正常
 真实隔离运行。不得把它当作新真实模型、自然市场、设备送达或已部署证据。剩余工作先
 按完整矩阵核对已具备的证据与实际缺口，再做指定Chat全diff终审、最终head全部必需CI、
 镜像/0086采纳及0097读取兼容回滚、安全合入部署和自然交易时段观察；不重放旧请求。
+
+
+### 2026-10-25 发布候选依赖审计收口（业务源码 dac9915f）
+
+- 完整 npm 审计新发现 fast-uri、undici、zod 告警，未沿用旧 braces 豁免。最小补丁仅三个既有节点：fast-uri 3.1.9、undici 7.30.1、zod 4.6.7；undici override 精确限制到 miniflare@5.20261012.0-beta，不新增依赖。官方旧 braces 公告已于 2026-10-23 撤回，当前完整报告为空。原豁免到期时间不延长、匹配规则不变；仅按已核验输入路径更新精确 lock/source 指纹，旧 38 条审计断言保留。
+- Python 审计另发现开发工具 cachecontrol[filecache] 的 filelock 三项告警，uv.lock 仅升级该既有节点 3.32.4→4.2.4。隔离新环境按 frozen 安装通过，FileCache 实际 set/get/delete 通过。漏洞数据库已识别依赖无已知告警；fsopenapi 非 PyPI、两个 editable 项目仍按原工具边界跳过，不能宣称其源码已被漏洞库审计。
+- 未修改共享 node_modules/venv；新依赖安装及验证隔离在私有目录。补丁后全 Web 1345 通过、1 跳过，typecheck、源码 lint、build、generated 一致性、198 policy 及原审计 38 条通过。独立依赖复核无新增 P1/P2；正常源码/期限/依赖输入路径的保护不变。
+- 本地整分支复核身份 dac9915f，未发现可确认 P1/P2；指出冻结后代际冲突和跨表互斥竞争的针对性证据待补。mixed 原 addressed 与新 daily 接手原 unresolved 资格互斥，不能将直接 SQL 负例包装成两个均合格正常入口的并发事实。指定 Chat 既有会话已发一次终审 marker nexus-monitor-release-final-20261025-01，仍待完整答复。
+- 此项仅完成依赖发布阻塞修复；精确最终 head CI、包含0086/0097读取支持的实际兼容回滚、部署及自然时段验收尚未完成。未启动业务宿主、调用模型、重放请求、接受或释放未知占用。
