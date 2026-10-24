@@ -12,6 +12,14 @@ from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, Monit
 MAX_PENDING = 32
 
 
+class PendingOverflow(ValueError):
+    """The full visible set exceeds capacity; no subset has been frozen."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__("MONITOR_PENDING_OVERFLOW")
+        self.count = count
+
+
 async def pending_stock(
     session: AsyncSession,
     *,
@@ -52,7 +60,7 @@ async def pending_stock(
         )
     ).all()
     if rows and rows[0][2] > MAX_PENDING:
-        raise ValueError("MONITOR_PENDING_OVERFLOW")
+        raise PendingOverflow(int(rows[0][2]))
     if (not rows and not allow_empty) or any(
         check.checked_at > now or trigger.created_at > now for trigger, check, _ in rows
     ):

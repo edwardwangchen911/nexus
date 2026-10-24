@@ -67,6 +67,7 @@ from nexus.monitoring.daily_contracts import (
     DailyPendingReview,
     daily_context_from_inputs,
     daily_context_identity,
+    daily_gap_from_inputs,
     validate_daily_pending_proposal,
 )
 from nexus.monitoring.disclosure_contracts import (
@@ -897,6 +898,15 @@ class StagedCodexCommittee(CodexCommittee):
             )
         if daily:
             context = daily_context_from_inputs(frozen_inputs)
+            if daily_gap_from_inputs(frozen_inputs) is not None:
+                payload["instructions"] = cast(str, payload["instructions"]) + (
+                    " The frozen pending_monitoring_gap records an optional historical review "
+                    "price bundle exceeding capacity. These events are not reviewed or consumed by "
+                    "this study. Do not infer coverage from today's baseline or monitor plan. "
+                    "Return null for daily_pending_proposal, daily_pending_review and "
+                    "daily_pending_adoption_hash; continue the normal security study with all "
+                    "existing evidence, audit and execution gates."
+                )
             payload["daily_pending_context_hash"] = (
                 None if context is None else daily_context_identity(context)[0]
             )
@@ -1402,6 +1412,13 @@ class StagedCodexCommittee(CodexCommittee):
             }[category]
             raise ValueError(code) from error
         if isinstance(parsed, _AssessmentBatch):
+            if (
+                isinstance(parsed, _DailyAssessmentBatch)
+                and daily_gap_from_inputs(self._frozen_inputs) is not None
+                and parsed.daily_pending_adoption_hash is not None
+            ):
+                self.failure_reason = "model_stage_output_invalid"
+                raise ValueError("DAILY_PENDING_ADOPTION_WITHOUT_CONTEXT")
             required = {
                 str(item["claim_id"])
                 for item in previous

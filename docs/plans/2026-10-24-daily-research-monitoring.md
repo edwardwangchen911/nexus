@@ -450,3 +450,42 @@ false=0。根组合22PG通过（129.98秒），包含并发、取消/超时、fr
 指定Chat终审、最终同head全部必需CI、镜像/兼容0096回滚/合入部署及自然交易时段证据。
 本片证明正常来源→确定性检查，不把outbox写入当设备送达，不把模拟socket当真实网络或
 Model调用，也不以绿CI/健康替代全产品闭环。
+
+### 2026-10-25 正常日研究的附带旧价格容量缺口（本地候选）
+
+确认的拒绝点是正常daily准备`agent_paper_context`时，旧price-v1待处理集合超过32项，
+`pending_stock`的容量异常被正式入口转为整轮`RESEARCH_ADMISSION_UNAVAILABLE`。既有
+SEC评审§5要求附加pending不能永久阻断既定daily；这不豁免daily自身正式准入。
+
+现在只有专用`PendingOverflow`可转为冻结`daily_monitor_gap_v1`：scope明确是尚未分配的
+price-v1集合，记录截取前完整count、原T0和固定原因，不附部分父论点/成员。正常三股daily
+继续走原身份、行情、账户、预算及租约；增量仍拒绝>32，不拆批、不清事件。其他身份/原件
+异常继续走原正式拒绝。gap与pending_monitoring互斥，新字段None时完全省略，保留旧字节。
+
+三阶段只对确有冻结pending的集合生成消费提案。gap明确提示尚未复核/消费，SDK拒绝孤立
+采纳hash，原无上下文proposal/review拒绝和消费函数返回0保持。新baseline或monitor plan
+不代表旧事件被消费，late第34项不回填T0的33项gap。合成超时依旧保留新Run未知费用和
+reserved预算，不重派Job。研究质量、监控覆盖和正式执行资格仍分开。
+
+此片不新增依赖、表或迁移；0096不变。新非空gap快照要求读取版本支持该字段，后续镜像
+回滚必须同时保留0096和新输入读取能力，不能删字段、重写快照/hash或以旧镜像能启动代替
+兼容核验。所有业务宿主、旧请求、未知接受及实际来源/模型/通知调用保持未动。
+
+指定Chat定向设计评审`nexus-unresolved-daily-consumption-20261025-01`已关联完整新请求、
+completed回复与idle，结论有条件通过。它是后续typed daily消费设计判断，不是代码终审或
+运行通过。本地已核对其P1/P2：旧已分配事件须精确属于原冻结并由原终态Output标为
+unresolved，known settled/无活动未知占用；不顺带接纳known-failed。历史来源读取与当前
+各kind接替generation分开；新增独立proof，双writer/DBguard按同trigger锁跨表排他，损坏
+证明拒绝而非当未消费重派；消费与当前coverage同事务，晚材料只入新冻结，原Run不改。
+
+下一片仍需完成上述typed daily v2独立消费证明及正常受控全链，然后API/BFF/实际页面
+矩阵、全diff指定Chat终审、最终同head全部必需CI、最终镜像/兼容回滚/合入部署和自然市场
+证据。本片不宣称旧typed unresolved已可消费，也不把本地测试当完整产品或远端CI完成。
+
+本片最终隔离PG32项通过（308.31秒）：32正常冻结、33项gap、迟到第34项不回填、原生
+Worker已知/未知结算及无消费、非法原件拒绝、旧消费回执/增量准入；完整fast6820通过/
+10skip/1deselected（218.31秒），最终43定向unit（4.61秒）、Mypy655源、Ruff/8format/diff
+通过。与父提交13ccfd53实际读取代码对比的旧上下文字节/hash完全一致。两次独立只读
+复核无新增P1/P2。初始新拒绝测试误假定内部异常透传及cycle有可变status，已改为核对正常
+unavailable回执和append-only事件；失败日志保留，生产拒绝及原有断言未放宽。全部模型/
+来源/通知为替身，未接业务数据库或启动业务宿主；完整Goal继续保持未完成。

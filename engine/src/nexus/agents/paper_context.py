@@ -17,13 +17,14 @@ from pydantic import (
     ValidationError,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
-from nexus.monitoring.daily_context import DailyMonitorContext
+from nexus.monitoring.daily_context import DailyMonitorContext, DailyMonitorGap
 from nexus.monitoring.disclosure_context import (
     DisclosureMonitoringContext,
     freeze_disclosure_baseline,
@@ -103,6 +104,7 @@ class AgentPaperResearchContext(BaseModel):
     paper_portfolio: AgentPaperPortfolioContext
     execution_locked: Literal[True] = True
     pending_monitoring: DailyMonitorContext | None = None
+    pending_monitoring_gap: DailyMonitorGap | None = None
     disclosure_monitoring: DisclosureMonitoringContext | None = None
 
     @field_validator("disclosure_monitoring", mode="before")
@@ -112,6 +114,15 @@ class AgentPaperResearchContext(BaseModel):
             return DisclosureMonitoringContext.model_validate_json(json.dumps(value))
         return value
 
+    @model_validator(mode="after")
+    def _pending_gap(self) -> "AgentPaperResearchContext":
+        if self.pending_monitoring_gap is not None and (
+            self.pending_monitoring is not None
+            or self.pending_monitoring_gap.observed_at != self.decision_time
+        ):
+            raise ValueError("DAILY_MONITOR_GAP_INVALID")
+        return self
+
     @model_serializer(mode="wrap")
     # Retain the closed serialization schema as well as historical payload bytes.
     def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
@@ -120,6 +131,8 @@ class AgentPaperResearchContext(BaseModel):
             value.pop("disclosure_monitoring", None)
         if self.pending_monitoring is None:
             value.pop("pending_monitoring", None)
+        if self.pending_monitoring_gap is None:
+            value.pop("pending_monitoring_gap", None)
         return value
 
 
@@ -233,10 +246,18 @@ async def prepare_agent_paper_research_snapshot(
         )
         cash_weight = (projection.available_cash + projection.reserved_cash) / projection.nav
     from nexus.monitoring.daily_context import freeze_daily_pending
+    from nexus.monitoring.pending import PendingOverflow
 
-    pending = await freeze_daily_pending(
-        session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
-    )
+    pending_gap = None
+    try:
+        pending = await freeze_daily_pending(
+            session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
+        )
+    except PendingOverflow as overflow:
+        # A daily study is independent work. Do not truncate its optional historical
+        # bundle or let that bundle permanently prevent the scheduled daily study.
+        pending = None
+        pending_gap = DailyMonitorGap(observed_at=decision_time, pending_count=overflow.count)
     disclosure = (
         await freeze_disclosure_baseline(
             session, instrument_id=candidate.instrument_id, as_of=decision_time
@@ -247,6 +268,7 @@ async def prepare_agent_paper_research_snapshot(
     context = AgentPaperResearchContext(
         disclosure_monitoring=disclosure,
         pending_monitoring=pending,
+        pending_monitoring_gap=pending_gap,
         cycle_id=cycle_id,
         instrument_id=candidate.instrument_id,
         decision_time=decision_time,

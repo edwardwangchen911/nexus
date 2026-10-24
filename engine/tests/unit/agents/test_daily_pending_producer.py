@@ -61,7 +61,9 @@ def test_v9_is_explicit_and_v8_remains_available():
     )
 
 
-async def produce(monkeypatch, *, mutation=None, inline=False, pending=True, n=2, capture=None):
+async def produce(
+    monkeypatch, *, mutation=None, inline=False, pending=True, n=2, capture=None, gap=False
+):
     request, evidence, _ = _authority()
     evidence = tuple(
         ref.model_copy(update={"source": "nexus_agent_paper_context"}) for ref in evidence
@@ -73,6 +75,14 @@ async def produce(monkeypatch, *, mutation=None, inline=False, pending=True, n=2
     paper = {"execution_locked": True}
     if frozen is not None:
         paper["pending_monitoring"] = frozen
+    if gap:
+        assert frozen is None
+        paper["pending_monitoring_gap"] = {
+            "purpose": "daily_monitor_gap_v1",
+            "reason": "MONITOR_PENDING_OVERFLOW",
+            "pending_count": 33,
+            "max_pending": 32,
+        }
     seen = []
     expected = None
     if capture is not None:
@@ -249,6 +259,25 @@ async def test_no_coverage_from_non_exact_or_rejected_original(monkeypatch, muta
 async def test_absent_pending_context_has_no_adoption(monkeypatch):
     intent, _, _, _ = await produce(monkeypatch, pending=False)
     assert intent.daily_pending_proposal is None
+
+
+@pytest.mark.asyncio
+async def test_daily_capacity_gap_remains_unreviewed_through_all_stages(monkeypatch):
+    intent, outputs, seen, _ = await produce(monkeypatch, pending=False, gap=True)
+    assert len(seen) == 3
+    assert all(payload["daily_pending_context_hash"] is None for payload in seen)
+    assert all("not reviewed or consumed" in payload["instructions"] for payload in seen)
+    assert all(row.daily_pending_proposal is None for row in outputs)
+    assert all(row.daily_pending_review is None for row in outputs)
+    assert all(row.daily_pending_adoption_hash is None for row in outputs)
+    assert intent.daily_pending_proposal is None
+    assert intent.stance == "watch"
+
+
+@pytest.mark.asyncio
+async def test_daily_capacity_gap_rejects_isolated_adoption_hash(monkeypatch):
+    with pytest.raises(ValueError, match="DAILY_PENDING_ADOPTION_WITHOUT_CONTEXT"):
+        await produce(monkeypatch, pending=False, gap=True, mutation="adoption")
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,23 @@ from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.strategy.intents import ResearchIntent
 
 
+class DailyMonitorGap(BaseModel):
+    """Frozen capacity fact only; it grants no event consumption authority."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    purpose: Literal["daily_monitor_gap_v1"] = "daily_monitor_gap_v1"
+    scope: Literal["unassigned_price_v1"] = "unassigned_price_v1"
+    reason: Literal["MONITOR_PENDING_OVERFLOW"] = "MONITOR_PENDING_OVERFLOW"
+    observed_at: datetime
+    pending_count: int = Field(ge=33, strict=True)
+    max_pending: Literal[32] = 32
+
+    @field_validator("observed_at")
+    @classmethod
+    def utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
 class DailyMonitorParent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     plan_id: UUID

@@ -31,15 +31,23 @@ def daily_context_identity(value: object) -> tuple[str, tuple[UUID, ...]]:
 
 
 def daily_context_from_inputs(inputs: dict[str, object]) -> object | None:
+    return _daily_field_from_inputs(inputs, "pending_monitoring")
+
+
+def daily_gap_from_inputs(inputs: dict[str, object]) -> object | None:
+    return _daily_field_from_inputs(inputs, "pending_monitoring_gap")
+
+
+def _daily_field_from_inputs(inputs: dict[str, object], field: str) -> object | None:
     security = inputs.get("security_snapshot")
     if not isinstance(security, dict):
         return None
     contexts = [
-        paper["pending_monitoring"]
+        paper[field]
         for item in security.get("items", [])
         if isinstance(item, dict)
         and isinstance(paper := item.get("agent_paper_context"), dict)
-        and paper.get("pending_monitoring") is not None
+        and paper.get(field) is not None
     ]
     if len(contexts) > 1:
         raise ValueError("DAILY_PENDING_CONTEXT_INVALID")
