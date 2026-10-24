@@ -21,6 +21,7 @@ from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 from nexus.monitoring.contracts import PriceMonitoringProposal
+from nexus.monitoring.daily_contracts import DailyPendingProposal
 
 _UNSAFE_TEXT = (
     "http://",
@@ -176,10 +177,10 @@ class ResearchConditionEvaluation(_IntentModel):
     @model_validator(mode="after")
     def _closed_observation(self) -> "ResearchConditionEvaluation":
         if (
-            self.condition.signal not in {
-                "portfolio.top1_warning_exceeded", "portfolio.top1_critical_exceeded"
-            }
-            or self.condition.operator != "is_true" or self.condition.threshold is not True
+            self.condition.signal
+            not in {"portfolio.top1_warning_exceeded", "portfolio.top1_critical_exceeded"}
+            or self.condition.operator != "is_true"
+            or self.condition.threshold is not True
             or self.condition.unit != "boolean"
             or ((self.result == "unknown") != (self.reason is not None))
         ):
@@ -202,6 +203,7 @@ class RoleVote(_IntentModel):
 
 
 class ResearchIntent(_IntentModel):
+    daily_pending_proposal: DailyPendingProposal | None = None
     monitoring_proposal: PriceMonitoringProposal | None = None
     synthesis_assessment: SynthesisAssessment | None = None
     condition_evaluations: tuple[ResearchConditionEvaluation, ...] | None = Field(
@@ -212,6 +214,8 @@ class ResearchIntent(_IntentModel):
     # A return annotation would replace the closed model serialization schema.
     def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         payload = cast(dict[str, object], handler(self))
+        if self.daily_pending_proposal is None:
+            payload.pop("daily_pending_proposal", None)
         if self.monitoring_proposal is None:
             payload.pop("monitoring_proposal", None)
         if self.synthesis_assessment is None:
@@ -253,20 +257,34 @@ class ResearchIntent(_IntentModel):
 
     @model_validator(mode="after")
     def _point_in_time_and_complete_evidence(self) -> "ResearchIntent":
+        daily = self.daily_pending_proposal
+        if daily is not None:
+            _assert_safe(daily.model_dump(mode="json"))
+            if any(
+                ref not in self.evidence_refs or ref.available_at > self.decision_time
+                for item in daily.items
+                for ref in item.evidence_refs
+            ):
+                raise ValueError("DAILY_PENDING_EVIDENCE_INVALID")
         proposal = self.monitoring_proposal
         if proposal is not None:
             _assert_safe(proposal.model_dump(mode="json"))
         if proposal is not None and (
             not self.decision_time < proposal.review_due_at <= proposal.valid_until
-            or any(ref not in self.evidence_refs or ref.available_at > self.decision_time
-                   for ref in proposal.evidence_refs)
+            or any(
+                ref not in self.evidence_refs or ref.available_at > self.decision_time
+                for ref in proposal.evidence_refs
+            )
         ):
             raise ValueError("MONITOR_PROPOSAL_BINDING_INVALID")
         if self.condition_evaluations is not None and (
             len({item.condition.signal for item in self.condition_evaluations}) != 2
             or any(item.observed_at > self.decision_time for item in self.condition_evaluations)
-            or any(ref not in self.evidence_refs for item in self.condition_evaluations
-                   for ref in item.condition.evidence_refs)
+            or any(
+                ref not in self.evidence_refs
+                for item in self.condition_evaluations
+                for ref in item.condition.evidence_refs
+            )
         ):
             raise ValueError("research observations must bind original evidence and time")
         if self.valid_until <= self.decision_time:

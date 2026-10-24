@@ -29,7 +29,7 @@ from nexus.agents.codex_versions import (
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
-from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSION, ROLE_ORDER, CommitteeRoleOutput
+from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS, ROLE_ORDER, CommitteeRoleOutput
 from nexus.agents.execution import CommitteeModel
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
@@ -195,7 +195,7 @@ def inspect_critique_request(
         readback_committee = committee
         if (
             getattr(committee._prompts["portfolio"], "version", None)
-            == MONITORING_SCOPE_PROMPT_VERSION
+            in MONITORING_SCOPE_PROMPT_VERSIONS
         ):
             # v8 also binds the original proposal and reviews, not just claim text.
             # Use an isolated view so inspection cannot mutate the producer state.

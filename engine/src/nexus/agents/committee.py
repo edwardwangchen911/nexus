@@ -17,6 +17,7 @@ from pydantic import (
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
 from nexus.monitoring.contracts import PriceMonitoringProposal, PriceMonitoringReview
+from nexus.monitoring.daily_contracts import DailyPendingProposal, DailyPendingReview
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
 type AgentRole = Literal[
@@ -282,6 +283,9 @@ class CommitteeRoleOutput(BaseModel):
     frozen_inputs_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     synthesis_assessment: SynthesisAssessment | None = None
+    daily_pending_proposal: DailyPendingProposal | None = None
+    daily_pending_review: DailyPendingReview | None = None
+    daily_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     monitoring_proposal: PriceMonitoringProposal | None = None
     monitoring_review: PriceMonitoringReview | None = None
     monitoring_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -289,7 +293,13 @@ class CommitteeRoleOutput(BaseModel):
     @model_validator(mode="after")
     def _monitoring_role(self) -> "CommitteeRoleOutput":
         if (
-            self.monitoring_proposal is not None
+            self.daily_pending_proposal is not None
+            and self.role != "orchestrator"
+            or self.daily_pending_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.daily_pending_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.monitoring_proposal is not None
             and self.role != "market_state"
             or self.monitoring_review is not None
             and self.role not in {"bear", "evidence_audit"}
@@ -297,7 +307,12 @@ class CommitteeRoleOutput(BaseModel):
             and self.role != "portfolio"
         ):
             raise ValueError("MONITOR_ROLE_INVALID")
-        for item in (self.monitoring_proposal, self.monitoring_review):
+        for item in (
+            *(self.daily_pending_proposal.items if self.daily_pending_proposal else ()),
+            self.daily_pending_review,
+            self.monitoring_proposal,
+            self.monitoring_review,
+        ):
             if item is not None:
                 ResearchClaim(text=item.rationale, evidence_refs=item.evidence_refs)
         return self
@@ -308,7 +323,14 @@ class CommitteeRoleOutput(BaseModel):
         payload = cast(dict[str, object], handler(self))
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
-        for name in ("monitoring_proposal", "monitoring_review", "monitoring_adoption_hash"):
+        for name in (
+            "monitoring_proposal",
+            "monitoring_review",
+            "monitoring_adoption_hash",
+            "daily_pending_proposal",
+            "daily_pending_review",
+            "daily_pending_adoption_hash",
+        ):
             if getattr(self, name) is None:
                 payload.pop(name, None)
         return payload
@@ -391,12 +413,19 @@ INFERENCE_REVIEW_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v7-inference-
 MONITORING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v8-price-monitor"
 
 
+DAILY_PENDING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v9-daily-pending"
+MONITORING_SCOPE_PROMPT_VERSIONS = frozenset(
+    {MONITORING_SCOPE_PROMPT_VERSION, DAILY_PENDING_SCOPE_PROMPT_VERSION}
+)
+
+
 def load_portfolio_synthesis_prompt(
     *,
     security_research_scope: bool = False,
     claim_review_scope: bool = False,
     inference_review_scope: bool = False,
     monitoring_scope: bool = False,
+    daily_pending_scope: bool = False,
 ) -> PromptAsset:
     """Load the immutable cross-source final-role prompt used by normal local setup."""
     if type(security_research_scope) is not bool:
@@ -409,8 +438,12 @@ def load_portfolio_synthesis_prompt(
         raise ValueError("INFERENCE_REVIEW_SCOPE_INVALID")
     if type(monitoring_scope) is not bool or (monitoring_scope and not inference_review_scope):
         raise ValueError("MONITORING_SCOPE_INVALID")
+    if type(daily_pending_scope) is not bool or (daily_pending_scope and not monitoring_scope):
+        raise ValueError("DAILY_PENDING_SCOPE_INVALID")
     version = (
-        MONITORING_SCOPE_PROMPT_VERSION
+        DAILY_PENDING_SCOPE_PROMPT_VERSION
+        if daily_pending_scope
+        else MONITORING_SCOPE_PROMPT_VERSION
         if monitoring_scope
         else INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
         if inference_review_scope

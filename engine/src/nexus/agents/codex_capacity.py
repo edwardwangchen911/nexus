@@ -26,6 +26,9 @@ from nexus.agents.codex_sdk import (
 from nexus.agents.codex_staged import (
     STAGES,
     StagedCodexCommittee,
+    _DailyPendingItem,
+    _DailyPendingProposal,
+    _DailyPendingReview,
     _MonitoringProposal,
     _MonitoringReview,
 )
@@ -38,7 +41,8 @@ from nexus.agents.codex_versions import (
     ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import (
-    MONITORING_SCOPE_PROMPT_VERSION,
+    DAILY_PENDING_SCOPE_PROMPT_VERSION,
+    MONITORING_SCOPE_PROMPT_VERSIONS,
     ROLE_ORDER,
     AgentRole,
     CommitteeRoleOutput,
@@ -173,9 +177,9 @@ async def capacity_job_qualified(session: AsyncSession, job: Job, *, claimed: bo
 
 
 def _monitoring_capacity_view(
-    committee: StagedCodexCommittee, evidence: tuple[EvidenceRef, ...]
+    committee: StagedCodexCommittee, evidence: tuple[EvidenceRef, ...], inputs: dict[str, object]
 ) -> StagedCodexCommittee:
-    if committee._prompts["portfolio"].version != MONITORING_SCOPE_PROMPT_VERSION:
+    if committee._prompts["portfolio"].version not in MONITORING_SCOPE_PROMPT_VERSIONS:
         return committee
     for model in (_MonitoringProposal, _MonitoringReview):
         properties = model.model_json_schema()["properties"]
@@ -229,6 +233,65 @@ def _monitoring_capacity_view(
         )
         for role in monitor_roles
     }
+    if committee._prompts["portfolio"].version == DAILY_PENDING_SCOPE_PROMPT_VERSION:
+        from nexus.monitoring.daily_contracts import (
+            DailyPendingItem,
+            DailyPendingProposal,
+            DailyPendingReview,
+            daily_context_from_inputs,
+            daily_context_identity,
+        )
+
+        context = daily_context_from_inputs(inputs)
+        if context is not None:
+            context_hash, trigger_ids = daily_context_identity(context)
+            props = _DailyPendingItem.model_json_schema()["properties"]
+            if (
+                props["rationale"].get("maxLength") != 160
+                or props["citations"].get("maxItems") != 3
+                or _DailyPendingProposal.model_json_schema()["properties"]["items"].get("maxItems")
+                != 32
+                or _DailyPendingReview.model_json_schema()["properties"]["rationale"].get(
+                    "maxLength"
+                )
+                != 500
+                or _DailyPendingReview.model_json_schema()["properties"]["citations"].get(
+                    "maxItems"
+                )
+                != 4
+            ):
+                raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+            daily = DailyPendingProposal(
+                context_hash=context_hash,
+                items=tuple(
+                    DailyPendingItem(
+                        trigger_id=trigger_id,
+                        status="unresolved",
+                        rationale="\x00" * 160,
+                        evidence_refs=(widest_reference,) * 3,
+                    )
+                    for trigger_id in trigger_ids
+                ),
+            )
+            view._outputs["orchestrator"] = CommitteeRoleOutput(
+                role="orchestrator",
+                vote="support",
+                claims=(ResearchClaim(text="capacity boundary", evidence_refs=(evidence[-1],)),),
+                prompt_hash=committee._prompts["orchestrator"].content_hash,
+                input_tokens=0,
+                output_tokens=0,
+                daily_pending_proposal=daily,
+            )
+            daily_review = DailyPendingReview(
+                proposal_hash=daily.content_hash,
+                decision="accepted",
+                rationale="\x00" * 500,
+                evidence_refs=(widest_reference,) * 4,
+            )
+            for reviewer in ("bear", "evidence_audit"):
+                view._outputs[reviewer] = view._outputs[reviewer].model_copy(
+                    update={"daily_pending_review": daily_review}
+                )
     return view
 
 
@@ -253,7 +316,7 @@ def candidate_capacity_envelope(
     """
     if not evidence_refs:
         raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
-    committee = _monitoring_capacity_view(committee, evidence_refs)
+    committee = _monitoring_capacity_view(committee, evidence_refs, inputs)
     # This proof is for the declared current SDK schema. Schema evolution must
     # explicitly update the envelope rather than silently keeping old maxima.
     claim_properties = _Claim.model_json_schema()["properties"]

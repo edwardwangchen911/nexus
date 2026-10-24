@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from nexus.agents.committee import (
+    DAILY_PENDING_SCOPE_PROMPT_VERSION,
     INFERENCE_REVIEW_SCOPE_PROMPT_VERSION,
-    MONITORING_SCOPE_PROMPT_VERSION,
 )
 from nexus.ops import openai_local
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentPromptVersionRecord
@@ -114,7 +114,7 @@ async def test_prepare_registers_only_explicit_prompt_and_existing_model_contrac
         if isinstance(row, AgentPromptVersionRecord) and row.role == "portfolio"
     ]
     assert portfolio[-1].version == (
-        MONITORING_SCOPE_PROMPT_VERSION if monitoring else INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
+        DAILY_PENDING_SCOPE_PROMPT_VERSION if monitoring else INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
     )
     models = [row for row in records if isinstance(row, AgentModelConfigRecord)]
     assert len(models) == 2

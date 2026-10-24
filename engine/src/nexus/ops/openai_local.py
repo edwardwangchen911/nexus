@@ -459,6 +459,7 @@ async def prepare_database(
             claim_review_scope=formal_bounded_stage_budget,
             inference_review_scope=formal_bounded_stage_budget,
             monitoring_scope=price_monitoring,
+            daily_pending_scope=price_monitoring,
         )
         prompts.append(
             (
@@ -745,8 +746,8 @@ def main() -> int:
     parser.add_argument(
         "--allow-stage-time-budget-registration",
         action="store_true",
-        help="Explicitly allow v6 or pending v8 registration in the configured local database; "
-        "v6 may change future selection, pending v8 remains inactive; never starts research",
+        help="Allow v6 or pending monitoring registration in the configured local database; "
+        "v6 may change selection, pending monitoring stays inactive; never starts research",
     )
     parser.add_argument(
         "--formal-bounded-stage-budget",
@@ -756,7 +757,7 @@ def main() -> int:
     parser.add_argument(
         "--price-monitoring",
         action="store_true",
-        help="Register the v8 price-monitor prompt with formal bounded setup; "
+        help="Register the v9 daily-pending monitor prompt with formal bounded setup; "
         "no research or monitoring",
     )
     args = parser.parse_args()

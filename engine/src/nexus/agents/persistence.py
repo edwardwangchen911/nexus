@@ -1457,10 +1457,15 @@ def _require_nonnegative_decimal(value: Decimal, name: str, *, positive: bool = 
 
 
 def _schema_hash(*, portfolio_prompt_version: str | None = None) -> str:
-    from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSION
+    from nexus.agents.committee import (
+        DAILY_PENDING_SCOPE_PROMPT_VERSION,
+        MONITORING_SCOPE_PROMPT_VERSION,
+    )
 
     name = (
-        "research-intent-v8-price-monitor.schema.json"
+        "research-intent-v9-daily-pending.schema.json"
+        if portfolio_prompt_version == DAILY_PENDING_SCOPE_PROMPT_VERSION
+        else "research-intent-v8-price-monitor.schema.json"
         if portfolio_prompt_version == MONITORING_SCOPE_PROMPT_VERSION
         else "research-intent-v1.schema.json"
     )
