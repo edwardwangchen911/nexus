@@ -1780,13 +1780,15 @@ async def _admit_cycle_research(
         )
     ):
         raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
-    profile_model_id = await _require_cycle_candidate_profile(
-        session,
-        cycle=cycle,
-        candidate_stage_capacity=candidate_stage_capacity,
-        now=authority.decision_time,
-        formal_stage_capacity=formal_stage_capacity,
-    )
+    profile_model_id = None
+    if daily_event_preview_deadline is None:
+        profile_model_id = await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=candidate_stage_capacity,
+            now=authority.decision_time,
+            formal_stage_capacity=formal_stage_capacity,
+        )
     manifest = parse_candidate_manifest(
         cycle.candidate_manifest,
         allow_legacy=cycle.decision_price_policy_id == PAPER_DECISION_SOURCE_POLICY_ID,
@@ -1807,6 +1809,16 @@ async def _admit_cycle_research(
     try:
         async with session.begin_nested():
             async with capacity_scope:
+                if daily_event_preview_deadline is not None:
+                    # Revalidate under the inherited timer before any rebuilt
+                    # snapshot, Run, Job or hold may be prepared.
+                    profile_model_id = await _require_cycle_candidate_profile(
+                        session,
+                        cycle=cycle,
+                        candidate_stage_capacity=candidate_stage_capacity,
+                        now=authority.decision_time,
+                        formal_stage_capacity=formal_stage_capacity,
+                    )
                 for candidate in manifest:
                     snapshot_actor = (
                         "local-agent-paper-cycle"
