@@ -175,3 +175,13 @@
 - 修正正常第二轮读取正式目标漏传formal_stage_capacity；未放宽风险或结果资格。集中只读复核发现每日截止竞态，已有先红后绿回归并定向关闭。
 - 20项每日/DB/迁移组合及随后加强的7项正常Worker回归通过（二者覆盖重叠）；141项相关unit、43项Web兼容回归、Mypy10源、Ruff/format/diff、生成客户端检查通过；pg-b收集421项。都是合成事实/模型替身的隔离正常入口证据，未调用真实模型、行情、通知或业务宿主。最终fast为6589 passed/10 skipped/1 deselected（234.75s），邻域PG 58 passed（558.47s）；与前述组合共78项不重叠PG，7项增强用例属于复验不重复计数。
 - 本段不勾选完整产品闭环：可靠结构事件、BFF/实际页面完整矩阵、终审、精确最终head CI、镜像/部署/回滚与自然交易窗口仍待后续。
+
+### 2026-10-24 可靠 SEC 索引来源（本地候选，事件派发尚未接线）
+
+- 原 refresh-disclosure 每类只选最新一份，普通8-K reader不重读原件，XBRL collector也不是完整披露feed。新增窄来源复用既有collect_identity_sources的固定directory/submissions采集与原receipt，再通过正常collect/import/inspect保存、重验完整索引。
+- 原件、receipt、既有发行人基础身份、canonical hash及实际本地入库时点逐层绑定；归档验证结束后重取数据库时钟登记可见时间。两种固定receipt精确接收，不改写原receipt。同件导入保持首次本地可见时间；同字节新HTTP收件产生新capture，逻辑event ID始终为CIK+accession。
+- 只描述新增收录的8-K/8-K/A，不解释正文、重要性或会计适用性。首次baseline不触发全部历史；未来baseline拒绝。未读取历史分片时无新增保持unknown；明确新项可true，同时保留partial覆盖。stale/conflict/超过32新项仍unknown，来源原件全部保留。
+- 真实公开归档证实AAPL recent有1002行，输入界限按事实调整为10000行/8MiB、目标类别1000项，均不截断。AAPL/AVGO/NVDA原bytes及原receipt零网络解析通过；不冒称真实数据库、模型、通知或当日采集验收。
+- 正常collect到隔离PG再只读inspect覆盖重收、新capture、明确新增、冲突、partial历史、篡改、同哈希旧对象损坏、未来及过期门禁共8项；连同SEC exhibit/amendment相关PG共18项通过。94项相关unit、Mypy3源、Ruff/format/diff及正式注册CLI帮助入口通过；最终日志保存在sec-index-*。
+- 集中复核两项P2均先红后绿：partial history误报false、全局同哈希旧URI未读回。未改变旧来源、价格条件、预算、租约或正式门禁。无新增依赖或迁移；旧代码回滚会忽略而不删除新来源快照。新测试已入默认CI组，远端CI尚未运行。
+- 下一步仍须接有类型的事件条件、同槽多事件与价格互不吞没的存储合同、稳定事件outbox去重及单股冻结接替；现有价格表/observation/latch不能冒充SEC事件链。随后继续BFF/实际页面及完整交付，不将本来源切片当作全目标完成。
