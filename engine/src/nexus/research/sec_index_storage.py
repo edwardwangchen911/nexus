@@ -311,8 +311,6 @@ async def compare_index_captures(
         if entry.accession_number in previous and previous[entry.accession_number] != entry:
             return {**result, "reason": "SEC_INDEX_EVENT_CONFLICT"}
     added = [entry for entry in current.entries if entry.accession_number not in previous]
-    if len(added) > 32:
-        return {**result, "reason": "SEC_INDEX_EVENT_OVERFLOW"}
     # Recent rows prove positives, but not absence in unread historical shards.
     complete = current.history_complete
     return {
@@ -321,6 +319,9 @@ async def compare_index_captures(
         "reason": None if added or complete else result["reason"],
         "event_ids": [f"sec:{current.issuer_cik}:{entry.accession_number}" for entry in added],
         "history_coverage": "complete" if complete else "partial",
+        # Research work capacity cannot erase an established disclosure fact.
+        "automatic_review_capacity": "blocked" if len(added) > 32 else "within_limit",
+        "impact_review": "not_performed",
         "baseline_snapshot_id": str(baseline_row.id),
         "snapshot_id": str(current_row.id),
     }

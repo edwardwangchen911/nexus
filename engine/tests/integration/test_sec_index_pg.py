@@ -70,7 +70,9 @@ def response(metadata, requests):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["same", "new", "new_partial", "partial", "conflict", "future"])
+@pytest.mark.parametrize(
+    "mode", ["same", "new", "new_partial", "partial", "conflict", "future", "overflow"]
+)
 async def test_normal_sec_index_capture_readback_and_exact_new_rows(
     migrated_database_url, tmp_path, mode
 ):
@@ -108,6 +110,12 @@ async def test_normal_sec_index_capture_readback_and_exact_new_rows(
             ]
         elif mode == "conflict":
             metadata["filings"]["recent"]["form"] = ["8-K/A"]
+        if mode == "overflow":
+            recent = metadata["filings"]["recent"]
+            for number in range(2, 35):
+                for key in recent:
+                    recent[key].append(recent[key][0])
+                recent["accessionNumber"][-1] = f"{CIK}-26-{number:06d}"
         if mode == "new_partial":
             metadata["filings"]["files"] = [{"name": "older.json"}]
         second = await collect_index(
@@ -157,14 +165,22 @@ async def test_normal_sec_index_capture_readback_and_exact_new_rows(
                 "new_partial": "true",
                 "partial": "unknown",
                 "conflict": "unknown",
+                "overflow": "true",
             }[mode]
         )
         assert result["event_ids"] == (
-            [f"sec:{CIK}:{CIK}-26-000002"] if mode in {"new", "new_partial"} else []
+            [f"sec:{CIK}:{CIK}-26-{number:06d}" for number in range(2, 35)]
+            if mode == "overflow"
+            else [f"sec:{CIK}:{CIK}-26-000002"]
+            if mode in {"new", "new_partial"}
+            else []
         )
         assert result["model_requests"] == result["provider_requests"] == 0
         if mode == "new_partial":
             assert result["history_coverage"] == "partial"
+        if mode == "overflow":
+            assert result["automatic_review_capacity"] == "blocked"
+            assert result["impact_review"] == "not_performed"
         if mode == "conflict":
             assert result["reason"] == "SEC_INDEX_EVENT_CONFLICT"
     factory = session_factory(settings)

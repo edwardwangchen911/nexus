@@ -114,3 +114,30 @@ class PriceMonitoringReview(MonitoringModel):
     decision: Literal["accepted", "rejected"]
     rationale: str = Field(min_length=1, max_length=500)
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1, max_length=4)
+
+
+class DisclosureReviewCondition(MonitoringModel):
+    """New locally confirmed index membership, never publication or impact."""
+
+    signal: Literal["sec.issuer_disclosure_added"]
+    operator: Literal["exists_new"]
+    threshold: bool = Field(strict=True)
+    unit: Literal["filing"]
+    purpose: Literal["review"]
+    source: Literal["sec"]
+    forms: tuple[Literal["8-K"], Literal["8-K/A"]]
+    max_age_seconds: Literal[300]
+    time_authority: Literal["frozen_index_vs_local_receipt"]
+
+    @field_validator("threshold")
+    @classmethod
+    def _exists(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("MONITOR_DISCLOSURE_THRESHOLD_INVALID")
+        return value
+
+    @property
+    def semantic_hash(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.model_dump(mode="json"), sort_keys=True).encode()
+        ).hexdigest()
