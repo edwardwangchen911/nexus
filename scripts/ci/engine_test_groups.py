@@ -111,6 +111,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_monitor_event_receipts_pg.py",
     "engine/tests/integration/test_monitor_daily_events_pg.py",
     "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
+    "engine/tests/integration/test_daily_v2_capacity_pg.py",
     "engine/tests/integration/test_monitor_daily_v2_native_pg.py",
     "engine/tests/integration/test_monitor_mixed_increment_pg.py",
     "engine/tests/integration/test_monitor_mixed_host_pg.py",

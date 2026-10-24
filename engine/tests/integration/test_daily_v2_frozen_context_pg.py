@@ -77,6 +77,27 @@ async def test_normal_daily_freezes_typed_package_or_explicit_gap(
             return None
 
         monkeypatch.setattr(daily, "read_batch_inputs", corrupt)
+    complete_freezes = []
+    real_capacities = []
+    if fault == "legacy":
+        from nexus.monitoring import daily_v2_capacity as capacity
+
+        freeze = daily.freeze_daily_events
+        envelope = capacity.candidate_capacity_envelope
+
+        async def capture_freeze(*args, **kwargs):
+            value = await freeze(*args, **kwargs)
+            if value[0] is not None:
+                complete_freezes.append(value[0])
+            return value
+
+        def capture_capacity(committee, **kwargs):
+            value = envelope(committee, **kwargs)
+            real_capacities.append((value["wire_upper_bytes"], committee._max_wire_bytes))
+            return value
+
+        monkeypatch.setattr(daily, "freeze_daily_events", capture_freeze)
+        monkeypatch.setattr(capacity, "candidate_capacity_envelope", capture_capacity)
     try:
         now, result = await new_daily(factory, settings, captured, pointer)
         async with factory() as session:
@@ -104,7 +125,19 @@ async def test_normal_daily_freezes_typed_package_or_explicit_gap(
                     33 if fault == "overflow" else 3
                 )
             else:
-                frozen = context.pending_monitoring_v2
+                if fault == "legacy":
+                    # Full freezing and optional model-input admission are separate boundaries.
+                    # Keep every original member assertion; the real wire gate may omit only
+                    # the entire optional bundle before any Job is published.
+                    assert complete_freezes
+                    frozen = complete_freezes[0]
+                    assert any(size > limit for size, limit in real_capacities), real_capacities
+                    assert context.pending_monitoring_v2 is None
+                    assert context.pending_monitoring_v2_gap.reason == "MONITOR_CONTENT_CAPACITY"
+                    assert context.pending_monitoring_v2_gap.pending_count == 4
+                    assert len(result.research_run_ids) == 3
+                else:
+                    frozen = context.pending_monitoring_v2
                 assert frozen is not None, context.model_dump(mode="json")
                 assert frozen.materials[0].snapshot_id == material_id
                 assert len(frozen.trigger_checks) == (4 if fault == "legacy" else 3)
