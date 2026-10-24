@@ -1,0 +1,333 @@
+"""Daily normal-cycle inputs consume only exact, reviewed pending evidence."""
+
+import json
+from datetime import timedelta
+
+import pytest
+from helpers.paper_batch import CALENDAR_ID
+from integration.test_monitor_increment_pg import append_fresh_inputs, ready_trigger
+from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
+    AgentResearchRunRecord,
+)
+from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.monitoring import MonitorDailyTriggerReceipt, MonitorTrigger
+from nexus.persistence.models.runtime import AuditEvent, Job, OutboxEvent
+from nexus.worker import run_agent_worker_once
+from sqlalchemy import select
+
+
+async def prepare_daily(database_url, monkeypatch, *, late_before_freeze=False, pending_count=1):
+    from nexus.paper.agent_cycle import start_schwab_agent_paper_cycle
+    from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
+    from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
+
+    factory, settings, trigger, parent, now = await ready_trigger(database_url, monkeypatch)
+    if pending_count > 1:
+        from integration.test_monitor_pending_pg import pending_members
+
+        await pending_members(factory, trigger, pending_count)
+    if late_before_freeze:
+        from integration.test_candidate_multistock_path import _set_test_insert_clock
+        from integration.test_monitor_pending_pg import pending_members
+
+        await _set_test_insert_clock(factory, now + timedelta(seconds=1))
+        await pending_members(factory, trigger, 2)
+        await _set_test_insert_clock(factory, now)
+    async with factory() as session:
+        batch = await load_agent_paper_candidate_batch(
+            session, batch_id=settings.agent_paper_candidate_batch_id
+        )
+    from nexus.persistence.models.market import LatestQuote
+
+    async with factory() as session:
+        quote_scope = tuple(await session.scalars(select(LatestQuote.instrument_id).distinct()))
+    for instrument_id in quote_scope:
+        if instrument_id != parent.instrument_id:
+            await append_fresh_inputs(factory, instrument_id, now)
+    async with factory() as session, session.begin():
+        authority = await load_quasi_realtime_cycle_authority(
+            session,
+            account_id=trigger.account_id,
+            now=now,
+            expected_calendar_authority_id=CALENDAR_ID,
+            expected_universe_snapshot_id=batch.universe_snapshot_id,
+        )
+        result = await start_schwab_agent_paper_cycle(
+            session,
+            authority=authority,
+            decision_slot_at=now.replace(second=0, microsecond=0),
+            idempotency_key="new-daily-pending-cycle",
+            requested_instrument_ids=batch.instrument_ids,
+            candidate_batch_id=batch.batch_id,
+            formal_stage_capacity=True,
+            formal_model_config_id=parent.model_config_id,
+        )
+        assert result.result_code == "RESEARCH_JOBS_PREPARED", result
+    return factory, settings, trigger, parent, now, result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_before_freeze", [False, True])
+async def test_normal_daily_freezes_pending_without_rewriting_trigger(
+    migrated_database_url, monkeypatch, late_before_freeze
+):
+    from nexus.agents.paper_context import read_agent_paper_research_context
+
+    factory, settings, trigger, parent, now, result = await prepare_daily(
+        migrated_database_url, monkeypatch, late_before_freeze=late_before_freeze
+    )
+    async with factory() as session:
+        run = await session.scalar(
+            select(AgentResearchRunRecord).where(
+                AgentResearchRunRecord.id.in_(result.research_run_ids),
+                AgentResearchRunRecord.instrument_id == parent.instrument_id,
+            )
+        )
+        snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        frozen = snapshot.payload["agent_paper_context"].get("pending_monitoring")
+        assert frozen is not None
+        assert [item["trigger_id"] for item in frozen["trigger_checks"]] == [str(trigger.id)]
+        assert frozen["parents"][0]["parent_run_id"] == str(parent.id)
+        bound = await read_agent_paper_research_context(
+            session, snapshot_id=run.data_snapshot_id, instrument_id=parent.instrument_id, as_of=now
+        )
+        assert bound is not None and bound[0].pending_monitoring is not None
+        old = await session.get(MonitorTrigger, trigger.id)
+        assert old.status == "pending" and old.research_run_id is None
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["addressed", "mixed", "unresolved", "rejected", "unknown"])
+async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
+    migrated_database_url, monkeypatch, mode
+):
+    from nexus.agents import codex_staged
+    from nexus.monitoring.pending import pending_stock
+    from nexus.monitoring.reconciliation import reconcile_account_results
+    from nexus.ops.research_monitor import parser
+    from nexus.ops.research_monitor import run as monitor_entry
+    from unit.agents.test_codex_sdk import _restore_view
+
+    factory, settings, trigger, parent, now, result = await prepare_daily(
+        migrated_database_url, monkeypatch, pending_count=2 if mode == "mixed" else 1
+    )
+    late_id = None
+    if mode == "addressed":
+        from integration.test_monitor_pending_pg import pending_members
+
+        late_id = (await pending_members(factory, trigger, 2))[-1]
+    async with factory() as session:
+        runs = tuple(
+            await session.scalars(
+                select(AgentResearchRunRecord).where(
+                    AgentResearchRunRecord.id.in_(result.research_run_ids)
+                )
+            )
+        )
+        target = next(run for run in runs if run.instrument_id == parent.instrument_id)
+        snapshot = await session.get(DataSnapshot, target.data_snapshot_id)
+        frozen_before = json.dumps(snapshot.payload, sort_keys=True)
+        frozen_ids = [
+            item["trigger_id"]
+            for item in snapshot.payload["agent_paper_context"]["pending_monitoring"][
+                "trigger_checks"
+            ]
+        ]
+        jobs = tuple(
+            await session.scalars(
+                select(Job).where(Job.payload["run_id"].astext.in_([str(run.id) for run in runs]))
+            )
+        )
+        outbox_before = set(await session.scalars(select(OutboxEvent.id)))
+    native = codex_staged.invoke_codex
+    seen = []
+    all_seen = []
+
+    async def invoke(payload, **kwargs):
+        payload = _restore_view(payload)
+        all_seen.append(payload["stage"])
+        context_hash = payload["daily_pending_context_hash"]
+        body_text, usage = await native(payload, **kwargs)
+        if context_hash is None:
+            return body_text, usage
+        stage = payload["stage"]
+        seen.append(stage)
+        if mode == "unknown" and stage == "critique":
+            raise TimeoutError("controlled unknown daily result")
+        body = json.loads(body_text)
+        citation = next(
+            item["index"]
+            for item in payload["evidence"]
+            if item["source"] == "nexus_agent_paper_context"
+        )
+        if stage == "research":
+            for row in body["roles"]:
+                if row["role"] == "orchestrator":
+                    row["daily_pending_proposal"] = {
+                        "context_hash": context_hash,
+                        "items": [
+                            {
+                                "trigger_id": trigger_id,
+                                "status": "unresolved"
+                                if mode == "unresolved" or mode == "mixed" and index
+                                else "addressed",
+                                "rationale": "已核对冻结父论点和触发证据，保持观察。",
+                                "citations": [citation],
+                            }
+                            for index, trigger_id in enumerate(frozen_ids)
+                        ],
+                    }
+        elif stage == "critique":
+            for row in body["roles"]:
+                row["daily_pending_review"] = {
+                    "proposal_hash": payload["daily_pending_proposal"]["content_hash"],
+                    "decision": "rejected"
+                    if mode == "rejected" and row["role"] == "evidence_audit"
+                    else "accepted",
+                    "rationale": "逐项核对原触发、父论点和冻结证据。",
+                    "citations": [citation],
+                }
+        else:
+            body["daily_pending_adoption_hash"] = payload["daily_pending_proposal"]["content_hash"]
+        return json.dumps(body), usage
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    selected_jobs = (
+        tuple(job for job in jobs if job.payload["run_id"] == str(target.id))
+        if mode == "unknown"
+        else jobs
+    )
+    for job in selected_jobs:
+        assert await run_agent_worker_once(settings, job_ids=(job.id,), formal_stage_capacity=True)
+        assert not await run_agent_worker_once(
+            settings, job_ids=(job.id,), formal_stage_capacity=True
+        )
+    async with factory() as session, session.begin():
+        observed = await reconcile_account_results(
+            session,
+            account_id=trigger.account_id,
+            instrument_ids=tuple(run.instrument_id for run in runs),
+            now=now,
+        )
+        assert observed["unverified"] == 0, observed
+    async with factory() as session:
+        receipts = tuple(await session.scalars(select(MonitorDailyTriggerReceipt)))
+        old = await session.get(MonitorTrigger, trigger.id)
+        persisted = await session.get(AgentResearchRunRecord, target.id)
+        budget = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == target.id
+            )
+        )
+        assert old.status == "pending" and old.research_run_id is None
+        assert old.outbox_id == trigger.outbox_id
+        assert set(await session.scalars(select(OutboxEvent.id))) == outbox_before
+        assert (
+            json.dumps(
+                (await session.get(DataSnapshot, target.data_snapshot_id)).payload, sort_keys=True
+            )
+            == frozen_before
+        )
+        pending = await pending_stock(
+            session,
+            account_id=trigger.account_id,
+            instrument_id=parent.instrument_id,
+            now=now,
+            allow_empty=True,
+        )
+        if mode in {"addressed", "mixed"}:
+            assert len(receipts) == 1
+            assert receipts[0].trigger_id == trigger.id and receipts[0].run_id == target.id
+            remaining_id = (
+                late_id
+                if mode == "addressed"
+                else next(row.id for row, _ in pending if str(row.id) == frozen_ids[1])
+            )
+            assert [row.id for row, _ in pending] == [remaining_id]
+            late = await session.get(MonitorTrigger, remaining_id)
+            assert late.status == "pending" and late.research_run_id is None
+            audits = tuple(
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.action == "research.monitor.daily_trigger_covered"
+                    )
+                )
+            )
+            assert len(audits) == 1 and audits[0].payload["receipt_id"] == str(receipts[0].id)
+        else:
+            assert not receipts and [row.id for row, _ in pending] == [trigger.id]
+        if mode == "unknown":
+            assert persisted.status == "failed" and persisted.settled_cost_usd is None
+            assert budget.state == "reserved" and budget.settled_usd is None
+            assert seen == ["research", "critique"]
+            queued = tuple(
+                await session.scalars(
+                    select(Job).where(
+                        Job.id.in_([job.id for job in jobs if job not in selected_jobs])
+                    )
+                )
+            )
+            assert len(queued) == 2 and all(job.status == "queued" for job in queued)
+        else:
+            assert persisted.status == "completed" and budget.state == "settled"
+            assert seen == ["research", "critique", "synthesis"]
+    if mode == "addressed":
+        admitted = await monitor_entry(
+            settings,
+            parser().parse_args(
+                [
+                    "admit",
+                    "--trigger-id",
+                    str(trigger.id),
+                    "--calendar-authority-id",
+                    str(CALENDAR_ID),
+                ]
+            ),
+        )
+        assert admitted["status"] == "covered" and admitted["run_id"] == str(target.id)
+        assert admitted["model_requests"] == admitted["provider_requests"] == 0
+        from nexus.ops.agent_paper_loop import AgentPaperLoopSnapshot
+        from nexus.ops.monitor_dispatch import dispatch_configured_once, inspect_monitor_queue
+
+        enabled = settings.model_copy(update={"agent_paper_cycle_enabled": True})
+        selected = await inspect_monitor_queue(
+            enabled,
+            account_id=trigger.account_id,
+            snapshot=AgentPaperLoopSnapshot(
+                now=now,
+                calendar_authority_id=CALENDAR_ID,
+                market_open_at=now - timedelta(hours=1),
+                decision_window_start_at=now - timedelta(minutes=30),
+                decision_window_end_at=now + timedelta(hours=4),
+                next_decision_window_start_at=now + timedelta(days=3),
+            ),
+        )
+        assert selected.monitor_trigger_id == late_id
+        stale_selection = await dispatch_configured_once(
+            enabled, trigger_id=trigger.id, calendar_authority_id=CALENDAR_ID
+        )
+        assert stale_selection["status"] == "covered"
+        assert stale_selection["run_id"] == str(target.id)
+        assert stale_selection["model_requests"] == stale_selection["provider_requests"] == 0
+    if mode == "unknown":
+        from nexus.paper.manual_request import require_manual_account_available
+
+        async with factory() as session, session.begin():
+            with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                await require_manual_account_available(
+                    session, account_id=trigger.account_id, now=now
+                )
+    async with factory() as session, session.begin():
+        repeat = await reconcile_account_results(
+            session,
+            account_id=trigger.account_id,
+            instrument_ids=tuple(run.instrument_id for run in runs),
+            now=now,
+        )
+        assert repeat["recorded"] == 0
+    assert all_seen == (
+        ["research", "critique"] if mode == "unknown" else ["research", "critique", "synthesis"] * 3
+    )
+    await factory.kw["bind"].dispose()

@@ -20,7 +20,7 @@ from nexus.agents.codex_formal_stage import (
     formal_preparation_model_matches,
     formal_stage_output_qualified,
 )
-from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSION, ROLE_ORDER, CommitteeRoleOutput
+from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS, ROLE_ORDER, CommitteeRoleOutput
 from nexus.agents.execution_authority import (
     load_frozen_evidence,
     load_frozen_prompts,
@@ -288,8 +288,8 @@ async def load_qualified_source(
     prompts = await load_frozen_prompts(session, run)
     if (
         prompts is None
-        or prompts["portfolio"].version != MONITORING_SCOPE_PROMPT_VERSION
-        or run.schema_hash != _schema_hash(portfolio_prompt_version=MONITORING_SCOPE_PROMPT_VERSION)
+        or prompts["portfolio"].version not in MONITORING_SCOPE_PROMPT_VERSIONS
+        or run.schema_hash != _schema_hash(portfolio_prompt_version=prompts["portfolio"].version)
     ):
         raise ValueError(invalid)
     context, evidence = await _qualify_source(

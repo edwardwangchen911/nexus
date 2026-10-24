@@ -10,6 +10,7 @@ from sqlalchemy import Text, cast, exists, func, select, text
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
+from nexus.monitoring.daily_consumption import daily_receipt, not_daily_covered
 from nexus.ops.agent_paper_loop import (
     AgentPaperLoopAction,
     AgentPaperLoopSnapshot,
@@ -137,6 +138,7 @@ async def inspect_monitor_queue(
                     MonitorTrigger.status.in_(("pending", "blocked")),
                     MonitorTrigger.research_run_id.is_(None),
                     unchecked(snapshot.now),
+                    not_daily_covered(),
                 )
                 .order_by(MonitorTrigger.created_at, MonitorTrigger.id)
                 .limit(1)
@@ -194,6 +196,17 @@ async def dispatch_configured_once(
             trigger = await session.get(MonitorTrigger, trigger_id)
             if trigger is None or trigger.account_id != settings.agent_paper_account_id:
                 raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+            covered = await daily_receipt(session, trigger.id)
+            if covered is not None:
+                return {
+                    "status": "covered",
+                    "trigger_id": str(trigger.id),
+                    "run_id": str(covered.run_id),
+                    "output_id": str(covered.output_id),
+                    "execution_locked": True,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                }
             if trigger.research_run_id is not None:
                 original = await session.get(AgentResearchRunRecord, trigger.research_run_id)
                 if original is None:

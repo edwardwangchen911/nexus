@@ -9,12 +9,20 @@ from enum import StrEnum
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+)
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
+from nexus.monitoring.daily_context import DailyMonitorContext
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -88,6 +96,14 @@ class AgentPaperResearchContext(BaseModel):
     prior_daily: AgentPaperPriorDaily
     paper_portfolio: AgentPaperPortfolioContext
     execution_locked: Literal[True] = True
+    pending_monitoring: DailyMonitorContext | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value = cast(dict[str, object], handler(self))
+        if self.pending_monitoring is None:
+            value.pop("pending_monitoring", None)
+        return value
 
 
 def _decimal(value: Decimal) -> str:
@@ -198,7 +214,13 @@ async def prepare_agent_paper_research_snapshot(
             else position.quantity * position.reference_close / projection.nav
         )
         cash_weight = (projection.available_cash + projection.reserved_cash) / projection.nav
+    from nexus.monitoring.daily_context import freeze_daily_pending
+
+    pending = await freeze_daily_pending(
+        session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
+    )
     context = AgentPaperResearchContext(
+        pending_monitoring=pending,
         cycle_id=cycle_id,
         instrument_id=candidate.instrument_id,
         decision_time=decision_time,
@@ -337,6 +359,17 @@ async def read_agent_paper_research_context(
         return None
     if context.instrument_id != instrument_id or context.decision_time != as_of:
         return None
+    if context.pending_monitoring is not None:
+        from nexus.monitoring.daily_context import validate_daily_pending
+
+        pending = context.pending_monitoring
+        if (
+            pending.cycle_id != context.cycle_id
+            or pending.instrument_id != instrument_id
+            or pending.decision_time != as_of
+            or not await validate_daily_pending(session, pending)
+        ):
+            return None
     content = _content(context)
     digest = hashlib.sha256(content).hexdigest()
     evidence = await session.scalar(

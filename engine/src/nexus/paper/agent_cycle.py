@@ -1698,6 +1698,7 @@ async def _start_cycle(
                         account_id=cycle.account_id,
                         decision_id=current_target.strategy_decision_id,
                         candidate_stage_capacity=candidate_stage_capacity,
+                        formal_stage_capacity=formal_stage_capacity,
                     )
                     if current_proposal is None:
                         raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")

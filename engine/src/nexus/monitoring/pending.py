@@ -13,8 +13,25 @@ MAX_PENDING = 32
 
 
 async def pending_stock(
-    session: AsyncSession, *, account_id: UUID, instrument_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    instrument_id: UUID,
+    now: datetime,
+    allow_empty: bool = False,
+    freeze_visible_only: bool = False,
 ) -> tuple[tuple[MonitorTrigger, MonitorCheck], ...]:
+    from nexus.monitoring.daily_consumption import not_daily_covered
+
+    visibility = (
+        (
+            MonitorTrigger.created_at <= now,
+            MonitorCheck.created_at <= now,
+            MonitorCheck.checked_at <= now,
+        )
+        if freeze_visible_only
+        else ()
+    )
     rows = (
         await session.execute(
             select(MonitorTrigger, MonitorCheck, func.count().over())
@@ -24,6 +41,8 @@ async def pending_stock(
                 MonitorTrigger.instrument_id == instrument_id,
                 MonitorTrigger.status.in_(("pending", "blocked")),
                 MonitorTrigger.research_run_id.is_(None),
+                not_daily_covered(),
+                *visibility,
             )
             .order_by(MonitorCheck.checked_at, MonitorTrigger.id)
             .limit(MAX_PENDING + 1)
@@ -31,7 +50,7 @@ async def pending_stock(
     ).all()
     if rows and rows[0][2] > MAX_PENDING:
         raise ValueError("MONITOR_PENDING_OVERFLOW")
-    if not rows or any(
+    if (not rows and not allow_empty) or any(
         check.checked_at > now or trigger.created_at > now for trigger, check, _ in rows
     ):
         raise ValueError("MONITOR_PENDING_CONDITION_UNRESOLVED")

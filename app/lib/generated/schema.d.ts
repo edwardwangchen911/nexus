@@ -2601,6 +2601,30 @@ export interface components {
             /** Truncated */
             truncated: boolean;
         };
+        /** DailyPendingItem */
+        DailyPendingItem: {
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Rationale */
+            rationale: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "addressed" | "unresolved";
+            /**
+             * Trigger Id
+             * Format: uuid
+             */
+            trigger_id: string;
+        };
+        /** DailyPendingProposal */
+        DailyPendingProposal: {
+            /** Context Hash */
+            context_hash: string;
+            /** Items */
+            items: components["schemas"]["DailyPendingItem"][];
+        };
         /** DailyResearchContextRequest */
         DailyResearchContextRequest: {
             /**
@@ -5815,6 +5839,86 @@ export interface components {
              */
             external_effects: "not_started" | "unknown" | "cycle_recorded";
         };
+        /**
+         * PriceMonitoringProposal
+         * @description One proposed review condition; it requires independent bear and audit approval.
+         */
+        PriceMonitoringProposal: {
+            condition: components["schemas"]["PriceReviewCondition"];
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Rationale */
+            rationale: string;
+            /**
+             * Review Due At
+             * Format: date-time
+             */
+            review_due_at: string;
+            /**
+             * Schema Version
+             * @default price_monitor_proposal_v1
+             * @constant
+             */
+            schema_version: "price_monitor_proposal_v1";
+            /**
+             * Valid Until
+             * Format: date-time
+             */
+            valid_until: string;
+        };
+        /**
+         * PriceReviewCondition
+         * @description A price review threshold; neither an order nor proof a thesis is false.
+         */
+        PriceReviewCondition: {
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Feed
+             * @constant
+             */
+            feed: "l1";
+            /**
+             * Max Age Seconds
+             * @constant
+             */
+            max_age_seconds: 60;
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "gte" | "lte";
+            /**
+             * Price Basis
+             * @constant
+             */
+            price_basis: "unadjusted_bid_ask_midpoint";
+            /**
+             * Purpose
+             * @constant
+             */
+            purpose: "review";
+            /**
+             * Signal
+             * @constant
+             */
+            signal: "schwab.l1.bid_ask_midpoint";
+            /**
+             * Source
+             * @constant
+             */
+            source: "schwab";
+            /** Threshold */
+            threshold: string;
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "currency";
+        };
         /** ProposalAdmissionRequest */
         ProposalAdmissionRequest: {
             /**
@@ -7043,6 +7147,7 @@ export interface components {
             condition_evaluations?: components["schemas"]["ResearchConditionEvaluation"][] | null;
             /** Counter Theses */
             counter_theses: components["schemas"]["ResearchClaim"][];
+            daily_pending_proposal?: components["schemas"]["DailyPendingProposal"] | null;
             /**
              * Data Snapshot Id
              * Format: uuid
@@ -7094,6 +7199,7 @@ export interface components {
             invalidation_conditions: components["schemas"]["ResearchCondition"][];
             /** Model Version */
             model_version: string;
+            monitoring_proposal?: components["schemas"]["PriceMonitoringProposal"] | null;
             /** Prompt Version */
             prompt_version: string;
             /**

@@ -162,6 +162,21 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 trigger = await session.get(MonitorTrigger, args.trigger_id)
                 if trigger is None or trigger.account_id != settings.agent_paper_account_id:
                     raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+                from nexus.monitoring.daily_consumption import daily_receipt
+                from nexus.paper.target_service import lock_portfolio_account
+
+                await lock_portfolio_account(session, settings.agent_paper_account_id)
+                daily_covered = await daily_receipt(session, trigger.id)
+                if daily_covered is not None:
+                    return {
+                        "status": "covered",
+                        "trigger_id": str(trigger.id),
+                        "run_id": str(daily_covered.run_id),
+                        "output_id": str(daily_covered.output_id),
+                        "execution_locked": True,
+                        "model_requests": 0,
+                        "provider_requests": 0,
+                    }
                 try:
                     member = await admit_trigger(
                         session,

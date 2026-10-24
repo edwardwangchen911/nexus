@@ -245,6 +245,10 @@ async def _admit_trigger(
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
     # A concurrent request may have populated this session before the account lock.
     await session.refresh(trigger)
+    from nexus.monitoring.daily_consumption import daily_receipt
+
+    if await daily_receipt(session, trigger.id) is not None:
+        raise ValueError("MONITOR_TRIGGER_ALREADY_COVERED")
     if trigger.research_run_id is not None:
         run = await session.get(AgentResearchRunRecord, trigger.research_run_id)
         if run is None:

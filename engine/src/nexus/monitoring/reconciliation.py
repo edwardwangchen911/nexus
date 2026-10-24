@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import String, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSION
+from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.synthesis import domain_evidence
 from nexus.audit.service import append_audit_event
@@ -99,8 +99,9 @@ async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetim
             AgentResearchRunRecord.status.in_(("completed", "failed", "abstained")),
             AgentResearchRunRecord.decision_time > source.decision_time,
             AgentResearchRunRecord.decision_time <= now,
-            AgentResearchRunRecord.prompt_manifest["portfolio"]["version"].astext
-            == MONITORING_SCOPE_PROMPT_VERSION,
+            AgentResearchRunRecord.prompt_manifest["portfolio"]["version"].astext.in_(
+                MONITORING_SCOPE_PROMPT_VERSIONS
+            ),
         )
         .order_by(AgentResearchRunRecord.decision_time.desc(), AgentResearchRunRecord.id.desc())
         .limit(1)
@@ -220,8 +221,9 @@ async def reconcile_account_results(
                 AgentResearchRunRecord.instrument_id.in_(instrument_ids),
                 AgentResearchRunRecord.status.in_(("completed", "failed", "abstained")),
                 AgentResearchRunRecord.decision_time <= now,
-                AgentResearchRunRecord.prompt_manifest["portfolio"]["version"].astext
-                == MONITORING_SCOPE_PROMPT_VERSION,
+                AgentResearchRunRecord.prompt_manifest["portfolio"]["version"].astext.in_(
+                    MONITORING_SCOPE_PROMPT_VERSIONS
+                ),
             )
             .distinct(AgentResearchRunRecord.instrument_id)
             .order_by(
@@ -384,6 +386,12 @@ async def _reconcile_run(
                 qualified = await load_qualified_source(
                     session, account_id=account_id, output_id=terminal.id, now=now
                 )
+                from nexus.monitoring.daily_consumption import record_daily_consumption
+
+                async with session.begin_nested():
+                    await record_daily_consumption(
+                        session, qualified=qualified, account_id=account_id, now=now
+                    )
                 quality = qualified.intent.quality_status
                 vetoed = any(
                     row.role == "evidence_audit"

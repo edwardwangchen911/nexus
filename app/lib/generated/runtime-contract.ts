@@ -3480,6 +3480,72 @@ export const runtimeContractSchemas = {
     "title": "DailyBriefResponse",
     "type": "object"
   },
+  "DailyPendingItem": {
+    "additionalProperties": false,
+    "properties": {
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 3,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "rationale": {
+        "maxLength": 160,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "addressed",
+          "unresolved"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "trigger_id": {
+        "format": "uuid",
+        "title": "Trigger Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "trigger_id",
+      "status",
+      "rationale",
+      "evidence_refs"
+    ],
+    "title": "DailyPendingItem",
+    "type": "object"
+  },
+  "DailyPendingProposal": {
+    "additionalProperties": false,
+    "properties": {
+      "context_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Context Hash",
+        "type": "string"
+      },
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/DailyPendingItem"
+        },
+        "maxItems": 32,
+        "minItems": 1,
+        "title": "Items",
+        "type": "array"
+      }
+    },
+    "required": [
+      "context_hash",
+      "items"
+    ],
+    "title": "DailyPendingProposal",
+    "type": "object"
+  },
   "DecisionReadiness": {
     "enum": [
       "DECISION_READY",
@@ -10953,6 +11019,129 @@ export const runtimeContractSchemas = {
     "title": "PreparationRecoveryView",
     "type": "object"
   },
+  "PriceMonitoringProposal": {
+    "additionalProperties": false,
+    "description": "One proposed review condition; it requires independent bear and audit approval.",
+    "properties": {
+      "condition": {
+        "$ref": "#/components/schemas/PriceReviewCondition"
+      },
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 4,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "rationale": {
+        "maxLength": 500,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "review_due_at": {
+        "format": "date-time",
+        "title": "Review Due At",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "price_monitor_proposal_v1",
+        "default": "price_monitor_proposal_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "valid_until": {
+        "format": "date-time",
+        "title": "Valid Until",
+        "type": "string"
+      }
+    },
+    "required": [
+      "condition",
+      "rationale",
+      "evidence_refs",
+      "review_due_at",
+      "valid_until"
+    ],
+    "title": "PriceMonitoringProposal",
+    "type": "object"
+  },
+  "PriceReviewCondition": {
+    "additionalProperties": false,
+    "description": "A price review threshold; neither an order nor proof a thesis is false.",
+    "properties": {
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "feed": {
+        "const": "l1",
+        "title": "Feed",
+        "type": "string"
+      },
+      "max_age_seconds": {
+        "const": 60,
+        "title": "Max Age Seconds",
+        "type": "integer"
+      },
+      "operator": {
+        "enum": [
+          "gte",
+          "lte"
+        ],
+        "title": "Operator",
+        "type": "string"
+      },
+      "price_basis": {
+        "const": "unadjusted_bid_ask_midpoint",
+        "title": "Price Basis",
+        "type": "string"
+      },
+      "purpose": {
+        "const": "review",
+        "title": "Purpose",
+        "type": "string"
+      },
+      "signal": {
+        "const": "schwab.l1.bid_ask_midpoint",
+        "title": "Signal",
+        "type": "string"
+      },
+      "source": {
+        "const": "schwab",
+        "title": "Source",
+        "type": "string"
+      },
+      "threshold": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Threshold",
+        "type": "string"
+      },
+      "unit": {
+        "const": "currency",
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "currency",
+      "purpose",
+      "source",
+      "feed",
+      "price_basis",
+      "max_age_seconds"
+    ],
+    "title": "PriceReviewCondition",
+    "type": "object"
+  },
   "ProposalAdmissionResponse": {
     "additionalProperties": false,
     "properties": {
@@ -13630,6 +13819,16 @@ export const runtimeContractSchemas = {
         "title": "Counter Theses",
         "type": "array"
       },
+      "daily_pending_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DailyPendingProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "data_snapshot_id": {
         "format": "uuid",
         "title": "Data Snapshot Id",
@@ -13734,6 +13933,16 @@ export const runtimeContractSchemas = {
         "minLength": 1,
         "title": "Model Version",
         "type": "string"
+      },
+      "monitoring_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PriceMonitoringProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "prompt_version": {
         "maxLength": 100,

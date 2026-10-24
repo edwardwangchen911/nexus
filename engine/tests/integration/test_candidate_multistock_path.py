@@ -90,7 +90,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             ).all()
             assert (
                 selected_prompts["portfolio"].version
-                == "local-portfolio-synthesis-v8-price-monitor"
+                == "local-portfolio-synthesis-v9-daily-pending"
             ), [(row.version, row.created_at.isoformat()) for row in prompt_rows]
     calls = []
 
@@ -162,6 +162,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
 
             if stage == "research":
                 for row in response["roles"]:
+                    row["daily_pending_proposal"] = None
                     row["monitoring_proposal"] = (
                         proposal_wire(AT) if row["role"] == "market_state" else None
                     )
@@ -169,6 +170,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                         row["monitoring_proposal"]["condition"]["threshold"] = monitoring_threshold
             elif stage == "critique":
                 for row in response["roles"]:
+                    row["daily_pending_review"] = None
                     row["monitoring_review"] = {
                         "proposal_hash": payload["monitoring_proposal"]["content_hash"],
                         "decision": "rejected"
@@ -178,6 +180,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                         "citations": [0],
                     }
             else:
+                response["daily_pending_adoption_hash"] = None
                 response["monitoring_adoption_hash"] = payload["monitoring_proposal"][
                     "content_hash"
                 ]
@@ -326,7 +329,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             if monitoring:
                 assert all(
                     run.prompt_manifest["portfolio"]["version"]
-                    == "local-portfolio-synthesis-v8-price-monitor"
+                    == "local-portfolio-synthesis-v9-daily-pending"
                     for run in runs
                 ), [run.prompt_manifest["portfolio"] for run in runs]
             assert all(

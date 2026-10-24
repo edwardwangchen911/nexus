@@ -452,7 +452,7 @@ async def append_fresh_inputs(factory, instrument_id, at, *, midpoint=None):
     async with factory() as session, session.begin():
         old = await session.scalar(
             select(LatestQuote)
-            .where(LatestQuote.instrument_id == instrument_id)
+            .where(LatestQuote.instrument_id == instrument_id, LatestQuote.event_kind == "quote")
             .order_by(LatestQuote.received_at.desc())
             .limit(1)
         )
