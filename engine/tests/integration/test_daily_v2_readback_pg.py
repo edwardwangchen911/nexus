@@ -28,9 +28,16 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.monitoring import (
     MonitorDailyEventReceipt,
+    MonitorPlan,
     MonitorTrigger,
 )
-from nexus.persistence.models.runtime import Job, JobLease
+from nexus.persistence.models.runtime import (
+    AuditEvent,
+    IdempotencyRecord,
+    Job,
+    JobLease,
+    OutboxEvent,
+)
 from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select, text
 from unit.agents.test_codex_sdk import _restore_view
@@ -134,9 +141,17 @@ async def partial_daily(url, monkeypatch, root):
     # Research settlement alone leaves the cycle researching. Use its normal
     # portfolio Worker and resume boundary before admitting an independent cycle.
     from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
+    from nexus.agents.portfolio_synthesis_contracts import (
+        PortfolioSynthesisInputV1,
+        PortfolioSynthesisIntentV1,
+    )
     from nexus.agents.responses_budget import UsageSnapshot
     from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
-    from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
+    from nexus.persistence.models.agents import (
+        AgentPortfolioSynthesisBudgetReservationRecord,
+        AgentPortfolioSynthesisOutputRecord,
+        AgentPortfolioSynthesisRunRecord,
+    )
     from nexus.worker import run_portfolio_synthesis_worker_once
 
     close_at = now + timedelta(seconds=1)
@@ -187,11 +202,103 @@ async def partial_daily(url, monkeypatch, root):
             now=captured["clock"][0],
             formal_stage_capacity=True,
         )
-        assert closed.status == "completed" and closed.result_code in {
-            "NO_ORDER_REQUIRED",
-            "PORTFOLIO_ASSESSMENT_DEFERRED",
-        }, closed
+        persisted = await session.get(AgentPortfolioSynthesisRunRecord, synthesis.id)
+        output = await session.scalar(
+            select(AgentPortfolioSynthesisOutputRecord).where(
+                AgentPortfolioSynthesisOutputRecord.run_id == synthesis.id
+            )
+        )
+        reservation = await session.scalar(
+            select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                AgentPortfolioSynthesisBudgetReservationRecord.run_id == synthesis.id
+            )
+        )
+        job = await session.get(Job, synthesis_job.id)
+        assert persisted.status == output.status == "completed"
+        assert job.status == "succeeded" and job.attempt_count == 1
+        assert persisted.input_tokens == persisted.output_tokens == 100
+        assert persisted.settled_cost_usd is not None
+        assert reservation.state == "settled"
+        assert reservation.settled_usd == persisted.settled_cost_usd
+        frozen_portfolio = PortfolioSynthesisInputV1.model_validate(persisted.frozen_input)
+        adopted = PortfolioSynthesisIntentV1.model_validate(output.intent)
+        assert adopted.input_hash == persisted.input_hash
+        assert len(adopted.choices) == 3 and all(
+            choice.action == "defer" for choice in adopted.choices
+        )
+        assert set(adopted.compared_instrument_ids) == set(
+            frozen_portfolio.candidate_instrument_ids
+        )
+        observed_facts = {
+            "result_code": closed.result_code,
+            "source_research": [
+                {"quality": source.intent.quality_status, "stance": source.intent.stance}
+                for source in frozen_portfolio.security_outputs
+            ],
+            "choices": [choice.action for choice in adopted.choices],
+            "portfolio_status": persisted.status,
+            "budget_state": reservation.state,
+        }
+        assert (
+            observed_facts["source_research"] == [{"quality": "complete", "stance": "watch"}] * 3
+        ), json.dumps(observed_facts, sort_keys=True)
+        assert closed.status == "completed", observed_facts
+        assert closed.result_code == "NO_ORDER_REQUIRED", observed_facts
         assert not closed.order_ids
+        from nexus.persistence.models.paper import (
+            AgentPaperCycleRecord,
+            PaperOrderRecord,
+            PaperTargetVersionRecord,
+            StrategyDecisionAgentOutputRecord,
+            StrategyDecisionRecord,
+        )
+
+        decision = await session.get(StrategyDecisionRecord, closed.strategy_decision_id)
+        assert decision.agent_paper_cycle_id == result.cycle_id
+        assert decision.account_id == pointer.account_id
+        assert decision.decision_origin == "agent_research"
+        assert decision.portfolio_synthesis_output_id == output.id
+        assert set(
+            await session.scalars(
+                select(StrategyDecisionAgentOutputRecord.agent_research_output_id).where(
+                    StrategyDecisionAgentOutputRecord.strategy_decision_id == decision.id
+                )
+            )
+        ) == set(persisted.research_output_ids)
+        active_target = await session.scalar(
+            select(PaperTargetVersionRecord)
+            .where(PaperTargetVersionRecord.account_id == pointer.account_id)
+            .order_by(PaperTargetVersionRecord.version_seq.desc())
+            .limit(1)
+        )
+        from nexus.paper.target_service import TargetActivationResult
+
+        activation_row = await session.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.actor_id == f"internal-paper:{pointer.account_id}",
+                IdempotencyRecord.route == "paper-target-activation-v1",
+                IdempotencyRecord.idempotency_key == f"portfolio-target:{result.cycle_id}",
+            )
+        )
+        activation = TargetActivationResult.model_validate(activation_row.response_payload)
+        assert activation.account_id == pointer.account_id
+        assert activation.strategy_decision_id == decision.id
+        assert (
+            activation.target_version_id == active_target.id == persisted.active_target_version_id
+        )
+        assert activation.target_created is False
+        assert activation.batch_id is None and activation.result_code == "NO_ORDER_REQUIRED"
+        assert activation.activated_at == active_target.activated_at < captured["clock"][0]
+        assert active_target.strategy_decision_id != decision.id
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(PaperOrderRecord)
+                .where(PaperOrderRecord.strategy_decision_id == decision.id)
+            )
+            == 0
+        )
+        assert (await session.get(AgentPaperCycleRecord, result.cycle_id)).execution_locked is True
     return (
         factory,
         settings,
@@ -262,6 +369,11 @@ async def test_partial_daily_next_normal_entry_and_damaged_historical_proof(
                     JobLease,
                     AgentDailyBudgetReservationRecord,
                     MonitorDailyEventReceipt,
+                    DataSnapshot,
+                    MonitorPlan,
+                    OutboxEvent,
+                    AuditEvent,
+                    IdempotencyRecord,
                 )
             }
             old_budgets = [
@@ -433,6 +545,35 @@ async def test_partial_daily_next_normal_entry_and_damaged_historical_proof(
                 model: set(await session.scalars(select(model.id))) for model in before
             } == after_admission
             assert await session.get(MonitorDailyEventReceipt, proof.id) is not None
+            assert (
+                await session.get(DataSnapshot, daily_run.data_snapshot_id)
+            ).payload == old_snapshot
+            original_output = await session.scalar(
+                select(AgentResearchOutputRecord).where(
+                    AgentResearchOutputRecord.run_id == old_run_id,
+                    AgentResearchOutputRecord.role.is_(None),
+                )
+            )
+            assert original_output.content_hash == old_hash
+            for identity, run_id, status, original_batch in old_rows:
+                row = await session.get(MonitorTrigger, identity)
+                assert (row.research_run_id, row.status, row.batch_id) == (
+                    run_id,
+                    status,
+                    original_batch,
+                )
+            assert [
+                (row.id, row.state, row.reserved_usd, row.settled_usd)
+                for row in await session.scalars(
+                    select(AgentDailyBudgetReservationRecord)
+                    .where(
+                        AgentDailyBudgetReservationRecord.id.in_(
+                            before[AgentDailyBudgetReservationRecord]
+                        )
+                    )
+                    .order_by(AgentDailyBudgetReservationRecord.id)
+                )
+            ] == old_budgets
         assert calls == []
     finally:
         await factory.kw["bind"].dispose()

@@ -552,3 +552,41 @@ wire 超限后最终整包 gap/count=4，三股仍完整发布且旧事件未消
 撤回实验，导致1项旧测试在新代码上失败；保留失败日志并固定代码重新全量验证，实验
 源码和测试均未进入最终候选。首次并行Mypy共享缓存内部异常已以独立缓存重新全量通过。
 这些本地证据不等于最终head远端必需CI；未push/PR/合入/部署。
+
+### 2026-10-25 历史消费、接替与下一轮准入边界（隔离验证）
+
+本片继续完整目标的既定验收缺口，不新增运行授权。模型、资料和通知仍为隔离替身；
+实际证据层为正常 start/resume 服务、原 Worker、真实随机 PostgreSQL 和 API reader。
+它们不是 CLI 子进程、HTTP/BFF/浏览器、真实模型或自然市场证明。
+
+审计否决与全部未解决两种 native 场景新增断言后通过（2项，518.37秒）：重复 reconcile
+不新增 plan/coverage/proof/Job/outbox/audit；两kind均gap、active_plan_id为空，固定原因
+分别为 REVIEW_UNVERIFIED 与 KIND_EVENTS_UNRESOLVED；原三事件、Output/hash/归属和
+冻结不改，预算已知结算，API仍读原Run与known用量。这里“零新增”不扩大成所有既有行
+零UPDATE。新增断言前的2项523.88秒基线另留，不用于代替最后验证。
+
+历史过期/换代2项PG通过（322.42秒）：旧混合包的disclosure父计划已被正常generation2
+接替，另一个参数使旧price条件由最初合成SDK入库前合法设置600秒有效期，在新T0自然
+过期。新日研究仍精确冻结原合法材料及未解决price，冻结当前两kind前代，经九阶段后
+原子安装price下一代/disclosure下一代及唯一新daily proof；旧2mixed proof、材料正文、
+原Output/hash和事件归属保持。没有修改不可变原件，也未单独证明“消费前未解决事件
+自身kind已被其他Run接替”的更窄场景；不借用该描述扩大这两个案例的证据范围。
+
+部分事件消费的真实正常收尾用例最初被 MANUAL_ACCOUNT_BUSY_OR_UNKNOWN 正确拒绝：
+三研究Job成功不等于组合周期完成。测试现沿原 resume、组合Worker、已知结算、正常
+收尾再进入独立新三股准备，不删除Job/hold或手工补周期终态。只保留未消费两公告，旧
+price proof与API读回仍有效；损坏证明时仅在隔离测试库临时关闭本表UPDATE guard并恢复，
+把证明指到另一股prepared Run，以not_started/known的区别核对身份与用量不会串用，
+再用正常 research-monitor parser/run 确认明确拒绝且零新增工作。
+
+剩余原范围不变：API/BFF/实际页面及完整安全矩阵、全diff指定Chat终审、最终head必需CI、
+镜像和兼容0097回滚、合入部署及自然市场。静态已定位新v2 coverage固定原因尚未全部
+映射到API CoverageReason/页面说明，后续展示切片必须实测补齐，不能把有效gap显示成
+合格覆盖；既有执行、审计、时效价格、预算及有效租约门禁保持。
+
+收尾分类已进一步收紧：本合成case三份研究均complete/watch，组合选择均defer；既有正常
+完整研究路径的固定结果为NO_ORDER_REQUIRED，不是研究quality partial的暂缓分支。
+相同全现金目标应复用旧active target，验收须核新decision→组合Output→三个原研究Output
+的绑定及精确activation幂等回执（target_created=false、无batch），不能错误要求新target。
+最初同时接受两个收尾码的宽断言已移除；两次收紧时发现的错误期望均保留日志，不改生产
+政策或夹具质量，不据本case回填旧partial、未知用量或自然结果。最终精确整链1项通过（371.12秒）；坏proof拒绝后十类ID集合零新增，原快照/hash/归属及旧预算值保持。
