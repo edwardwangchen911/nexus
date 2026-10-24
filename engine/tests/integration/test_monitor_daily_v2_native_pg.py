@@ -224,7 +224,33 @@ async def test_new_daily_native_consumes_only_qualified_historical_events(
             session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now
         )
         assert report["unverified"] == 0, report
+    # Reconciliation is a readback on an already persisted terminal result,
+    # never another Worker dispatch or a second replacement/consumption attempt.
+    from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
+
+    guarded = (
+        MonitorPlan,
+        MonitorCoverageReceipt,
+        MonitorDailyEventReceipt,
+        Job,
+        OutboxEvent,
+        AuditEvent,
+    )
     async with factory() as session:
+        saved_counts = {
+            model: await session.scalar(select(func.count()).select_from(model))
+            for model in guarded
+        }
+    async with factory() as session, session.begin():
+        repeated = await reconcile_account_results(
+            session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now
+        )
+        assert repeated["unverified"] == 0, repeated
+    async with factory() as session:
+        assert {
+            model: await session.scalar(select(func.count()).select_from(model))
+            for model in guarded
+        } == saved_counts
         proofs = tuple(await session.scalars(select(MonitorDailyEventReceipt)))
         coverage = tuple(
             await session.scalars(
@@ -232,6 +258,14 @@ async def test_new_daily_native_consumes_only_qualified_historical_events(
             )
         )
         assert {row.kind for row in coverage} == {"price", "disclosure"}
+        if mode in {"unresolved", "veto"}:
+            assert all(row.status == "gap" and row.active_plan_id is None for row in coverage)
+            assert {row.reason for row in coverage} == {
+                "MONITOR_KIND_EVENTS_UNRESOLVED"
+                if mode == "unresolved"
+                else "MONITOR_DAILY_EVENT_REVIEW_UNVERIFIED"
+            }
+            assert set(await session.scalars(select(MonitorPlan.id))) == plans_before
         if mode == "replacement_fail":
             assert all(row.status == "gap" for row in coverage)
             assert set(await session.scalars(select(MonitorPlan.id))) == plans_before
@@ -274,6 +308,16 @@ async def test_new_daily_native_consumes_only_qualified_historical_events(
             assert api.triggers[0].usage_status == "known"
         else:
             assert not proofs and readback["unresolved_event_count"] == 3
+        if mode in {"unresolved", "veto"}:
+            from nexus.api.research_monitoring import read_monitoring_view
+
+            parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)
+            api = await read_monitoring_view(session, parent, now=now)
+            assert api.execution_locked and api.state == "withdrawn"
+            assert len(api.triggers) == 1
+            assert api.triggers[0].status == "completed"
+            assert api.triggers[0].run_id == old_run_id
+            assert api.triggers[0].usage_status == "known"
         target_budget = await session.scalar(
             select(AgentDailyBudgetReservationRecord).where(
                 AgentDailyBudgetReservationRecord.run_id == target.id
