@@ -266,11 +266,31 @@ async def reconcile_account_results(
             )
         )
         if mixed_member is not None:
-            # Native completion is not the future per-kind reviewed consumption.
-            await finish_increment(
-                session, account_id=account_id, trigger_id=mixed_member.trigger_id, now=now
+            from nexus.monitoring.mixed_reconciliation import (
+                MixedReplacementRejected,
+                reconcile_mixed_run,
+                record_replacement_gap,
             )
-            counts["awaiting_mixed_review"] = counts.get("awaiting_mixed_review", 0) + 1
+
+            try:
+                async with session.begin_nested():
+                    mixed_receipts = await reconcile_mixed_run(
+                        session, account_id=account_id, run=run, member=mixed_member, now=now
+                    )
+            except MixedReplacementRejected as rejected:
+                await finish_increment(
+                    session, account_id=account_id, trigger_id=mixed_member.trigger_id, now=now
+                )
+                mixed_receipts = await record_replacement_gap(
+                    session, account_id=account_id, run=run, rejected=rejected, now=now
+                )
+
+            if mixed_receipts is None:
+                counts["awaiting_mixed_review"] = counts.get("awaiting_mixed_review", 0) + 1
+            else:
+                for mixed_receipt in mixed_receipts:
+                    counts["recorded"] += 1
+                    counts[mixed_receipt.status] += 1
             continue
         if not await _native_finished(session, run, now):
             counts["awaiting_native_finish"] += 1

@@ -192,9 +192,9 @@ async def native_result(url, monkeypatch, root, mode):
     original = execution._append_output
 
     async def with_original_aux(session, research, **kwargs):
-        # This persistence seam supplies future aux fields before their Python schema
-        # is integrated. Worker/job/usage are native; normal aux production is tested
-        # by the main writer, not claimed by this relational regression.
+        # This seam deliberately mutates persisted aux to challenge the SQL fences.
+        # The SDK wire itself remains valid; the normal producer/reconciler is
+        # covered separately and is not replaced by this relational regression.
         role = kwargs["role"]
         payload = dict(kwargs["payload"])
         if role == "market_state":
@@ -208,18 +208,22 @@ async def native_result(url, monkeypatch, root, mode):
         return await original(session, research, **{**kwargs, "payload": payload})
 
     monkeypatch.setattr(execution, "_append_output", with_original_aux)
-    if mode == "unknown":
-        from nexus.agents import codex_staged
-        from unit.agents.test_codex_sdk import _restore_view
+    from helpers.mixed_stage import add_mixed_fields
+    from nexus.agents import codex_staged
+    from unit.agents.test_codex_sdk import _restore_view
 
-        native = codex_staged.invoke_codex
+    native = codex_staged.invoke_codex
 
-        async def timeout(payload, **kwargs):
-            if _restore_view(payload)["stage"] == "critique":
-                raise TimeoutError("synthetic unknown")
-            return await native(payload, **kwargs)
+    async def mixed_wire(payload, **kwargs):
+        wire = _restore_view(payload)
+        if mode == "unknown" and wire["stage"] == "critique":
+            raise TimeoutError("synthetic unknown")
+        raw, usage = await native(payload, **kwargs)
+        body = json.loads(raw)
+        add_mixed_fields(body, wire)
+        return json.dumps(body), usage
 
-        monkeypatch.setattr(codex_staged, "invoke_codex", timeout)
+    monkeypatch.setattr(codex_staged, "invoke_codex", mixed_wire)
     assert await run_agent_worker_once(
         settings, job_ids=(member.job_id,), formal_stage_capacity=True
     )

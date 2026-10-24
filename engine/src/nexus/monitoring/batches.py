@@ -30,6 +30,7 @@ class BatchScanReport(TypedDict):
     impact_review: str
     coverage: str
     unresolved_event_count: int
+    stock_unresolved_event_count: int
     status: str
     batch_id: str
     checks: int
@@ -50,6 +51,7 @@ async def _report(
     session: AsyncSession, batch: MonitorObservationBatch, *, new_triggers: int, status: str
 ) -> BatchScanReport:
     from nexus.monitoring.daily_consumption import not_daily_covered
+    from nexus.monitoring.mixed_readback import mixed_batch_readback, not_mixed_consumed
 
     checks = tuple(
         await session.scalars(
@@ -68,6 +70,7 @@ async def _report(
                 MonitorTrigger.status.in_(("pending", "blocked")),
                 MonitorTrigger.research_run_id.is_(None),
                 not_daily_covered(),
+                not_mixed_consumed(),
             )
         )
         or 0
@@ -80,14 +83,14 @@ async def _report(
                 MonitorTrigger.account_id == batch.account_id,
                 MonitorTrigger.instrument_id == batch.instrument_id,
                 MonitorTrigger.batch_id.is_not(None),
+                not_mixed_consumed(),
             )
         )
         or 0
     )
     return {
-        "impact_review": "not_verified",
-        "coverage": "unresolved",
-        "unresolved_event_count": unresolved,
+        **await mixed_batch_readback(session, batch.id),
+        "stock_unresolved_event_count": unresolved,
         "status": status,
         "batch_id": str(batch.id),
         "checks": len(checks),
@@ -139,7 +142,23 @@ async def disclosure_source_current(
         )
         .limit(1)
     )
-    return latest == plan.source_run_id
+    if latest == plan.source_run_id:
+        return True
+    from nexus.persistence.models.monitoring import MonitorCoverageReceipt
+
+    return (
+        await session.scalar(
+            select(MonitorCoverageReceipt.id).where(
+                MonitorCoverageReceipt.kind == "disclosure",
+                MonitorCoverageReceipt.account_id == plan.account_id,
+                MonitorCoverageReceipt.run_id == latest,
+                MonitorCoverageReceipt.active_plan_id == plan.id,
+                MonitorCoverageReceipt.status.in_(("installed", "retained")),
+                MonitorCoverageReceipt.observed_at <= now,
+            )
+        )
+        is not None
+    )
 
 
 async def _check(

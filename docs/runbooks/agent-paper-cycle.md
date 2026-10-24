@@ -1177,3 +1177,18 @@ completed仅表示原生研究已终结。逐事件双审/采纳、按kind消费
 返回awaiting_mixed_review；不得因此宣称监控版本已接替或宿主可完成coverage退出确认。
 未知结果保持unknown和原预算hold；只有严格证明零调用的原生capacity拒绝才走既有封口证明，
 不退还3次SDK额度。0095有v2事实后不可降级，回滚需保留该schema及读取支持。
+
+#### 混合批次逐事件采纳及双类收尾（0096，本地候选）
+
+新的v2三阶段输出将逐事件判断保存为aux原文，原ResearchIntent schema不变。正常
+`research-monitor reconcile`同时记录逐事件已复核消费证明及price/disclosure两类coverage；
+`finish`分别返回原生状态/native_reason、当前review原因、impact_review、coverage及本批
+未解决数。scan另返回stock_unresolved_event_count，不混用本批与整股数量。空批次不冒充
+已复核；未解决、缺冻结前代或条件不能批准的类别明确gap，不推进该类baseline。
+
+不要对v2调用单类install；公开入口将拒绝，它必须经过原子reconcile。本类新plan要求本类
+全部精确事件已有双审采纳回执，任何一类写入失败都回滚候选接替与消费，再留下固定gap。
+正常完成及严格零调用拒绝可凭双类持久化回执完成宿主收尾；unknown保留原预留且不重放。
+只读检查使用无行锁的完整批次validator；写入口原锁保留。0096产生新回执或typed coverage
+后禁止降级，部署回滚镜像须保留0096读取能力。自动typed队列、采集准备与新页面尚待后续
+集成；不能手工启动业务宿主或重放历史批次来代替验收。

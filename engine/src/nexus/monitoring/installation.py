@@ -109,7 +109,7 @@ async def load_approved_source(
     return ApprovedSource(source.run, source.output, proposal, source.context)
 
 
-async def install_plan_from_output(
+async def _install_mixed_or_legacy_plan(
     session: AsyncSession,
     *,
     account_id: UUID,
@@ -122,10 +122,15 @@ async def install_plan_from_output(
         session, account_id=account_id, output_id=output_id, now=now
     )
     if (
-        isinstance(source.context, MonitorResearchContext | MixedMonitorContext)
+        isinstance(source.context, MonitorResearchContext)
         and expected_predecessor_id != source.context.plan_id
     ):
         raise ValueError("MONITOR_PLAN_CONFLICT")
+    if isinstance(source.context, MixedMonitorContext):
+        from nexus.monitoring.mixed_reconciliation import frozen_predecessor
+
+        if expected_predecessor_id != frozen_predecessor(source.context, "price"):
+            raise ValueError("MONITOR_PLAN_CONFLICT")
     await lock_security(session, account_id=account_id, instrument_id=source.run.instrument_id)
     existing = await session.scalar(
         select(MonitorPlan).where(
@@ -227,3 +232,26 @@ async def install_plan_from_output(
         },
     )
     return plan
+
+
+async def install_plan_from_output(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    output_id: UUID,
+    expected_predecessor_id: UUID | None,
+    now: datetime,
+) -> MonitorPlan:
+    """Single-kind public entry; typed batches close only through atomic reconciliation."""
+    source = await load_qualified_source(
+        session, account_id=account_id, output_id=output_id, now=now
+    )
+    if isinstance(source.context, MixedMonitorContext):
+        raise ValueError("MONITOR_MIXED_ATOMIC_RECONCILIATION_REQUIRED")
+    return await _install_mixed_or_legacy_plan(
+        session,
+        account_id=account_id,
+        output_id=output_id,
+        expected_predecessor_id=expected_predecessor_id,
+        now=now,
+    )

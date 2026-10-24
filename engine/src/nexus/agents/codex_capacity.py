@@ -294,8 +294,6 @@ def _monitoring_capacity_view(
                     update={"daily_pending_review": daily_review}
                 )
     if committee._prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION:
-        from uuid import UUID
-
         from nexus.monitoring.contracts import DisclosureReviewCondition
         from nexus.monitoring.disclosure_contracts import (
             DisclosureMonitoringProposal,
@@ -336,6 +334,83 @@ def _monitoring_capacity_view(
         for role in ("bear", "evidence_audit"):
             view._outputs[role] = view._outputs[role].model_copy(
                 update={"disclosure_review": disclosure_review}
+            )
+    from nexus.monitoring.mixed_contracts import (
+        MixedEventItem,
+        MixedEventProposal,
+        MixedEventReview,
+        mixed_context_from_inputs,
+    )
+
+    mixed_context = mixed_context_from_inputs(inputs)
+    if mixed_context is not None:
+        from nexus.agents.codex_staged import (
+            _MixedEventItem,
+            _MixedEventProposal,
+            _MixedEventReview,
+        )
+
+        for domain, wire in (
+            (MixedEventItem, _MixedEventItem),
+            (MixedEventReview, _MixedEventReview),
+        ):
+            domain_props, wire_props = (
+                domain.model_json_schema()["properties"],
+                wire.model_json_schema()["properties"],
+            )
+            if (
+                domain_props["rationale"].get("maxLength") != 160
+                or wire_props["rationale"].get("maxLength") != 160
+                or wire_props["citations"].get("maxItems") != 3
+                or domain_props["evidence_refs"].get("maxItems") != 3
+            ):
+                raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        if _MixedEventProposal.model_json_schema()["properties"]["items"].get("maxItems") != 32:
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        context_ref = next(ref for ref in evidence if ref.source == "nexus_monitor_increment_v2")
+        # Exact immutable identity values; only bounded model prose/citations vary.
+        context_checks = mixed_context.get("trigger_checks")
+        if not isinstance(context_checks, list):
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        materials = mixed_context.get("materials")
+        if not isinstance(materials, dict):
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        bodies = {
+            f"sec:{row['archive']['issuer_cik']}:"
+            f"{row['archive']['entry']['accession_number']}": UUID(row["snapshot_id"])
+            for row in materials["contents"]
+        }
+        mixed_refs = (context_ref, widest_reference, widest_reference)
+        mixed = MixedEventProposal(
+            context_hash=context_ref.content_hash,
+            items=tuple(
+                MixedEventItem(
+                    trigger_id=row["trigger_id"],
+                    kind=row["kind"],
+                    event_key=row["event_key"],
+                    status="unresolved",
+                    rationale="\x00" * 160,
+                    content_snapshot_id=bodies[row["event_key"]]
+                    if row["kind"] == "disclosure"
+                    else None,
+                    evidence_refs=mixed_refs,
+                )
+                for row in context_checks
+            ),
+        )
+        mixed_review = MixedEventReview(
+            proposal_hash=mixed.content_hash,
+            decision="accepted",
+            rationale="\x00" * 160,
+            evidence_refs=mixed_refs,
+        )
+        view._outputs["market_state"] = view._outputs["market_state"].model_copy(
+            update={"mixed_event_proposal": mixed}
+        )
+        mixed_roles: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+        for role in mixed_roles:
+            view._outputs[role] = view._outputs[role].model_copy(
+                update={"mixed_event_review": mixed_review}
             )
     return view
 

@@ -225,7 +225,7 @@ async def dispatch_configured_once(
                 trigger_id = member.trigger_id
                 job = await session.get(Job, member.job_id)
                 assert job is not None
-                if trigger.status in {"completed", "failed", "unknown"}:
+                if trigger.status in {"completed", "failed", "unknown"} and member.batch_id is None:
                     return {
                         "status": trigger.status,
                         "trigger_id": str(member.trigger_id),
@@ -255,6 +255,11 @@ async def dispatch_configured_once(
                     ):
                         raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
                     job_id = job.id
+                elif job.status == "skipped" and member.batch_id is not None:
+                    from nexus.monitoring.preclaim import preclaim_rejection_qualified
+
+                    if not await preclaim_rejection_qualified(session, run=original, now=now):
+                        return {"status": "unconfirmed", "execution_locked": True}
                 elif job.status not in {"succeeded", "failed"}:
                     return {"status": "unconfirmed", "execution_locked": True}
             else:
@@ -331,6 +336,11 @@ async def dispatch_configured_once(
         await run(settings, argparse.Namespace(action="reconcile"))
         if finished["status"] == "admitted":
             return {"status": "unconfirmed", "execution_locked": True}
+        if "unresolved_event_count" in finished:
+            # Only reread immutable receipts after reconciliation; no worker/source call.
+            finished = await run(
+                settings, argparse.Namespace(action="finish", trigger_id=trigger_id)
+            )
         return finished
     finally:
         await factory.kw["bind"].dispose()
@@ -443,21 +453,29 @@ async def confirm_monitor_shutdown(
                     AgentDailyBudgetReservationRecord.run_id == run.id
                 )
             )
-            coverage = await session.scalar(
-                select(MonitorCoverageReceipt.id).where(
-                    MonitorCoverageReceipt.kind == "price",
-                    MonitorCoverageReceipt.run_id == run.id,
-                    MonitorCoverageReceipt.account_id == account_id,
+            coverage_rows = tuple(
+                await session.scalars(
+                    select(MonitorCoverageReceipt).where(
+                        MonitorCoverageReceipt.run_id == run.id,
+                        MonitorCoverageReceipt.account_id == account_id,
+                    )
                 )
+            )
+            coverage = (
+                {row.kind for row in coverage_rows} == {"price", "disclosure"}
+                and all(
+                    row.status in {"installed", "retained", "gap", "superseded"}
+                    for row in coverage_rows
+                )
+                if member.batch_id is not None
+                else any(row.kind == "price" for row in coverage_rows)
             )
             from nexus.monitoring.preclaim import preclaim_rejection_qualified
 
-            if coverage is not None and await preclaim_rejection_qualified(
-                session, run=run, now=now
-            ):
+            if coverage and await preclaim_rejection_qualified(session, run=run, now=now):
                 return True
             return bool(
-                coverage is not None
+                coverage
                 and reservation is not None
                 and reservation.state == "settled"
                 and run.settled_cost_usd is not None

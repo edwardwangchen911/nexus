@@ -1,0 +1,73 @@
+"""Read consumption receipts independently from terminal job and discovery status."""
+
+from typing import TypedDict
+from uuid import UUID
+
+from sqlalchemy import exists, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
+
+from nexus.persistence.models.monitoring import MonitorTrigger
+
+
+def not_mixed_consumed() -> ColumnElement[bool]:
+    from nexus.persistence.models.monitoring import MonitorMixedEventReceipt
+
+    return ~exists(
+        select(MonitorMixedEventReceipt.id).where(
+            MonitorMixedEventReceipt.trigger_id == MonitorTrigger.id
+        )
+    )
+
+
+class MixedBatchReadback(TypedDict):
+    impact_review: str
+    coverage: str
+    unresolved_event_count: int
+
+
+async def mixed_batch_readback(session: AsyncSession, batch_id: UUID) -> MixedBatchReadback:
+    from nexus.persistence.models.monitoring import MonitorCoverageReceipt, MonitorIncrement
+
+    total = (
+        await session.scalar(
+            select(func.count())
+            .select_from(MonitorTrigger)
+            .where(MonitorTrigger.batch_id == batch_id)
+        )
+        or 0
+    )
+    unresolved = (
+        await session.scalar(
+            select(func.count())
+            .select_from(MonitorTrigger)
+            .where(MonitorTrigger.batch_id == batch_id, not_mixed_consumed())
+        )
+        or 0
+    )
+    rows = tuple(
+        await session.scalars(
+            select(MonitorCoverageReceipt)
+            .join(MonitorIncrement, MonitorIncrement.run_id == MonitorCoverageReceipt.run_id)
+            .where(MonitorIncrement.batch_id == batch_id)
+        )
+    )
+    kinds = {row.kind for row in rows}
+    return {
+        "impact_review": "verified" if total > 0 and unresolved == 0 else "not_verified",
+        "coverage": (
+            "unresolved"
+            if kinds != {"price", "disclosure"}
+            else "gap"
+            if any(row.status == "gap" for row in rows)
+            else "superseded"
+            if any(row.status == "superseded" for row in rows)
+            else "covered"
+            if all(
+                row.status in {"installed", "retained"} and row.active_plan_id is not None
+                for row in rows
+            )
+            else "unresolved"
+        ),
+        "unresolved_event_count": unresolved,
+    }

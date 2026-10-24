@@ -69,7 +69,13 @@ async def _inputs(
     from nexus.monitoring.source_qualification import load_qualified_source
     from nexus.research.sec_disclosure_index import SecIndexEntry
 
-    await session.execute(text("SELECT nexus_monitor_validate_batch(:id)"), {"id": batch.id})
+    readonly = await session.scalar(text("SELECT current_setting('transaction_read_only')"))
+    validator = (
+        "nexus_monitor_validate_batch_readonly"
+        if readonly == "on"
+        else "nexus_monitor_validate_batch"
+    )
+    await session.execute(text(f"SELECT {validator}(:id)"), {"id": batch.id})
     if not 1 <= len(batch.trigger_ids) <= 32:
         raise MaterialGap("MONITOR_PENDING_OVERFLOW")
     if max(batch.created_at, batch.sealed_at, batch.checked_at) > now:

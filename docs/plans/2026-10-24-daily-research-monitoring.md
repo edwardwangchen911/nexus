@@ -346,3 +346,40 @@ PG通过185.33秒；完整fast6749通过/10skip/1deselected（221.56秒）。最
 format/diff通过，末尾CLI安全码与定向回归日志单列；正常采集函数另有71unit/5PG独立证据。
 以上均合成原件/HTTP与模型替身、真实隔离持久化，零真实模型/SEC/Bark/业务宿主或账户写入。
 没有释放业务未知预留、重放旧请求或放宽正式门禁；当前尚无远端最终CI、部署或真实交易时段证明。
+
+### 2026-10-25 逐事件双审、两类原子接替及只读收尾（本地候选）
+
+本片承接354a205d的同批单Job与结算证明。原三阶段输出新增可空aux字段：market_state逐项
+proposal、bear/evidence_audit原proposal hash审核、portfolio精确采纳hash。只对显式v2启用新
+wire；不增加调用、限额或截止，旧v10 wire、ResearchIntent及None字段序列化保持原字节。
+完整成员、kind/event_key和SEC原件snapshot_id逐一匹配冻结材料，正文已取得不等于已复核。
+
+正常reconcile只在原生终结、已知结算及原件/输出资格通过后记录逐事件消费证明。新增0096
+append-only事件回执，精确绑定批次/触发/Run/Output/原材料/context/proposal/双审hash。
+price/disclosure两类coverage必须同Run、同观察时点一起落盘；新plan还必须具备本类全部
+事件的合格回执。直接SQL成对伪造coverage、未知用量、未采纳或外来引用均不能装新plan。
+公开单类install拒绝v2绕过，只有完整编译后的内部原子接替路径可安装。
+
+某类有unresolved、无冻结前代或无可批准新条件时，该类明确gap，不推进baseline、不续期
+旧条件。真实前代冲突使全批superseded且不消费事件。第二类安装失败回滚全部新plan及消费，
+再保存两类固定gap；已知原生终态在savepoint回滚后重新封口，不重派Job。审计否决不能
+被synthesis或采纳hash覆盖；unknown不写消费/coverage，不释放USD或3call预留。
+
+只读资格入口复制完整批次校验，仅去掉outbox行锁；原写入guard保持原锁。宿主检查、零调用
+证明和退出继续完整校验冻结身份，不能以released预算本身当零调用证据。新v2终态dispatch
+读取原请求、完成reconcile并重新读回metadata，skipped必须先通过原生零调用证明。空批次
+不标verified；批次与整股未解决计数分开。当前review原因与历史native_reason分别返回，旧
+Trigger/Output/快照不追改。0096有新回执或typed coverage后禁止降级；回滚镜像须兼容0096。
+
+本片最终验证结果见本段末尾及私有checkpoint；所有资料、模型和网络替身均隔离合成。
+本片不包含自动typed pending选择/正常采集准备、未解决旧事件后续研究编排、新API/BFF/页面。
+它们仍是同一完整Goal的剩余工作，不能将本片视为全监控闭环或自然时段验收完成。随后仍须
+实际diff Chat终审、最终同head必需CI、镜像与兼容回滚、合入部署及自然业务观察。
+
+本片最终离线证明：正常CLI/Worker/双类reconcile/只读宿主收尾7项通过（245.45秒），覆盖
+正常3阶段、critique超时未知2阶段、零调用容量拒绝、逐项未解决、审计否决、第二类失败原子
+回滚及纯披露首成员；旧dispatch/reconciliation/migration/mixedDB共20项通过（230.10秒）。
+完整fast6785通过/10skip/1deselected（259.41秒），最终91项定向unit、Mypy651源、Ruff与
+format/diff通过。0096合并后的全组PG结果保存在event-db-integrated-final.log，并在私有
+checkpoint登记；集中只读复核无新增P1/P2。未启动真实模型/SEC/Bark/业务宿主，未改旧结果
+或接受、解除任何业务未知占用。以上是本地候选证明，不能代替最终远端CI或部署事实。

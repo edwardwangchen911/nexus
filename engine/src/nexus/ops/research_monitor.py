@@ -265,22 +265,26 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                     trigger_id=args.trigger_id,
                     now=now,
                 )
+                from nexus.monitoring.mixed_readback import mixed_batch_readback
+
+                mixed_metadata: dict[str, object] = {}
+                if finished_trigger.batch_id is not None:
+                    mixed_metadata.update(
+                        await mixed_batch_readback(session, finished_trigger.batch_id)
+                    )
                 return {
                     "status": finished_trigger.status,
-                    "reason": finished_trigger.reason,
+                    "reason": (
+                        "MONITOR_EVENT_REVIEW_VERIFIED"
+                        if mixed_metadata.get("impact_review") == "verified"
+                        else finished_trigger.reason
+                    ),
                     **(
-                        {
-                            "impact_review": "not_verified",
-                            "coverage": "unresolved",
-                            "unresolved_event_count": await session.scalar(
-                                select(func.count())
-                                .select_from(type(finished_trigger))
-                                .where(type(finished_trigger).batch_id == finished_trigger.batch_id)
-                            ),
-                        }
+                        {"native_reason": finished_trigger.reason}
                         if finished_trigger.batch_id is not None
                         else {}
                     ),
+                    **mixed_metadata,
                     "trigger_id": str(finished_trigger.id),
                     "run_id": str(finished_trigger.research_run_id),
                     "execution_locked": True,

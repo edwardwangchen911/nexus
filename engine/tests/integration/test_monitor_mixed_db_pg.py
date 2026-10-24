@@ -56,7 +56,7 @@ def runtime_head(monkeypatch):
     # The main writer owns the normal runtime-head switch. This isolated test
     # uses the actual migrated head without editing existing test assertions.
     for path in ("nexus.persistence.migrations", "nexus.ops.research_monitor"):
-        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", "0095_monitor_mixed_increments")
+        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", "0096_monitor_event_receipts")
 
 
 async def mixed_fixture(url, monkeypatch, tmp_path):
