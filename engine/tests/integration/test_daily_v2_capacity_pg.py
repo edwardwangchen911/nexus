@@ -77,6 +77,8 @@ async def normal_slot(factory, settings, captured, pointer):
         "actual_base_wire",
         "deadline",
         "deadline_exit",
+        "rebuild_expired",
+        "rebuild_profile_timeout",
     ],
 )
 async def test_unpublished_daily_capacity_rollback_is_exact(
@@ -128,6 +130,39 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
     timeout_waiter = asyncio.Event()
     timeout_exited = []
     admission_task = asyncio.current_task()
+    rebuild_modes = {"rebuild_expired", "rebuild_profile_timeout"}
+    first_capacity_failure = []
+    rebuild_profile_calls = []
+    rebuild_snapshot_calls = []
+    if mode in rebuild_modes:
+        original_profile = agent_cycle._require_cycle_candidate_profile
+        original_snapshot = agent_cycle.prepare_agent_paper_research_snapshot
+
+        async def bounded_profile(*args, **kwargs):
+            if first_capacity_failure:
+                rebuild_profile_calls.append(True)
+                assert mode != "rebuild_expired", "expired rebuild must not enter profile"
+                scope = module._current_scope.get()
+                assert scope is not None, "rebuild profile must be inside inherited scope"
+                assert scope.deadline == first_capacity_failure[0]
+                assert scope._timeout is not None
+                assert asyncio.current_task() is admission_task
+                scope._timeout.reschedule(asyncio.get_running_loop().time() - 1)
+                try:
+                    await timeout_waiter.wait()
+                finally:
+                    timeout_exited.append(True)
+                raise AssertionError("expired profile scope must cancel its waiter")
+            return await original_profile(*args, **kwargs)
+
+        async def bounded_snapshot(*args, **kwargs):
+            if first_capacity_failure:
+                rebuild_snapshot_calls.append(True)
+                raise AssertionError("failed rebuild preflight must not prepare a snapshot")
+            return await original_snapshot(*args, **kwargs)
+
+        monkeypatch.setattr(agent_cycle, "_require_cycle_candidate_profile", bounded_profile)
+        monkeypatch.setattr(agent_cycle, "prepare_agent_paper_research_snapshot", bounded_snapshot)
     if mode == "deadline_exit":
         original_exit = module.DailyEventCapacityScope.__aexit__
         real_monotonic = module._monotonic
@@ -185,7 +220,7 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
         bundle = paper.get("pending_monitoring_v2")
         gap = paper.get("pending_monitoring_v2_gap")
         seen.append((run.id, run.instrument_id, bundle is not None, gap is not None))
-        if mode in {"typed_only", "late_member", "deadline", "deadline_exit"}:
+        if mode in {"typed_only", "late_member", "deadline", "deadline_exit"} | rebuild_modes:
             scope = module._current_scope.get()
             assert scope is not None, "normal pool must own the common capacity deadline"
             if bundle is not None or gap is not None:
@@ -226,6 +261,11 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
                     ),
                 )
             )
+            if mode in rebuild_modes:
+                assert staged_counts == [(2, 2)]
+                first_capacity_failure.append(scope.deadline)
+                if mode == "rebuild_expired":
+                    monkeypatch.setattr(module, "_monotonic", lambda: scope.deadline + 1)
             if mode == "deadline":
                 assert staged_counts == [(2, 2)]
                 assert asyncio.current_task() is admission_task
@@ -252,7 +292,7 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
 
     monkeypatch.setattr(module, "preview_daily_event_capacity", preview, raising=False)
     monkeypatch.setattr(codex_staged, "invoke_codex", no_sdk)
-    if mode in {"late_member", "deadline", "deadline_exit"}:
+    if mode in {"late_member", "deadline", "deadline_exit"} | rebuild_modes:
         # Change only deterministic loop iteration, not the frozen candidate set,
         # identity, hash, materials or admission entry; exercise two prior holds.
         parse = agent_cycle.parse_candidate_manifest
@@ -275,6 +315,8 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
             "noncapacity",
             "deadline",
             "deadline_exit",
+            "rebuild_expired",
+            "rebuild_profile_timeout",
         }
         assert result.result_code == (
             "RESEARCH_JOBS_PREPARED" if success else "RESEARCH_ADMISSION_UNAVAILABLE"
@@ -283,12 +325,16 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
         target_calls = [row for row in seen if row[1] == pointer.instrument_id]
         assert [row[2:] for row in target_calls] == (
             [(True, False), (False, True)]
-            if mode not in {"noncapacity", "deadline"}
+            if mode not in {"noncapacity", "deadline"} | rebuild_modes
             else [(True, False)]
         )
         if mode in {"typed_only", "late_member"}:
             assert len(deadlines) >= 2 and len(set(deadlines)) == 1
-        if mode == "deadline":
+        if mode in rebuild_modes:
+            assert rebuild_profile_calls == ([] if mode == "rebuild_expired" else [True])
+            assert rebuild_snapshot_calls == []
+            assert len(first_capacity_failure) == 1
+        if mode in {"deadline", "rebuild_profile_timeout"}:
             assert timeout_exited == [True]
             assert not timeout_waiter.is_set()
             checkpoint = list(seen)
