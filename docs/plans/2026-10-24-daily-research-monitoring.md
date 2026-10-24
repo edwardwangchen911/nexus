@@ -255,3 +255,49 @@ Ruff全engine通过。来源/批次/迁移/旧类型/旧通知合并23 PG通过1
 
 下一片继续精确accession正文准入、v2混合冻结/消费、双kind原子接替及页面矩阵，随后完整终审、
 同head必需CI、最终镜像/部署及自然交易验收。本片未push/PR/远端CI/合入部署，完整Goal保持active。
+
+### 2026-10-24 精确披露正文资格与封存材料准备（本地候选）
+
+本片核查确认：旧refresh-disclosure按form选最新，不能兑现封存accession；旧普通SEC正文允许截断，
+强8-K归档仅证明primary+99.1，不能证明没有99.2，8-K/A亦明确附件未收集。因而不能只把这些
+引用塞入v2并让模型试探。新增固定8-K/8-K/A文档清单原件及全部声明文本文件的正常本地导入，
+沿原SEC索引精确绑定CIK/accession/form/accepted/filed/primary及四个本地可见时点。
+
+`research-monitor import-content`要求精确index snapshot、accession和已归档目录；每个文件有
+原bytes/HTTP200 receipt/hash/size/URL，inventory引用目录与实际集合必须完全相同，包含99.2等
+所有声明附件。仅支持文本html/htm/txt与primary/EX类型；其他类型、清单残缺、截断、缺件、
+receipt早于提交或未来可见均明确拒绝。非文本/其他类型是当前支持缺口，不伪称附件完整。
+解析器最多17份声明文档、每件8MiB及32k完整可见字符；prepared package整体256KiB上界，
+超限保留原件并阻断准备，不截取或增加模型调用。该上界不是正式模型wire/token预算承诺。
+
+原件、canonical及独立source `nexus_sec_monitor_filing` 保存到既有Artifact/Snapshot/EvidenceRef，
+不登记或替换FinancialFact/Filing会计来源。available/created取实际对象归档后的数据库时间；
+重复导入幂等，读回逐件重验原件及索引、canonical和时点。8-K/A关系not_assessed、会计修订
+unverified、impact_review not_performed，不能绕过原EPS/TTM采纳或审计否决。
+
+`prepare-batch`对完整sealed batch核验原始price quote/条件、每份SEC check及精确正文，冻结两kind
+父论点、原角色审计、三条触发及每件文本附件为独立 `monitor_batch_inputs_v1`。仅索引则明确
+missing_content，缺件不创建半包。相同批次并发准备只生成一个包/一次审计；迟到成员不入旧包。
+历史读回仅重建原cutoff事实，与当前计划/Run终态资格分开；后来冲突正文或新计划不能改旧包，
+正常再次准备仍重新检查当前资格并拒绝冲突/待接替。缺失对象和坏件均失效，不fallback旧版本。
+
+本片不创建Run/Job/lease/预算hold，不消费触发，不修改未知费用/预算，不启动业务宿主。
+prepared只表示材料已冻结，admission=not_checked；价格/身份/交易时段/账户/预算/租约与模型
+容量仍须正式v2准入逐项重验。新材料source没有研究snapshot evidence authority，不能借普通
+研究入口授权调用。仍缺精确accession正常网络采集、混合v2单股Job/3-call hold、模型输入消费、
+按kind审核/消费/原子接替及API/BFF/实际页面矩阵；旧v1拒收batch保护保持。完整Goal继续active。
+
+集中审查确认1P1/4P2并修复：末行未闭合清单遗漏附件（明确拒绝）；实际归档发布时间；清单
+receipt时间下界；CLI固定缺口码；历史cutoff受后来plan/终态污染。对应缺陷回归均实际RED→GREEN，
+补充原件存储失败、晚到冲突、并发、材料包不能获研究授权及无新增Run/Job/hold。
+没有新依赖或数据库迁移，schema仍0094；所有新存储不可删除/回填旧事实，回滚保留0094及
+原件，旧版本可关闭新入口但不得把不支持的材料读为研究已完成。
+
+
+本片验证：完整fast6728 passed/10skip/1deselected（238.61秒，最后price原件复验/缺口清单/存储
+错误增量以前）；来源/批次/旧SEC原件链35PG通过235.24秒。最后正常材料入口综合PG通过
+22.75秒，覆盖两份精确正文/99.2、并发只一包、一审计、迟到冲突/新plan、旧cutoff、存储失败、
+普通研究准入拒绝且Run/Job/预算预留数量不变、归档实际完成前不可见、精确missing_event_ids。
+最终33定向unit、Mypy645源、Ruff全engine/format/diff通过；正常入口测试已加入CI组。
+全部原件、模型、传输均为合成或隔离替身，本片没有真实来源/模型/Bark/业务写入或宿主启动。
+尚未push/PR、远端CI、最终Chat终审或部署，不把这份材料资格证明当完整研究消费闭环。

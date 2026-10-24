@@ -1125,3 +1125,31 @@ uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-fil
 候选0093将固定price/disclosure的数据库身份分开；当前旧价格入口只处理price，
 新类型尚不代表SEC自动扫描/通知/增量已启用。迁移前按正常备份/恢复程序验证；无disclosure历史才可降至0092，
 已有任何disclosure记录会拒绝降级，不能强行删除事实或保护来回滚。未来部署须保留兼容0093的读取和回滚版本。
+
+### 混合批次的精确正文材料准备
+
+以下是本地候选入口，尚未启用混合v2模型准入或自动精确采集；均不启动宿主、网络采集或模型。
+
+```bash
+nexus-engine-research-monitor import-content --index-snapshot-id <已归档SEC索引UUID> \
+  --accession <该索引内精确accession> --archive-dir <本地原件目录>
+nexus-engine-research-monitor prepare-batch --batch-id <已封口股票批次UUID>
+```
+
+归档目录须包含 `<accession>-index.html`（SEC Document Format Files清单）、清单中全部声明
+文本原文件，以及每个文件同名的 `.receipt.json`。HTTP receipt固定含source_url、received_at、
+sha256、byte_length、http_status=200；只接受该CIK/accession的官方SEC目录URL，不能传当前时钟、
+账户或替代正文。支持primary和EX类型的html/htm/txt，不支持PDF/图片等时返回固定未支持原因；
+不得省略清单行或缺失附件来通过。最多17份文件，每件原始8MiB、完整可见正文32k字符，不截断。
+单文件和清单receipt均不得早于该披露提交时点或晚于实际导入截止。8-K/A仍不推定原件关系和会计修订。
+
+导入逐件归档并在对象存储完成后登记可用时间。重新导入返回精确原身份，读回必须重验原件、
+canonical及首次登记时点。该入口不选“最新一条”来代替指定accession；未来正常采集必须按相同
+身份生成完整归档，不能重复模型试探缺件。
+
+prepare-batch仅冻结材料：原price检查、SEC事件、父论点及原审计、每份披露清单/正文/附件。
+缺正文返回missing_content及排序后的missing_event_ids，冲突/损坏不fallback；容量>32成员或材料包>256KiB明确阻断，原事件
+和通知保留。并发准备只保存一个包及一次审计。旧包按原cutoff读回；当前资格检查与历史事实分开，
+新计划、迟到冲突、有效期等仍可阻断再次准备。prepared不代表可执行，返回admission=not_checked、
+impact_review=not_performed、job_created=false、execution_locked=true；没有预算、Job、消费或
+会计采纳副作用。最终v2准入须重新检查当日身份、时段、新鲜价格、账户/未知占用、预算与有效租约。

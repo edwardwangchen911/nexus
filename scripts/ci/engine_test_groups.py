@@ -105,6 +105,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_disclosure_producer_pg.py",
     "engine/tests/integration/test_disclosure_observations_pg.py",
     "engine/tests/integration/test_monitor_batches_pg.py",
+    "engine/tests/integration/test_monitor_filing_content_pg.py",
     "engine/tests/integration/test_monitor_daily_receipts_pg.py",
     "engine/tests/integration/test_monitor_frozen_members_pg.py",
     "engine/tests/integration/test_monitor_dispatch_pg.py",

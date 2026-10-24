@@ -40,6 +40,17 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--plan-id", type=UUID, required=True)
     scan = commands.add_parser("scan", help="Check only the current market-session bucket")
     scan.add_argument("--calendar-authority-id", type=UUID, required=True)
+    content = commands.add_parser(
+        "import-content", help="Import exact SEC filing inventory and every declared text original"
+    )
+    content.add_argument("--index-snapshot-id", type=UUID, required=True)
+    content.add_argument("--accession", required=True)
+    content.add_argument("--archive-dir", type=Path, required=True)
+    preparation = commands.add_parser(
+        "prepare-batch",
+        help="Freeze parent theses and verified SEC content without admitting research",
+    )
+    preparation.add_argument("--batch-id", type=UUID, required=True)
     admit = commands.add_parser("admit", help="Admit one new single-security trigger review")
     admit.add_argument("--trigger-id", type=UUID, required=True)
     admit.add_argument("--calendar-authority-id", type=UUID, required=True)
@@ -130,6 +141,56 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+            if args.action == "prepare-batch":
+                from nexus.monitoring.batch_inputs import prepare_batch_inputs
+
+                return await prepare_batch_inputs(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    batch_id=args.batch_id,
+                    now=now,
+                )
+            if args.action == "import-content":
+                from nexus.monitoring.filing_archive import import_filing_content
+                from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
+                from nexus.persistence.models.data import DataSnapshot
+
+                candidate = (
+                    None
+                    if settings.agent_paper_candidate_batch_id is None
+                    else await load_agent_paper_candidate_batch(
+                        session, batch_id=settings.agent_paper_candidate_batch_id
+                    )
+                )
+                source = await session.get(DataSnapshot, args.index_snapshot_id)
+                index_payload = None if source is None else source.payload.get("index")
+                if (
+                    not isinstance(index_payload, dict)
+                    or candidate is None
+                    or candidate.account_id != settings.agent_paper_account_id
+                    or source is None
+                    or index_payload.get("instrument_id")
+                    not in {str(value) for value in candidate.instrument_ids}
+                ):
+                    raise ValueError("MONITOR_SCOPE_INVALID")
+                material, created = await import_filing_content(
+                    session,
+                    index_snapshot_id=args.index_snapshot_id,
+                    accession=args.accession,
+                    archive_dir=args.archive_dir,
+                    now=now,
+                )
+                return {
+                    "status": "created" if created else "existing",
+                    "snapshot_id": str(material.snapshot_id),
+                    "evidence_ref_id": str(material.evidence_ref_id),
+                    "canonical_hash": material.canonical_hash,
+                    "provider_requests": 0,
+                    "model_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
+                    "impact_review": "not_performed",
+                }
             if args.action == "finish":
                 from nexus.monitoring.admission import finish_increment
 
@@ -438,6 +499,22 @@ def main(argv: list[str] | None = None) -> int:
             "MONITOR_SCOPE_EXCEEDED",
             "AGENT_PAPER_CALENDAR_UNAVAILABLE",
             "RESEARCH_OUTPUT_NOT_ACTIONABLE",
+            "SEC_MONITOR_ARCHIVE_INVALID",
+            "SEC_MONITOR_ARCHIVE_UNAVAILABLE",
+            "SEC_MONITOR_ARTIFACT_INVALID",
+            "SEC_MONITOR_ENTRY_UNAVAILABLE",
+            "SEC_MONITOR_ATTACHMENT_UNSUPPORTED",
+            "SEC_MONITOR_CONTENT_CAPACITY",
+            "SEC_MONITOR_DOCUMENT_SET_INVALID",
+            "SEC_MONITOR_DOCUMENT_SIZE_INVALID",
+            "SEC_MONITOR_DOCUMENT_TIME_INVALID",
+            "SEC_MONITOR_IDENTITY_INVALID",
+            "SEC_MONITOR_INVENTORY_IDENTITY_INVALID",
+            "SEC_MONITOR_INVENTORY_INVALID",
+            "SEC_MONITOR_ORIGINAL_INVALID",
+            "SEC_MONITOR_CLOCK_UNAVAILABLE",
+            "MONITOR_BATCH_UNAVAILABLE",
+            "MONITOR_SCOPE_INVALID",
         }
         code = str(error) if str(error) in safe else "MONITOR_OPERATION_UNCONFIRMED"
         print(json.dumps({"status": "blocked", "error_code": code, "execution_locked": True}))
