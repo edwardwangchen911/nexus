@@ -3,34 +3,7 @@ import { formatDisplayDecimal } from "../lib/display-decimal";
 import { formatDisplayTime } from "../lib/display-format";
 import { Badge } from "./ui/badge";
 
-export type PriceMonitoringView = {
-  observed_at: string;
-  state: "not_installed" | "valid" | "expired" | "superseded" | "withdrawn" | "unknown";
-  plan_id: string | null;
-  condition: components["schemas"]["PriceReviewCondition"] | null;
-  valid_until: string | null;
-  review_due_at: string | null;
-  replacement_run_id: string | null;
-  latest_check: {
-    result: "true" | "false" | "unknown";
-    scheduled_at: string;
-    checked_at: string;
-    reason: "observation_missing" | "authority_mismatch" | "time_unproven" | "price_missing" | null;
-  } | null;
-  triggers: Array<{
-    trigger_id: string;
-    cause: "initial_match" | "crossed";
-    checked_at: string;
-    status: "pending" | "blocked" | "admitted" | "completed" | "failed" | "unknown" | "covered";
-    blocked_reason: "budget" | "account_occupied" | "inputs" | "overflow" | "unknown" | null;
-    run_id: string | null;
-    usage_status: "not_started" | "in_progress" | "known" | "unknown";
-    notification_status: "queued" | "delivering" | "published" | "dead_letter" | "unknown";
-  }>;
-  trigger_count: number;
-  execution_locked: true;
-  coverage_reason?: "audit_rejected" | "source_invalid" | "no_condition" | "run_failed" | "usage_unknown" | "awaiting_reconciliation" | null;
-};
+export type PriceMonitoringView = components["schemas"]["ResearchMonitoringView"];
 
 const stateLabels = {
   not_installed: "尚未安装监控计划", valid: "计划有效期内", expired: "计划已过期",

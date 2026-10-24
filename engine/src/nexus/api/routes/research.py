@@ -17,7 +17,7 @@ from nexus.agents.codex_versions import (
     SDK_CONFIG_VERSIONS,
     STAGED_CONFIG_VERSIONS,
 )
-from nexus.agents.committee import StageInputIdentity
+from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS, StageInputIdentity
 from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
@@ -32,6 +32,7 @@ from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.research_inputs import read_research_inputs
+from nexus.api.research_monitoring import read_monitoring_view
 from nexus.api.research_stages import read_stage_trace
 from nexus.api.schemas.agents import (
     AgentRunStatus,
@@ -347,6 +348,11 @@ async def _hydrate_response(
         )
         return response.model_copy(
             update={
+                "monitoring": (
+                    await read_monitoring_view(session, run, now=reader.read_at)
+                    if _declares_monitoring(run)
+                    else None
+                ),
                 "stage_trace": await read_stage_trace(session, run),
                 "inputs": await read_research_inputs(
                     session,
@@ -356,6 +362,14 @@ async def _hydrate_response(
                 ),
             }
         )
+
+
+def _declares_monitoring(run: AgentResearchRunRecord) -> bool:
+    manifest = run.prompt_manifest
+    portfolio = manifest.get("portfolio") if isinstance(manifest, dict) else None
+    return (
+        isinstance(portfolio, dict) and portfolio.get("version") in MONITORING_SCOPE_PROMPT_VERSIONS
+    )
 
 
 def _declares_current_trends(run: AgentResearchRunRecord) -> bool:

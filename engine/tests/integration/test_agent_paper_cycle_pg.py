@@ -2215,7 +2215,7 @@ async def _seed_cycle_research_authority(
     for index, (instrument_id, _, _, _) in enumerate(instruments, start=1):
         evidence_hash = str((index + 6) % 10) * 64
         evidence = ResearchEvidenceRef(
-            id=UUID(int=0x63000000000000000000000000000200 + index),
+            id=UUID(int=0x63000000000000000000000000000200 + index, version=4),
             source="sec",
             provider_object_id=f"agent-paper:{instrument_id}",
             revision="v1",

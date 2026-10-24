@@ -2073,6 +2073,8 @@ export interface components {
              */
             start_session: string;
         };
+        /** @enum {string} */
+        BlockedReason: "budget" | "account_occupied" | "inputs" | "overflow" | "unknown";
         /** BriefDisagreementSummary */
         BriefDisagreementSummary: {
             /**
@@ -2547,6 +2549,8 @@ export interface components {
             /** Unknown Reason */
             unknown_reason: string | null;
         };
+        /** @enum {string} */
+        CoverageReason: "audit_rejected" | "source_invalid" | "no_condition" | "run_failed" | "usage_unknown" | "awaiting_reconciliation";
         CurrencyCode: string;
         /** @enum {string} */
         CycleStatus: "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
@@ -3890,6 +3894,8 @@ export interface components {
             /** Delta */
             delta: string | null;
         };
+        /** @enum {string} */
+        MonitoringState: "not_installed" | "valid" | "expired" | "superseded" | "withdrawn" | "unknown";
         /** NewsArticle */
         NewsArticle: {
             /** Author */
@@ -7285,6 +7291,94 @@ export interface components {
             /** Usage Known */
             usage_known: boolean;
         };
+        /** ResearchMonitorCheck */
+        ResearchMonitorCheck: {
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Reason */
+            reason: ("observation_missing" | "authority_mismatch" | "time_unproven" | "price_missing") | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "true" | "false" | "unknown";
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+        };
+        /** ResearchMonitoringView */
+        ResearchMonitoringView: {
+            condition: components["schemas"]["PriceReviewCondition"] | null;
+            coverage_reason: components["schemas"]["CoverageReason"] | null;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            latest_check: components["schemas"]["ResearchMonitorCheck"] | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Plan Id */
+            plan_id: string | null;
+            /** Replacement Run Id */
+            replacement_run_id: string | null;
+            /** Review Due At */
+            review_due_at: string | null;
+            state: components["schemas"]["MonitoringState"];
+            /**
+             * Trigger Count
+             * @default 0
+             */
+            trigger_count: number;
+            /**
+             * Triggers
+             * @default []
+             */
+            triggers: components["schemas"]["ResearchMonitorTrigger"][];
+            /** Valid Until */
+            valid_until: string | null;
+        };
+        /** ResearchMonitorTrigger */
+        ResearchMonitorTrigger: {
+            blocked_reason: components["schemas"]["BlockedReason"] | null;
+            /**
+             * Cause
+             * @enum {string}
+             */
+            cause: "initial_match" | "crossed";
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /**
+             * Notification Status
+             * @enum {string}
+             */
+            notification_status: "queued" | "delivering" | "published" | "dead_letter" | "unknown";
+            /** Run Id */
+            run_id: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "blocked" | "admitted" | "completed" | "failed" | "unknown" | "covered";
+            /**
+             * Trigger Id
+             * Format: uuid
+             */
+            trigger_id: string;
+            usage_status: components["schemas"]["UsageStatus"];
+        };
         /** ResearchRunCreateRequest */
         ResearchRunCreateRequest: {
             /**
@@ -7342,6 +7436,7 @@ export interface components {
             intent: components["schemas"]["ResearchIntent"] | null;
             /** Invalidation Conditions */
             invalidation_conditions: components["schemas"]["ResearchCondition"][];
+            monitoring?: components["schemas"]["ResearchMonitoringView"] | null;
             /** Output Tokens */
             output_tokens?: number | null;
             /** Quality Status */
@@ -8193,6 +8288,8 @@ export interface components {
             /** Value */
             value?: string | null;
         };
+        /** @enum {string} */
+        UsageStatus: "not_started" | "in_progress" | "known" | "unknown";
         /** VetoExperimentRequest */
         VetoExperimentRequest: {
             /**

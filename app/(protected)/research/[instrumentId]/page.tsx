@@ -6,14 +6,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
 import { DecisionCard } from "../../../components/decision-card";
-import { ResearchMonitoring, type PriceMonitoringView } from "../../../components/research-monitoring";
+import { ResearchMonitoring } from "../../../components/research-monitoring";
 import { DecisionPath } from "../../../components/decision-path";
 import { ResearchInputs } from "../../../components/research-inputs";
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import type { components } from "../../../lib/generated/schema";
 
-type Research = components["schemas"]["ResearchRunResponse"] & { monitoring?: PriceMonitoringView | null };
+type Research = components["schemas"]["ResearchRunResponse"];
 type ResearchEnvelope = components["schemas"]["ResearchRunEnvelope"];
 type ResearchAdmission = components["schemas"]["ResearchAdmissionResponse"];
 type ResearchAdmissionEnvelope = components["schemas"]["ResearchAdmissionEnvelope"];

@@ -118,6 +118,12 @@ async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
         from integration.test_monitor_pending_pg import pending_members
 
         late_id = (await pending_members(factory, trigger, 2))[-1]
+        from nexus.monitoring.storage import mark_trigger_blocked
+
+        async with factory() as session, session.begin():
+            await mark_trigger_blocked(
+                session, trigger_id=trigger.id, reason="MONITOR_BUDGET_UNAVAILABLE", now=now
+            )
     async with factory() as session:
         runs = tuple(
             await session.scalars(
@@ -221,7 +227,15 @@ async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
                 AgentDailyBudgetReservationRecord.run_id == target.id
             )
         )
-        assert old.status == "pending" and old.research_run_id is None
+        assert old.status == ("blocked" if mode == "addressed" else "pending")
+        assert old.research_run_id is None
+        if mode == "addressed":
+            from nexus.api.research_monitoring import read_monitoring_view
+
+            assert old.reason == "MONITOR_BUDGET_UNAVAILABLE"
+            view = await read_monitoring_view(session, run=parent, now=now)
+            covered = next(item for item in view.triggers if item.trigger_id == trigger.id)
+            assert covered.status == "covered" and covered.blocked_reason is None
         assert old.outbox_id == trigger.outbox_id
         assert set(await session.scalars(select(OutboxEvent.id))) == outbox_before
         assert (

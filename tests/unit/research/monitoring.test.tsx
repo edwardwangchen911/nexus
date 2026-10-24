@@ -11,6 +11,7 @@ const at = "2026-10-24T11:30:00Z";
 
 function monitoring(overrides: Partial<PriceMonitoringView> = {}): PriceMonitoringView {
   return {
+    coverage_reason: null,
     observed_at: at, state: "valid", plan_id: "plan-1", valid_until: "2026-10-25T12:00:00Z",
     review_due_at: "2026-10-25T10:00:00Z", replacement_run_id: null,
     condition: { currency: "USD", feed: "l1", max_age_seconds: 60, operator: "gte",
