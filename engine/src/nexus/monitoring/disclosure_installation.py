@@ -12,7 +12,7 @@ from nexus.domain.time import require_utc
 from nexus.monitoring.disclosure_contracts import compile_disclosure_proposal
 from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.monitoring.source_qualification import load_qualified_source
-from nexus.monitoring.storage import lock_security
+from nexus.monitoring.storage import lock_security, plan_recorded_at
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.monitoring import MonitorPlan
 
@@ -92,6 +92,7 @@ async def _install_mixed_or_legacy_disclosure(
         ):
             raise ValueError("MONITOR_SOURCE_NOT_NEWER")
     plan = MonitorPlan(
+        created_at=await plan_recorded_at(session, requested_at=now),
         kind="disclosure",
         account_id=account_id,
         instrument_id=source.run.instrument_id,

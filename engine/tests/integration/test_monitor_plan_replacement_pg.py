@@ -103,6 +103,11 @@ async def test_returning_condition_consumes_frozen_quote_but_not_postfreeze_chec
     monkeypatch.setattr(installation, "load_qualified_source", approved)
     monkeypatch.setattr(installation, "load_approved_source", approved)
 
+    async def recorded_at(_session, *, requested_at):
+        return requested_at
+
+    monkeypatch.setattr(installation, "plan_recorded_at", recorded_at)
+
     async def install(source, predecessor, minute):
         async with factory() as session, session.begin():
             return await install_plan_from_output(
@@ -182,6 +187,11 @@ async def test_scanner_reloads_generation_after_concurrent_installer(
     # boundary. Native qualification is exercised by the separate full-path tests.
     monkeypatch.setattr(installation, "load_qualified_source", approved)
     monkeypatch.setattr(installation, "load_approved_source", approved)
+
+    async def recorded_at(_session, *, requested_at):
+        return requested_at
+
+    monkeypatch.setattr(installation, "plan_recorded_at", recorded_at)
     monkeypatch.setattr(scanning, "load_agent_paper_service_calendar_authority", calendar)
     monkeypatch.setattr(scanning, "lock_security", delayed_lock)
     monkeypatch.setattr(scanning, "read_latest_price", observation)

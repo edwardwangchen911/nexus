@@ -16,7 +16,7 @@ from nexus.monitoring.contracts import PriceMonitoringProposal, PriceReviewCondi
 from nexus.monitoring.evaluation import EpisodeState, Result, advance_episode, compile_proposal
 from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.monitoring.source_qualification import load_qualified_source
-from nexus.monitoring.storage import lock_security
+from nexus.monitoring.storage import lock_security, plan_recorded_at
 from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
@@ -165,6 +165,7 @@ async def _install_mixed_or_legacy_plan(
             raise ValueError("MONITOR_SOURCE_NOT_NEWER")
     proposal = source.proposal
     plan = MonitorPlan(
+        created_at=await plan_recorded_at(session, requested_at=now),
         account_id=account_id,
         instrument_id=source.run.instrument_id,
         generation=1 if prior is None else prior.generation + 1,

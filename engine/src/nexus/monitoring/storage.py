@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
@@ -24,6 +24,14 @@ async def lock_security(session: AsyncSession, *, account_id: UUID, instrument_i
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
         {"scope": f"research-monitor:{account_id}:{instrument_id}"},
     )
+
+
+async def plan_recorded_at(session: AsyncSession, *, requested_at: datetime) -> datetime:
+    """Read insertion visibility only after holding the security transaction lock."""
+    value = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(value, datetime) or value.utcoffset() is None or value < requested_at:
+        raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+    return require_utc(value)
 
 
 async def record_check(
