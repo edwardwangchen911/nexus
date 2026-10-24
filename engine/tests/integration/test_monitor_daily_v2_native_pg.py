@@ -113,13 +113,33 @@ async def unresolved_then_daily(url, monkeypatch, root):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["addressed", "unresolved", "veto", "unknown", "replacement_fail"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "addressed",
+        "unresolved",
+        "veto",
+        "unknown",
+        "replacement_fail",
+        "superseded_price",
+        "superseded_disclosure",
+    ],
+)
 async def test_new_daily_native_consumes_only_qualified_historical_events(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
     from nexus.monitoring.mixed_readback import mixed_batch_readback
     from nexus.monitoring.reconciliation import reconcile_account_results
 
+    saved = []
+    prepare = ready_host_batch
+
+    async def capture(*args, **kwargs):
+        value = await prepare(*args, **kwargs)
+        saved.append(value)
+        return value
+
+    monkeypatch.setattr(f"{__name__}.ready_host_batch", capture)
     (
         factory,
         settings,
@@ -210,6 +230,25 @@ async def test_new_daily_native_consumes_only_qualified_historical_events(
         assert not await run_agent_worker_once(
             settings, job_ids=(job.id,), formal_stage_capacity=True
         )
+    if mode.startswith("superseded_"):
+        from helpers.monitor_generation import assert_old_run_superseded
+        from integration.test_daily_v2_readback_pg import close_daily_cycle
+
+        captured = saved[0][2]
+        await close_daily_cycle(factory, settings, captured, pointer, result, now, monkeypatch)
+        await assert_old_run_superseded(
+            factory,
+            settings,
+            captured,
+            pointer,
+            target.id,
+            native,
+            monkeypatch,
+            advanced_kind=mode.removeprefix("superseded_"),
+        )
+        assert len(seen) == 9
+        await factory.kw["bind"].dispose()
+        return
     if mode == "replacement_fail":
         from nexus.monitoring import disclosure_installation
 

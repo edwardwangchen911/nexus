@@ -24,11 +24,26 @@ from sqlalchemy import func, select
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "unknown", [False, True, "capacity", "unresolved", "veto", "rollback", "sec_only"]
+    "unknown",
+    [
+        False,
+        True,
+        "capacity",
+        "unresolved",
+        "veto",
+        "rollback",
+        "sec_only",
+        "superseded_price",
+        "superseded_disclosure",
+        "superseded_unfrozen_price",
+    ],
 )
 async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three_calls(
     migrated_database_url, monkeypatch, tmp_path, unknown
 ):
+    frozen_without_price = unknown == "superseded_unfrozen_price"
+    if frozen_without_price:
+        unknown = "sec_only"
     factory, settings, store, captured, pointer, batch_id, materials_id = await prepared_materials(
         migrated_database_url, monkeypatch, tmp_path, sec_only=unknown in ("capacity", "sec_only")
     )
@@ -315,6 +330,26 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
                         expected_predecessor_id=None,
                     ),
                 )
+    if frozen_without_price or (isinstance(unknown, str) and unknown.startswith("superseded_")):
+        from helpers.monitor_generation import assert_old_run_superseded
+
+        if frozen_without_price:
+            assert {item["kind"] for item in frozen[0].materials.parents} == {"disclosure"}
+        await assert_old_run_superseded(
+            factory,
+            settings,
+            captured,
+            pointer,
+            member.run_id,
+            native,
+            monkeypatch,
+            advanced_kind="price" if frozen_without_price else unknown.removeprefix("superseded_"),
+            mixed_member=member,
+            unfrozen_kind="price" if frozen_without_price else None,
+        )
+        assert len(stages) == 3
+        await factory.kw["bind"].dispose()
+        return
     if unknown == "rollback":
         import nexus.monitoring.disclosure_installation as disclosure_installation
 

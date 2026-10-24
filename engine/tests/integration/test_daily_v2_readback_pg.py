@@ -43,101 +43,7 @@ from sqlalchemy import func, select, text
 from unit.agents.test_codex_sdk import _restore_view
 
 
-async def partial_daily(url, monkeypatch, root):
-    saved = []
-    prepare = native_fixture.ready_host_batch
-
-    async def capture(*args, **kwargs):
-        value = await prepare(*args, **kwargs)
-        saved.append(value)
-        return value
-
-    monkeypatch.setattr(native_fixture, "ready_host_batch", capture)
-    (
-        factory,
-        settings,
-        pointer,
-        batch_id,
-        members,
-        old_run_id,
-        old_hash,
-        now,
-        result,
-        native,
-    ) = await native_fixture.unresolved_then_daily(url, monkeypatch, root)
-    captured = saved[0][2]
-    async with factory() as session:
-        runs = tuple(
-            await session.scalars(
-                select(AgentResearchRunRecord).where(
-                    AgentResearchRunRecord.id.in_(result.research_run_ids)
-                )
-            )
-        )
-        target = next(row for row in runs if row.instrument_id == pointer.instrument_id)
-        frozen = (await session.get(DataSnapshot, target.data_snapshot_id)).payload[
-            "agent_paper_context"
-        ]["pending_monitoring_v2"]
-        jobs = tuple(
-            await session.scalars(
-                select(Job).where(Job.payload["run_id"].astext.in_([str(row.id) for row in runs]))
-            )
-        )
-    calls = []
-
-    async def invoke(payload, **kwargs):
-        wire = _restore_view(payload)
-        calls.append(wire["stage"])
-        raw, usage = await native(payload, **kwargs)
-        if wire.get("daily_pending_context_hash") is None:
-            return raw, usage
-        body = json.loads(raw)
-        citation = next(
-            row["index"] for row in wire["evidence"] if row["source"] == "nexus_agent_paper_context"
-        )
-        if wire["stage"] == "research":
-            for row in body["roles"]:
-                if row["role"] == "orchestrator":
-                    row["daily_pending_proposal"] = {
-                        "context_hash": wire["daily_pending_context_hash"],
-                        "items": [
-                            {
-                                "trigger_id": item["trigger_id"],
-                                "status": "addressed" if item["kind"] == "price" else "unresolved",
-                                "rationale": "价格已核对，公告待解决，保留原件及归属。",
-                                "citations": [citation],
-                            }
-                            for item in frozen["trigger_checks"]
-                        ],
-                    }
-        elif wire["stage"] == "critique":
-            for row in body["roles"]:
-                row["daily_pending_review"] = {
-                    "proposal_hash": wire["daily_pending_proposal"]["content_hash"],
-                    "decision": "accepted",
-                    "rationale": "逐项确认已解决与未解决事件，保留独立审核。",
-                    "citations": [citation],
-                }
-        else:
-            body["daily_pending_adoption_hash"] = wire["daily_pending_proposal"]["content_hash"]
-        return json.dumps(body), usage
-
-    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
-    for job in jobs:
-        assert await run_agent_worker_once(settings, job_ids=(job.id,), formal_stage_capacity=True)
-    assert len(calls) == 9 and all(
-        calls.count(stage) == 3 for stage in ("research", "critique", "synthesis")
-    )
-    async with factory() as session, session.begin():
-        report = await reconcile_account_results(
-            session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now
-        )
-        assert report["unverified"] == 0, report
-    async with factory() as session:
-        proofs = tuple(await session.scalars(select(MonitorDailyEventReceipt)))
-        assert len(proofs) == 1 and proofs[0].kind == "price"
-        assert proofs[0].original_run_id == old_run_id and proofs[0].run_id == target.id
-        assert await validate_daily_event_receipt(session, proofs[0].id)
+async def close_daily_cycle(factory, settings, captured, pointer, result, now, monkeypatch):
     # Research settlement alone leaves the cycle researching. Use its normal
     # portfolio Worker and resume boundary before admitting an independent cycle.
     from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
@@ -299,6 +205,104 @@ async def partial_daily(url, monkeypatch, root):
             == 0
         )
         assert (await session.get(AgentPaperCycleRecord, result.cycle_id)).execution_locked is True
+
+
+async def partial_daily(url, monkeypatch, root):
+    saved = []
+    prepare = native_fixture.ready_host_batch
+
+    async def capture(*args, **kwargs):
+        value = await prepare(*args, **kwargs)
+        saved.append(value)
+        return value
+
+    monkeypatch.setattr(native_fixture, "ready_host_batch", capture)
+    (
+        factory,
+        settings,
+        pointer,
+        batch_id,
+        members,
+        old_run_id,
+        old_hash,
+        now,
+        result,
+        native,
+    ) = await native_fixture.unresolved_then_daily(url, monkeypatch, root)
+    captured = saved[0][2]
+    async with factory() as session:
+        runs = tuple(
+            await session.scalars(
+                select(AgentResearchRunRecord).where(
+                    AgentResearchRunRecord.id.in_(result.research_run_ids)
+                )
+            )
+        )
+        target = next(row for row in runs if row.instrument_id == pointer.instrument_id)
+        frozen = (await session.get(DataSnapshot, target.data_snapshot_id)).payload[
+            "agent_paper_context"
+        ]["pending_monitoring_v2"]
+        jobs = tuple(
+            await session.scalars(
+                select(Job).where(Job.payload["run_id"].astext.in_([str(row.id) for row in runs]))
+            )
+        )
+    calls = []
+
+    async def invoke(payload, **kwargs):
+        wire = _restore_view(payload)
+        calls.append(wire["stage"])
+        raw, usage = await native(payload, **kwargs)
+        if wire.get("daily_pending_context_hash") is None:
+            return raw, usage
+        body = json.loads(raw)
+        citation = next(
+            row["index"] for row in wire["evidence"] if row["source"] == "nexus_agent_paper_context"
+        )
+        if wire["stage"] == "research":
+            for row in body["roles"]:
+                if row["role"] == "orchestrator":
+                    row["daily_pending_proposal"] = {
+                        "context_hash": wire["daily_pending_context_hash"],
+                        "items": [
+                            {
+                                "trigger_id": item["trigger_id"],
+                                "status": "addressed" if item["kind"] == "price" else "unresolved",
+                                "rationale": "价格已核对，公告待解决，保留原件及归属。",
+                                "citations": [citation],
+                            }
+                            for item in frozen["trigger_checks"]
+                        ],
+                    }
+        elif wire["stage"] == "critique":
+            for row in body["roles"]:
+                row["daily_pending_review"] = {
+                    "proposal_hash": wire["daily_pending_proposal"]["content_hash"],
+                    "decision": "accepted",
+                    "rationale": "逐项确认已解决与未解决事件，保留独立审核。",
+                    "citations": [citation],
+                }
+        else:
+            body["daily_pending_adoption_hash"] = wire["daily_pending_proposal"]["content_hash"]
+        return json.dumps(body), usage
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    for job in jobs:
+        assert await run_agent_worker_once(settings, job_ids=(job.id,), formal_stage_capacity=True)
+    assert len(calls) == 9 and all(
+        calls.count(stage) == 3 for stage in ("research", "critique", "synthesis")
+    )
+    async with factory() as session, session.begin():
+        report = await reconcile_account_results(
+            session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now
+        )
+        assert report["unverified"] == 0, report
+    async with factory() as session:
+        proofs = tuple(await session.scalars(select(MonitorDailyEventReceipt)))
+        assert len(proofs) == 1 and proofs[0].kind == "price"
+        assert proofs[0].original_run_id == old_run_id and proofs[0].run_id == target.id
+        assert await validate_daily_event_receipt(session, proofs[0].id)
+    await close_daily_cycle(factory, settings, captured, pointer, result, now, monkeypatch)
     return (
         factory,
         settings,
