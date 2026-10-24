@@ -1,7 +1,8 @@
 """Normal three-stock admission: an unpublished typed bundle may become one gap.
 
-The exception seam below controls capacity only. Native snapshot, claim, Job,
-budget and transaction code remain real; no Worker or external SDK is started.
+Controlled exceptions exercise rollback ordering; actual-wire modes retain the
+normal preview and add bounded synthetic bytes only to a tool projection. Native
+snapshot, claim, Job, budget and transactions remain real; no Worker or SDK runs.
 """
 
 from datetime import timedelta
@@ -15,6 +16,7 @@ from integration.test_daily_v2_frozen_context_pg import (
     prepared_materials,
 )
 from nexus.agents import codex_staged
+from nexus.agents.tools import ReadOnlyTools
 from nexus.paper import agent_cycle
 from nexus.paper.agent_cycle_authority import load_quasi_realtime_cycle_authority
 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
@@ -63,7 +65,16 @@ async def normal_slot(factory, settings, captured, pointer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["typed_only", "base_too_large", "noncapacity", "late_member", "published_replay"]
+    "mode",
+    [
+        "typed_only",
+        "base_too_large",
+        "noncapacity",
+        "late_member",
+        "published_replay",
+        "actual_wire",
+        "actual_base_wire",
+    ],
 )
 async def test_unpublished_daily_capacity_rollback_is_exact(
     migrated_database_url, monkeypatch, tmp_path, mode
@@ -107,6 +118,40 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
     rolled_ids, rolled_snapshots = set(), set()
     staged_counts = []
     sdk_calls = []
+    actual_wire = mode in {"actual_wire", "actual_base_wire"}
+    real_preview = module.preview_daily_event_capacity
+    measured_wire = []
+    if actual_wire:
+        original_tools = module.database_read_only_tools
+        original_envelope = module.candidate_capacity_envelope
+
+        async def bounded_projection(session, run, **kwargs):
+            tools = await original_tools(session, run, **kwargs)
+            frozen = await session.get(DataSnapshot, run.data_snapshot_id)
+            paper = frozen.payload["agent_paper_context"]
+            if run.instrument_id != pointer.instrument_id or (
+                mode == "actual_wire" and paper.get("pending_monitoring_v2") is None
+            ):
+                return tools
+
+            async def security(payload):
+                result = await tools.execute("get_security_snapshot", payload)
+                # Controlled tool projection only: preserve every original item,
+                # reference and scope. No DataSnapshot or source bytes are edited.
+                return {**result, "synthetic_capacity_padding": "x" * 120000}
+
+            return ReadOnlyTools(
+                executors={**tools._executors, "get_security_snapshot": security},
+                allow_sec_amendments=tools.allow_sec_amendments,
+            )
+
+        def measured_envelope(committee, **kwargs):
+            result = original_envelope(committee, **kwargs)
+            measured_wire.append((result["wire_upper_bytes"], committee._max_wire_bytes))
+            return result
+
+        monkeypatch.setattr(module, "database_read_only_tools", bounded_projection)
+        monkeypatch.setattr(module, "candidate_capacity_envelope", measured_envelope)
 
     async def no_sdk(*args, **kwargs):
         sdk_calls.append(True)
@@ -152,10 +197,15 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
                     ),
                 )
             )
+            if actual_wire:
+                await real_preview(session, run)
+                return
             raise module.DailyEventCapacityExceeded(
                 run.instrument_id, len(bundle["trigger_checks"])
             )
         assert gap is not None and gap["reason"] == "MONITOR_CONTENT_CAPACITY"
+        if actual_wire:
+            await real_preview(session, run)
         if mode == "base_too_large":
             raise ValueError("CODEX_CAPACITY_POOL_WIRE_EXCEEDED")
 
@@ -178,7 +228,7 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
     try:
         async with factory() as session, session.begin():
             result = await agent_cycle.start_schwab_agent_paper_cycle(session, **arguments)
-        success = mode not in {"base_too_large", "noncapacity"}
+        success = mode not in {"base_too_large", "actual_base_wire", "noncapacity"}
         assert result.result_code == (
             "RESEARCH_JOBS_PREPARED" if success else "RESEARCH_ADMISSION_UNAVAILABLE"
         ), result
@@ -187,6 +237,11 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
         assert [row[2:] for row in target_calls] == (
             [(True, False), (False, True)] if mode != "noncapacity" else [(True, False)]
         )
+        if actual_wire:
+            assert len(measured_wire) == 2
+            assert measured_wire[0][0] > measured_wire[0][1]
+            assert (measured_wire[1][0] > measured_wire[1][1]) is (mode == "actual_base_wire")
+            assert all(limit == 100479 for _, limit in measured_wire)
         if mode == "late_member":
             assert staged_counts == [(2, 2)]
         async with factory() as session:
