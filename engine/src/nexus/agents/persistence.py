@@ -621,10 +621,23 @@ async def admit_research_run(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     research_only: bool = False,
+    monitor_increment: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Keep version-inheriting admission failures atomic inside caller transactions."""
 
+    if type(monitor_increment) is not bool or (
+        monitor_increment
+        and (
+            research_only
+            or not formal_stage_capacity
+            or job_type is not JobType.AGENT_PAPER_RESEARCH
+            or model_config_id is None
+            or prompt_version_id is None
+            or version_source_run_id is not None
+        )
+    ):
+        raise ValueError("MONITOR_ADMISSION_ARGUMENT_INVALID")
     if (
         type(research_only) is not bool
         or research_only
@@ -664,6 +677,7 @@ async def admit_research_run(
             formal_stage_capacity=formal_stage_capacity,
             full_input_capacity=full_input_capacity,
             research_only=research_only,
+            monitor_increment=monitor_increment,
             economic_allocation=economic_allocation,
         )
 
@@ -736,6 +750,7 @@ async def _admit_research_run(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     research_only: bool = False,
+    monitor_increment: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
@@ -867,6 +882,10 @@ async def _admit_research_run(
         from nexus.agents.research_only import is_research_only, require_research_only_snapshot
 
         replay_snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        from nexus.monitoring.context import is_monitor_snapshot
+
+        if is_monitor_snapshot(replay_snapshot) != monitor_increment:
+            raise ValueError("MONITOR_ADMISSION_REQUIRED")
         if research_only:
             require_research_only_snapshot(replay_snapshot)
         elif is_research_only(replay_snapshot, run.evidence_manifest):
@@ -899,7 +918,21 @@ async def _admit_research_run(
         require_research_only_snapshot,
         research_only_prompts_valid,
     )
+    from nexus.monitoring.context import is_monitor_snapshot, read_monitor_context
 
+    if is_monitor_snapshot(snapshot) != monitor_increment:
+        raise ValueError("MONITOR_ADMISSION_REQUIRED")
+    if (
+        monitor_increment
+        and await read_monitor_context(
+            session,
+            snapshot_id=request.data_snapshot_id,
+            instrument_id=request.instrument_id,
+            as_of=request.decision_time,
+        )
+        is None
+    ):
+        raise ValueError("MONITOR_CONTEXT_INVALID")
     if research_only:
         require_research_only_snapshot(snapshot)
         if snapshot is None or snapshot.observed_at != request.decision_time:
@@ -937,6 +970,27 @@ async def _admit_research_run(
         prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
     if protected_authority is not None:
         prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
+    if monitor_increment:
+        binding = await read_monitor_context(
+            session,
+            snapshot_id=request.data_snapshot_id,
+            instrument_id=request.instrument_id,
+            as_of=request.decision_time,
+        )
+        parent = (
+            None
+            if binding is None
+            else await session.get(AgentResearchRunRecord, binding[0].parent_run_id)
+        )
+        if (
+            parent is None
+            or parent.model_config_id != model_config_id
+            or parent.prompt_version_id != prompt_version_id
+        ):
+            raise ValueError("MONITOR_VERSION_BINDING_INVALID")
+        # The original normal bundle may contain independently versioned roles;
+        # an orchestrator ID alone is not a same-version challenger bundle.
+        prompts = await load_frozen_prompts(session, parent)
     if research_only and (
         prompts is None
         or not research_only_prompts_valid(prompts)

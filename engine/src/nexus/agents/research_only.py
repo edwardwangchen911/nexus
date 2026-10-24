@@ -64,6 +64,10 @@ def require_research_only_snapshot(snapshot: DataSnapshot | None) -> None:
 
 async def require_formal_research(session: AsyncSession, run: AgentResearchRunRecord) -> None:
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    from nexus.monitoring.context import is_monitor_snapshot
+
+    if is_monitor_snapshot(snapshot):
+        raise ValueError("MONITOR_FORMAL_CONSUMPTION_FORBIDDEN")
     if is_research_only(snapshot, run.evidence_manifest):
         raise ValueError("RESEARCH_ONLY_FORMAL_CONSUMPTION_FORBIDDEN")
 

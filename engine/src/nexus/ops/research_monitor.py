@@ -36,6 +36,11 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--plan-id", type=UUID, required=True)
     scan = commands.add_parser("scan", help="Check only the current market-session bucket")
     scan.add_argument("--calendar-authority-id", type=UUID, required=True)
+    admit = commands.add_parser("admit", help="Admit one new single-security trigger review")
+    admit.add_argument("--trigger-id", type=UUID, required=True)
+    admit.add_argument("--calendar-authority-id", type=UUID, required=True)
+    finish = commands.add_parser("finish", help="Record the original incremental job outcome")
+    finish.add_argument("--trigger-id", type=UUID, required=True)
     return result
 
 
@@ -101,6 +106,105 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+            if args.action == "finish":
+                from nexus.monitoring.admission import finish_increment
+
+                finished_trigger = await finish_increment(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    trigger_id=args.trigger_id,
+                    now=now,
+                )
+                return {
+                    "status": finished_trigger.status,
+                    "reason": finished_trigger.reason,
+                    "trigger_id": str(finished_trigger.id),
+                    "run_id": str(finished_trigger.research_run_id),
+                    "execution_locked": True,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                }
+            if args.action == "admit":
+                from nexus.agents.budget import BudgetExhausted
+                from nexus.monitoring.admission import admit_trigger
+                from nexus.monitoring.storage import mark_trigger_blocked
+
+                if (
+                    settings.agent_paper_candidate_batch_id is None
+                    or settings.agent_paper_formal_model_config_id is None
+                ):
+                    raise ValueError("MONITOR_CONFIGURATION_UNAVAILABLE")
+                from nexus.persistence.models.monitoring import MonitorTrigger
+
+                trigger = await session.get(MonitorTrigger, args.trigger_id)
+                if trigger is None or trigger.account_id != settings.agent_paper_account_id:
+                    raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+                try:
+                    member = await admit_trigger(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        trigger_id=args.trigger_id,
+                        candidate_batch_id=settings.agent_paper_candidate_batch_id,
+                        calendar_authority_id=args.calendar_authority_id,
+                        model_config_id=settings.agent_paper_formal_model_config_id,
+                        daily_limit_usd=settings.agent_daily_budget_usd,
+                        daily_sdk_call_limit=settings.agent_monitor_daily_sdk_call_limit,
+                        now=now,
+                    )
+                except (ValueError, BudgetExhausted) as error:
+                    reason = (
+                        "MONITOR_DAILY_LIMIT_REACHED"
+                        if str(error) == "MONITOR_DAILY_CALL_LIMIT"
+                        else "MONITOR_BUDGET_UNAVAILABLE"
+                        if isinstance(error, BudgetExhausted)
+                        else "MONITOR_ACCOUNT_OCCUPIED"
+                        if str(error)
+                        in {
+                            "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+                            "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+                            "MANUAL_PREPARATION_ACK_BLOCKED",
+                        }
+                        else "MONITOR_INPUTS_UNAVAILABLE"
+                    )
+                    safe_codes = {
+                        "MONITOR_DAILY_CALL_LIMIT",
+                        "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
+                        "MONITOR_SOURCE_INVALID",
+                        "MONITOR_CONTEXT_INVALID",
+                        "MONITOR_INCREMENT_BINDING_INVALID",
+                        "MONITOR_VERSION_BINDING_INVALID",
+                        "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+                        "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+                        "MONITOR_TRIGGER_SUPERSEDED_OR_EXPIRED",
+                        "MONITOR_MARKET_CLOSED",
+                        "MONITOR_SCOPE_INVALID",
+                        "MONITOR_EVIDENCE_SCOPE_INVALID",
+                    }
+                    code = (
+                        str(error) if str(error) in safe_codes else "MONITOR_ADMISSION_UNCONFIRMED"
+                    )
+                    # The savepoint removed only failed admission, never its trigger/outbox.
+                    await mark_trigger_blocked(
+                        session, trigger_id=args.trigger_id, reason=reason, now=now
+                    )
+                    return {
+                        "status": "blocked",
+                        "reason": reason,
+                        "error_code": code,
+                        "execution_locked": True,
+                        "model_requests": 0,
+                        "provider_requests": 0,
+                    }
+                await session.refresh(trigger)
+                return {
+                    "status": trigger.status,
+                    "run_id": str(member.run_id),
+                    "job_id": str(member.job_id),
+                    "trigger_id": str(member.trigger_id),
+                    "execution_locked": True,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                }
             if args.action == "scan":
                 return await scan_account(
                     session,
@@ -160,6 +264,22 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
         await factory.kw["bind"].dispose()
 
 
+async def run_configured(
+    environment: dict[str, str], args: argparse.Namespace
+) -> dict[str, object]:
+    settings = _FileEngineSettings.model_validate(environment)
+    if args.action == "admit":
+        from nexus.ops.formal_budget_protection import bind_runtime_environment
+
+        bound, calendar = await bind_runtime_environment(settings, environment)
+        if calendar is not None and UUID(calendar) != args.calendar_authority_id:
+            raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+        settings = _FileEngineSettings.model_validate(bound)
+        if not settings.agent_paper_cycle_enabled:
+            raise ValueError("MONITOR_HOST_DISABLED")
+    return await run(settings, args)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -167,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         env_file = args.env_file if args.env_file.is_absolute() else root / args.env_file
         env_file = _validate_local_env(root, env_file)
         environment = load_agent_paper_service_environment(root, {}, env_file=env_file)
-        result = asyncio.run(run(_FileEngineSettings.model_validate(environment), args))
+        result = asyncio.run(run_configured(environment, args))
     except Exception as error:
         safe = {
             "MONITOR_ACCOUNT_UNCONFIGURED",

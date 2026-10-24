@@ -305,6 +305,9 @@ async def require_manual_account_state_available(
 ) -> None:
     """Account state gates independent of native claim acceptance checks."""
     await lock_portfolio_account(session, account_id)
+    from nexus.monitoring.admission import require_monitor_account_available
+
+    await require_monitor_account_available(session, account_id=account_id, now=now)
     await require_manual_request_history(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
     )
@@ -838,6 +841,11 @@ async def require_no_running_manual_request(
     from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
 
     await lock_portfolio_account(session, account_id)
+    from nexus.monitoring.admission import require_monitor_account_available
+
+    await require_monitor_account_available(
+        session, account_id=account_id, now=await _database_now(session)
+    )
     await require_acknowledged_native_claims(
         session,
         account_id=account_id,

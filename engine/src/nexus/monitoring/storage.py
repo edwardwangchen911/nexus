@@ -175,6 +175,9 @@ async def mark_trigger_blocked(
     trigger = await session.get(MonitorTrigger, trigger_id)
     if trigger is None:
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+    from nexus.paper.target_service import lock_portfolio_account
+
+    await lock_portfolio_account(session, trigger.account_id)
     await lock_security(session, account_id=trigger.account_id, instrument_id=trigger.instrument_id)
     await session.refresh(trigger)
     if trigger.status == "blocked" and trigger.reason == reason:

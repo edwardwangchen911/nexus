@@ -104,6 +104,9 @@ class EngineSettings(_SafeSettings):
     agent_daily_budget_usd: Decimal = Field(
         default=Decimal("3.00"), validation_alias="AGENT_DAILY_BUDGET_USD", gt=0
     )
+    agent_monitor_daily_sdk_call_limit: int = Field(
+        default=9, ge=3, le=90, validation_alias="NEXUS_MONITOR_DAILY_SDK_CALL_LIMIT"
+    )
     agent_paper_cycle_enabled: bool = Field(
         default=False,
         validation_alias="NEXUS_AGENT_PAPER_CYCLE_ENABLED",

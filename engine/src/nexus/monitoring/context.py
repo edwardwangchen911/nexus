@@ -144,6 +144,38 @@ async def read_monitor_context(
         or not plan.effective_at <= as_of < plan.valid_until
     ):
         return None
+    from nexus.agents.actionable_research import _hash
+
+    if parent.content_hash != _hash(
+        {
+            "status": parent.status,
+            "role": parent.role,
+            "payload": parent.payload,
+            "intent": parent.intent,
+        }
+    ):
+        return None
+    # Portfolio facts remain frozen account facts, not a model-authored weight.
+    from decimal import Decimal, localcontext
+
+    from nexus.paper.projection import load_paper_projection
+
+    projection = await load_paper_projection(session, account_id=context.account_id, as_of=as_of)
+    position = next((p for p in projection.positions if p.instrument_id == instrument_id), None)
+    with localcontext() as arithmetic:
+        arithmetic.prec = 38
+        weight = (
+            Decimal(0)
+            if position is None
+            else position.quantity * position.reference_close / projection.nav
+        )
+        cash = (projection.available_cash + projection.reserved_cash) / projection.nav
+    if (
+        context.paper_portfolio.projection_hash != projection.projection_hash
+        or context.paper_portfolio.candidate_position_weight != str(weight)
+        or context.paper_portfolio.cash_weight != str(cash)
+    ):
+        return None
     condition = PriceReviewCondition.model_validate(plan.condition)
     if (
         condition.semantic_hash != plan.condition_hash

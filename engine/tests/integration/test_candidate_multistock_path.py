@@ -46,6 +46,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     sdk_lifecycle_case=None,
     monitoring=False,
     monitoring_rejected=False,
+    monitoring_threshold="123.45",
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -164,6 +165,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row["monitoring_proposal"] = (
                         proposal_wire(AT) if row["role"] == "market_state" else None
                     )
+                    if row["monitoring_proposal"] is not None:
+                        row["monitoring_proposal"]["condition"]["threshold"] = monitoring_threshold
             elif stage == "critique":
                 for row in response["roles"]:
                     row["monitoring_review"] = {

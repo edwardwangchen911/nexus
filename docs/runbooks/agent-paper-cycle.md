@@ -204,6 +204,31 @@ uv run --project engine nexus-engine-agent-paper-once run-research \
 如果 Job 已在运行、已终态、绑定冲突、已有 Output 或调用结果不明，命令返回
 `AGENT_PAPER_RESULT_UNKNOWN`；先查原 Cycle/Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
 
+### 价格触发的单股增量研究（新监控链）
+
+正常入口为 `nexus-engine-research-monitor`（源码运行可用
+`PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.research_monitor`）。
+先以 `install --output-id <原已完成输出>` 登记原审核通过计划，
+`inspect --plan-id <计划>` 只读检查；`scan --calendar-authority-id <已配置日历>`
+仅检查当前正常交易时段的五分钟桶，不采集行情或调用模型。
+
+`admit --trigger-id <已落盘触发> --calendar-authority-id <已配置日历>`
+使用已正式应用的账户、候选批次、模型与预算配置，只为该证券创建一个原生研究 Job。
+它冻结原父论点、原触发报价和本次新鲜决策报价；原正式时效、风险及账户占用检查仍生效。
+同一触发重复读取只返回原 Run/Job 和当前状态，不再次执行。研究仍须由正常 Worker 消费；
+本增量身份不能直接作为正式组合执行授权。
+
+`NEXUS_MONITOR_DAILY_SDK_CALL_LIMIT` 默认 9，范围 3–90；每笔准入持有 3 次调用额度，
+按账户及交易日累计，同日生效上限不超过此前已冻结上限。此约束独立于美元费用，
+订阅估价为零也不能无限调用，未知或失败不返还调用额度。
+
+`finish --trigger-id <原触发>` 只核对原 Job、租约消费证明、用量和预算结算后登记收尾。
+未终结保持原状态；已知结算可完成，未知保留 unknown、费用及预算占用，禁止自动重试或接受。
+旧结果及原 trigger 不重写，终态回执幂等。完成 watch 研究不解除只能 defer 的正式门禁。
+
+当前自动安装、宿主自动增量派发及新结果接替尚需完成整体集成；这些独立入口的通过
+不能当作已部署的连续业务闭环。启用前须完成最终 CI、兼容迁移回滚和正常页面验收。
+
 ## 4. Resume：消费已持久化研究结果
 
 ```bash
