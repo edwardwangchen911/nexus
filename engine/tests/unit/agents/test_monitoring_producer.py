@@ -81,6 +81,7 @@ async def produce(
     absent=False,
     expired=False,
     inline=False,
+    capture=None,
 ):
     request, evidence, prompts = _authority()
     prompts = dict(prompts)
@@ -183,6 +184,11 @@ async def produce(
     outputs = [
         await committee.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER
     ]
+    if capture is not None:
+        capture["inputs"] = committee._frozen_inputs
+        capture["request"] = request
+        capture["evidence"] = evidence
+        capture["prompts"] = prompts
     intent = synthesize_intent(
         AgentResearchRunRecord(id=UUID(int=3), **request.model_dump()),
         "ABC",
@@ -365,3 +371,50 @@ def test_v7_stage_schema_cannot_emit_v8_monitoring_fields(field):
         response["roles"][0][field] = None
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         model.model_validate(response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["critique", "synthesis"])
+async def test_v8_readonly_inspection_restores_original_monitoring_context(monkeypatch, stage):
+    import hashlib
+    from types import SimpleNamespace
+
+    from nexus.ops.research_workload_inspection import inspect_critique_request
+
+    captured = {}
+    _, outputs, _ = await produce(monkeypatch, capture=captured)
+    request, evidence, prompts = (captured[key] for key in ("request", "evidence", "prompts"))
+    committee = codex_staged.StructuredStagedCodexCommittee(
+        prompts=prompts, tools=_tools(), paper_stage_scope=True, inline_citations=False
+    )
+    run = SimpleNamespace(
+        id=UUID(int=3), evidence_hash="b" * 64, pricing_version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+    )
+    records = []
+    for index, output in enumerate(outputs):
+        content = dict(
+            status="running", role=output.role, payload=output.model_dump(mode="json"), intent=None
+        )
+        records.append(
+            SimpleNamespace(
+                **content,
+                run_id=run.id,
+                sequence=index + 1,
+                prompt_hash=output.prompt_hash,
+                content_hash=hashlib.sha256(
+                    json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+            )
+        )
+    result = inspect_critique_request(
+        committee,
+        run=run,
+        request=request,
+        evidence_refs=evidence,
+        inputs=captured["inputs"],
+        records=tuple(records),
+        stage=stage,
+    )
+    assert result["status"] == "request_hash_verified"
+    assert result["original_request_hash_matched"] is True
+    assert committee._outputs == {}  # Readback cannot alter a live producer's state.
