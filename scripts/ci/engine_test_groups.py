@@ -88,6 +88,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_formal_resume_observation_clock.py",
     "engine/tests/integration/test_accounting_review_intake.py",
     "engine/tests/integration/test_accounting_adoption.py",
+    "engine/tests/integration/test_monitor_image_compat_pg.py",
     "engine/tests/integration/test_workbench_activity_pg.py",
     "engine/tests/integration/test_workbench_activity_boundaries_pg.py",
     "engine/tests/integration/test_workbench_research_summary_pg.py",
