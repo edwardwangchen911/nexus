@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from helpers.deferred_monitor_guards import validate_pending_monitor_guards
 from nexus.agents.observation_readback import ObservationReadback
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job
@@ -226,6 +227,7 @@ async def test_cycle_freezes_order_and_partial_candidate_failure(migrated_databa
             )
             await session.execute(text("ALTER TABLE agent_paper_cycle_events ENABLE TRIGGER USER"))
         if defect == "run_snapshot":
+            await validate_pending_monitor_guards(session, table="agent_research_runs")
             await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             await session.execute(
                 text("UPDATE agent_research_runs SET data_snapshot_id=:snapshot WHERE id=:id"),
@@ -353,17 +355,25 @@ async def test_completed_run_requires_job_completion_visible_at_read_time(
         run = await session.get(AgentResearchRunRecord, run_id)
         at = datetime.now(UTC)
         job = Job(
-            payload={"run_id": str(run_id)}, scope_id=str(run.instrument_id),
-            job_type="agent.paper.research", effective_at=run.decision_time,
-            created_at=run.created_at, started_at=run.created_at,
+            payload={"run_id": str(run_id)},
+            scope_id=str(run.instrument_id),
+            job_type="agent.paper.research",
+            effective_at=run.decision_time,
+            created_at=run.created_at,
+            started_at=run.created_at,
             finished_at=at + timedelta(minutes=1) if finish == "future" else None,
             status="succeeded",
         )
         reader = ObservationReadback(session, read_at=at)
         await reader.prime([run])
         result = await _project(
-            session, instrument_id=run.instrument_id, symbol="AAPL", run=run,
-            jobs=(job,), reader=reader, read_at=at,
+            session,
+            instrument_id=run.instrument_id,
+            symbol="AAPL",
+            run=run,
+            jobs=(job,),
+            reader=reader,
+            read_at=at,
         )
         assert result.job_status == "running"
         assert result.read_status == "unavailable"

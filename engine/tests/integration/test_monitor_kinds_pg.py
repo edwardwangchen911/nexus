@@ -139,6 +139,7 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
         )
         session.add(event)
         await session.flush()
+        assert event.batch_id is None and event.research_run_id is None
         from nexus.audit.service import append_audit_event
         from nexus.ops.monitor_dispatch import DISPATCH_ACTION, unchecked
 
@@ -263,7 +264,9 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
                 ]
             ),
         )
-    with pytest.raises(ValueError, match="MONITOR_TRIGGER_UNAVAILABLE"):
+    # Finish also serves typed SEC batches, but this unassigned legacy-shaped
+    # event has no original increment to finish.
+    with pytest.raises(ValueError, match="MONITOR_INCREMENT_UNAVAILABLE"):
         await run(settings, parser().parse_args(["finish", "--trigger-id", str(scope[1])]))
     assert await facts() == before
     await factory.kw["bind"].dispose()
@@ -279,7 +282,7 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0096_monitor_event_receipts"
+            == "0097_monitor_daily_events"
         )
         assert (await session.get(MonitorTrigger, scope[1])).kind == "disclosure"
     await factory.kw["bind"].dispose()

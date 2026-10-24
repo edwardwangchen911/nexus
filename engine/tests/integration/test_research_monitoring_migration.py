@@ -24,11 +24,11 @@ def test_empty_schema_round_trip_and_history_downgrade_fence(migrated_database_u
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     command.upgrade(config, "head")
-    assert asyncio.run(revision(migrated_database_url)) == "0096_monitor_event_receipts"
+    assert asyncio.run(revision(migrated_database_url)) == "0097_monitor_daily_events"
     command.downgrade(config, "0086_accounting_adoption")
     assert asyncio.run(revision(migrated_database_url)) == "0086_accounting_adoption"
     command.upgrade(config, "head")
     asyncio.run(seed(migrated_database_url))
     with pytest.raises(Exception, match="MONITOR_HISTORY_DOWNGRADE_FORBIDDEN"):
         command.downgrade(config, "0086_accounting_adoption")
-    assert asyncio.run(revision(migrated_database_url)) == "0096_monitor_event_receipts"
+    assert asyncio.run(revision(migrated_database_url)) == "0097_monitor_daily_events"

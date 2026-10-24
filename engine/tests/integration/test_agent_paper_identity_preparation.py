@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from helpers.current_identity import archives
+from helpers.deferred_monitor_guards import validate_pending_monitor_guards
 from helpers.research_snapshots import seed_filing
 from integration.test_agent_paper_candidate_batch_pg import (
     AAPL_ID,
@@ -441,14 +442,22 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     )
                     assert bindings
                     assert all(item.decision_session == day for item in bindings.values())
-                    await _assert_final_paper_identity(
-                        session,
-                        store,
-                        snapshot,
-                        instrument_id,
-                        clock[0],
-                        day,
-                    )
+                    # The final-context reader needs a persisted cycle owner.
+                    # Roll back this separate probe so preparation itself must
+                    # still leave zero cycles, Jobs, orders and fills below.
+                    probe = await session.begin_nested()
+                    try:
+                        await _assert_final_paper_identity(
+                            session,
+                            store,
+                            snapshot,
+                            instrument_id,
+                            clock[0],
+                            day,
+                            batch_id=batch.batch_id,
+                        )
+                    finally:
+                        await probe.rollback()
         async with factory() as session:
             assert await session.scalar(
                 select(func.count())
@@ -463,24 +472,35 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
         await factory.kw["bind"].dispose()
 
 
-async def _assert_final_paper_identity(session, store, base, instrument_id, decision_time, day):
+async def _assert_final_paper_identity(
+    session, store, base, instrument_id, decision_time, day, *, batch_id
+):
     """Use the cycle's real final-context consumer with native price/quote rows."""
     from copy import deepcopy
     from decimal import Decimal
     from hashlib import sha256
 
+    from integration.test_agent_paper_candidate_batch_pg import PORTFOLIO_ID
     from nexus.agents.paper_context import (
         prepare_agent_paper_research_snapshot,
         read_agent_paper_research_context,
     )
     from nexus.market.ingestion import ingest_price_page
     from nexus.market.intraday_ingestion import canonical_quote_observation
-    from nexus.paper.agent_cycle_models import CandidateManifestEntry
+    from nexus.paper.agent_cycle_models import CandidateManifestEntry, candidate_manifest_hash
+    from nexus.paper.portfolio_policy import (
+        PORTFOLIO_ALLOCATION_POLICY_HASH,
+        PORTFOLIO_ALLOCATION_V1,
+    )
     from nexus.paper.projection import load_paper_projection
     from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
     from nexus.persistence.models.data import DataArtifact, DataSnapshot
     from nexus.persistence.models.market import LatestQuote
-    from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID
+    from nexus.persistence.models.paper import (
+        PAPER_DECISION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+        PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+    )
     from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 
     original = (deepcopy(base.payload), base.revision, base.observed_at)
@@ -587,9 +607,30 @@ async def _assert_final_paper_identity(session, store, base, instrument_id, deci
     assert projection.reserved_cash == 0
     assert projection.positions == projection.open_orders == ()
     assert projection.drawdown_state == "unlocked"
+    cycle = AgentPaperCycleRecord(
+        account_id=ACCOUNT_ID,
+        portfolio_id=PORTFOLIO_ID,
+        decision_session=day,
+        decision_time=decision_time,
+        decision_slot_at=decision_time,
+        execution_session=day,
+        universe_snapshot_id=UNIVERSE_ID,
+        quality_report_id=None,
+        candidate_batch_id=batch_id,
+        decision_price_policy_id=PAPER_SCHWAB_DECISION_SOURCE_POLICY_ID,
+        execution_price_policy_id=PAPER_SCHWAB_EXECUTION_SOURCE_POLICY_ID,
+        candidate_manifest=[candidate.model_dump(mode="json")],
+        candidate_hash=candidate_manifest_hash((candidate,)),
+        sizing_policy_version=PORTFOLIO_ALLOCATION_V1.version,
+        sizing_policy_hash=PORTFOLIO_ALLOCATION_POLICY_HASH,
+        execution_locked=True,
+        created_at=decision_time,
+    )
+    session.add(cycle)
+    await session.flush()
     final = await prepare_agent_paper_research_snapshot(
         session,
-        cycle_id=uuid4(),
+        cycle_id=cycle.id,
         decision_time=decision_time,
         candidate=candidate,
         projection=projection,
@@ -619,6 +660,9 @@ async def _assert_final_paper_identity(session, store, base, instrument_id, deci
     assert context is not None and context[0].decision_time == decision_time
     unchanged = await session.get(DataSnapshot, base.id, populate_existing=True)
     assert (unchanged.payload, unchanged.revision, unchanged.observed_at) == original
+    # Preserve the completed snapshot's deferred validation before the caller
+    # rolls back this synthetic final-context probe.
+    await validate_pending_monitor_guards(session, table="data_snapshots")
 
 
 async def _seed_funded_projection(session, *, at):
