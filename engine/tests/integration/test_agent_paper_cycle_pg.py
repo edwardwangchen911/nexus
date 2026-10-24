@@ -21,6 +21,7 @@ import nexus.paper.agent_version_runner as agent_version_runner
 import pytest
 from alembic import command
 from alembic.config import Config
+from helpers.deferred_monitor_guards import validate_pending_monitor_guards
 from helpers.paper_api import app, headers
 from helpers.paper_batch import (
     CALENDAR_ID,
@@ -689,6 +690,8 @@ async def test_manifest_never_shrinks_candidate_set_when_one_authority_missing(
                     "content_hash=repeat('0',64)",
                 ),
             }[gap]
+            if table == "data_snapshots":
+                await validate_pending_monitor_guards(session, table="data_snapshots")
             await session.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
             await session.execute(
                 text(f"UPDATE {table} SET {assignment} WHERE {condition}"),
@@ -3113,6 +3116,7 @@ async def test_agent_version_pair_resumes_original_outputs_without_duplicate_wor
                 daily_limit_usd=Decimal("3"),
                 now=evaluation_start,
             )
+            await validate_pending_monitor_guards(session, table="agent_research_runs")
             await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             try:
                 await session.execute(
@@ -5596,6 +5600,7 @@ async def test_schwab_order_cycle_preserves_frozen_risk_and_is_loop_inspectable(
             run = await session.get(AgentResearchRunRecord, first.research_run_ids[0])
             assert run is not None
             paper_snapshot_id = run.data_snapshot_id
+            await validate_pending_monitor_guards(session, table="data_snapshots")
             await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
             try:
                 await session.execute(
