@@ -269,7 +269,16 @@ async def _admit_trigger(
     await require_manual_account_available(session, account_id=account_id, now=now)
     await lock_security(session, account_id=account_id, instrument_id=trigger.instrument_id)
     await session.refresh(trigger, with_for_update=True)
+    from nexus.monitoring.mixed_readback import unadmitted_stock_count
     from nexus.monitoring.pending import compatible_check, pending_stock, same_condition_lineage
+
+    if (
+        await unadmitted_stock_count(
+            session, account_id=account_id, instrument_id=trigger.instrument_id
+        )
+        > 32
+    ):
+        raise ValueError("MONITOR_PENDING_OVERFLOW")
 
     pending = await pending_stock(
         session, account_id=account_id, instrument_id=trigger.instrument_id, now=now

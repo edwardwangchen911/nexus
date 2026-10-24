@@ -226,6 +226,15 @@ async def _eligible(
     )
     if batch.instrument_id not in candidate.instrument_ids:
         raise ValueError("MONITOR_SCOPE_INVALID")
+    from nexus.monitoring.mixed_readback import unadmitted_stock_count
+
+    if (
+        await unadmitted_stock_count(
+            session, account_id=batch.account_id, instrument_id=batch.instrument_id
+        )
+        > 32
+    ):
+        raise ValueError("MONITOR_PENDING_OVERFLOW")
     members = tuple(
         await session.scalars(
             select(MonitorTrigger)

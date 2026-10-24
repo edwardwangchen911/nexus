@@ -6,11 +6,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import Text, cast, exists, func, select, text
+from sqlalchemy import Text, cast, exists, func, or_, select, text
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.monitoring.daily_consumption import daily_receipt, not_daily_covered
+from nexus.monitoring.mixed_readback import not_mixed_consumed
 from nexus.ops.agent_paper_loop import (
     AgentPaperLoopAction,
     AgentPaperLoopSnapshot,
@@ -36,7 +37,11 @@ def unchecked(now: datetime) -> ColumnElement[bool]:
         .join(peer, AuditEvent.payload["trigger_id"].astext == cast(peer.id, Text))
         .where(
             AuditEvent.action == DISPATCH_ACTION,
-            peer.kind == MonitorTrigger.kind,
+            or_(
+                MonitorTrigger.batch_id.is_not(None),
+                peer.batch_id.is_not(None),
+                peer.kind == MonitorTrigger.kind,
+            ),
             peer.account_id == MonitorTrigger.account_id,
             peer.instrument_id == MonitorTrigger.instrument_id,
             AuditEvent.occurred_at >= bucket,
@@ -119,46 +124,106 @@ async def inspect_monitor_queue(
                     else "admitted"
                 )
                 return replace(
-                    snapshot, monitor_trigger_id=trigger.id, monitor_trigger_status=status
+                    snapshot,
+                    monitor_trigger_id=trigger.id,
+                    monitor_trigger_status=status,
+                    monitor_batch_id=member.batch_id,
                 )
-            if (
-                settings.agent_paper_candidate_batch_id is None
-                or ordinary == AgentPaperLoopAction.TRIGGER
-            ):
+            if settings.agent_paper_candidate_batch_id is None or ordinary not in IDLE_ACTIONS:
                 return snapshot
             batch = await load_agent_paper_candidate_batch(
                 session, batch_id=settings.agent_paper_candidate_batch_id
             )
             if batch is None or batch.account_id != account_id or batch.created_at > snapshot.now:
                 raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
-            pending = await session.scalar(
-                select(MonitorTrigger)
-                .where(
-                    MonitorTrigger.kind == "price",
-                    MonitorTrigger.batch_id.is_(None),
-                    MonitorTrigger.account_id == account_id,
-                    MonitorTrigger.instrument_id.in_(batch.instrument_ids),
-                    MonitorTrigger.status.in_(("pending", "blocked")),
-                    MonitorTrigger.research_run_id.is_(None),
-                    unchecked(snapshot.now),
-                    not_daily_covered(),
-                )
-                .order_by(MonitorTrigger.created_at, MonitorTrigger.id)
-                .limit(1)
-            )
-            return (
-                snapshot
-                if pending is None
-                else replace(
-                    snapshot, monitor_trigger_id=pending.id, monitor_trigger_status="pending"
+            pending = tuple(
+                await session.scalars(
+                    select(MonitorTrigger)
+                    .where(
+                        MonitorTrigger.account_id == account_id,
+                        MonitorTrigger.instrument_id.in_(batch.instrument_ids),
+                        MonitorTrigger.status.in_(("pending", "blocked")),
+                        MonitorTrigger.research_run_id.is_(None),
+                        unchecked(snapshot.now),
+                        not_daily_covered(),
+                        not_mixed_consumed(),
+                    )
+                    .order_by(MonitorTrigger.created_at, MonitorTrigger.id)
                 )
             )
+            from nexus.monitoring.mixed_readback import unadmitted_stock_count
+
+            seen_batches: set[UUID] = set()
+            overflow: dict[UUID, bool] = {}
+            for trigger in pending:
+                if trigger.instrument_id not in overflow:
+                    overflow[trigger.instrument_id] = (
+                        await unadmitted_stock_count(
+                            session, account_id=account_id, instrument_id=trigger.instrument_id
+                        )
+                        > 32
+                    )
+                if overflow[trigger.instrument_id]:
+                    continue
+                if trigger.batch_id is not None:
+                    if trigger.batch_id in seen_batches:
+                        continue
+                    seen_batches.add(trigger.batch_id)
+                    from nexus.ops.monitor_batch_prepare import inspect_batch_preparation
+                    from nexus.persistence.models.monitoring import MonitorObservationBatch
+
+                    sealed = await session.get(MonitorObservationBatch, trigger.batch_id)
+                    if (
+                        sealed is None
+                        or sealed.account_id != account_id
+                        or sealed.instrument_id != trigger.instrument_id
+                        or max(sealed.created_at, sealed.sealed_at) > snapshot.now
+                        or not 1 <= len(sealed.trigger_ids) <= 32
+                    ):
+                        continue
+                    group = tuple(
+                        await session.scalars(
+                            select(MonitorTrigger)
+                            .where(MonitorTrigger.batch_id == sealed.id)
+                            .order_by(MonitorTrigger.id)
+                        )
+                    )
+                    if tuple(str(row.id) for row in group) != tuple(sealed.trigger_ids) or any(
+                        row.status not in {"pending", "blocked"} or row.research_run_id is not None
+                        for row in group
+                    ):
+                        continue
+                    from nexus.ops.monitor_market_prepare import inspect_batch_market_preparation
+
+                    market_state = await inspect_batch_market_preparation(session, sealed.id)
+                    if market_state in {"blocked", "unknown"}:
+                        continue
+                    state = await inspect_batch_preparation(session, sealed.id)
+                    if state in {"blocked", "unknown"}:
+                        continue
+                    return replace(
+                        snapshot,
+                        monitor_trigger_id=group[0].id,
+                        monitor_trigger_status="pending",
+                        monitor_batch_id=sealed.id,
+                    )
+                if trigger.kind == "price":
+                    return replace(
+                        snapshot, monitor_trigger_id=trigger.id, monitor_trigger_status="pending"
+                    )
+            return snapshot
     finally:
         await factory.kw["bind"].dispose()
 
 
 async def dispatch_configured_once(
-    settings: EngineSettings, *, trigger_id: UUID, calendar_authority_id: UUID
+    settings: EngineSettings,
+    *,
+    trigger_id: UUID,
+    calendar_authority_id: UUID,
+    repo_root: Path | None = None,
+    sec_contact: str | None = None,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Persist a bounded eligibility check, then consume only the original native Job.
 
@@ -199,10 +264,7 @@ async def dispatch_configured_once(
             trigger = await session.get(MonitorTrigger, trigger_id)
             if (
                 trigger is None
-                or (
-                    trigger.kind != "price"
-                    and (trigger.batch_id is None or trigger.research_run_id is None)
-                )
+                or (trigger.kind != "price" and trigger.batch_id is None)
                 or trigger.account_id != settings.agent_paper_account_id
             ):
                 raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
@@ -276,18 +338,53 @@ async def dispatch_configured_once(
                     occurred_at=now,
                 )
         if trigger.research_run_id is None:
-            admitted = await run(
-                settings,
-                argparse.Namespace(
-                    action="admit",
-                    trigger_id=trigger_id,
+            if trigger.batch_id is not None:
+                prepared = await run(
+                    settings,
+                    argparse.Namespace(
+                        action="prepare-pending",
+                        batch_id=trigger.batch_id,
+                        repo_root=Path.cwd() if repo_root is None else repo_root,
+                        _sec_contact=sec_contact,
+                    ),
+                )
+                if prepared["status"] != "prepared":
+                    return {**prepared, "trigger_id": str(trigger.id)}
+                from nexus.ops.monitor_market_prepare import prepare_batch_market_inputs
+
+                market = await prepare_batch_market_inputs(
+                    settings,
+                    account_id=settings.agent_paper_account_id,
+                    batch_id=trigger.batch_id,
                     calendar_authority_id=calendar_authority_id,
-                ),
-            )
+                    environment=environment or {},
+                    repo_root=repo_root,
+                )
+                if market["status"] != "prepared":
+                    return {**market, "trigger_id": str(trigger.id)}
+                admitted = await run(
+                    settings,
+                    argparse.Namespace(
+                        action="admit-batch",
+                        batch_id=trigger.batch_id,
+                        materials_snapshot_id=UUID(str(prepared["snapshot_id"])),
+                        calendar_authority_id=calendar_authority_id,
+                    ),
+                )
+            else:
+                admitted = await run(
+                    settings,
+                    argparse.Namespace(
+                        action="admit",
+                        trigger_id=trigger_id,
+                        calendar_authority_id=calendar_authority_id,
+                    ),
+                )
             if admitted["status"] != "admitted":
                 return admitted
             job_id = UUID(str(admitted["job_id"]))
-            trigger_id = UUID(str(admitted["trigger_id"]))
+            if "trigger_id" in admitted:
+                trigger_id = UUID(str(admitted["trigger_id"]))
         if job_id is not None:
             # Native claim, one attempt, exact Job and capacity/lease checks. No fallback key.
             async with factory() as session, session.begin():
@@ -358,12 +455,14 @@ async def dispatch_host_once(
 ) -> dict[str, object]:
     from nexus.ops.research_monitor import load_host_settings
 
+    private_context: dict[str, str] = {}
     current = await load_host_settings(
         settings,
         account_id=account_id,
         calendar_authority_id=calendar_authority_id,
         repo_root=repo_root,
         env_file=env_file,
+        private_context=private_context,
     )
     if not current.agent_paper_cycle_enabled:
         raise ValueError("MONITOR_HOST_DISABLED")
@@ -402,8 +501,29 @@ async def dispatch_host_once(
         != AgentPaperLoopAction.RUN_MONITOR_INCREMENT
     ):
         return {"status": "deferred", "execution_locked": True}
+    if (
+        selected.monitor_batch_id is not None
+        and selected.monitor_trigger_status == "pending"
+        and evaluation is not None
+    ):
+        from nexus.monitoring.host import BATCH_PREPARATION_HEADROOM_SECONDS
+
+        if (
+            evaluation.evaluation_slot_at is None
+            or evaluation.evaluation_slot_at
+            <= evaluation.now
+            + timedelta(
+                seconds=INCREMENT_ACTION_HEADROOM_SECONDS + BATCH_PREPARATION_HEADROOM_SECONDS
+            )
+        ):
+            return {"status": "deferred", "execution_locked": True}
     return await dispatch_configured_once(
-        current, trigger_id=trigger_id, calendar_authority_id=calendar_authority_id
+        current,
+        trigger_id=trigger_id,
+        calendar_authority_id=calendar_authority_id,
+        repo_root=repo_root,
+        sec_contact=private_context.get("SEC_CONTACT"),
+        environment=private_context,
     )
 
 
@@ -433,14 +553,22 @@ async def confirm_monitor_shutdown(
             if (
                 not isinstance(now, datetime)
                 or trigger is None
-                or (
-                    trigger.kind != "price"
-                    and (trigger.batch_id is None or trigger.research_run_id is None)
-                )
+                or (trigger.kind != "price" and trigger.batch_id is None)
                 or trigger.account_id != account_id
-                or trigger.status not in {"completed", "failed"}
-                or trigger.research_run_id is None
             ):
+                return False
+            if trigger.research_run_id is None:
+                if trigger.batch_id is None:
+                    return False
+                from nexus.ops.monitor_batch_prepare import confirm_batch_preparation
+                from nexus.ops.monitor_market_prepare import confirm_batch_market_preparation
+
+                return await confirm_batch_preparation(
+                    settings, account_id=account_id, batch_id=trigger.batch_id
+                ) and await confirm_batch_market_preparation(
+                    settings, account_id=account_id, batch_id=trigger.batch_id
+                )
+            if trigger.status not in {"completed", "failed"}:
                 return False
             run = await session.get(AgentResearchRunRecord, trigger.research_run_id)
             if run is None or run.status not in {"completed", "failed", "abstained"}:

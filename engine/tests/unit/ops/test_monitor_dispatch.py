@@ -231,3 +231,25 @@ async def test_legacy_host_without_formal_monitor_model_keeps_existing_route(mon
         )
         is original
     )
+
+
+@pytest.mark.parametrize("preparation_margin", [30, 400])
+def test_typed_material_preparation_reserves_its_bounded_collection_before_daily_slot(
+    preparation_margin,
+):
+    from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+
+    opening = AT.replace(hour=13, minute=30)
+    daily_slot = opening.replace(hour=14, minute=0)
+    snapshot = replace(
+        waiting(monitor_trigger_id=UUID(int=2), monitor_trigger_status="pending"),
+        now=daily_slot - timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS + preparation_margin),
+        market_open_at=opening,
+        decision_window_start_at=opening,
+        host_prepared_market_open_at=opening,
+    )
+    assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RUN_MONITOR_INCREMENT
+    assert (
+        loop.choose_loop_action(replace(snapshot, monitor_batch_id=UUID(int=3)))
+        == loop.AgentPaperLoopAction.WAIT_FOR_SESSION
+    )

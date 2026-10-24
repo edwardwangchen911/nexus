@@ -71,3 +71,27 @@ async def mixed_batch_readback(session: AsyncSession, batch_id: UUID) -> MixedBa
         ),
         "unresolved_event_count": unresolved,
     }
+
+
+async def unadmitted_stock_count(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    instrument_id: UUID,
+) -> int:
+    """The automatic capacity boundary covers the whole unresolved admission pool."""
+    from nexus.monitoring.daily_consumption import not_daily_covered
+
+    count = await session.scalar(
+        select(func.count())
+        .select_from(MonitorTrigger)
+        .where(
+            MonitorTrigger.account_id == account_id,
+            MonitorTrigger.instrument_id == instrument_id,
+            MonitorTrigger.status.in_(("pending", "blocked")),
+            MonitorTrigger.research_run_id.is_(None),
+            not_daily_covered(),
+            not_mixed_consumed(),
+        )
+    )
+    return int(count or 0)

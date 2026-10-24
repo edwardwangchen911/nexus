@@ -109,6 +109,15 @@ async def _admit_batch(
             raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
         return await require_increment_binding(session, run)
     await require_manual_account_available(session, account_id=account_id, now=now)
+    from nexus.monitoring.mixed_readback import unadmitted_stock_count
+
+    if (
+        await unadmitted_stock_count(
+            session, account_id=account_id, instrument_id=batch_row.instrument_id
+        )
+        > 32
+    ):
+        raise ValueError("MONITOR_PENDING_OVERFLOW")
     materials = await read_batch_inputs(session, snapshot_id=materials_snapshot_id, as_of=now)
     material_row = await session.get(DataSnapshot, materials_snapshot_id)
     if materials is None or material_row is None or materials.batch_id != batch_id:

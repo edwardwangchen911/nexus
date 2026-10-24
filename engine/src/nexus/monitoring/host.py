@@ -17,6 +17,11 @@ INCREMENT_ACTION_HEADROOM_SECONDS = (
 )
 
 
+# One exact filing (60s), one bounded market preparation (300s), short
+# transactions and durable closeout (60s). Worker/model deadlines stay unchanged.
+BATCH_PREPARATION_HEADROOM_SECONDS = 420
+
+
 class PriceMonitorCoordinator:
     """Coordinate scans on one host event loop, without blocking its heartbeat.
 

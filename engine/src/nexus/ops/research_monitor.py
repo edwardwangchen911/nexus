@@ -30,6 +30,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "reconcile", help="Reconcile persisted research results into monitor coverage"
     )
+    pending = commands.add_parser(
+        "prepare-pending", help="Prepare one sealed batch without model I/O"
+    )
+    pending.add_argument("--batch-id", type=UUID, required=True)
     install = commands.add_parser("install", help="Install one original audited research proposal")
     install.add_argument("--kind", choices=("price", "disclosure"), default="price")
     install.add_argument("--output-id", type=UUID, required=True)
@@ -98,6 +102,7 @@ async def load_host_settings(
     calendar_authority_id: UUID,
     repo_root: Path,
     env_file: Path | None = None,
+    private_context: dict[str, str] | None = None,
 ) -> EngineSettings:
     # Reload the existing protected host configuration even while research is busy.
     # This does not prepare market data, admit research, or change host identity.
@@ -121,6 +126,8 @@ async def load_host_settings(
         or (pinned_calendar is not None and UUID(pinned_calendar) != calendar_authority_id)
     ):
         raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+    if private_context is not None:
+        private_context.update(environment)
     return current
 
 
@@ -187,6 +194,15 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action == "prepare-pending":
+        from nexus.ops.monitor_batch_prepare import prepare_pending_batch
+
+        return await prepare_pending_batch(
+            settings,
+            batch_id=args.batch_id,
+            repo_root=getattr(args, "repo_root", Path.cwd()),
+            sec_contact=getattr(args, "_sec_contact", None),
+        )
     if args.action == "collect-content":
         return await _collect_content_with_scope(settings, args)
     factory = session_factory(settings)
@@ -299,18 +315,110 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                     or settings.agent_paper_formal_model_config_id is None
                 ):
                     raise ValueError("MONITOR_CONFIGURATION_UNAVAILABLE")
-                member = await admit_batch(
-                    session,
-                    account_id=settings.agent_paper_account_id,
-                    batch_id=args.batch_id,
-                    materials_snapshot_id=args.materials_snapshot_id,
-                    candidate_batch_id=settings.agent_paper_candidate_batch_id,
-                    calendar_authority_id=args.calendar_authority_id,
-                    model_config_id=settings.agent_paper_formal_model_config_id,
-                    daily_limit_usd=settings.agent_daily_budget_usd,
-                    daily_sdk_call_limit=settings.agent_monitor_daily_sdk_call_limit,
-                    now=now,
+                from nexus.agents.budget import BudgetExhausted
+                from nexus.audit.service import append_audit_event
+                from nexus.monitoring.storage import lock_security
+                from nexus.paper.target_service import lock_portfolio_account
+                from nexus.persistence.models.monitoring import (
+                    MonitorObservationBatch,
+                    MonitorTrigger,
                 )
+
+                await lock_portfolio_account(session, settings.agent_paper_account_id)
+                sealed_batch = await session.get(MonitorObservationBatch, args.batch_id)
+                if (
+                    sealed_batch is None
+                    or sealed_batch.account_id != settings.agent_paper_account_id
+                ):
+                    raise ValueError("MONITOR_BATCH_UNAVAILABLE")
+                await lock_security(
+                    session,
+                    account_id=sealed_batch.account_id,
+                    instrument_id=sealed_batch.instrument_id,
+                )
+                try:
+                    member = await admit_batch(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        batch_id=args.batch_id,
+                        materials_snapshot_id=args.materials_snapshot_id,
+                        candidate_batch_id=settings.agent_paper_candidate_batch_id,
+                        calendar_authority_id=args.calendar_authority_id,
+                        model_config_id=settings.agent_paper_formal_model_config_id,
+                        daily_limit_usd=settings.agent_daily_budget_usd,
+                        daily_sdk_call_limit=settings.agent_monitor_daily_sdk_call_limit,
+                        now=now,
+                    )
+                except (ValueError, BudgetExhausted) as error:
+                    members = tuple(
+                        await session.scalars(
+                            select(MonitorTrigger)
+                            .where(MonitorTrigger.batch_id == sealed_batch.id)
+                            .order_by(MonitorTrigger.id)
+                        )
+                    )
+                    if tuple(str(row.id) for row in members) != tuple(
+                        sealed_batch.trigger_ids
+                    ) or any(
+                        row.research_run_id is not None or row.status not in {"pending", "blocked"}
+                        for row in members
+                    ):
+                        raise
+                    reason = (
+                        "MONITOR_DAILY_LIMIT_REACHED"
+                        if str(error) == "MONITOR_DAILY_CALL_LIMIT"
+                        else "MONITOR_BUDGET_UNAVAILABLE"
+                        if isinstance(error, BudgetExhausted)
+                        else "MONITOR_ACCOUNT_OCCUPIED"
+                        if str(error)
+                        in {
+                            "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+                            "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+                            "MANUAL_PREPARATION_ACK_BLOCKED",
+                        }
+                        else "MONITOR_INPUTS_UNAVAILABLE"
+                    )
+                    safe_codes = {
+                        "MONITOR_DAILY_CALL_LIMIT",
+                        "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
+                        "MONITOR_MARKET_CLOSED",
+                        "MONITOR_SOURCE_INVALID",
+                        "MONITOR_CONTEXT_INVALID",
+                        "MONITOR_PREPARED_INPUTS_CHANGED",
+                        "MONITOR_PENDING_OVERFLOW",
+                        "MONITOR_TRIGGER_SUPERSEDED_OR_EXPIRED",
+                        "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+                        "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+                        "MANUAL_PREPARATION_ACK_BLOCKED",
+                    }
+                    code = (
+                        str(error) if str(error) in safe_codes else "MONITOR_ADMISSION_UNCONFIRMED"
+                    )
+                    for row in members:
+                        row.status, row.reason = "blocked", reason
+                    await append_audit_event(
+                        session,
+                        actor_id="research-monitor",
+                        action="research.monitor.batch_admission_blocked",
+                        schema_version="monitor_batch_admission_v1",
+                        occurred_at=now,
+                        payload={
+                            "batch_id": str(sealed_batch.id),
+                            "trigger_ids": list(sealed_batch.trigger_ids),
+                            "reason": reason,
+                            "error_code": code,
+                        },
+                    )
+                    await session.flush()
+                    return {
+                        "status": "blocked",
+                        "batch_id": str(sealed_batch.id),
+                        "reason": reason,
+                        "error_code": code,
+                        "execution_locked": True,
+                        "model_requests": 0,
+                        "provider_requests": 0,
+                    }
                 from nexus.persistence.models.monitoring import MonitorTrigger
 
                 first = await session.get(MonitorTrigger, member.trigger_id)
@@ -580,7 +688,7 @@ async def run_configured(
     environment: dict[str, str], args: argparse.Namespace
 ) -> dict[str, object]:
     settings = _FileEngineSettings.model_validate(environment)
-    if args.action == "collect-content":
+    if args.action in {"collect-content", "prepare-pending"}:
         args = argparse.Namespace(**vars(args), _sec_contact=environment.get("SEC_CONTACT"))
 
     if args.action in {"admit", "admit-batch"}:

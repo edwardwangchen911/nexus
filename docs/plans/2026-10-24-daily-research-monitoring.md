@@ -383,3 +383,36 @@ Trigger/Output/快照不追改。0096有新回执或typed coverage后禁止降�
 format/diff通过。0096合并后的全组PG结果保存在event-db-integrated-final.log，并在私有
 checkpoint登记；集中只读复核无新增P1/P2。未启动真实模型/SEC/Bark/业务宿主，未改旧结果
 或接受、解除任何业务未知占用。以上是本地候选证明，不能代替最终远端CI或部署事实。
+
+### 2026-10-25 宿主自动接手已登记混合批次并准备、派发（本地候选）
+
+普通宿主优先跟踪原Run；无原Run时按完整封口集合选择，兼容SEC首成员。五分钟检查按整股
+跨kind及旧price-v1互相围栏，不以换成员或旧入口绕过。Daily/manual/evaluation和已有未知
+优先级保留；Daily PREPARE在新pending查询前返回。既有Run/Job不换键、不创建第二尝试。
+
+`prepare-pending --batch-id`是正常正文准备入口。短事务先保存精确accession的声明，再离开
+事务取一份缺件；每次一个accession、总60秒，所有冻结成员原件齐备后才prepared。并发、
+取消、重启与失败不重取；历史未知保持未知，合格已有材料零HTTP复用。私有目录固定owner
+0700且不跟随symlink。没有模型任务或预算hold副作用。
+
+完整材料就绪后复用正常prepare_schwab_decision_authority，仅原候选股、原日历/universe，
+不扩执行scope，不重新跑每日filings/macro/trends。已有合格fresh authority零外呼复用，
+stale才以单批一次声明调用正常单股风险证明和行情producer。新包装仅设300秒有限总包络，
+原HTTP/Worker/模型和BFF十秒截止不变；超时、取消、无结果声明均unknown且不重放。用量/
+unknown/有效租约、protected_demand及future预算保护在IO前后复核。宿主为准备额外留420秒
+启动余量，不能挤掉原每日/evaluation槽；无Run退出须同时有正文和市场两个确定准备证明。
+
+Ruling：原SEC评审§5不允许隐式拆批自动消化overflow，故按整股未准入pending总数>32阻断，
+不是只限制单批。shared count与报告既有口径一致，用于selector各kind、正文/市场准备及新旧加锁
+准入；两批17+17或再附旧price触发都不能绕过。其他股与既定每日槽不受此股容量阻断。
+新的typed准入失败在savepoint回滚后保留整批blocked与安全审计，不产生部分Run/Job/预留。
+
+完整fast6791通过/10skip/1deselected（225.25秒）；最终Mypy653源检查，59定向
+unit通过。正常宿主/正文/市场组合24PG通过（261.97秒），最后两项跨kind/overflow gate
+定向PG通过；最后旧price-v1派发/增量8PG通过（90.93秒），所有准确耗时见私有checkpoint与host-*日志。
+独立集中只读终审未发现剩余确认P1/P2，测试均隔离合成，没有真实网络/模型或业务宿主调用。
+
+仍未完成五分钟current行情与SEC捕获producer的正常周期接线（现scan读取落盘事实，行情
+准备发生在已登记trigger之后），未解决旧typed事件在未来研究中的精确消费、API/BFF及实际
+页面；随后仍需完整diff Chat终审、最终同head全部必需CI、兼容0096回滚/镜像/合入部署和
+自然交易时段观察。本片不冒充完整自动检测或真实模型验收，未知业务占用保持。

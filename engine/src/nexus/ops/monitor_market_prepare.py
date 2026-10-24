@@ -112,22 +112,14 @@ async def _preflight(
     if batch is None or batch.account_id != account_id or not 1 <= len(batch.trigger_ids) <= 32:
         raise ValueError("MONITOR_BATCH_UNAVAILABLE")
     await lock_security(session, account_id=account_id, instrument_id=batch.instrument_id)
-    from nexus.monitoring.daily_consumption import not_daily_covered
-    from nexus.monitoring.mixed_readback import not_mixed_consumed
+    from nexus.monitoring.mixed_readback import unadmitted_stock_count
 
-    pending_count = await session.scalar(
-        select(func.count())
-        .select_from(MonitorTrigger)
-        .where(
-            MonitorTrigger.account_id == account_id,
-            MonitorTrigger.instrument_id == batch.instrument_id,
-            MonitorTrigger.status.in_(("pending", "blocked")),
-            MonitorTrigger.research_run_id.is_(None),
-            not_daily_covered(),
-            not_mixed_consumed(),
+    if (
+        await unadmitted_stock_count(
+            session, account_id=account_id, instrument_id=batch.instrument_id
         )
-    )
-    if pending_count is None or pending_count > 32:
+        > 32
+    ):
         raise ValueError("MONITOR_STOCK_PENDING_CAPACITY")
     if await session.scalar(
         select(MonitorIncrement.id).where(MonitorIncrement.batch_id == batch_id)

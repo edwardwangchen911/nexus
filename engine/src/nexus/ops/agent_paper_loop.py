@@ -291,6 +291,7 @@ class AgentPaperLoopSnapshot:
     manual_research_only: bool = False
     monitor_trigger_id: UUID | None = None
     monitor_trigger_status: str | None = None
+    monitor_batch_id: UUID | None = None
     host_prepared_market_open_at: datetime | None = None
 
 
@@ -1836,13 +1837,23 @@ def choose_loop_action(
             allowed |= {AgentPaperLoopAction.TRIGGER, AgentPaperLoopAction.PREPARE_INPUTS}
         if ordinary in allowed:
             if snapshot.monitor_trigger_status == "pending":
-                from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+                from nexus.monitoring.host import (
+                    BATCH_PREPARATION_HEADROOM_SECONDS,
+                    INCREMENT_ACTION_HEADROOM_SECONDS,
+                )
 
                 if snapshot.decision_window_start_at is None or snapshot.market_open_at is None:
                     return ordinary
                 # Preserve the daily slot: existing bounded preclaim + Worker plus
                 # 90 seconds for admission, persisted closeout and reinspection.
-                headroom = timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS)
+                headroom = timedelta(
+                    seconds=INCREMENT_ACTION_HEADROOM_SECONDS
+                    + (
+                        BATCH_PREPARATION_HEADROOM_SECONDS
+                        if snapshot.monitor_batch_id is not None
+                        else 0
+                    )
+                )
                 daily_slot = _portfolio_slot(snapshot.decision_window_start_at)
                 if (
                     snapshot.now < snapshot.market_open_at
