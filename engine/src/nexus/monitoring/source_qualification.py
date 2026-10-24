@@ -82,6 +82,7 @@ async def _qualify_source(
             monitor is None
             or member.account_id != account_id
             or trigger is None
+            or trigger.kind != "price"
             or trigger.status == "unknown"
         ):
             raise ValueError(invalid)

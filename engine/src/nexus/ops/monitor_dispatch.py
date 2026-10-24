@@ -36,6 +36,7 @@ def unchecked(now: datetime) -> ColumnElement[bool]:
         .join(peer, AuditEvent.payload["trigger_id"].astext == cast(peer.id, Text))
         .where(
             AuditEvent.action == DISPATCH_ACTION,
+            peer.kind == MonitorTrigger.kind,
             peer.account_id == MonitorTrigger.account_id,
             peer.instrument_id == MonitorTrigger.instrument_id,
             AuditEvent.occurred_at >= bucket,
@@ -133,6 +134,7 @@ async def inspect_monitor_queue(
             pending = await session.scalar(
                 select(MonitorTrigger)
                 .where(
+                    MonitorTrigger.kind == "price",
                     MonitorTrigger.account_id == account_id,
                     MonitorTrigger.instrument_id.in_(batch.instrument_ids),
                     MonitorTrigger.status.in_(("pending", "blocked")),
@@ -194,7 +196,11 @@ async def dispatch_configured_once(
             if not isinstance(now, datetime):
                 raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
             trigger = await session.get(MonitorTrigger, trigger_id)
-            if trigger is None or trigger.account_id != settings.agent_paper_account_id:
+            if (
+                trigger is None
+                or trigger.kind != "price"
+                or trigger.account_id != settings.agent_paper_account_id
+            ):
                 raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
             covered = await daily_receipt(session, trigger.id)
             if covered is not None:
@@ -413,6 +419,7 @@ async def confirm_monitor_shutdown(
             if (
                 not isinstance(now, datetime)
                 or trigger is None
+                or trigger.kind != "price"
                 or trigger.account_id != account_id
                 or trigger.status not in {"completed", "failed"}
                 or trigger.research_run_id is None
@@ -431,6 +438,7 @@ async def confirm_monitor_shutdown(
             )
             coverage = await session.scalar(
                 select(MonitorCoverageReceipt.id).where(
+                    MonitorCoverageReceipt.kind == "price",
                     MonitorCoverageReceipt.run_id == run.id,
                     MonitorCoverageReceipt.account_id == account_id,
                 )

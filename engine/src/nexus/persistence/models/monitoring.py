@@ -3,7 +3,18 @@
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,8 +25,31 @@ from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 class MonitorPlan(ImmutableCreatedAt, Base):
     __tablename__ = "research_monitor_plans"
     __table_args__ = (
-        UniqueConstraint("account_id", "instrument_id", "generation"),
-        UniqueConstraint("account_id", "source_output_id", name="uq_monitor_account_output"),
+        UniqueConstraint("account_id", "instrument_id", "kind", "generation"),
+        UniqueConstraint(
+            "id", "account_id", "instrument_id", "kind", name="uq_monitor_plan_scope_kind"
+        ),
+        CheckConstraint("kind IN ('price','disclosure')", name="kind_allowed"),
+        CheckConstraint(
+            "(kind='price' AND baseline_snapshot_id IS NULL AND baseline_as_of IS NULL) OR "
+            "(kind='disclosure' AND baseline_snapshot_id IS NOT NULL "
+            "AND baseline_as_of IS NOT NULL "
+            "AND baseline_as_of<=effective_at)",
+            name="baseline_kind",
+        ),
+        UniqueConstraint(
+            "account_id", "source_output_id", "kind", name="uq_monitor_account_output"
+        ),
+        ForeignKeyConstraint(
+            ["predecessor_id", "account_id", "instrument_id", "kind"],
+            [
+                "research_monitor_plans.id",
+                "research_monitor_plans.account_id",
+                "research_monitor_plans.instrument_id",
+                "research_monitor_plans.kind",
+            ],
+            name="fk_monitor_plan_predecessor_kind",
+        ),
         CheckConstraint("generation > 0", name="generation_positive"),
         CheckConstraint(
             "effective_at < review_due_at AND review_due_at <= valid_until", name="time_order"
@@ -24,6 +58,9 @@ class MonitorPlan(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    kind: Mapped[str] = mapped_column(String(16), default="price", server_default="price")
+    baseline_snapshot_id: Mapped[UUID | None] = mapped_column(ForeignKey("data_snapshots.id"))
+    baseline_as_of: Mapped[datetime | None] = mapped_column(UTCDateTime())
     generation: Mapped[int] = mapped_column(Integer)
     source_run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
     source_output_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_outputs.id"))
@@ -52,7 +89,29 @@ class MonitorEpisode(ImmutableCreatedAt, Base):
 class MonitorCheck(ImmutableCreatedAt, Base):
     __tablename__ = "research_monitor_checks"
     __table_args__ = (
-        UniqueConstraint("account_id", "instrument_id", "scheduled_at"),
+        UniqueConstraint("account_id", "instrument_id", "kind", "scheduled_at", "event_key"),
+        UniqueConstraint(
+            "id",
+            "account_id",
+            "instrument_id",
+            "kind",
+            "event_key",
+            name="uq_monitor_check_scope_kind",
+        ),
+        ForeignKeyConstraint(
+            ["plan_id", "account_id", "instrument_id", "kind"],
+            [
+                "research_monitor_plans.id",
+                "research_monitor_plans.account_id",
+                "research_monitor_plans.instrument_id",
+                "research_monitor_plans.kind",
+            ],
+            name="fk_monitor_check_plan_kind",
+        ),
+        CheckConstraint(
+            "(kind='price' AND event_key='') OR (kind='disclosure' AND length(event_key)>0)",
+            name="kind_event",
+        ),
         CheckConstraint("result IN ('true','false','unknown')", name="result_allowed"),
         CheckConstraint("scheduled_at <= checked_at", name="time_order"),
     )
@@ -60,6 +119,8 @@ class MonitorCheck(ImmutableCreatedAt, Base):
     account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
     plan_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_plans.id"))
+    kind: Mapped[str] = mapped_column(String(16), default="price", server_default="price")
+    event_key: Mapped[str] = mapped_column(String(128), default="", server_default="")
     scheduled_at: Mapped[datetime] = mapped_column(UTCDateTime())
     checked_at: Mapped[datetime] = mapped_column(UTCDateTime())
     result: Mapped[str] = mapped_column(String(16))
@@ -70,9 +131,42 @@ class MonitorCheck(ImmutableCreatedAt, Base):
 class MonitorTrigger(ImmutableCreatedAt, Base):
     __tablename__ = "research_monitor_triggers"
     __table_args__ = (
-        UniqueConstraint("account_id", "instrument_id", "condition_hash", "episode"),
+        Index(
+            "uq_monitor_price_episode",
+            "account_id",
+            "instrument_id",
+            "condition_hash",
+            "episode",
+            unique=True,
+            postgresql_where=text("kind='price'"),
+        ),
+        Index(
+            "uq_monitor_disclosure_event",
+            "account_id",
+            "instrument_id",
+            "event_key",
+            unique=True,
+            postgresql_where=text("kind='disclosure'"),
+        ),
+        ForeignKeyConstraint(
+            ["check_id", "account_id", "instrument_id", "kind", "event_key"],
+            [
+                "research_monitor_checks.id",
+                "research_monitor_checks.account_id",
+                "research_monitor_checks.instrument_id",
+                "research_monitor_checks.kind",
+                "research_monitor_checks.event_key",
+            ],
+            name="fk_monitor_trigger_check_kind",
+        ),
         UniqueConstraint("check_id"),
-        CheckConstraint("episode > 0", name="episode_positive"),
+        CheckConstraint(
+            "(kind='price' AND event_key='' AND episode IS NOT NULL "
+            "AND episode>0 AND cause IN ('initial_match','crossed')) OR "
+            "(kind='disclosure' AND event_key ~ '^sec:[0-9]{10}:[0-9]{10}-[0-9]{2}-[0-9]{6}$' "
+            "AND episode IS NULL AND cause='disclosure_added')",
+            name="kind_episode",
+        ),
         CheckConstraint(
             "status IN ('pending','blocked','admitted','completed','failed','unknown')",
             name="status_allowed",
@@ -82,7 +176,9 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
     account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
     condition_hash: Mapped[str] = mapped_column(String(64))
-    episode: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16), default="price", server_default="price")
+    event_key: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    episode: Mapped[int | None] = mapped_column(Integer)
     check_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_checks.id"))
     cause: Mapped[str] = mapped_column(String(24))
     status: Mapped[str] = mapped_column(String(16), default="pending")
@@ -122,7 +218,28 @@ class MonitorCoverageReceipt(ImmutableCreatedAt, Base):
 
     __tablename__ = "research_monitor_coverage"
     __table_args__ = (
-        UniqueConstraint("account_id", "run_id"),
+        UniqueConstraint("account_id", "run_id", "kind"),
+        CheckConstraint("kind IN ('price','disclosure')", name="kind_allowed"),
+        ForeignKeyConstraint(
+            ["prior_plan_id", "account_id", "instrument_id", "kind"],
+            [
+                "research_monitor_plans.id",
+                "research_monitor_plans.account_id",
+                "research_monitor_plans.instrument_id",
+                "research_monitor_plans.kind",
+            ],
+            name="fk_monitor_coverage_prior_kind",
+        ),
+        ForeignKeyConstraint(
+            ["active_plan_id", "account_id", "instrument_id", "kind"],
+            [
+                "research_monitor_plans.id",
+                "research_monitor_plans.account_id",
+                "research_monitor_plans.instrument_id",
+                "research_monitor_plans.kind",
+            ],
+            name="fk_monitor_coverage_active_kind",
+        ),
         CheckConstraint(
             "status IN ('installed','retained','gap','unknown','superseded','unverified')",
             name="status_allowed",
@@ -146,6 +263,7 @@ class MonitorCoverageReceipt(ImmutableCreatedAt, Base):
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
     run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
     output_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_research_outputs.id"))
+    kind: Mapped[str] = mapped_column(String(16), default="price", server_default="price")
     prior_plan_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_monitor_plans.id"))
     active_plan_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_monitor_plans.id"))
     research_as_of: Mapped[datetime] = mapped_column(UTCDateTime())

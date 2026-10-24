@@ -160,7 +160,11 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 from nexus.persistence.models.monitoring import MonitorTrigger
 
                 trigger = await session.get(MonitorTrigger, args.trigger_id)
-                if trigger is None or trigger.account_id != settings.agent_paper_account_id:
+                if (
+                    trigger is None
+                    or trigger.kind != "price"
+                    or trigger.account_id != settings.agent_paper_account_id
+                ):
                     raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
                 from nexus.monitoring.daily_consumption import daily_receipt
                 from nexus.paper.target_service import lock_portfolio_account
@@ -287,6 +291,7 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
             elif args.action == "inspect":
                 selected = await session.scalar(
                     select(MonitorPlan).where(
+                        MonitorPlan.kind == "price",
                         MonitorPlan.id == args.plan_id,
                         MonitorPlan.account_id == settings.agent_paper_account_id,
                     )
@@ -299,6 +304,7 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
             current = await session.scalar(
                 select(MonitorPlan.id)
                 .where(
+                    MonitorPlan.kind == "price",
                     MonitorPlan.account_id == plan.account_id,
                     MonitorPlan.instrument_id == plan.instrument_id,
                 )

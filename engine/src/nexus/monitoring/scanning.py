@@ -51,6 +51,7 @@ async def scan_account(
         await session.scalars(
             select(MonitorPlan)
             .where(
+                MonitorPlan.kind == "price",
                 MonitorPlan.account_id == account_id,
                 true() if instrument_ids is None else MonitorPlan.instrument_id.in_(instrument_ids),
             )
@@ -71,6 +72,7 @@ async def scan_account(
         plan = await session.scalar(
             select(MonitorPlan)
             .where(
+                MonitorPlan.kind == "price",
                 MonitorPlan.account_id == account_id,
                 MonitorPlan.instrument_id == selected.instrument_id,
             )

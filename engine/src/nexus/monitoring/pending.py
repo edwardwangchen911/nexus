@@ -37,6 +37,8 @@ async def pending_stock(
             select(MonitorTrigger, MonitorCheck, func.count().over())
             .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
             .where(
+                MonitorTrigger.kind == "price",
+                MonitorCheck.kind == "price",
                 MonitorTrigger.account_id == account_id,
                 MonitorTrigger.instrument_id == instrument_id,
                 MonitorTrigger.status.in_(("pending", "blocked")),
@@ -62,13 +64,14 @@ async def same_condition_lineage(
 ) -> dict[UUID, MonitorPlan]:
     lineage = (
         select(MonitorPlan.id, MonitorPlan.predecessor_id, MonitorPlan.generation)
-        .where(MonitorPlan.id == plan.id)
+        .where(MonitorPlan.id == plan.id, MonitorPlan.kind == "price")
         .cte("monitor_lineage", recursive=True)
     )
     lineage = lineage.union_all(
         select(MonitorPlan.id, MonitorPlan.predecessor_id, MonitorPlan.generation)
         .join(lineage, MonitorPlan.id == lineage.c.predecessor_id)
         .where(
+            MonitorPlan.kind == "price",
             MonitorPlan.account_id == plan.account_id,
             MonitorPlan.instrument_id == plan.instrument_id,
             MonitorPlan.generation == lineage.c.generation - 1,
@@ -91,7 +94,8 @@ def compatible_check(
 ) -> bool:
     origin = lineage.get(check.plan_id)
     return (
-        origin is not None
+        plan.kind == trigger.kind == check.kind == "price"
+        and origin is not None
         and trigger.account_id == check.account_id == plan.account_id
         and trigger.instrument_id == check.instrument_id == plan.instrument_id
         and trigger.check_id == check.id

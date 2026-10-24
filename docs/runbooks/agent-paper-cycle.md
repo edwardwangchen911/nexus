@@ -1095,3 +1095,16 @@ uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-fil
 没有迁移或数据回填。回滚前先确认没有执行中或待执行的新版本 Job，再按既有兼容镜像流程
 回滚；保留已落盘提示词和结果。旧代码仍能读取其原有结果结构，但不能证明新范围提示已生效。
 离线 wire、SDK 替身或 CI 通过只证明接线与保护，不证明自然模型质量改善或正式投资决策完成。
+
+
+#### SEC 新增事实与工作容量
+
+`nexus-engine-sec-index inspect` 的 `result=true` 只表示相对于指定冻结基线的新收录身份。
+若新增超过32项，仍返回完整 `event_ids`，并单列 `automatic_review_capacity=blocked`；
+`impact_review=not_performed` 表示没有据此完成正文/附件的影响复核。不得截取前32项、
+把容量不足当成 unknown/false，或用新 baseline 当作全部已研究。历史分片未读且无明确新增仍为 unknown。
+索引入口本身不发送通知、创建研究、释放预算或解除占用。
+
+候选0093将固定price/disclosure的数据库身份分开；当前旧价格入口只处理price，
+新类型尚不代表SEC自动扫描/通知/增量已启用。迁移前按正常备份/恢复程序验证；无disclosure历史才可降至0092，
+已有任何disclosure记录会拒绝降级，不能强行删除事实或保护来回滚。未来部署须保留兼容0093的读取和回滚版本。

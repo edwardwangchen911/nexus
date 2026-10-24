@@ -47,6 +47,7 @@ async def read_monitoring_view(
         await session.scalars(
             select(MonitorPlan)
             .where(
+                MonitorPlan.kind == "price",
                 MonitorPlan.source_run_id == run.id,
                 MonitorPlan.instrument_id == run.instrument_id,
                 MonitorPlan.created_at <= now,
@@ -59,6 +60,7 @@ async def read_monitoring_view(
         await session.scalars(
             select(MonitorCoverageReceipt)
             .where(
+                MonitorCoverageReceipt.kind == "price",
                 MonitorCoverageReceipt.run_id == run.id,
                 MonitorCoverageReceipt.observed_at <= now,
                 MonitorCoverageReceipt.created_at <= now,
@@ -86,6 +88,7 @@ async def read_monitoring_view(
     latest = await session.scalar(
         select(MonitorPlan)
         .where(
+            MonitorPlan.kind == "price",
             MonitorPlan.account_id == original.account_id,
             MonitorPlan.instrument_id == original.instrument_id,
             MonitorPlan.created_at <= now,
@@ -97,6 +100,7 @@ async def read_monitoring_view(
     receipt = await session.scalar(
         select(MonitorCoverageReceipt)
         .where(
+            MonitorCoverageReceipt.kind == "price",
             MonitorCoverageReceipt.account_id == original.account_id,
             MonitorCoverageReceipt.instrument_id == original.instrument_id,
             MonitorCoverageReceipt.observed_at <= now,
@@ -130,6 +134,7 @@ async def read_monitoring_view(
     check = await session.scalar(
         select(MonitorCheck)
         .where(
+            MonitorCheck.kind == "price",
             MonitorCheck.plan_id == original.id,
             MonitorCheck.checked_at <= now,
             MonitorCheck.created_at <= now,
@@ -158,7 +163,9 @@ async def read_monitoring_view(
             )
             .outerjoin(OutboxEvent, OutboxEvent.id == MonitorTrigger.outbox_id)
             .where(
+                MonitorCheck.kind == "price",
                 MonitorCheck.plan_id == original.id,
+                MonitorTrigger.kind == "price",
                 MonitorTrigger.account_id == original.account_id,
                 MonitorTrigger.instrument_id == run.instrument_id,
                 MonitorTrigger.created_at <= now,
@@ -174,7 +181,9 @@ async def read_monitoring_view(
         .select_from(MonitorTrigger)
         .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
         .where(
+            MonitorCheck.kind == "price",
             MonitorCheck.plan_id == original.id,
+            MonitorTrigger.kind == "price",
             MonitorTrigger.account_id == original.account_id,
             MonitorTrigger.instrument_id == run.instrument_id,
             MonitorTrigger.created_at <= now,

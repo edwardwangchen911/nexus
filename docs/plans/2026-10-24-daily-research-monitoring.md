@@ -180,8 +180,34 @@
 
 - 原 refresh-disclosure 每类只选最新一份，普通8-K reader不重读原件，XBRL collector也不是完整披露feed。新增窄来源复用既有collect_identity_sources的固定directory/submissions采集与原receipt，再通过正常collect/import/inspect保存、重验完整索引。
 - 原件、receipt、既有发行人基础身份、canonical hash及实际本地入库时点逐层绑定；归档验证结束后重取数据库时钟登记可见时间。两种固定receipt精确接收，不改写原receipt。同件导入保持首次本地可见时间；同字节新HTTP收件产生新capture，逻辑event ID始终为CIK+accession。
-- 只描述新增收录的8-K/8-K/A，不解释正文、重要性或会计适用性。首次baseline不触发全部历史；未来baseline拒绝。未读取历史分片时无新增保持unknown；明确新项可true，同时保留partial覆盖。stale/conflict/超过32新项仍unknown，来源原件全部保留。
+- 只描述新增收录的8-K/8-K/A，不解释正文、重要性或会计适用性。首次baseline不触发全部历史；未来baseline拒绝。未读取历史分片时无新增保持unknown；明确新项可true，同时保留partial覆盖。stale/conflict仍unknown，来源原件全部保留。超过32项的事实/容量分离见下方最新修正。
 - 真实公开归档证实AAPL recent有1002行，输入界限按事实调整为10000行/8MiB、目标类别1000项，均不截断。AAPL/AVGO/NVDA原bytes及原receipt零网络解析通过；不冒称真实数据库、模型、通知或当日采集验收。
 - 正常collect到隔离PG再只读inspect覆盖重收、新capture、明确新增、冲突、partial历史、篡改、同哈希旧对象损坏、未来及过期门禁共8项；连同SEC exhibit/amendment相关PG共18项通过。94项相关unit、Mypy3源、Ruff/format/diff及正式注册CLI帮助入口通过；最终日志保存在sec-index-*。
 - 集中复核两项P2均先红后绿：partial history误报false、全局同哈希旧URI未读回。未改变旧来源、价格条件、预算、租约或正式门禁。无新增依赖或迁移；旧代码回滚会忽略而不删除新来源快照。新测试已入默认CI组，远端CI尚未运行。
 - 下一步仍须接有类型的事件条件、同槽多事件与价格互不吞没的存储合同、稳定事件outbox去重及单股冻结接替；现有价格表/observation/latch不能冒充SEC事件链。随后继续BFF/实际页面及完整交付，不将本来源切片当作全目标完成。
+
+
+### 2026-10-24 SEC 双类型身份与价格旧版兼容（本地候选，完整事件链继续）
+
+已返回的独立产品评审通过固定 `price` / `disclosure` 两类方案，并要求以下合同：
+
+- SEC 信号仅证明相对于研究时点冻结 baseline 的本地新增收录，不证明刚发布、重要性或财务影响。网络新鲜度依据原 HTTP receipt，不能使用新导入时间；T0 冻结至 T2 激活之间的 T1 事件不可吞没。baseline、事件登记、核验后的研究消费是三个独立事实。
+- 索引事件可以通知；判断影响前必须通过正常入口绑定精确 accession 的正文及必要附件。缺正文是明确 evidence gap，不能重复模型探测，也不能靠 addressed 标志清除。
+- 同股一次 tick 先完成价格/事件评估并封口，再统一准入。同一封口批次的价格与两份披露应为三触发、一份聚合通知、一股一 Job / 三次 SDK 预留；冻结后 late 不追加原工作。消费与各 kind 接替须在归属、成员、前驱、审计、已知结算均通过后同短事务提交。
+- 每份事件保留底层事实，通知按每股批次聚合，正文有界并链接本地详情。超过32项明确阻塞自动增量容量，保留全部事实；不能截断、改真值、重复通知或默认拆分新增模型调用，也不能永久阻断正常每日研究。
+- 已核对 default9 只计增量 SDK 预留，未包含每日三股九次调用；共享美元预算、账户与未知占用保护仍同时生效。不提高限额、不扩大权限。
+
+本片实施 `0093_monitor_kinds`：旧行默认 price；计划代次/同输出/coverage 按 kind 唯一，check 含 kind 与 event_key，SEC trigger 按账户+股票+CIK+accession 跨版本唯一。SEC 没有价格 episode；price episode 的非空/正数要求显式保留。基线引用和截止按 kind 校验；disclosure 截止必须等于源研究冻结时点，引用的 SEC 索引来源/证券和四个本地时间必须在截止前；前驱、check→plan、trigger→check、coverage→plan 以复合外键约束同账户、股票及 kind。
+
+旧扫描、安装、准入、消费、接替、CLI 和研究详情仍严格处理 price。旧 v1 context/hash/shape 不增加缺省 kind；新迁移精确修改旧 DB 函数接缝，结构漂移拒绝迁移，不改已应用的0091/0092。共享预算/unknown守卫不按kind过滤。价格旧版不得接收 SEC，即使 SEC 行携带价格形状的 JSON。
+
+正常 SEC collect/import/inspect 现将超过32项已证实新增返回 true 和完整事件集合，另列 `automatic_review_capacity=blocked`、`impact_review=not_performed`；容量不是资料真值。尚未启用 SEC 计划安装、扫描、聚合 outbox、v10 提示或 v2 混合冻结/消费，不把本片当成完整事件链。trigger 的既有独立 outbox 约束仍保留，后续批次切片必须完成后才启用新生产者。
+
+迁移只在隔离数据库验证，未部署。无 disclosure 历史时可回0092且保留价格历史；一旦任何 disclosure plan/check/trigger/coverage 已落盘，正常降级会拒绝，必须保留0093及相应读取支持。此约束不等于已有验证可用的部署回滚镜像。
+
+
+本片离线验证：完整fast为6636 passed / 10 skipped / 1 deselected（228.43秒）；价格完整组首次91 passed、2 failed（753.82秒），失败分别为运行中补强未发布0093导致旧template读新downgrade、旧unknown测试绕过正常增量绑定。保留原失败日志，未加DROP IF EXISTS或放宽断言；以fresh template及正常准入/Worker受控超时/finish修正夹具后，新增/邻域和两项失败共16项通过（64.73秒），更强的相反报价及unknown不可重开再1项通过（17.41秒）。最终类型/基线/SQL拒收、来源overflow、API只读和迁移均有新鲜结果；前序91项价格回归代码及条件未变，复用对应证据，不冒称存在一次最终全组全绿运行。
+
+Ruff/format/diff、23源Mypy、生成合同检查、pg-b 434项收集、迁移offline SQL通过。集中审查的负例假阳性已修，基线T0冻结与跨kind资格抑制均另有RED→GREEN；未发现剩余确定P1/P2。当前仅隔离事实及模型替身，无真实来源/模型/通知/券商请求，不改旧结果、不解除unknown/预算、不启动业务宿主。
+
+交付分层：SEC真值/闭集信号与旧unknown夹具修正可独立提交；kind迁移、所有旧消费者隔离及DB负例必须一起审阅，不能只落数据库唯一键就启用SEC写入。该核心diff体积主要来自显式DDL与跨表约束回归，未拆掉必要断言来减行。下一切片仍须实现研究时点实际冻结baseline、v10独立审核/采纳、封口批次聚合通知、精确accession内容准入、v2混合单股消费与双kind原子接替，然后继续完整页面矩阵、终审、最终同head CI和部署/兼容回滚，自然时段验收另列。完整Goal保持active。

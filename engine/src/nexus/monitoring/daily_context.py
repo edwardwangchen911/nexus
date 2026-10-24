@@ -96,7 +96,7 @@ async def freeze_daily_pending(
             if plan is None
             else await session.get(AgentResearchOutputRecord, plan.source_output_id)
         )
-        if plan is None or output is None or output.intent is None:
+        if plan is None or plan.kind != "price" or output is None or output.intent is None:
             raise ValueError("DAILY_MONITOR_CONTEXT_INVALID")
         parents[plan.id] = DailyMonitorParent(
             plan_id=plan.id,
@@ -154,6 +154,7 @@ async def validate_daily_pending(session: AsyncSession, context: DailyMonitorCon
         output = await session.get(AgentResearchOutputRecord, parent.parent_output_id)
         if (
             plan is None
+            or plan.kind != "price"
             or output is None
             or output.intent is None
             or plan.account_id != context.account_id
@@ -181,6 +182,8 @@ async def validate_daily_pending(session: AsyncSession, context: DailyMonitorCon
         if (
             trigger is None
             or check is None
+            or trigger.kind != "price"
+            or check.kind != "price"
             or trigger.check_id != check.id
             or trigger.account_id != context.account_id
             or trigger.instrument_id != context.instrument_id

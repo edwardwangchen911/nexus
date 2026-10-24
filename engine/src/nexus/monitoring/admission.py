@@ -66,6 +66,7 @@ async def require_increment_binding(
     if (
         job is None
         or trigger is None
+        or trigger.kind != "price"
         or bound is None
         or member.snapshot_id != run.data_snapshot_id
         or member.instrument_id != run.instrument_id
@@ -100,7 +101,8 @@ async def require_increment_binding(
         len(set(frozen_ids)) != len(frozen_ids)
         or {row.id for row in rows} != set(frozen_ids)
         or any(
-            row.account_id != member.account_id
+            row.kind != "price"
+            or row.account_id != member.account_id
             or row.instrument_id != member.instrument_id
             or (row.status, row.reason) != (trigger.status, trigger.reason)
             for row in rows
@@ -241,7 +243,7 @@ async def _admit_trigger(
         raise ValueError("MONITOR_CALL_LIMIT_INVALID")
     await lock_portfolio_account(session, account_id)
     trigger = await session.get(MonitorTrigger, trigger_id)
-    if trigger is None or trigger.account_id != account_id:
+    if trigger is None or trigger.kind != "price" or trigger.account_id != account_id:
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
     # A concurrent request may have populated this session before the account lock.
     await session.refresh(trigger)
@@ -268,7 +270,9 @@ async def _admit_trigger(
     plan = await session.scalar(
         select(MonitorPlan)
         .where(
-            MonitorPlan.account_id == account_id, MonitorPlan.instrument_id == trigger.instrument_id
+            MonitorPlan.kind == "price",
+            MonitorPlan.account_id == account_id,
+            MonitorPlan.instrument_id == trigger.instrument_id,
         )
         .order_by(MonitorPlan.generation.desc())
         .limit(1)
@@ -568,7 +572,7 @@ async def finish_increment(
     now = require_utc(now)
     await lock_portfolio_account(session, account_id)
     trigger = await session.get(MonitorTrigger, trigger_id)
-    if trigger is None or trigger.account_id != account_id:
+    if trigger is None or trigger.kind != "price" or trigger.account_id != account_id:
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
     await lock_security(session, account_id=account_id, instrument_id=trigger.instrument_id)
     await session.refresh(trigger, with_for_update=True)

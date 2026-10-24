@@ -128,6 +128,7 @@ async def read_monitor_context(
         parent is None
         or parent_run is None
         or plan is None
+        or plan.kind != "price"
         or parent.run_id != parent_run.id
         or parent_run.instrument_id != instrument_id
         or parent.status != "completed"
@@ -214,6 +215,8 @@ async def read_monitor_context(
         if (
             trigger is None
             or check is None
+            or trigger.kind != "price"
+            or check.kind != "price"
             or trigger.check_id != check.id
             or trigger.account_id != context.account_id
             or trigger.instrument_id != instrument_id

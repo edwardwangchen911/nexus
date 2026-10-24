@@ -77,6 +77,7 @@ async def record_daily_consumption(
         trigger = await session.get(MonitorTrigger, item.trigger_id, with_for_update=True)
         if (
             trigger is None
+            or trigger.kind != "price"
             or trigger.account_id != account_id
             or trigger.instrument_id != qualified.run.instrument_id
             or trigger.research_run_id is not None

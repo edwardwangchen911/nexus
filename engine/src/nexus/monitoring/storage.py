@@ -50,9 +50,12 @@ async def record_check(
     plan = await session.get(MonitorPlan, plan_id)
     if plan is None:
         raise ValueError("MONITOR_PLAN_UNAVAILABLE")
+    if plan.kind != "price":
+        raise ValueError("MONITOR_KIND_UNSUPPORTED")
     await lock_security(session, account_id=plan.account_id, instrument_id=plan.instrument_id)
     existing = await session.scalar(
         select(MonitorCheck).where(
+            MonitorCheck.kind == "price",
             MonitorCheck.account_id == plan.account_id,
             MonitorCheck.instrument_id == plan.instrument_id,
             MonitorCheck.scheduled_at == scheduled_at,
@@ -64,6 +67,7 @@ async def record_check(
     latest_plan = await session.scalar(
         select(MonitorPlan.id)
         .where(
+            MonitorPlan.kind == "price",
             MonitorPlan.account_id == plan.account_id,
             MonitorPlan.instrument_id == plan.instrument_id,
         )
@@ -175,6 +179,8 @@ async def mark_trigger_blocked(
     trigger = await session.get(MonitorTrigger, trigger_id)
     if trigger is None:
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+    if trigger.kind != "price":
+        raise ValueError("MONITOR_KIND_UNSUPPORTED")
     from nexus.paper.target_service import lock_portfolio_account
 
     await lock_portfolio_account(session, trigger.account_id)

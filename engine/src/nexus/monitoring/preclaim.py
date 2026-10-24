@@ -177,6 +177,7 @@ async def close_capacity_rejected_increment_once(
             trigger = await session.get(MonitorTrigger, trigger_id)
             if (
                 trigger is None
+                or trigger.kind != "price"
                 or trigger.account_id != account_id
                 or trigger.research_run_id is None
             ):

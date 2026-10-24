@@ -127,7 +127,9 @@ async def install_plan_from_output(
     await lock_security(session, account_id=account_id, instrument_id=source.run.instrument_id)
     existing = await session.scalar(
         select(MonitorPlan).where(
-            MonitorPlan.account_id == account_id, MonitorPlan.source_output_id == output_id
+            MonitorPlan.kind == "price",
+            MonitorPlan.account_id == account_id,
+            MonitorPlan.source_output_id == output_id,
         )
     )
     if existing is not None:
@@ -137,6 +139,7 @@ async def install_plan_from_output(
     prior = await session.scalar(
         select(MonitorPlan)
         .where(
+            MonitorPlan.kind == "price",
             MonitorPlan.account_id == account_id,
             MonitorPlan.instrument_id == source.run.instrument_id,
         )

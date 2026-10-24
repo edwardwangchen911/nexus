@@ -59,6 +59,7 @@ async def latest_coverage(
     row: MonitorCoverageReceipt | None = await session.scalar(
         select(MonitorCoverageReceipt)
         .where(
+            MonitorCoverageReceipt.kind == "price",
             MonitorCoverageReceipt.account_id == account_id,
             MonitorCoverageReceipt.instrument_id == instrument_id,
             MonitorCoverageReceipt.observed_at <= now,
@@ -73,6 +74,8 @@ async def latest_coverage(
 
 
 async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetime) -> bool:
+    if plan.kind != "price":
+        return False
     receipt = await latest_coverage(
         session, account_id=plan.account_id, instrument_id=plan.instrument_id, now=now
     )
@@ -109,6 +112,7 @@ async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetim
     if successor is not None:
         successor_receipt = await session.scalar(
             select(MonitorCoverageReceipt).where(
+                MonitorCoverageReceipt.kind == "price",
                 MonitorCoverageReceipt.account_id == plan.account_id,
                 MonitorCoverageReceipt.run_id == successor.id,
             )
@@ -249,6 +253,7 @@ async def reconcile_account_results(
     for run in candidates:
         existing = await session.scalar(
             select(MonitorCoverageReceipt).where(
+                MonitorCoverageReceipt.kind == "price",
                 MonitorCoverageReceipt.account_id == account_id,
                 MonitorCoverageReceipt.run_id == run.id,
             )
@@ -323,6 +328,7 @@ async def _reconcile_run(
     prior = await session.scalar(
         select(MonitorPlan)
         .where(
+            MonitorPlan.kind == "price",
             MonitorPlan.account_id == account_id,
             MonitorPlan.instrument_id == run.instrument_id,
         )
