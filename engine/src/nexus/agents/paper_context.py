@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.monitoring.daily_context import DailyMonitorContext, DailyMonitorGap
+from nexus.monitoring.daily_v2_context import DailyEventContext, DailyEventGap
 from nexus.monitoring.disclosure_context import (
     DisclosureMonitoringContext,
     freeze_disclosure_baseline,
@@ -105,6 +106,8 @@ class AgentPaperResearchContext(BaseModel):
     execution_locked: Literal[True] = True
     pending_monitoring: DailyMonitorContext | None = None
     pending_monitoring_gap: DailyMonitorGap | None = None
+    pending_monitoring_v2: DailyEventContext | None = None
+    pending_monitoring_v2_gap: DailyEventGap | None = None
     disclosure_monitoring: DisclosureMonitoringContext | None = None
 
     @field_validator("disclosure_monitoring", mode="before")
@@ -116,9 +119,20 @@ class AgentPaperResearchContext(BaseModel):
 
     @model_validator(mode="after")
     def _pending_gap(self) -> "AgentPaperResearchContext":
-        if self.pending_monitoring_gap is not None and (
-            self.pending_monitoring is not None
-            or self.pending_monitoring_gap.observed_at != self.decision_time
+        if sum(
+            value is not None
+            for value in (
+                self.pending_monitoring,
+                self.pending_monitoring_gap,
+                self.pending_monitoring_v2,
+                self.pending_monitoring_v2_gap,
+            )
+        ) > 1 or any(
+            gap is not None and gap.observed_at != self.decision_time
+            for gap in (
+                self.pending_monitoring_gap,
+                self.pending_monitoring_v2_gap,
+            )
         ):
             raise ValueError("DAILY_MONITOR_GAP_INVALID")
         return self
@@ -133,6 +147,10 @@ class AgentPaperResearchContext(BaseModel):
             value.pop("pending_monitoring", None)
         if self.pending_monitoring_gap is None:
             value.pop("pending_monitoring_gap", None)
+        if self.pending_monitoring_v2 is None:
+            value.pop("pending_monitoring_v2", None)
+        if self.pending_monitoring_v2_gap is None:
+            value.pop("pending_monitoring_v2_gap", None)
         return value
 
 
@@ -246,18 +264,23 @@ async def prepare_agent_paper_research_snapshot(
         )
         cash_weight = (projection.available_cash + projection.reserved_cash) / projection.nav
     from nexus.monitoring.daily_context import freeze_daily_pending
+    from nexus.monitoring.daily_v2_context import freeze_daily_events
     from nexus.monitoring.pending import PendingOverflow
 
-    pending_gap = None
-    try:
-        pending = await freeze_daily_pending(
-            session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
-        )
-    except PendingOverflow as overflow:
-        # A daily study is independent work. Do not truncate its optional historical
-        # bundle or let that bundle permanently prevent the scheduled daily study.
-        pending = None
-        pending_gap = DailyMonitorGap(observed_at=decision_time, pending_count=overflow.count)
+    pending_v2, pending_v2_gap = await freeze_daily_events(
+        session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
+    )
+    pending, pending_gap = None, None
+    if pending_v2 is None and pending_v2_gap is None:
+        try:
+            pending = await freeze_daily_pending(
+                session,
+                cycle_id=cycle_id,
+                instrument_id=candidate.instrument_id,
+                as_of=decision_time,
+            )
+        except PendingOverflow as overflow:
+            pending_gap = DailyMonitorGap(observed_at=decision_time, pending_count=overflow.count)
     disclosure = (
         await freeze_disclosure_baseline(
             session, instrument_id=candidate.instrument_id, as_of=decision_time
@@ -269,6 +292,8 @@ async def prepare_agent_paper_research_snapshot(
         disclosure_monitoring=disclosure,
         pending_monitoring=pending,
         pending_monitoring_gap=pending_gap,
+        pending_monitoring_v2=pending_v2,
+        pending_monitoring_v2_gap=pending_v2_gap,
         cycle_id=cycle_id,
         instrument_id=candidate.instrument_id,
         decision_time=decision_time,
@@ -413,6 +438,17 @@ async def read_agent_paper_research_context(
             disclosure.instrument_id != instrument_id
             or disclosure.research_as_of != as_of
             or not await validate_disclosure_baseline(session, disclosure)
+        ):
+            return None
+    if context.pending_monitoring_v2 is not None:
+        from nexus.monitoring.daily_v2_context import validate_daily_events
+
+        pending_v2 = context.pending_monitoring_v2
+        if (
+            pending_v2.cycle_id != context.cycle_id
+            or pending_v2.instrument_id != instrument_id
+            or pending_v2.decision_time != as_of
+            or not await validate_daily_events(session, pending_v2)
         ):
             return None
     if context.pending_monitoring is not None:
