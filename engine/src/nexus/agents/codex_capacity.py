@@ -3,8 +3,9 @@
 import hashlib
 import json
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -22,7 +23,12 @@ from nexus.agents.codex_sdk import (
     codex_request_hash,
     codex_request_wire,
 )
-from nexus.agents.codex_staged import STAGES, StagedCodexCommittee
+from nexus.agents.codex_staged import (
+    STAGES,
+    StagedCodexCommittee,
+    _MonitoringProposal,
+    _MonitoringReview,
+)
 from nexus.agents.codex_token_budget import INPUT_RESERVE
 from nexus.agents.codex_versions import (
     BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
@@ -31,11 +37,22 @@ from nexus.agents.codex_versions import (
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
     ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
-from nexus.agents.committee import ROLE_ORDER
+from nexus.agents.committee import (
+    MONITORING_SCOPE_PROMPT_VERSION,
+    ROLE_ORDER,
+    AgentRole,
+    CommitteeRoleOutput,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
+from nexus.monitoring.contracts import (
+    PriceMonitoringProposal,
+    PriceMonitoringReview,
+    PriceReviewCondition,
+)
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job
+from nexus.strategy.intents import ResearchClaim
 
 
 def capacity_config() -> dict[str, str | int | bool]:
@@ -155,6 +172,66 @@ async def capacity_job_qualified(session: AsyncSession, job: Job, *, claimed: bo
     )
 
 
+def _monitoring_capacity_view(
+    committee: StagedCodexCommittee, evidence: tuple[EvidenceRef, ...]
+) -> StagedCodexCommittee:
+    if committee._prompts["portfolio"].version != MONITORING_SCOPE_PROMPT_VERSION:
+        return committee
+    for model in (_MonitoringProposal, _MonitoringReview):
+        properties = model.model_json_schema()["properties"]
+        if (
+            properties["rationale"].get("maxLength") != 500
+            or properties["citations"].get("maxItems") != 4
+        ):
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+    if PriceReviewCondition.model_json_schema()["properties"]["threshold"].get("maxLength") != 40:
+        raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+    # Bound normalized domain values, not raw model datetime spellings. Price
+    # allows 38 digits plus a decimal point; Unicode decimal digits can occupy
+    # four UTF-8 bytes each. All rationale characters need at most six JSON bytes.
+    widest_reference = max(evidence, key=evidence.index)
+    proposal = PriceMonitoringProposal(
+        condition=PriceReviewCondition(
+            signal="schwab.l1.bid_ask_midpoint",
+            operator="gte",
+            threshold="9" + "𝟏" * 25 + "." + "𝟏" * 12,
+            unit="currency",
+            currency="USD",
+            purpose="review",
+            source="schwab",
+            feed="l1",
+            price_basis="unadjusted_bid_ask_midpoint",
+            max_age_seconds=60,
+        ),
+        rationale="\x00" * 500,
+        evidence_refs=(widest_reference,) * 4,
+        review_due_at=datetime.max.replace(tzinfo=UTC),
+        valid_until=datetime.max.replace(tzinfo=UTC),
+    )
+    review = PriceMonitoringReview(
+        proposal_hash=proposal.content_hash,
+        decision="accepted",
+        rationale="\x00" * 500,
+        evidence_refs=proposal.evidence_refs,
+    )
+    view = copy(committee)
+    monitor_roles: tuple[AgentRole, ...] = ("market_state", "bear", "evidence_audit")
+    view._outputs = {
+        role: CommitteeRoleOutput(
+            role=role,
+            vote="support",
+            claims=(ResearchClaim(text="capacity boundary", evidence_refs=(evidence[-1],)),),
+            prompt_hash=committee._prompts[role].content_hash,
+            input_tokens=0,
+            output_tokens=0,
+            monitoring_proposal=proposal if role == "market_state" else None,
+            monitoring_review=review if role != "market_state" else None,
+        )
+        for role in monitor_roles
+    }
+    return view
+
+
 def candidate_capacity_envelope(
     committee: StagedCodexCommittee,
     *,
@@ -176,6 +253,7 @@ def candidate_capacity_envelope(
     """
     if not evidence_refs:
         raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+    committee = _monitoring_capacity_view(committee, evidence_refs)
     # This proof is for the declared current SDK schema. Schema evolution must
     # explicitly update the envelope rather than silently keeping old maxima.
     claim_properties = _Claim.model_json_schema()["properties"]
