@@ -133,6 +133,10 @@ async def _native_finished(
     if len(jobs) != 1:
         return False
     job = jobs[0]
+    if job.status == "skipped":
+        from nexus.monitoring.preclaim import preclaim_rejection_qualified
+
+        return await preclaim_rejection_qualified(session, run=run, now=now)
     leases = tuple(await session.scalars(select(JobLease).where(JobLease.job_id == job.id)))
     return bool(
         job.job_type == "agent.paper.research"
@@ -345,7 +349,10 @@ async def _reconcile_run(
             AgentDailyBudgetReservationRecord.run_id == run.id
         )
     )
-    known = (
+    from nexus.monitoring.preclaim import preclaim_rejection_qualified
+
+    rejected_before_claim = await preclaim_rejection_qualified(session, run=run, now=now)
+    known = rejected_before_claim or (
         reservation is not None
         and reservation.state == "settled"
         and run.input_tokens is not None
@@ -354,6 +361,8 @@ async def _reconcile_run(
         and reservation.settled_usd == run.settled_cost_usd
     )
     status, reason, quality, active, output_id = "gap", "MONITOR_RUN_FAILED", None, None, None
+    if rejected_before_claim:
+        reason = "MONITOR_CAPACITY_REJECTED"
     vetoed = False
     if superseded:
         status, reason = "superseded", "MONITOR_SOURCE_SUPERSEDED"

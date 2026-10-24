@@ -116,6 +116,11 @@ async def require_monitor_account_available(
                 AgentDailyBudgetReservationRecord.run_id == member.run_id
             )
         )
+        if run is not None and job is not None and job.status == "skipped":
+            from nexus.monitoring.preclaim import preclaim_rejection_qualified
+
+            if await preclaim_rejection_qualified(session, run=run, now=now):
+                continue
         if (
             run is None
             or job is None
@@ -554,10 +559,17 @@ async def finish_increment(
         return trigger
     job = await session.get(Job, member.job_id)
     leases = tuple(await session.scalars(select(JobLease).where(JobLease.job_id == member.job_id)))
+    from nexus.monitoring.preclaim import preclaim_rejection_qualified
+
+    rejected_before_claim = (
+        job is not None
+        and job.status == "skipped"
+        and await preclaim_rejection_qualified(session, run=run, now=now)
+    )
     if (
         job is None
         or run.status not in {"completed", "failed", "abstained"}
-        or job.status not in {"succeeded", "failed"}
+        or (job.status not in {"succeeded", "failed"} and not rejected_before_claim)
         or len(leases) != 1
         or not await job_lease_consumed(session, job=job, lease=leases[0], now=now)
     ):
@@ -567,7 +579,7 @@ async def finish_increment(
             AgentDailyBudgetReservationRecord.run_id == run.id
         )
     )
-    known = (
+    known = rejected_before_claim or (
         reservation is not None
         and reservation.state == "settled"
         and run.settled_cost_usd is not None
@@ -588,7 +600,10 @@ async def finish_increment(
             raise ValueError("MONITOR_OUTPUT_UNAVAILABLE")
         trigger.status, trigger.reason = "completed", None
     else:
-        trigger.status, trigger.reason = "failed", "MONITOR_RESEARCH_FAILED"
+        trigger.status, trigger.reason = (
+            "failed",
+            ("MONITOR_CAPACITY_REJECTED" if rejected_before_claim else "MONITOR_RESEARCH_FAILED"),
+        )
     await append_audit_event(
         session,
         actor_id="research-monitor",
