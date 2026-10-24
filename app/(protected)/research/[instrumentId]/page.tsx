@@ -6,13 +6,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
 import { DecisionCard } from "../../../components/decision-card";
+import { ResearchMonitoring, type PriceMonitoringView } from "../../../components/research-monitoring";
 import { DecisionPath } from "../../../components/decision-path";
 import { ResearchInputs } from "../../../components/research-inputs";
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import type { components } from "../../../lib/generated/schema";
 
-type Research = components["schemas"]["ResearchRunResponse"];
+type Research = components["schemas"]["ResearchRunResponse"] & { monitoring?: PriceMonitoringView | null };
 type ResearchEnvelope = components["schemas"]["ResearchRunEnvelope"];
 type ResearchAdmission = components["schemas"]["ResearchAdmissionResponse"];
 type ResearchAdmissionEnvelope = components["schemas"]["ResearchAdmissionEnvelope"];
@@ -153,6 +154,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
+        {research.monitoring ? <ResearchMonitoring monitoring={research.monitoring} instrumentId={research.instrument_id} /> : null}
       </>}
     </section>
   );
