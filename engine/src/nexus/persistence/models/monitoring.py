@@ -219,6 +219,9 @@ class MonitorIncrement(ImmutableCreatedAt, Base):
         CheckConstraint("daily_sdk_call_limit BETWEEN 3 AND 90", name="bounded_call_limit"),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("research_monitor_batches.id"), unique=True
+    )
     account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
     trigger_id: Mapped[UUID] = mapped_column(
