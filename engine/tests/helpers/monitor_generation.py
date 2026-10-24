@@ -151,7 +151,17 @@ async def assert_old_run_superseded(
     monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
     for job in jobs:
         assert await run_agent_worker_once(settings, job_ids=(job.id,), formal_stage_capacity=True)
-    assert len(jobs) == 1 and stages == ["research", "critique", "synthesis"]
+    async with factory() as session:
+        observed_jobs = [
+            (row.status, row.last_error_code)
+            for row in await session.scalars(
+                select(Job).where(Job.id.in_([job.id for job in jobs]))
+            )
+        ]
+    assert len(jobs) == 1 and stages == ["research", "critique", "synthesis"], {
+        "stages": stages,
+        "jobs": observed_jobs,
+    }
     async with factory() as session, session.begin():
         report = await reconcile_account_results(
             session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now

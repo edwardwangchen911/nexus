@@ -193,19 +193,25 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             elif stage == "critique":
                 for row in response["roles"]:
                     row["daily_pending_review"] = None
-                    row["monitoring_review"] = {
-                        "proposal_hash": payload["monitoring_proposal"]["content_hash"],
-                        "decision": "rejected"
-                        if monitoring_rejected and row["role"] == "evidence_audit"
-                        else "accepted",
-                        "rationale": "核对冻结证据、价格口径和复核时限。",
-                        "citations": [0],
-                    }
+                    row["monitoring_review"] = (
+                        None
+                        if payload.get("monitoring_proposal") is None
+                        else {
+                            "proposal_hash": payload["monitoring_proposal"]["content_hash"],
+                            "decision": "rejected"
+                            if monitoring_rejected and row["role"] == "evidence_audit"
+                            else "accepted",
+                            "rationale": "核对冻结证据、价格口径和复核时限。",
+                            "citations": [0],
+                        }
+                    )
             else:
                 response["daily_pending_adoption_hash"] = None
-                response["monitoring_adoption_hash"] = payload["monitoring_proposal"][
-                    "content_hash"
-                ]
+                response["monitoring_adoption_hash"] = (
+                    None
+                    if payload.get("monitoring_proposal") is None
+                    else payload["monitoring_proposal"]["content_hash"]
+                )
         if disclosure:
             from nexus.monitoring.disclosure_contracts import disclosure_from_inputs
 
@@ -242,7 +248,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 for row in response["roles"]:
                     row["disclosure_review"] = (
                         None
-                        if baseline is None
+                        if baseline is None or payload.get("disclosure_proposal") is None
                         else {
                             "proposal_hash": payload["disclosure_proposal"]["content_hash"],
                             "decision": "accepted",
@@ -252,7 +258,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     )
             else:
                 response["disclosure_adoption_hash"] = (
-                    payload["disclosure_proposal"]["content_hash"] if baseline is not None else None
+                    payload["disclosure_proposal"]["content_hash"]
+                    if baseline is not None and payload.get("disclosure_proposal") is not None
+                    else None
                 )
         return json.dumps(response), UsageSnapshot(input_tokens=100, output_tokens=100)
 
