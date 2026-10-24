@@ -212,6 +212,25 @@ uv run --project engine nexus-engine-agent-paper-once run-research \
 `inspect --plan-id <计划>` 只读检查；`scan --calendar-authority-id <已配置日历>`
 仅检查当前正常交易时段的五分钟桶，不采集行情或调用模型。
 
+SEC 结构事件使用独立的完整索引来源，入口为 `nexus-engine-sec-index`，也可通过
+`PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.sec_index_local` 运行。
+`collect --identity-snapshot-id <已有基础身份> --archive-dir <新私有目录>` 复用正常 SEC
+身份采集入口，仅发 directory 和该发行人 submissions 两次有界 GET；不下载正文、不调用模型。
+`import` 使用同样两个参数导入已有目录中的原始 directory/submissions 与各自 receipt，
+不重新获取或伪造回执。父目录须符合既有私有目录要求。
+
+`inspect --snapshot-id <索引>` 只读核验原件、发行人绑定和本地入库时间；source_fresh 与
+原件完整性分别返回。提供 `--baseline-id <已冻结索引> --baseline-as-of <真实冻结时点>`
+才比较新增收录 accession；首次收件本身不把全部历史记录认作新增。标识按发行人 CIK 与
+accession 固定，不随重复收件或内容 hash 改变。类别仅 8-K/8-K/A，不解释利空、会计修订或重要性。
+
+来源保留全部 recent 元数据：10000 行/8 MiB 输入硬边界，目标类别最多1000项，超限明确拒绝。
+未读取历史分片时，无新增保持 unknown；明确新项可返回 true，同时保留 partial 历史覆盖。
+同 accession 冲突、来源超过五分钟、未来基线、原件损坏均不产生充分的无新增结论。
+旧网络回执离线入库不回填可见时间，同件导入保持首次本地可见时间。
+此来源入口当前只保存/读取索引，不派发 outbox 或研究；完整事件触发必须另接有版本的条件、
+事件去重及单股冻结上下文，不能套用价格 observation 或价格 latch。
+
 `admit --trigger-id <已落盘触发> --calendar-authority-id <已配置日历>`
 使用已正式应用的账户、候选批次、模型与预算配置，只为该证券创建一个原生研究 Job。
 它冻结原父论点、原触发报价和本次新鲜决策报价；原正式时效、风险及账户占用检查仍生效。
