@@ -115,3 +115,41 @@ class MonitorIncrement(ImmutableCreatedAt, Base):
     daily_sdk_call_limit: Mapped[int] = mapped_column(Integer)
     context_hash: Mapped[str] = mapped_column(String(64))
     manifest_hash: Mapped[str] = mapped_column(String(64))
+
+
+class MonitorCoverageReceipt(ImmutableCreatedAt, Base):
+    """One append-only account observation of a terminal research result."""
+
+    __tablename__ = "research_monitor_coverage"
+    __table_args__ = (
+        UniqueConstraint("account_id", "run_id"),
+        CheckConstraint(
+            "status IN ('installed','retained','gap','unknown','superseded','unverified')",
+            name="status_allowed",
+        ),
+        CheckConstraint(
+            "quality_status IS NULL OR quality_status IN ('complete','partial')",
+            name="quality_allowed",
+        ),
+        CheckConstraint("observed_at >= research_as_of", name="time_order"),
+        CheckConstraint(
+            "status NOT IN ('installed','retained') OR active_plan_id IS NOT NULL",
+            name="active_plan_required",
+        ),
+        CheckConstraint(
+            "status NOT IN ('gap','superseded','unverified') OR active_plan_id IS NULL",
+            name="gap_has_no_active_plan",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    output_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_research_outputs.id"))
+    prior_plan_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_monitor_plans.id"))
+    active_plan_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_monitor_plans.id"))
+    research_as_of: Mapped[datetime] = mapped_column(UTCDateTime())
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    status: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(64))
+    quality_status: Mapped[str | None] = mapped_column(String(16))

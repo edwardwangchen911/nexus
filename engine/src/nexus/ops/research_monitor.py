@@ -27,6 +27,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.add_argument("--env-file", type=Path, default=Path("infra/.env.local"))
     commands = result.add_subparsers(dest="action", required=True)
+    commands.add_parser(
+        "reconcile", help="Reconcile persisted research results into monitor coverage"
+    )
     install = commands.add_parser("install", help="Install one original audited research proposal")
     install.add_argument("--output-id", type=UUID, required=True)
     install.add_argument("--expected-predecessor-id", type=UUID)
@@ -205,13 +208,37 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                     "model_requests": 0,
                     "provider_requests": 0,
                 }
-            if args.action == "scan":
-                return await scan_account(
+            if args.action in {"scan", "reconcile"}:
+                from nexus.monitoring.reconciliation import reconcile_account_results
+                from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
+
+                if settings.agent_paper_candidate_batch_id is None:
+                    raise ValueError("MONITOR_SCOPE_UNCONFIGURED")
+                batch = await load_agent_paper_candidate_batch(
+                    session, batch_id=settings.agent_paper_candidate_batch_id
+                )
+                if (
+                    batch is None
+                    or batch.account_id != settings.agent_paper_account_id
+                    or batch.created_at > now
+                ):
+                    raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+                reconciled = await reconcile_account_results(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    instrument_ids=batch.instrument_ids,
+                    now=now,
+                )
+                if args.action == "reconcile":
+                    return reconciled
+                scanned = await scan_account(
                     session,
                     account_id=settings.agent_paper_account_id,
                     calendar_authority_id=args.calendar_authority_id,
                     now=now,
+                    instrument_ids=batch.instrument_ids,
                 )
+                return {**scanned, "reconciled_results": reconciled["recorded"]}
             if args.action == "install":
                 plan = await install_plan_from_output(
                     session,
@@ -241,6 +268,35 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 .order_by(MonitorPlan.generation.desc())
                 .limit(1)
             )
+            from nexus.monitoring.reconciliation import latest_coverage, plan_covered
+            from nexus.persistence.models.agents import (
+                AgentResearchOutputRecord,
+                AgentResearchRunRecord,
+            )
+
+            coverage_receipt = await latest_coverage(
+                session,
+                account_id=settings.agent_paper_account_id,
+                instrument_id=plan.instrument_id,
+                now=now,
+            )
+            source_run = await session.get(AgentResearchRunRecord, plan.source_run_id)
+            source_output = await session.get(AgentResearchOutputRecord, plan.source_output_id)
+            applicable_receipt = (
+                coverage_receipt
+                if coverage_receipt is not None
+                and source_run is not None
+                and coverage_receipt.research_as_of >= source_run.decision_time
+                else None
+            )
+            covered = await plan_covered(session, plan=plan, now=now)
+            quality = (
+                applicable_receipt.quality_status
+                if applicable_receipt is not None
+                else None
+                if source_output is None or source_output.intent is None
+                else source_output.intent.get("quality_status")
+            )
             return {
                 "status": "installed" if args.action == "install" else "observed",
                 "plan_id": str(plan.id),
@@ -253,9 +309,23 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 if now < plan.effective_at
                 else "expired"
                 if now >= plan.valid_until
+                else "unavailable"
+                if not covered
                 else "review_due"
                 if now >= plan.review_due_at
                 else "active",
+                "research_quality": quality,
+                "latest_result_state": None
+                if applicable_receipt is None
+                else applicable_receipt.status,
+                "coverage_reason": (
+                    "MONITOR_RESULT_RECONCILIATION_PENDING"
+                    if not covered
+                    and (applicable_receipt is None or applicable_receipt.active_plan_id == plan.id)
+                    else None
+                    if applicable_receipt is None
+                    else applicable_receipt.reason
+                ),
                 "execution_locked": True,
                 "model_requests": 0,
                 "provider_requests": 0,

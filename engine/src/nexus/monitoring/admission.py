@@ -257,6 +257,10 @@ async def _admit_trigger(
     )
     if not calendar.market_open_at <= now < calendar.market_close_at:
         raise ValueError("MONITOR_MARKET_CLOSED")
+    from nexus.monitoring.reconciliation import plan_covered
+
+    if not await plan_covered(session, plan=plan, now=now):
+        raise ValueError("MONITOR_TRIGGER_SUPERSEDED_OR_EXPIRED")
     batch, _identities = await validate_agent_paper_candidate_batch(
         session, batch_id=candidate_batch_id, account_id=account_id, as_of=now
     )

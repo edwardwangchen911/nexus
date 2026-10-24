@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
@@ -15,7 +15,12 @@ from nexus.persistence.models.paper import PaperAccountRecord
 
 
 async def scan_account(
-    session: AsyncSession, *, account_id: UUID, calendar_authority_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    calendar_authority_id: UUID,
+    now: datetime,
+    instrument_ids: tuple[UUID, ...] | None = None,
 ) -> dict[str, object]:
     now = require_utc(now)
     account = await session.get(PaperAccountRecord, account_id)
@@ -24,7 +29,15 @@ async def scan_account(
     calendar = await load_agent_paper_service_calendar_authority(
         session, now=now, expected_calendar_authority_id=calendar_authority_id
     )
-    counts = {"checks": 0, "true": 0, "false": 0, "unknown": 0, "expired": 0, "not_effective": 0}
+    counts = {
+        "checks": 0,
+        "true": 0,
+        "false": 0,
+        "unknown": 0,
+        "expired": 0,
+        "not_effective": 0,
+        "coverage_gap": 0,
+    }
     result: dict[str, object] = {
         "status": "scanned",
         "observed_at": now.isoformat(),
@@ -37,7 +50,10 @@ async def scan_account(
     plans = tuple(
         await session.scalars(
             select(MonitorPlan)
-            .where(MonitorPlan.account_id == account_id)
+            .where(
+                MonitorPlan.account_id == account_id,
+                true() if instrument_ids is None else MonitorPlan.instrument_id.in_(instrument_ids),
+            )
             .distinct(MonitorPlan.instrument_id)
             .order_by(MonitorPlan.instrument_id, MonitorPlan.generation.desc())
             .limit(6)
@@ -45,6 +61,8 @@ async def scan_account(
     )
     if len(plans) > 5:
         raise ValueError("MONITOR_SCOPE_EXCEEDED")
+    if instrument_ids is not None:
+        counts["coverage_gap"] = len(set(instrument_ids) - {plan.instrument_id for plan in plans})
     scheduled = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
     for selected in plans:
         # Lock in instrument order, then reload: installation may have advanced
@@ -65,6 +83,11 @@ async def scan_account(
             continue
         if now < plan.effective_at:
             counts["not_effective"] += 1
+            continue
+        from nexus.monitoring.reconciliation import plan_covered
+
+        if not await plan_covered(session, plan=plan, now=now):
+            counts["coverage_gap"] += 1
             continue
         observation = await read_latest_price(session, instrument_id=plan.instrument_id, now=now)
         check = await record_check(

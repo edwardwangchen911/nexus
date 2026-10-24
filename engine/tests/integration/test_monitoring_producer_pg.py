@@ -91,7 +91,9 @@ async def test_monitoring_proposal_survives_formal_worker_persistence(
                     now=AT + timedelta(seconds=3),
                 )
         entry_settings = EngineSettings(
-            database_url=migrated_database_url, agent_paper_account_id=account_id
+            database_url=migrated_database_url,
+            agent_paper_account_id=account_id,
+            agent_paper_candidate_batch_id=cycle.candidate_batch_id,
         )
         receipt = await run_monitor(
             entry_settings, parser().parse_args(["install", "--output-id", str(row.id)])
