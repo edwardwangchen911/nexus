@@ -22,6 +22,7 @@ from nexus.monitoring.disclosure_contracts import (
     DisclosureMonitoringProposal,
     DisclosureMonitoringReview,
 )
+from nexus.monitoring.mixed_contracts import MixedEventProposal, MixedEventReview
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
 type AgentRole = Literal[
@@ -287,6 +288,9 @@ class CommitteeRoleOutput(BaseModel):
     frozen_inputs_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     synthesis_assessment: SynthesisAssessment | None = None
+    mixed_event_proposal: MixedEventProposal | None = None
+    mixed_event_review: MixedEventReview | None = None
+    mixed_event_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     daily_pending_proposal: DailyPendingProposal | None = None
     daily_pending_review: DailyPendingReview | None = None
     daily_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -300,7 +304,13 @@ class CommitteeRoleOutput(BaseModel):
     @model_validator(mode="after")
     def _monitoring_role(self) -> "CommitteeRoleOutput":
         if (
-            self.disclosure_proposal is not None
+            self.mixed_event_proposal is not None
+            and self.role != "market_state"
+            or self.mixed_event_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.mixed_event_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.disclosure_proposal is not None
             and self.role != "market_state"
             or self.disclosure_review is not None
             and self.role not in {"bear", "evidence_audit"}
@@ -321,6 +331,8 @@ class CommitteeRoleOutput(BaseModel):
         ):
             raise ValueError("MONITOR_ROLE_INVALID")
         for item in (
+            *(self.mixed_event_proposal.items if self.mixed_event_proposal else ()),
+            self.mixed_event_review,
             *(self.daily_pending_proposal.items if self.daily_pending_proposal else ()),
             self.daily_pending_review,
             self.disclosure_proposal,
@@ -339,6 +351,9 @@ class CommitteeRoleOutput(BaseModel):
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
         for name in (
+            "mixed_event_proposal",
+            "mixed_event_review",
+            "mixed_event_adoption_hash",
             "disclosure_proposal",
             "disclosure_review",
             "disclosure_adoption_hash",
