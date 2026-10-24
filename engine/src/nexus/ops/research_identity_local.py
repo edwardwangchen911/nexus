@@ -15,7 +15,12 @@ import httpx
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.providers.fmp_profile import validate_symbol
-from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
+from nexus.providers.http import (
+    AllowedOrigin,
+    FixedOriginHttpClient,
+    HttpPolicyError,
+    HttpRequestPolicy,
+)
 from nexus.research.identity_sources import (
     directory_binding as _binding,
 )
@@ -25,6 +30,14 @@ from nexus.research.identity_sources import (
 from nexus.research.identity_sources import (
     require_submissions_binding as _require_submissions,
 )
+
+
+class _Exact200Client(FixedOriginHttpClient):
+    async def _read_bounded(self, response: httpx.Response) -> bytes:
+        # SEC's complete-original receipt must not relabel partial/empty 2xx as 200.
+        if response.status_code != 200:
+            raise HttpPolicyError("STATUS_REJECTED", http_status=response.status_code)
+        return await super()._read_bounded(response)
 
 
 async def collect_identity_sources(
@@ -64,7 +77,7 @@ async def collect_identity_sources(
     async def get(host: str, parts: tuple[str, ...], name: str) -> dict[str, Any]:
         nonlocal requests
         requests += 1
-        fixed = FixedOriginHttpClient(
+        fixed = _Exact200Client(
             provider_name="sec",
             origin=AllowedOrigin("https", host),
             policy=HttpRequestPolicy(max_attempts=1),
