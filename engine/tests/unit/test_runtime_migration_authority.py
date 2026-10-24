@@ -13,4 +13,4 @@ def test_runtime_authority_matches_installed_migration_chain():
 
 
 def test_monitor_frozen_group_revision_is_current_authority():
-    assert CURRENT_MIGRATION_HEAD == "0091_monitor_frozen_members"
+    assert CURRENT_MIGRATION_HEAD == "0092_monitor_daily_receipts"

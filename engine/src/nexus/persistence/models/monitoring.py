@@ -153,3 +153,25 @@ class MonitorCoverageReceipt(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(16))
     reason: Mapped[str] = mapped_column(String(64))
     quality_status: Mapped[str | None] = mapped_column(String(16))
+
+
+class MonitorDailyTriggerReceipt(ImmutableCreatedAt, Base):
+    """An original daily result addressed this exact trigger; no trigger is rewritten."""
+
+    __tablename__ = "research_monitor_daily_trigger_receipts"
+    __table_args__ = (
+        UniqueConstraint("trigger_id"),
+        CheckConstraint("context_hash ~ '^[0-9a-f]{64}$'", name="context_hash_canonical"),
+        CheckConstraint("review_bundle_hash ~ '^[0-9a-f]{64}$'", name="review_hash_canonical"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    trigger_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_triggers.id"))
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    cycle_id: Mapped[UUID] = mapped_column(ForeignKey("agent_paper_cycles.id"))
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    output_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_outputs.id"))
+    snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    context_hash: Mapped[str] = mapped_column(String(64))
+    review_bundle_hash: Mapped[str] = mapped_column(String(64))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())

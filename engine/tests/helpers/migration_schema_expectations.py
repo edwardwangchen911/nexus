@@ -605,3 +605,5 @@ OPTIONAL_MIGRATION_TABLE_GROUPS += (
     frozenset({"economic_evaluations", "economic_pair_slots", "economic_lane_cycles"}),
     frozenset({"economic_common_windows", "economic_window_orders"}),
 )
+
+EXPECTED_TABLES = EXPECTED_TABLES | {"research_monitor_daily_trigger_receipts"}
