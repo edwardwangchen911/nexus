@@ -1766,6 +1766,7 @@ async def _admit_cycle_research(
     version_model_id: UUID | None = None,
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
+    omit_monitor_events_for: frozenset[UUID] = frozenset(),
 ) -> AgentPaperCycleResult:
     if formal_stage_capacity and any(
         value is not None
@@ -1791,7 +1792,12 @@ async def _admit_cycle_research(
     )
     from nexus.agents.committee import DISCLOSURE_SCOPE_PROMPT_VERSION
     from nexus.agents.persistence import resolve_research_prompt_authority
+    from nexus.monitoring.daily_v2_capacity import DailyEventCapacityExceeded
 
+    cycle_id = cycle.id
+    instruments = frozenset(candidate.instrument_id for candidate in manifest)
+    if not omit_monitor_events_for <= instruments:
+        raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
     run_ids: list[UUID] = []
     try:
         async with session.begin_nested():
@@ -1854,6 +1860,8 @@ async def _admit_cycle_research(
                             candidate=candidate,
                             projection=projection,
                             disclosure_scope=disclosure_scope,
+                            omit_monitor_event_bundle=candidate.instrument_id
+                            in omit_monitor_events_for,
                         )
                     ).id
                 if version_evaluation_id is None:
@@ -1907,7 +1915,36 @@ async def _admit_cycle_research(
                     # or reservation from this nested transaction may be committed.
                     raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
                 run_ids.append(admission.run_id)
-    except ValueError:
+    except ValueError as error:
+        # Rollback of the complete pool has finished before handling the error.
+        # Never reuse a Run, pending Job, hold, or ORM state from that savepoint.
+        restored = await session.get(AgentPaperCycleRecord, cycle_id, populate_existing=True)
+        if restored is None:
+            raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID") from None
+        cycle = restored
+        if (
+            isinstance(error, DailyEventCapacityExceeded)
+            and formal_stage_capacity
+            and error.instrument_id in instruments
+            and error.instrument_id not in omit_monitor_events_for
+        ):
+            # Only initial, uncommitted material selection is rebuilt. Each stock
+            # may omit its entire optional bundle once; at most five stocks exist.
+            return await _admit_cycle_research(
+                session,
+                cycle=cycle,
+                authority=authority,
+                projection=projection,
+                daily_limit_usd=daily_limit_usd,
+                version_evaluation_id=version_evaluation_id,
+                version_lane=version_lane,
+                version_source_run_id=version_source_run_id,
+                version_prompt_id=version_prompt_id,
+                version_model_id=version_model_id,
+                candidate_stage_capacity=candidate_stage_capacity,
+                formal_stage_capacity=formal_stage_capacity,
+                omit_monitor_events_for=omit_monitor_events_for | {error.instrument_id},
+            )
         await _append_event(
             session,
             cycle,

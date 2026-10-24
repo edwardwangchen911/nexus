@@ -1316,6 +1316,12 @@ async def _admit_research_run(
     )
     session.add(run)
     await session.flush()
+    if formal_stage_capacity:
+        from nexus.monitoring.daily_v2_capacity import preview_daily_event_capacity
+
+        # The normal frozen authority exists, but no Job can yet be claimed.
+        # A capacity refusal stays inside the caller's complete admission savepoint.
+        await preview_daily_event_capacity(session, run)
     await enqueue_job(
         session,
         key=JobKeyV1(

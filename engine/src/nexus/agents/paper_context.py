@@ -174,8 +174,11 @@ async def prepare_agent_paper_research_snapshot(
     candidate: CandidateManifestEntry,
     projection: PaperPortfolioProjection,
     disclosure_scope: bool = False,
+    omit_monitor_event_bundle: bool = False,
 ) -> DataSnapshot:
     """Add exact cycle facts to an existing slow research snapshot without mutating it."""
+    if type(omit_monitor_event_bundle) is not bool:
+        raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
     base = await session.get(DataSnapshot, candidate.research_snapshot_id)
     quote = await session.get(LatestQuote, candidate.decision_quote_id)
     artifact = await session.get(DataArtifact, candidate.decision_artifact_id)
@@ -264,12 +267,19 @@ async def prepare_agent_paper_research_snapshot(
         )
         cash_weight = (projection.available_cash + projection.reserved_cash) / projection.nav
     from nexus.monitoring.daily_context import freeze_daily_pending
-    from nexus.monitoring.daily_v2_context import freeze_daily_events
+    from nexus.monitoring.daily_v2_context import DailyEventGap, freeze_daily_events
     from nexus.monitoring.pending import PendingOverflow
 
     pending_v2, pending_v2_gap = await freeze_daily_events(
         session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
     )
+    if omit_monitor_event_bundle and pending_v2 is not None:
+        pending_v2_gap = DailyEventGap(
+            observed_at=decision_time,
+            pending_count=len(pending_v2.trigger_checks),
+            reason="MONITOR_CONTENT_CAPACITY",
+        )
+        pending_v2 = None
     pending, pending_gap = None, None
     if pending_v2 is None and pending_v2_gap is None:
         try:
