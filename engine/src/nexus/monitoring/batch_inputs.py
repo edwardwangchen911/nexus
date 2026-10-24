@@ -66,7 +66,7 @@ async def _inputs(
     from nexus.monitoring.batches import disclosure_source_current
     from nexus.monitoring.disclosure_observations import read_disclosure_observation
     from nexus.monitoring.reconciliation import plan_covered
-    from nexus.monitoring.source_qualification import load_qualified_source
+    from nexus.monitoring.source_qualification import QualifiedSource, load_qualified_source
     from nexus.research.sec_disclosure_index import SecIndexEntry
 
     readonly = await session.scalar(text("SELECT current_setting('transaction_read_only')"))
@@ -82,6 +82,7 @@ async def _inputs(
         raise MaterialGap("MONITOR_BATCH_NOT_VISIBLE")
     members: list[dict[str, object]] = []
     parents = {}
+    qualified_sources: dict[UUID, QualifiedSource] = {}
     contents = []
     missing: list[str] = []
     for trigger_id in batch.trigger_ids:
@@ -120,9 +121,12 @@ async def _inputs(
             if latest != plan.id or not plan.effective_at <= now < plan.valid_until or not current:
                 raise MaterialGap("MONITOR_AWAITING_RECONCILIATION")
         if plan.id not in parents:
-            qualified = await load_qualified_source(
-                session, account_id=batch.account_id, output_id=plan.source_output_id, now=now
-            )
+            qualified = qualified_sources.get(plan.source_output_id)
+            if qualified is None:
+                qualified = await load_qualified_source(
+                    session, account_id=batch.account_id, output_id=plan.source_output_id, now=now
+                )
+                qualified_sources[plan.source_output_id] = qualified
             if (
                 qualified.run.id != plan.source_run_id
                 or qualified.output.content_hash != plan.source_hash

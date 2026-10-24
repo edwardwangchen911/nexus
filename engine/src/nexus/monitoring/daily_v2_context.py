@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 from hashlib import sha256
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -22,6 +22,9 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job
+
+if TYPE_CHECKING:
+    from nexus.monitoring.source_qualification import QualifiedSource
 
 
 class DailyEventCheck(BaseModel):
@@ -162,7 +165,11 @@ async def _valid_predecessors(session: AsyncSession, context: DailyEventContext)
 
 
 async def _original_unresolved(
-    session: AsyncSession, trigger: MonitorTrigger, as_of: datetime
+    session: AsyncSession,
+    trigger: MonitorTrigger,
+    as_of: datetime,
+    *,
+    qualified_sources: dict[tuple[UUID, UUID, datetime], "QualifiedSource"] | None = None,
 ) -> tuple[UUID, UUID]:
     # Lazy imports: source qualification and mixed context import paper_context.
     from nexus.monitoring.admission import require_increment_binding
@@ -190,11 +197,16 @@ async def _original_unresolved(
         or member.batch_id != trigger.batch_id
     ):
         raise ValueError("MONITOR_ORIGINAL_REVIEW_UNAVAILABLE")
-    source = await load_qualified_source(
-        session, account_id=trigger.account_id, output_id=output.id, now=job.finished_at
-    )
+    key = (trigger.account_id, output.id, job.finished_at)
+    source = None if qualified_sources is None else qualified_sources.get(key)
+    if source is None:
+        source = await load_qualified_source(
+            session, account_id=trigger.account_id, output_id=output.id, now=job.finished_at
+        )
     if not isinstance(source.context, MixedMonitorContext):
         raise ValueError("MONITOR_ORIGINAL_REVIEW_UNAVAILABLE")
+    if qualified_sources is not None:
+        qualified_sources[key] = source
     market = next(row for row in source.role_outputs if row.role == "market_state")
     proposal = market.mixed_event_proposal
     items = (
@@ -290,6 +302,7 @@ async def freeze_daily_events(
     if count > 32:
         return gap("MONITOR_PENDING_OVERFLOW")
     checks, materials = [], {}
+    qualified_sources: dict[tuple[UUID, UUID, datetime], QualifiedSource] = {}
     try:
         legacy = await freeze_daily_pending(
             session, cycle_id=cycle_id, instrument_id=instrument_id, as_of=as_of
@@ -298,7 +311,9 @@ async def freeze_daily_events(
             output_id, material_id = None, None
             if trigger.batch_id is not None:
                 if trigger.research_run_id is not None:
-                    output_id, material_id = await _original_unresolved(session, trigger, as_of)
+                    output_id, material_id = await _original_unresolved(
+                        session, trigger, as_of, qualified_sources=qualified_sources
+                    )
                 else:
                     if trigger.status not in {"pending", "blocked"}:
                         return gap("MONITOR_ORIGINAL_REVIEW_UNAVAILABLE")
@@ -359,6 +374,7 @@ async def freeze_daily_events(
 
 async def validate_daily_events(session: AsyncSession, context: DailyEventContext) -> bool:
     """Recheck the exact frozen set, never re-select today's pending or predecessors."""
+    qualified_sources: dict[tuple[UUID, UUID, datetime], QualifiedSource] = {}
     try:
         cycle = await session.get(AgentPaperCycleRecord, context.cycle_id)
         if (
@@ -422,7 +438,7 @@ async def validate_daily_events(session: AsyncSession, context: DailyEventContex
                 if trigger.research_run_id != item.original_run_id:
                     return False
                 output_id, material_id = await _original_unresolved(
-                    session, trigger, context.decision_time
+                    session, trigger, context.decision_time, qualified_sources=qualified_sources
                 )
                 if (
                     output_id != item.original_output_id

@@ -27,7 +27,7 @@ async def lock_security(session: AsyncSession, *, account_id: UUID, instrument_i
 
 
 async def plan_recorded_at(session: AsyncSession, *, requested_at: datetime) -> datetime:
-    """Read insertion visibility only after holding the security transaction lock."""
+    """Sample the database registration time while holding the security transaction lock."""
     value = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(value, datetime) or value.utcoffset() is None or value < requested_at:
         raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
