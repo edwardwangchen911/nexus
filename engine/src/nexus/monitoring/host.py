@@ -5,7 +5,16 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from math import isfinite
 
+from nexus.agents.codex_versions import (
+    BOUNDED_RESEARCH_HANDLER_TIMEOUT_SECONDS,
+    CAPACITY_PRECLAIM_TIMEOUT_SECONDS,
+)
 from nexus.domain.time import require_utc
+
+# Preserve an existing scheduled research slot without changing Worker deadlines.
+INCREMENT_ACTION_HEADROOM_SECONDS = (
+    CAPACITY_PRECLAIM_TIMEOUT_SECONDS + BOUNDED_RESEARCH_HANDLER_TIMEOUT_SECONDS + 90
+)
 
 
 class PriceMonitorCoordinator:

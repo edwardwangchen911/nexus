@@ -96,6 +96,8 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_monitoring_migration.py",
     "engine/tests/integration/test_monitoring_producer_pg.py",
     "engine/tests/integration/test_monitor_increment_pg.py",
+    "engine/tests/integration/test_monitor_dispatch_pg.py",
+    "engine/tests/integration/test_monitor_preclaim_pg.py",
     "engine/tests/integration/test_monitor_source_qualification_pg.py",
     "engine/tests/integration/test_monitor_reconciliation_pg.py",
     "engine/tests/integration/test_monitor_plan_replacement_pg.py",

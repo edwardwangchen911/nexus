@@ -55,6 +55,26 @@ async def scan_host_once(
     repo_root: Path,
     env_file: Path | None = None,
 ) -> dict[str, object]:
+    current = await load_host_settings(
+        settings,
+        account_id=account_id,
+        calendar_authority_id=calendar_authority_id,
+        repo_root=repo_root,
+        env_file=env_file,
+    )
+    if not current.agent_paper_cycle_enabled:
+        return {"status": "disabled", "model_requests": 0, "provider_requests": 0}
+    return await scan_configured_once(current, calendar_authority_id=calendar_authority_id)
+
+
+async def load_host_settings(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    calendar_authority_id: UUID,
+    repo_root: Path,
+    env_file: Path | None = None,
+) -> EngineSettings:
     # Reload the existing protected host configuration even while research is busy.
     # This does not prepare market data, admit research, or change host identity.
     from nexus.ops.agent_paper_loop import _load_bound_loop_environment
@@ -68,7 +88,7 @@ async def scan_host_once(
         else EngineSettings.model_validate(environment)
     )
     if not current.agent_paper_cycle_enabled:
-        return {"status": "disabled", "model_requests": 0, "provider_requests": 0}
+        return current
     if (
         current.agent_paper_account_id != account_id
         or current.database_url is None
@@ -77,7 +97,7 @@ async def scan_host_once(
         or (pinned_calendar is not None and UUID(pinned_calendar) != calendar_authority_id)
     ):
         raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
-    return await scan_configured_once(current, calendar_authority_id=calendar_authority_id)
+    return current
 
 
 async def scan_configured_once(
