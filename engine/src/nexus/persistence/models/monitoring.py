@@ -1,9 +1,9 @@
 """Research monitoring lineage, immutable checks, and durable trigger latches."""
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -89,3 +89,29 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
     reason: Mapped[str | None] = mapped_column(String(64))
     research_run_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_research_runs.id"))
     outbox_id: Mapped[UUID] = mapped_column(ForeignKey("outbox_events.id"), unique=True)
+
+
+class MonitorIncrement(ImmutableCreatedAt, Base):
+    """One immutable, non-executing research admission and its finite call hold."""
+
+    __tablename__ = "research_monitor_increments"
+    __table_args__ = (
+        CheckConstraint("reserved_sdk_calls = 3", name="three_stage_calls"),
+        CheckConstraint("daily_sdk_call_limit BETWEEN 3 AND 90", name="bounded_call_limit"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    trigger_id: Mapped[UUID] = mapped_column(
+        ForeignKey("research_monitor_triggers.id"), unique=True
+    )
+    plan_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_plans.id"))
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"), unique=True)
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id"), unique=True)
+    snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"), unique=True)
+    research_as_of: Mapped[datetime] = mapped_column(UTCDateTime())
+    session_date: Mapped[date] = mapped_column(Date())
+    reserved_sdk_calls: Mapped[int] = mapped_column(Integer)
+    daily_sdk_call_limit: Mapped[int] = mapped_column(Integer)
+    context_hash: Mapped[str] = mapped_column(String(64))
+    manifest_hash: Mapped[str] = mapped_column(String(64))
