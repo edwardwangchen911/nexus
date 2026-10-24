@@ -132,6 +132,14 @@ async def load_frozen_evidence(
             != set(observation_ids)
         ):
             return ()
+    if any(ref.source == "nexus_price_monitor_increment" for ref in ordered):
+        from nexus.monitoring.context import FrozenMonitorContextStatus, revalidate_monitor_context
+
+        if (
+            await revalidate_monitor_context(session, run=run, evidence_records=ordered)
+            is not FrozenMonitorContextStatus.VALID
+        ):
+            return ()
     return ordered
 
 

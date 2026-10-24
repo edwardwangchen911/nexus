@@ -128,6 +128,20 @@ async def execute_research_run(
         run=run,
         evidence_records=evidence_records,
     )
+    from nexus.monitoring.context import FrozenMonitorContextStatus, revalidate_monitor_context
+
+    monitor_context_status = await revalidate_monitor_context(
+        session, run=run, evidence_records=evidence_records
+    )
+    if monitor_context_status is FrozenMonitorContextStatus.INVALID:
+        return await _terminal_without_usage(
+            session,
+            run,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="abstained",
+            reason="monitor_context_invalid",
+        )
     if (
         price_authority_status is FrozenPriceAuthorityStatus.INVALID
         or paper_context_status is FrozenAgentPaperContextStatus.INVALID
@@ -294,6 +308,24 @@ async def execute_research_run(
         run=run,
         evidence_records=evidence_records,
     )
+    final_monitor_context_status = await revalidate_monitor_context(
+        session, run=run, evidence_records=evidence_records
+    )
+    if (
+        final_monitor_context_status is FrozenMonitorContextStatus.INVALID
+        or final_monitor_context_status is not monitor_context_status
+    ):
+        return await _terminal_after_committee(
+            session,
+            run,
+            model=model,
+            committee=committee,
+            role_outputs=role_outputs,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="abstained",
+            reason="monitor_context_invalid",
+        )
     if (
         final_price_authority_status is FrozenPriceAuthorityStatus.INVALID
         or final_price_authority_status is not price_authority_status
@@ -341,6 +373,7 @@ async def execute_research_run(
         price_authority_valid=(
             final_price_authority_status is FrozenPriceAuthorityStatus.VALID
             or final_paper_context_status is FrozenAgentPaperContextStatus.VALID
+            or final_monitor_context_status is FrozenMonitorContextStatus.VALID
         ),
         portfolio_context=await read_portfolio_context(
             session, run.data_snapshot_id, run.instrument_id, run.decision_time
