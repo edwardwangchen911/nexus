@@ -2680,6 +2680,86 @@ export interface components {
             /** Unknown Reason */
             unknown_reason: string | null;
         };
+        /** DisclosureMonitoringProposal */
+        DisclosureMonitoringProposal: {
+            /**
+             * Baseline As Of
+             * Format: date-time
+             */
+            baseline_as_of: string;
+            /** Baseline Hash */
+            baseline_hash: string;
+            /**
+             * Baseline Snapshot Id
+             * Format: uuid
+             */
+            baseline_snapshot_id: string;
+            condition: components["schemas"]["DisclosureReviewCondition"];
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Issuer Cik */
+            issuer_cik: string;
+            /** Rationale */
+            rationale: string;
+            /**
+             * Review Due At
+             * Format: date-time
+             */
+            review_due_at: string;
+            /**
+             * Valid Until
+             * Format: date-time
+             */
+            valid_until: string;
+        };
+        /**
+         * DisclosureReviewCondition
+         * @description New locally confirmed index membership, never publication or impact.
+         */
+        DisclosureReviewCondition: {
+            /** Forms */
+            forms: [
+                "8-K",
+                "8-K/A"
+            ];
+            /**
+             * Max Age Seconds
+             * @constant
+             */
+            max_age_seconds: 300;
+            /**
+             * Operator
+             * @constant
+             */
+            operator: "exists_new";
+            /**
+             * Purpose
+             * @constant
+             */
+            purpose: "review";
+            /**
+             * Signal
+             * @constant
+             */
+            signal: "sec.issuer_disclosure_added";
+            /**
+             * Source
+             * @constant
+             */
+            source: "sec";
+            /** Threshold */
+            threshold: boolean;
+            /**
+             * Time Authority
+             * @constant
+             */
+            time_authority: "frozen_index_vs_local_receipt";
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "filing";
+        };
         /** @enum {string} */
         DisplayReadiness: "DISPLAY_READY" | "DISPLAY_UNAVAILABLE";
         /** DrawdownAcknowledgeEnvelope */
@@ -7173,6 +7253,7 @@ export interface components {
             decision_time: string;
             /** Disagreement */
             disagreement: string;
+            disclosure_proposal?: components["schemas"]["DisclosureMonitoringProposal"] | null;
             /** Display Symbol */
             display_symbol: string;
             /** Entry Conditions */

@@ -22,6 +22,7 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 from nexus.monitoring.contracts import PriceMonitoringProposal
 from nexus.monitoring.daily_contracts import DailyPendingProposal
+from nexus.monitoring.disclosure_contracts import DisclosureMonitoringProposal
 
 _UNSAFE_TEXT = (
     "http://",
@@ -203,6 +204,7 @@ class RoleVote(_IntentModel):
 
 
 class ResearchIntent(_IntentModel):
+    disclosure_proposal: DisclosureMonitoringProposal | None = None
     daily_pending_proposal: DailyPendingProposal | None = None
     monitoring_proposal: PriceMonitoringProposal | None = None
     synthesis_assessment: SynthesisAssessment | None = None
@@ -214,6 +216,8 @@ class ResearchIntent(_IntentModel):
     # A return annotation would replace the closed model serialization schema.
     def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         payload = cast(dict[str, object], handler(self))
+        if self.disclosure_proposal is None:
+            payload.pop("disclosure_proposal", None)
         if self.daily_pending_proposal is None:
             payload.pop("daily_pending_proposal", None)
         if self.monitoring_proposal is None:
@@ -257,6 +261,18 @@ class ResearchIntent(_IntentModel):
 
     @model_validator(mode="after")
     def _point_in_time_and_complete_evidence(self) -> "ResearchIntent":
+        disclosure = self.disclosure_proposal
+        if disclosure is not None:
+            _assert_safe(disclosure.model_dump(mode="json"))
+            if (
+                disclosure.baseline_as_of != self.decision_time
+                or not self.decision_time < disclosure.review_due_at <= disclosure.valid_until
+                or any(
+                    ref not in self.evidence_refs or ref.available_at > self.decision_time
+                    for ref in disclosure.evidence_refs
+                )
+            ):
+                raise ValueError("DISCLOSURE_PROPOSAL_BINDING_INVALID")
         daily = self.daily_pending_proposal
         if daily is not None:
             _assert_safe(daily.model_dump(mode="json"))

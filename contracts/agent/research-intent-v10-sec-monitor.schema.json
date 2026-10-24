@@ -1,0 +1,959 @@
+{
+  "$defs": {
+    "DailyPendingItem": {
+      "additionalProperties": false,
+      "properties": {
+        "trigger_id": {
+          "format": "uuid",
+          "title": "Trigger Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "addressed",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "trigger_id",
+        "status",
+        "rationale",
+        "evidence_refs"
+      ],
+      "title": "DailyPendingItem",
+      "type": "object"
+    },
+    "DailyPendingProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "context_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Context Hash",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DailyPendingItem"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "context_hash",
+        "items"
+      ],
+      "title": "DailyPendingProposal",
+      "type": "object"
+    },
+    "DisclosureMonitoringProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/DisclosureReviewCondition"
+        },
+        "baseline_snapshot_id": {
+          "format": "uuid",
+          "title": "Baseline Snapshot Id",
+          "type": "string"
+        },
+        "baseline_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Baseline Hash",
+          "type": "string"
+        },
+        "issuer_cik": {
+          "pattern": "^[0-9]{10}$",
+          "title": "Issuer Cik",
+          "type": "string"
+        },
+        "baseline_as_of": {
+          "format": "date-time",
+          "title": "Baseline As Of",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "review_due_at": {
+          "format": "date-time",
+          "title": "Review Due At",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "condition",
+        "baseline_snapshot_id",
+        "baseline_hash",
+        "issuer_cik",
+        "baseline_as_of",
+        "rationale",
+        "evidence_refs",
+        "review_due_at",
+        "valid_until"
+      ],
+      "title": "DisclosureMonitoringProposal",
+      "type": "object"
+    },
+    "DisclosureReviewCondition": {
+      "additionalProperties": false,
+      "description": "New locally confirmed index membership, never publication or impact.",
+      "properties": {
+        "signal": {
+          "const": "sec.issuer_disclosure_added",
+          "title": "Signal",
+          "type": "string"
+        },
+        "operator": {
+          "const": "exists_new",
+          "title": "Operator",
+          "type": "string"
+        },
+        "threshold": {
+          "title": "Threshold",
+          "type": "boolean"
+        },
+        "unit": {
+          "const": "filing",
+          "title": "Unit",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "review",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "source": {
+          "const": "sec",
+          "title": "Source",
+          "type": "string"
+        },
+        "forms": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "const": "8-K",
+              "type": "string"
+            },
+            {
+              "const": "8-K/A",
+              "type": "string"
+            }
+          ],
+          "title": "Forms",
+          "type": "array"
+        },
+        "max_age_seconds": {
+          "const": 300,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "time_authority": {
+          "const": "frozen_index_vs_local_receipt",
+          "title": "Time Authority",
+          "type": "string"
+        }
+      },
+      "required": [
+        "signal",
+        "operator",
+        "threshold",
+        "unit",
+        "purpose",
+        "source",
+        "forms",
+        "max_age_seconds",
+        "time_authority"
+      ],
+      "title": "DisclosureReviewCondition",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A point-in-time reference to immutable source content.",
+      "properties": {
+        "source": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "object_id": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Object Id",
+          "type": "string"
+        },
+        "available_at": {
+          "format": "date-time",
+          "title": "Available At",
+          "type": "string"
+        },
+        "location": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Location",
+          "type": "string"
+        },
+        "content_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "object_id",
+        "available_at",
+        "location",
+        "content_hash"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "PriceMonitoringProposal": {
+      "additionalProperties": false,
+      "description": "One proposed review condition; it requires independent bear and audit approval.",
+      "properties": {
+        "schema_version": {
+          "const": "price_monitor_proposal_v1",
+          "default": "price_monitor_proposal_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "condition": {
+          "$ref": "#/$defs/PriceReviewCondition"
+        },
+        "rationale": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "review_due_at": {
+          "format": "date-time",
+          "title": "Review Due At",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "condition",
+        "rationale",
+        "evidence_refs",
+        "review_due_at",
+        "valid_until"
+      ],
+      "title": "PriceMonitoringProposal",
+      "type": "object"
+    },
+    "PriceReviewCondition": {
+      "additionalProperties": false,
+      "description": "A price review threshold; neither an order nor proof a thesis is false.",
+      "properties": {
+        "signal": {
+          "const": "schwab.l1.bid_ask_midpoint",
+          "title": "Signal",
+          "type": "string"
+        },
+        "operator": {
+          "enum": [
+            "gte",
+            "lte"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "threshold": {
+          "maxLength": 40,
+          "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+          "title": "Threshold",
+          "type": "string"
+        },
+        "unit": {
+          "const": "currency",
+          "title": "Unit",
+          "type": "string"
+        },
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "review",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "source": {
+          "const": "schwab",
+          "title": "Source",
+          "type": "string"
+        },
+        "feed": {
+          "const": "l1",
+          "title": "Feed",
+          "type": "string"
+        },
+        "price_basis": {
+          "const": "unadjusted_bid_ask_midpoint",
+          "title": "Price Basis",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "const": 60,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "signal",
+        "operator",
+        "threshold",
+        "unit",
+        "currency",
+        "purpose",
+        "source",
+        "feed",
+        "price_basis",
+        "max_age_seconds"
+      ],
+      "title": "PriceReviewCondition",
+      "type": "object"
+    },
+    "ResearchClaim": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text",
+        "evidence_refs"
+      ],
+      "title": "ResearchClaim",
+      "type": "object"
+    },
+    "ResearchCondition": {
+      "additionalProperties": false,
+      "description": "A deterministic signal predicate, never an executable expression.",
+      "properties": {
+        "signal": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:-]*$",
+          "title": "Signal",
+          "type": "string"
+        },
+        "operator": {
+          "enum": [
+            "lt",
+            "lte",
+            "eq",
+            "gte",
+            "gt",
+            "is_true",
+            "is_false"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Threshold"
+        },
+        "unit": {
+          "enum": [
+            "ratio",
+            "basis_points",
+            "days",
+            "currency",
+            "boolean",
+            "count",
+            "state"
+          ],
+          "title": "Unit",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "signal",
+        "operator",
+        "threshold",
+        "unit",
+        "evidence_refs"
+      ],
+      "title": "ResearchCondition",
+      "type": "object"
+    },
+    "ResearchConditionEvaluation": {
+      "additionalProperties": false,
+      "description": "A frozen research observation, never an entry/exit or execution grant.",
+      "properties": {
+        "schema_version": {
+          "const": "research_condition_evaluation_v1",
+          "default": "research_condition_evaluation_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "research_observation",
+          "default": "research_observation",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "condition": {
+          "$ref": "#/$defs/ResearchCondition"
+        },
+        "result": {
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "const": "frozen_concentration_unavailable",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "condition",
+        "result",
+        "observed_at"
+      ],
+      "title": "ResearchConditionEvaluation",
+      "type": "object"
+    },
+    "RoleVote": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "orchestrator",
+            "fundamental",
+            "market_state",
+            "macro_sector",
+            "bull",
+            "bear",
+            "evidence_audit",
+            "portfolio"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "vote": {
+          "enum": [
+            "support",
+            "oppose",
+            "abstain"
+          ],
+          "title": "Vote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "vote"
+      ],
+      "title": "RoleVote",
+      "type": "object"
+    },
+    "SynthesisAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "stance": {
+          "enum": [
+            "buy_candidate",
+            "reduce_candidate",
+            "hold",
+            "watch"
+          ],
+          "title": "Stance",
+          "type": "string"
+        },
+        "claims": {
+          "items": {
+            "$ref": "#/$defs/ResearchClaim"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Claims",
+          "type": "array"
+        },
+        "reviews": {
+          "items": {
+            "$ref": "#/$defs/SynthesisClaimReview"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Reviews",
+          "type": "array"
+        },
+        "review_conclusion": {
+          "enum": [
+            "sufficient",
+            "limited",
+            "insufficient"
+          ],
+          "title": "Review Conclusion",
+          "type": "string"
+        },
+        "uncertainties": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 5,
+          "title": "Uncertainties",
+          "type": "array"
+        }
+      },
+      "required": [
+        "stance",
+        "claims",
+        "reviews",
+        "review_conclusion",
+        "uncertainties"
+      ],
+      "title": "SynthesisAssessment",
+      "type": "object"
+    },
+    "SynthesisClaimReview": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {
+          "pattern": "^(bear|evidence_audit):[0-9]+$",
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "resolved": {
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "missing_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Missing Evidence",
+          "type": "array"
+        },
+        "prevented_conclusion": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prevented Conclusion"
+        }
+      },
+      "required": [
+        "claim_id",
+        "status",
+        "rationale",
+        "evidence_refs",
+        "resolved",
+        "missing_evidence",
+        "prevented_conclusion"
+      ],
+      "title": "SynthesisClaimReview",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "disclosure_proposal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DisclosureMonitoringProposal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "daily_pending_proposal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DailyPendingProposal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "monitoring_proposal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PriceMonitoringProposal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "synthesis_assessment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SynthesisAssessment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "condition_evaluations": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ResearchConditionEvaluation"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Condition Evaluations"
+    },
+    "schema_version": {
+      "const": "research_intent_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "decision_id": {
+      "format": "uuid",
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "instrument_id": {
+      "format": "uuid",
+      "title": "Instrument Id",
+      "type": "string"
+    },
+    "display_symbol": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[A-Z0-9.\\-]+$",
+      "title": "Display Symbol",
+      "type": "string"
+    },
+    "decision_time": {
+      "format": "date-time",
+      "title": "Decision Time",
+      "type": "string"
+    },
+    "data_snapshot_id": {
+      "format": "uuid",
+      "title": "Data Snapshot Id",
+      "type": "string"
+    },
+    "horizon": {
+      "enum": [
+        "short_term",
+        "medium_term",
+        "long_term"
+      ],
+      "title": "Horizon",
+      "type": "string"
+    },
+    "stance": {
+      "enum": [
+        "buy_candidate",
+        "reduce_candidate",
+        "hold",
+        "watch"
+      ],
+      "title": "Stance",
+      "type": "string"
+    },
+    "exposure_action": {
+      "enum": [
+        "none",
+        "reduce",
+        "maintain",
+        "eligible_for_increase"
+      ],
+      "title": "Exposure Action",
+      "type": "string"
+    },
+    "theses": {
+      "items": {
+        "$ref": "#/$defs/ResearchClaim"
+      },
+      "maxItems": 5,
+      "title": "Theses",
+      "type": "array"
+    },
+    "counter_theses": {
+      "items": {
+        "$ref": "#/$defs/ResearchClaim"
+      },
+      "maxItems": 5,
+      "title": "Counter Theses",
+      "type": "array"
+    },
+    "uncertainties": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10,
+      "title": "Uncertainties",
+      "type": "array"
+    },
+    "invalidation_conditions": {
+      "items": {
+        "$ref": "#/$defs/ResearchCondition"
+      },
+      "maxItems": 10,
+      "title": "Invalidation Conditions",
+      "type": "array"
+    },
+    "entry_conditions": {
+      "items": {
+        "$ref": "#/$defs/ResearchCondition"
+      },
+      "maxItems": 10,
+      "title": "Entry Conditions",
+      "type": "array"
+    },
+    "exit_conditions": {
+      "items": {
+        "$ref": "#/$defs/ResearchCondition"
+      },
+      "maxItems": 10,
+      "title": "Exit Conditions",
+      "type": "array"
+    },
+    "valid_until": {
+      "format": "date-time",
+      "title": "Valid Until",
+      "type": "string"
+    },
+    "quality_status": {
+      "enum": [
+        "complete",
+        "partial"
+      ],
+      "title": "Quality Status",
+      "type": "string"
+    },
+    "evidence_audit": {
+      "enum": [
+        "complete",
+        "partial",
+        "failed"
+      ],
+      "title": "Evidence Audit",
+      "type": "string"
+    },
+    "role_votes": {
+      "items": {
+        "$ref": "#/$defs/RoleVote"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Role Votes",
+      "type": "array"
+    },
+    "disagreement": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Disagreement",
+      "type": "string"
+    },
+    "strategy_version": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Strategy Version",
+      "type": "string"
+    },
+    "model_version": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "prompt_version": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Prompt Version",
+      "type": "string"
+    },
+    "data_version": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Data Version",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "minItems": 1,
+      "title": "Evidence Refs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "decision_id",
+    "instrument_id",
+    "display_symbol",
+    "decision_time",
+    "data_snapshot_id",
+    "horizon",
+    "stance",
+    "exposure_action",
+    "theses",
+    "counter_theses",
+    "uncertainties",
+    "invalidation_conditions",
+    "entry_conditions",
+    "exit_conditions",
+    "valid_until",
+    "quality_status",
+    "evidence_audit",
+    "role_votes",
+    "disagreement",
+    "strategy_version",
+    "model_version",
+    "prompt_version",
+    "data_version",
+    "evidence_refs"
+  ],
+  "title": "ResearchIntent",
+  "type": "object"
+}

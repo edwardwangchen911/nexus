@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -729,6 +729,53 @@ async def _verify_formal_replay_binding(
         raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
 
 
+async def resolve_research_prompt_authority(
+    session: AsyncSession,
+    *,
+    actor_id: str,
+    idempotency_key: str,
+    prompt_version_id: UUID | None = None,
+    version_source_run_id: UUID | None = None,
+    reuse_latest_actor_agent_version: bool = False,
+) -> tuple[
+    AgentResearchRunRecord | None, Mapping[AgentRole, AgentPromptVersionRecord] | None, UUID | None
+]:
+    """One version-resolution contract for snapshot freezing and native admission."""
+    protected_model_id = None
+    if version_source_run_id is not None:
+        prior_run = await session.get(AgentResearchRunRecord, version_source_run_id)
+    elif reuse_latest_actor_agent_version:
+        prior_run = await session.scalar(
+            select(AgentResearchRunRecord)
+            .where(AgentResearchRunRecord.actor_id == actor_id)
+            .order_by(
+                AgentResearchRunRecord.decision_time.desc(),
+                AgentResearchRunRecord.created_at.desc(),
+                AgentResearchRunRecord.id.desc(),
+            )
+            .limit(1)
+        )
+    else:
+        prior_run = None
+    from nexus.paper.formal_budget_protection import pinned_research_authorities
+
+    protected_authority = await pinned_research_authorities(
+        session,
+        actor_id=actor_id,
+        idempotency_key=idempotency_key,
+    )
+    if protected_authority is not None:
+        prior_run = None
+        protected_model_id = protected_authority[1].id
+    if prior_run is not None:
+        prompts = await load_frozen_prompts(session, prior_run)
+    else:
+        prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
+    if protected_authority is not None:
+        prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
+    return prior_run, prompts, protected_model_id
+
+
 async def _admit_research_run(
     session: AsyncSession,
     *,
@@ -939,37 +986,16 @@ async def _admit_research_run(
             raise ValueError("RESEARCH_ONLY_SNAPSHOT_INVALID")
     elif is_research_only(snapshot):
         raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
-    if version_source_run_id is not None:
-        prior_run = await session.get(AgentResearchRunRecord, version_source_run_id)
-    elif reuse_latest_actor_agent_version:
-        prior_run = await session.scalar(
-            select(AgentResearchRunRecord)
-            .where(AgentResearchRunRecord.actor_id == actor_id)
-            .order_by(
-                AgentResearchRunRecord.decision_time.desc(),
-                AgentResearchRunRecord.created_at.desc(),
-                AgentResearchRunRecord.id.desc(),
-            )
-            .limit(1)
-        )
-    else:
-        prior_run = None
-    from nexus.paper.formal_budget_protection import pinned_research_authorities
-
-    protected_authority = await pinned_research_authorities(
+    prior_run, prompts, protected_model_id = await resolve_research_prompt_authority(
         session,
         actor_id=actor_id,
         idempotency_key=idempotency_key,
+        prompt_version_id=prompt_version_id,
+        version_source_run_id=version_source_run_id,
+        reuse_latest_actor_agent_version=reuse_latest_actor_agent_version,
     )
-    if protected_authority is not None:
-        prior_run = None
-        model_config_id = protected_authority[1].id
-    if prior_run is not None:
-        prompts = await load_frozen_prompts(session, prior_run)
-    else:
-        prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
-    if protected_authority is not None:
-        prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
+    if protected_model_id is not None:
+        model_config_id = protected_model_id
     if monitor_increment:
         binding = await read_monitor_context(
             session,
@@ -1459,11 +1485,14 @@ def _require_nonnegative_decimal(value: Decimal, name: str, *, positive: bool = 
 def _schema_hash(*, portfolio_prompt_version: str | None = None) -> str:
     from nexus.agents.committee import (
         DAILY_PENDING_SCOPE_PROMPT_VERSION,
+        DISCLOSURE_SCOPE_PROMPT_VERSION,
         MONITORING_SCOPE_PROMPT_VERSION,
     )
 
     name = (
-        "research-intent-v9-daily-pending.schema.json"
+        "research-intent-v10-sec-monitor.schema.json"
+        if portfolio_prompt_version == DISCLOSURE_SCOPE_PROMPT_VERSION
+        else "research-intent-v9-daily-pending.schema.json"
         if portfolio_prompt_version == DAILY_PENDING_SCOPE_PROMPT_VERSION
         else "research-intent-v8-price-monitor.schema.json"
         if portfolio_prompt_version == MONITORING_SCOPE_PROMPT_VERSION

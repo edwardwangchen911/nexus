@@ -209,7 +209,8 @@ def synthesize_intent(
         raise ValueError("research observation context does not bind the run")
     monitoring_proposal = None
     from nexus.agents.committee import (
-        DAILY_PENDING_SCOPE_PROMPT_VERSION,
+        DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
+        DISCLOSURE_SCOPE_PROMPT_VERSION,
         MONITORING_SCOPE_PROMPT_VERSIONS,
     )
 
@@ -233,6 +234,30 @@ def synthesize_intent(
         except ValueError:
             # A rejected or unbound plan leaves research quality and stance unchanged.
             monitoring_proposal = None
+    disclosure_proposal = None
+    from nexus.monitoring.disclosure_contracts import compile_disclosure_proposal
+
+    proposed = by_role["market_state"].disclosure_proposal
+    if prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION and proposed is not None:
+        paper = (snapshot.payload or {}).get("agent_paper_context")
+        context = paper.get("disclosure_monitoring") if isinstance(paper, dict) else None
+        try:
+            disclosure_proposal = compile_disclosure_proposal(
+                proposed,
+                {
+                    str(role): row.disclosure_review
+                    for role, row in by_role.items()
+                    if role in {"bear", "evidence_audit"} and row.disclosure_review is not None
+                },
+                context=context,
+                instrument_id=run.instrument_id,
+                now=run.decision_time,
+                evidence_refs=evidence_refs,
+                audit_vote=by_role["evidence_audit"].vote,
+                adoption_hash=by_role["portfolio"].disclosure_adoption_hash,
+            )
+        except ValueError:
+            disclosure_proposal = None
     daily_pending_proposal = None
     from nexus.monitoring.daily_contracts import (
         compile_daily_pending_proposal,
@@ -241,7 +266,7 @@ def synthesize_intent(
 
     daily_proposal = by_role["orchestrator"].daily_pending_proposal
     if (
-        prompts["portfolio"].version == DAILY_PENDING_SCOPE_PROMPT_VERSION
+        prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS
         and daily_proposal is not None
     ):
         paper = (snapshot.payload or {}).get("agent_paper_context")
@@ -265,6 +290,7 @@ def synthesize_intent(
         except ValueError:
             daily_pending_proposal = None
     return ResearchIntent(
+        disclosure_proposal=disclosure_proposal,
         daily_pending_proposal=daily_pending_proposal,
         monitoring_proposal=monitoring_proposal,
         synthesis_assessment=assessment,

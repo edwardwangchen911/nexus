@@ -82,6 +82,9 @@ async def produce(
     expired=False,
     inline=False,
     capture=None,
+    disclosure=False,
+    disclosure_rejected=None,
+    disclosure_fault=None,
 ):
     request, evidence, prompts = _authority()
     prompts = dict(prompts)
@@ -90,7 +93,30 @@ async def produce(
         claim_review_scope=True,
         inference_review_scope=True,
         monitoring_scope=True,
+        **({"daily_pending_scope": True, "disclosure_scope": True} if disclosure else {}),
     )
+    if disclosure:
+        evidence = (
+            *evidence,
+            evidence[0].model_copy(update={"source": "nexus_agent_paper_context"}),
+        )
+    baseline = {
+        "schema_version": "sec_monitor_baseline_v1",
+        "instrument_id": str(request.instrument_id),
+        "snapshot_id": str(UUID(int=30)),
+        "snapshot_hash": "d" * 64,
+        "issuer_cik": "0000000001",
+        "research_as_of": request.decision_time.isoformat(),
+    }
+    disclosure_context = {
+        "schema_version": "disclosure_monitor_context_v1",
+        "instrument_id": str(request.instrument_id),
+        "research_as_of": request.decision_time.isoformat(),
+        "baseline": baseline,
+        "gap_reason": None,
+    }
+    if disclosure_fault == "missing_baseline":
+        disclosure_context.update(baseline=None, gap_reason="SEC_BASELINE_MISSING")
     seen = []
     proposal = None
 
@@ -117,7 +143,8 @@ async def produce(
                 None
                 if absent
                 else PriceMonitoringProposal(
-                    **{k: v for k, v in wire.items() if k != "citations"}, evidence_refs=evidence
+                    **{k: v for k, v in wire.items() if k != "citations"},
+                    evidence_refs=evidence[:1] if disclosure else evidence,
                 )
             )
         elif stage == "critique":
@@ -156,12 +183,53 @@ async def produce(
                 if adoption == "foreign"
                 else None
             )
+        if disclosure:
+            if stage == "research":
+                for row in body["roles"]:
+                    row["daily_pending_proposal"] = None
+                    row["disclosure_proposal"] = None
+                    if row["role"] == "market_state":
+                        row["disclosure_proposal"] = {
+                            **proposal_wire(request.decision_time),
+                            "condition": {
+                                "signal": "sec.issuer_disclosure_added",
+                                "operator": "exists_new",
+                                "threshold": True,
+                                "unit": "filing",
+                                "purpose": "review",
+                                "source": "sec",
+                                "forms": ["8-K", "8-K/A"],
+                                "max_age_seconds": 300,
+                                "time_authority": "frozen_index_vs_local_receipt",
+                            },
+                            "baseline_hash": "f" * 64
+                            if disclosure_fault == "foreign_hash"
+                            else baseline["snapshot_hash"],
+                            "citations": [1],
+                        }
+            elif stage == "critique":
+                for row in body["roles"]:
+                    row["daily_pending_review"] = None
+                    row["disclosure_review"] = {
+                        "proposal_hash": payload["disclosure_proposal"]["content_hash"],
+                        "decision": "rejected"
+                        if row["role"] == disclosure_rejected
+                        else "accepted",
+                        "rationale": "新增收录仅触发复核，不判断重要性或影响。",
+                        "citations": [1],
+                    }
+            else:
+                body["daily_pending_adoption_hash"] = None
+                body["disclosure_adoption_hash"] = payload["disclosure_proposal"]["content_hash"]
         return json.dumps(body), UsageSnapshot(input_tokens=300, output_tokens=100)
 
     monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
     committee = codex_staged.StructuredStagedCodexCommittee(
         prompts=prompts, tools=_tools(), paper_stage_scope=True, inline_citations=inline
     )
+    if capture is not None:
+        capture["committee"] = committee
+        capture["seen"] = seen
     original_inputs = committee._inputs
 
     async def inputs(req):
@@ -174,7 +242,10 @@ async def produce(
                     "content_hash": evidence[0].content_hash,
                     "available_at": evidence[0].model_dump(mode="json")["available_at"],
                     "evidence_ref_id": "fixture-evidence",
-                    "agent_paper_context": {"execution_locked": True},
+                    "agent_paper_context": {
+                        "execution_locked": True,
+                        **({"disclosure_monitoring": disclosure_context} if disclosure else {}),
+                    },
                 }
             ]
         }
@@ -192,7 +263,13 @@ async def produce(
     intent = synthesize_intent(
         AgentResearchRunRecord(id=UUID(int=3), **request.model_dump()),
         "ABC",
-        DataSnapshot(id=request.data_snapshot_id, revision="synthetic"),
+        DataSnapshot(
+            id=request.data_snapshot_id,
+            revision="synthetic",
+            payload={"agent_paper_context": {"disclosure_monitoring": disclosure_context}}
+            if disclosure
+            else {},
+        ),
         {
             r: AgentPromptVersionRecord(
                 role=r, version=p.version, content=p.content, content_hash=p.content_hash
@@ -418,3 +495,136 @@ async def test_v8_readonly_inspection_restores_original_monitoring_context(monke
     assert result["status"] == "request_hash_verified"
     assert result["original_request_hash_matched"] is True
     assert committee._outputs == {}  # Readback cannot alter a live producer's state.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "price_rejected,sec_rejected", [(None, None), ("bear", None), (None, "evidence_audit")]
+)
+async def test_v10_independent_disclosure_proposal_is_bound_to_original_baseline(
+    monkeypatch, price_rejected, sec_rejected
+):
+    intent, outputs, seen = await produce(
+        monkeypatch, disclosure=True, rejected=price_rejected, disclosure_rejected=sec_rejected
+    )
+    assert len(seen) == 3
+    assert (intent.monitoring_proposal is not None) == (price_rejected is None)
+    assert (intent.disclosure_proposal is not None) == (sec_rejected is None)
+    original = outputs[2].disclosure_proposal
+    assert original.baseline_hash == "d" * 64
+    assert original.baseline_as_of == intent.decision_time
+    assert outputs[5].disclosure_review.proposal_hash == original.content_hash
+    assert outputs[6].disclosure_review.proposal_hash == original.content_hash
+    assert ResearchIntent.model_validate_json(intent.model_dump_json()) == intent
+
+
+def test_paper_context_serialization_schema_retains_closed_fields():
+    from nexus.agents.paper_context import AgentPaperResearchContext
+
+    schema = AgentPaperResearchContext.model_json_schema(mode="serialization")
+    assert schema["additionalProperties"] is False
+    assert "cycle_id" in schema.get("properties", {}), (
+        "wrap serializer must not erase the frozen schema"
+    )
+
+
+@pytest.mark.asyncio
+async def test_v10_capacity_reserves_disclosure_proposal_and_both_reviews(monkeypatch):
+    from nexus.agents.codex_capacity import _monitoring_capacity_view
+
+    captured = {}
+    await produce(monkeypatch, disclosure=True, capture=captured)
+    committee = codex_staged.StructuredStagedCodexCommittee(
+        prompts=captured["prompts"], tools=_tools(), paper_stage_scope=True
+    )
+    view = _monitoring_capacity_view(committee, captured["evidence"], captured["inputs"])
+    assert view._outputs["market_state"].disclosure_proposal is not None
+    assert view._outputs["bear"].disclosure_review is not None
+    assert view._outputs["evidence_audit"].disclosure_review is not None
+
+
+@pytest.mark.asyncio
+async def test_v10_global_audit_veto_cannot_be_overridden_by_disclosure_adoption(monkeypatch):
+    intent, _, _ = await produce(monkeypatch, disclosure=True, vote="oppose")
+    assert intent.disclosure_proposal is None and intent.monitoring_proposal is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "baseline_hash",
+        "baseline_time",
+        "context_missing",
+        "context_gap",
+        "context_instrument",
+        "review_hash",
+        "adoption_hash",
+        "paper_citation",
+        "missing_review",
+    ],
+)
+async def test_v10_exact_context_reviews_and_citations_cannot_be_forged(monkeypatch, fault):
+    import copy
+
+    from nexus.monitoring.disclosure_contracts import compile_disclosure_proposal
+
+    captured = {}
+    intent, outputs, _ = await produce(monkeypatch, disclosure=True, capture=captured)
+    proposal = intent.disclosure_proposal
+    reviews = {
+        row.role: row.disclosure_review for row in outputs if row.role in {"bear", "evidence_audit"}
+    }
+    context = copy.deepcopy(
+        captured["inputs"]["security_snapshot"]["items"][0]["agent_paper_context"][
+            "disclosure_monitoring"
+        ]
+    )
+    adoption = proposal.content_hash
+    if fault == "baseline_hash":
+        proposal = proposal.model_copy(update={"baseline_hash": "f" * 64})
+    elif fault == "baseline_time":
+        proposal = proposal.model_copy(
+            update={"baseline_as_of": intent.decision_time + timedelta(seconds=1)}
+        )
+    elif fault == "context_missing":
+        context = None
+    elif fault == "context_gap":
+        context.update(baseline=None, gap_reason="SEC_BASELINE_MISSING")
+    elif fault == "context_instrument":
+        context["instrument_id"] = context["baseline"]["instrument_id"] = str(UUID(int=500))
+    elif fault == "review_hash":
+        reviews["bear"] = reviews["bear"].model_copy(update={"proposal_hash": "f" * 64})
+    elif fault == "adoption_hash":
+        adoption = "f" * 64
+    elif fault == "paper_citation":
+        proposal = proposal.model_copy(update={"evidence_refs": captured["evidence"][:1]})
+    else:
+        reviews.pop("bear")
+    if fault in {"baseline_hash", "baseline_time", "paper_citation"}:
+        adoption = proposal.content_hash
+        reviews = {
+            key: value.model_copy(update={"proposal_hash": proposal.content_hash})
+            for key, value in reviews.items()
+        }
+    with pytest.raises(ValueError):
+        compile_disclosure_proposal(
+            proposal,
+            reviews,
+            context=context,
+            instrument_id=intent.instrument_id,
+            now=intent.decision_time,
+            evidence_refs=captured["evidence"],
+            audit_vote="support",
+            adoption_hash=adoption,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["foreign_hash", "missing_baseline"])
+async def test_v10_model_cannot_forge_baseline_or_probe_missing_evidence(monkeypatch, fault):
+    captured = {}
+    with pytest.raises(ValueError, match="DISCLOSURE_BASELINE_MISMATCH"):
+        await produce(monkeypatch, disclosure=True, disclosure_fault=fault, capture=captured)
+    assert [item["stage"] for item in captured["seen"]] == ["research"]
+    assert captured["committee"].failure_reason == "model_stage_output_invalid"

@@ -3696,6 +3696,146 @@ export const runtimeContractSchemas = {
     "title": "DiagnosticItemResponse",
     "type": "object"
   },
+  "DisclosureMonitoringProposal": {
+    "additionalProperties": false,
+    "properties": {
+      "baseline_as_of": {
+        "format": "date-time",
+        "title": "Baseline As Of",
+        "type": "string"
+      },
+      "baseline_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Baseline Hash",
+        "type": "string"
+      },
+      "baseline_snapshot_id": {
+        "format": "uuid",
+        "title": "Baseline Snapshot Id",
+        "type": "string"
+      },
+      "condition": {
+        "$ref": "#/components/schemas/DisclosureReviewCondition"
+      },
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 3,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "issuer_cik": {
+        "pattern": "^[0-9]{10}$",
+        "title": "Issuer Cik",
+        "type": "string"
+      },
+      "rationale": {
+        "maxLength": 160,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "review_due_at": {
+        "format": "date-time",
+        "title": "Review Due At",
+        "type": "string"
+      },
+      "valid_until": {
+        "format": "date-time",
+        "title": "Valid Until",
+        "type": "string"
+      }
+    },
+    "required": [
+      "condition",
+      "baseline_snapshot_id",
+      "baseline_hash",
+      "issuer_cik",
+      "baseline_as_of",
+      "rationale",
+      "evidence_refs",
+      "review_due_at",
+      "valid_until"
+    ],
+    "title": "DisclosureMonitoringProposal",
+    "type": "object"
+  },
+  "DisclosureReviewCondition": {
+    "additionalProperties": false,
+    "description": "New locally confirmed index membership, never publication or impact.",
+    "properties": {
+      "forms": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "const": "8-K",
+            "type": "string"
+          },
+          {
+            "const": "8-K/A",
+            "type": "string"
+          }
+        ],
+        "title": "Forms",
+        "type": "array"
+      },
+      "max_age_seconds": {
+        "const": 300,
+        "title": "Max Age Seconds",
+        "type": "integer"
+      },
+      "operator": {
+        "const": "exists_new",
+        "title": "Operator",
+        "type": "string"
+      },
+      "purpose": {
+        "const": "review",
+        "title": "Purpose",
+        "type": "string"
+      },
+      "signal": {
+        "const": "sec.issuer_disclosure_added",
+        "title": "Signal",
+        "type": "string"
+      },
+      "source": {
+        "const": "sec",
+        "title": "Source",
+        "type": "string"
+      },
+      "threshold": {
+        "title": "Threshold",
+        "type": "boolean"
+      },
+      "time_authority": {
+        "const": "frozen_index_vs_local_receipt",
+        "title": "Time Authority",
+        "type": "string"
+      },
+      "unit": {
+        "const": "filing",
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "purpose",
+      "source",
+      "forms",
+      "max_age_seconds",
+      "time_authority"
+    ],
+    "title": "DisclosureReviewCondition",
+    "type": "object"
+  },
   "DisplayReadiness": {
     "enum": [
       "DISPLAY_READY",
@@ -13887,6 +14027,16 @@ export const runtimeContractSchemas = {
         "minLength": 1,
         "title": "Disagreement",
         "type": "string"
+      },
+      "disclosure_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DisclosureMonitoringProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "display_symbol": {
         "maxLength": 32,

@@ -41,7 +41,8 @@ from nexus.agents.codex_versions import (
     ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import (
-    DAILY_PENDING_SCOPE_PROMPT_VERSION,
+    DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
+    DISCLOSURE_SCOPE_PROMPT_VERSION,
     MONITORING_SCOPE_PROMPT_VERSIONS,
     ROLE_ORDER,
     AgentRole,
@@ -233,7 +234,7 @@ def _monitoring_capacity_view(
         )
         for role in monitor_roles
     }
-    if committee._prompts["portfolio"].version == DAILY_PENDING_SCOPE_PROMPT_VERSION:
+    if committee._prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS:
         from nexus.monitoring.daily_contracts import (
             DailyPendingItem,
             DailyPendingProposal,
@@ -292,6 +293,50 @@ def _monitoring_capacity_view(
                 view._outputs[reviewer] = view._outputs[reviewer].model_copy(
                     update={"daily_pending_review": daily_review}
                 )
+    if committee._prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION:
+        from uuid import UUID
+
+        from nexus.monitoring.contracts import DisclosureReviewCondition
+        from nexus.monitoring.disclosure_contracts import (
+            DisclosureMonitoringProposal,
+            DisclosureMonitoringReview,
+        )
+
+        # A schema superset only, never research evidence or a usable baseline.
+        maximal = DisclosureMonitoringProposal(
+            condition=DisclosureReviewCondition(
+                signal="sec.issuer_disclosure_added",
+                operator="exists_new",
+                threshold=True,
+                unit="filing",
+                purpose="review",
+                source="sec",
+                forms=("8-K", "8-K/A"),
+                max_age_seconds=300,
+                time_authority="frozen_index_vs_local_receipt",
+            ),
+            baseline_snapshot_id=UUID(int=(1 << 128) - 1),
+            baseline_hash="f" * 64,
+            issuer_cik="9" * 10,
+            baseline_as_of=datetime.max.replace(tzinfo=UTC),
+            rationale="\x00" * 160,
+            evidence_refs=(widest_reference,) * 3,
+            review_due_at=datetime.max.replace(tzinfo=UTC),
+            valid_until=datetime.max.replace(tzinfo=UTC),
+        )
+        disclosure_review = DisclosureMonitoringReview(
+            proposal_hash=maximal.content_hash,
+            decision="accepted",
+            rationale="\x00" * 160,
+            evidence_refs=maximal.evidence_refs,
+        )
+        view._outputs["market_state"] = view._outputs["market_state"].model_copy(
+            update={"disclosure_proposal": maximal}
+        )
+        for role in ("bear", "evidence_audit"):
+            view._outputs[role] = view._outputs[role].model_copy(
+                update={"disclosure_review": disclosure_review}
+            )
     return view
 
 

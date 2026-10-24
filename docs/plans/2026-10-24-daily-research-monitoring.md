@@ -211,3 +211,18 @@
 Ruff/format/diff、23源Mypy、生成合同检查、pg-b 434项收集、迁移offline SQL通过。集中审查的负例假阳性已修，基线T0冻结与跨kind资格抑制均另有RED→GREEN；未发现剩余确定P1/P2。当前仅隔离事实及模型替身，无真实来源/模型/通知/券商请求，不改旧结果、不解除unknown/预算、不启动业务宿主。
 
 交付分层：SEC真值/闭集信号与旧unknown夹具修正可独立提交；kind迁移、所有旧消费者隔离及DB负例必须一起审阅，不能只落数据库唯一键就启用SEC写入。该核心diff体积主要来自显式DDL与跨表约束回归，未拆掉必要断言来减行。下一切片仍须实现研究时点实际冻结baseline、v10独立审核/采纳、封口批次聚合通知、精确accession内容准入、v2混合单股消费与双kind原子接替，然后继续完整页面矩阵、终审、最终同head CI和部署/兼容回滚，自然时段验收另列。完整Goal保持active。
+
+
+### 2026-10-24 正常 v10 研究生产者冻结 SEC T0 基线（本地候选）
+
+可靠 `DisclosureMonitoringContext` 已接入正常纸研究准备与精确读回。ready 绑定实际原件/receipt/canonical/index/issuer、四个本地可见时间及T0；旧baseline不因五分钟过期而失效。最新可见来源损坏或store失败是invalid gap，不回退旧件；missing/invalid保持当时冻结事实，后来到货不重选、不回填旧快照。只有原current观测需五分钟网络新鲜度，本文不将baseline当披露已研究证明。
+
+显式 `--disclosure-monitoring` 依赖既有price及formal bounded setup，注册新v10提示，不改变旧v8/v9资产。market_state可独立提出SEC/价格条件，bear和evidence_audit各审原hash，portfolio只采纳精确hash；global audit非support仍同时否决。SEC提案必须引用paper context并绑定baseline id/hash/issuer/T0；无ready baseline不能伪造提案或继续模型探测。新wire/intent schema静态资产独立，旧字段None仍省略；修复paper context wrap serializer丢闭集schema属性但不改历史字节。
+
+容量上界新增SEC proposal与两审，保持原8192输出、96k累计输入、100479 wire和截止；无新增SDK调用。快照冻结与准入共用prior/pinned/frozen/explicit/latest的版本解析，pinned v9/active v10不会增加SEC依赖，注册竞态导致两者scope不一致时整批nested transaction回滚，保护Job和预算。相邻回归另修受保护宿主初始身份：只读载入已封存配置后固定初始scope，后续数据库/账户/日历/batch/model/runtime漂移仍拒绝。
+
+正常三股CLI/setup→准备→Worker三阶段→Output/Run/已知用量→受保护API GET通过。合成原件/真实持久化fixture为AAPL ready、AVGO/NVDA明确missing gap，各三阶段各一次，原watch/partial正式defer不变。API核对原baseline hash和verified stage trace；无真实来源、模型、通知或业务宿主调用，不将这份受控链当自然行情或设备送达证明。
+
+验证：来源module13 PG+3unit（agent原16项，根串行集成）；根正常/邻域28 PG通过185.63秒。v10/旧hash/闭集schema/伪造及上下文50/52项定向unit均通过；最终正常producer2+真实protected-binding6共8 PG通过38.70秒，最终producer+loop344 unit通过9.09秒。整fast在最终authority修正前6645 passed/10skip/1deselected（224.81秒），后续采用上述定向复验，不冒称最终head全量fast或GitHub CI已完成。最终Mypy11源、Ruff/format/diff、生成客户端检查、Web typecheck通过。审查的版本选择P2已RED→GREEN，最终定向复核无新增确定P1/P2；所有源失败日志保留。
+
+该片仅交付正常冻结与审核后的条件生产/持久化，SEC plan安装、封口观测批次、聚合outbox、精确accession内容准入、v2混合单股消费及双kind原子接替仍待下一片；不启用半成品SEC扫描或把索引状态冒充正文影响复核。未来实际v10落盘后回滚需保留v10 schema/prompt/读取支持，不删除新事实。完整Goal继续active，最终CI/镜像/部署/回滚和自然交易验收尚未完成。

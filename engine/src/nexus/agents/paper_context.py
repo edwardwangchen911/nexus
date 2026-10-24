@@ -15,6 +15,7 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     ValidationError,
+    field_validator,
     model_serializer,
 )
 from sqlalchemy import select
@@ -23,6 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.monitoring.daily_context import DailyMonitorContext
+from nexus.monitoring.disclosure_context import (
+    DisclosureMonitoringContext,
+    freeze_disclosure_baseline,
+    validate_disclosure_baseline,
+)
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -97,10 +103,21 @@ class AgentPaperResearchContext(BaseModel):
     paper_portfolio: AgentPaperPortfolioContext
     execution_locked: Literal[True] = True
     pending_monitoring: DailyMonitorContext | None = None
+    disclosure_monitoring: DisclosureMonitoringContext | None = None
+
+    @field_validator("disclosure_monitoring", mode="before")
+    @classmethod
+    def _disclosure_json(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return DisclosureMonitoringContext.model_validate_json(json.dumps(value))
+        return value
 
     @model_serializer(mode="wrap")
-    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+    # Retain the closed serialization schema as well as historical payload bytes.
+    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         value = cast(dict[str, object], handler(self))
+        if self.disclosure_monitoring is None:
+            value.pop("disclosure_monitoring", None)
         if self.pending_monitoring is None:
             value.pop("pending_monitoring", None)
         return value
@@ -125,6 +142,7 @@ async def prepare_agent_paper_research_snapshot(
     decision_time: datetime,
     candidate: CandidateManifestEntry,
     projection: PaperPortfolioProjection,
+    disclosure_scope: bool = False,
 ) -> DataSnapshot:
     """Add exact cycle facts to an existing slow research snapshot without mutating it."""
     base = await session.get(DataSnapshot, candidate.research_snapshot_id)
@@ -219,7 +237,15 @@ async def prepare_agent_paper_research_snapshot(
     pending = await freeze_daily_pending(
         session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
     )
+    disclosure = (
+        await freeze_disclosure_baseline(
+            session, instrument_id=candidate.instrument_id, as_of=decision_time
+        )
+        if disclosure_scope
+        else None
+    )
     context = AgentPaperResearchContext(
+        disclosure_monitoring=disclosure,
         pending_monitoring=pending,
         cycle_id=cycle_id,
         instrument_id=candidate.instrument_id,
@@ -359,6 +385,14 @@ async def read_agent_paper_research_context(
         return None
     if context.instrument_id != instrument_id or context.decision_time != as_of:
         return None
+    if context.disclosure_monitoring is not None:
+        disclosure = context.disclosure_monitoring
+        if (
+            disclosure.instrument_id != instrument_id
+            or disclosure.research_as_of != as_of
+            or not await validate_disclosure_baseline(session, disclosure)
+        ):
+            return None
     if context.pending_monitoring is not None:
         from nexus.monitoring.daily_context import validate_daily_pending
 

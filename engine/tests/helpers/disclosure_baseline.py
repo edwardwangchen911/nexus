@@ -9,14 +9,22 @@ from nexus.ops.instrument_identity_local import import_identity
 from nexus.ops.sec_index_local import import_index
 
 
-async def import_baseline_identity(settings, store, root, *, symbol="AAPL", exchange="NYSE"):
+async def import_baseline_identity(
+    settings, store, root, *, symbol="AAPL", exchange="NYSE", received=None
+):
     assert exchange in {"NYSE", "NASDAQ"}
     raw = filing().replace(b"AAPL", symbol.encode())
     if exchange == "NASDAQ":
         raw = raw.replace(b"exch:XNYS", b"exch:XNAS").replace(
             b"New York Stock Exchange", b"The Nasdaq Stock Market LLC"
         )
-    fmp, sec = archives(root, symbol=symbol, fmp=profile(symbol=symbol, exchange=exchange), sec=raw)
+    fmp, sec = archives(
+        root,
+        symbol=symbol,
+        fmp=profile(symbol=symbol, exchange=exchange),
+        sec=raw,
+        received=received.isoformat() if received else None,
+    )
     return await import_identity(
         settings, symbol=symbol, fmp_archive=fmp, sec_archive=sec, store=store
     )

@@ -18,6 +18,10 @@ from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
 from nexus.monitoring.contracts import PriceMonitoringProposal, PriceMonitoringReview
 from nexus.monitoring.daily_contracts import DailyPendingProposal, DailyPendingReview
+from nexus.monitoring.disclosure_contracts import (
+    DisclosureMonitoringProposal,
+    DisclosureMonitoringReview,
+)
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
 type AgentRole = Literal[
@@ -286,6 +290,9 @@ class CommitteeRoleOutput(BaseModel):
     daily_pending_proposal: DailyPendingProposal | None = None
     daily_pending_review: DailyPendingReview | None = None
     daily_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    disclosure_proposal: DisclosureMonitoringProposal | None = None
+    disclosure_review: DisclosureMonitoringReview | None = None
+    disclosure_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     monitoring_proposal: PriceMonitoringProposal | None = None
     monitoring_review: PriceMonitoringReview | None = None
     monitoring_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -293,7 +300,13 @@ class CommitteeRoleOutput(BaseModel):
     @model_validator(mode="after")
     def _monitoring_role(self) -> "CommitteeRoleOutput":
         if (
-            self.daily_pending_proposal is not None
+            self.disclosure_proposal is not None
+            and self.role != "market_state"
+            or self.disclosure_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.disclosure_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.daily_pending_proposal is not None
             and self.role != "orchestrator"
             or self.daily_pending_review is not None
             and self.role not in {"bear", "evidence_audit"}
@@ -310,6 +323,8 @@ class CommitteeRoleOutput(BaseModel):
         for item in (
             *(self.daily_pending_proposal.items if self.daily_pending_proposal else ()),
             self.daily_pending_review,
+            self.disclosure_proposal,
+            self.disclosure_review,
             self.monitoring_proposal,
             self.monitoring_review,
         ):
@@ -324,6 +339,9 @@ class CommitteeRoleOutput(BaseModel):
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
         for name in (
+            "disclosure_proposal",
+            "disclosure_review",
+            "disclosure_adoption_hash",
             "monitoring_proposal",
             "monitoring_review",
             "monitoring_adoption_hash",
@@ -414,8 +432,12 @@ MONITORING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v8-price-monitor"
 
 
 DAILY_PENDING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v9-daily-pending"
+DISCLOSURE_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v10-sec-monitor"
+DAILY_PENDING_SCOPE_PROMPT_VERSIONS = frozenset(
+    {DAILY_PENDING_SCOPE_PROMPT_VERSION, DISCLOSURE_SCOPE_PROMPT_VERSION}
+)
 MONITORING_SCOPE_PROMPT_VERSIONS = frozenset(
-    {MONITORING_SCOPE_PROMPT_VERSION, DAILY_PENDING_SCOPE_PROMPT_VERSION}
+    {MONITORING_SCOPE_PROMPT_VERSION, *DAILY_PENDING_SCOPE_PROMPT_VERSIONS}
 )
 
 
@@ -426,6 +448,7 @@ def load_portfolio_synthesis_prompt(
     inference_review_scope: bool = False,
     monitoring_scope: bool = False,
     daily_pending_scope: bool = False,
+    disclosure_scope: bool = False,
 ) -> PromptAsset:
     """Load the immutable cross-source final-role prompt used by normal local setup."""
     if type(security_research_scope) is not bool:
@@ -440,8 +463,12 @@ def load_portfolio_synthesis_prompt(
         raise ValueError("MONITORING_SCOPE_INVALID")
     if type(daily_pending_scope) is not bool or (daily_pending_scope and not monitoring_scope):
         raise ValueError("DAILY_PENDING_SCOPE_INVALID")
+    if type(disclosure_scope) is not bool or (disclosure_scope and not daily_pending_scope):
+        raise ValueError("DISCLOSURE_SCOPE_INVALID")
     version = (
-        DAILY_PENDING_SCOPE_PROMPT_VERSION
+        DISCLOSURE_SCOPE_PROMPT_VERSION
+        if disclosure_scope
+        else DAILY_PENDING_SCOPE_PROMPT_VERSION
         if daily_pending_scope
         else MONITORING_SCOPE_PROMPT_VERSION
         if monitoring_scope

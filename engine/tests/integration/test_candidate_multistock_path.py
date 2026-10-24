@@ -47,6 +47,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     monitoring=False,
     monitoring_rejected=False,
     monitoring_threshold="123.45",
+    disclosure=False,
+    before_research=None,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -67,6 +69,14 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         monkeypatch,
         candidate_instruments=FIVE[:count],
         decision_time=AT,
+        **(
+            {
+                "candidate_symbols": ("AAPL", "AVGO", "NVDA")[:count],
+                "risk_bucket_overrides": {INSTRUMENTS[0][0]: "EQUITY"},
+            }
+            if disclosure
+            else {}
+        ),
     )
     if monitoring:
         from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
@@ -74,7 +84,11 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         # Register a later immutable version, without changing any old prompt.
         await _set_test_insert_clock(sessions, AT - timedelta(seconds=1))
         await prepare_database(
-            settings, **V9_OPTIONS, formal_bounded_stage_budget=True, price_monitoring=True
+            settings,
+            **V9_OPTIONS,
+            formal_bounded_stage_budget=True,
+            price_monitoring=True,
+            disclosure_monitoring=disclosure,
         )
         from nexus.agents.persistence import load_complete_prompt_authority
         from nexus.persistence.models.agents import AgentPromptVersionRecord
@@ -88,9 +102,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     )
                 )
             ).all()
-            assert (
-                selected_prompts["portfolio"].version
-                == "local-portfolio-synthesis-v9-daily-pending"
+            assert selected_prompts["portfolio"].version == (
+                "local-portfolio-synthesis-v10-sec-monitor"
+                if disclosure
+                else "local-portfolio-synthesis-v9-daily-pending"
             ), [(row.version, row.created_at.isoformat()) for row in prompt_rows]
     calls = []
 
@@ -116,7 +131,14 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
 
         monkeypatch.setattr(AsyncSession, "scalar", database_clock)
 
+    if before_research is not None:
+        await before_research(settings, sessions, authority, manifest, clock_at)
+
     async def invoke(payload, **kwargs):
+        if disclosure:
+            from unit.agents.test_codex_sdk import _restore_view
+
+            payload = _restore_view(payload)
         stage = payload["stage"]
         calls.append(stage)
         assert kwargs["timeout_seconds"] > 0
@@ -184,6 +206,54 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 response["monitoring_adoption_hash"] = payload["monitoring_proposal"][
                     "content_hash"
                 ]
+        if disclosure:
+            from nexus.monitoring.disclosure_contracts import disclosure_from_inputs
+
+            context = disclosure_from_inputs(payload["frozen_inputs"])
+            baseline = context.get("baseline") if isinstance(context, dict) else None
+            reference = next(
+                row["index"]
+                for row in payload["evidence"]
+                if row["source"] == "nexus_agent_paper_context"
+            )
+            if stage == "research":
+                for row in response["roles"]:
+                    row["disclosure_proposal"] = None
+                    if row["role"] == "market_state" and baseline is not None:
+                        row["disclosure_proposal"] = {
+                            "condition": {
+                                "signal": "sec.issuer_disclosure_added",
+                                "operator": "exists_new",
+                                "threshold": True,
+                                "unit": "filing",
+                                "purpose": "review",
+                                "source": "sec",
+                                "forms": ["8-K", "8-K/A"],
+                                "max_age_seconds": 300,
+                                "time_authority": "frozen_index_vs_local_receipt",
+                            },
+                            "baseline_hash": baseline["snapshot_hash"],
+                            "rationale": "新收录披露仅触发复核，正文影响仍需核验。",
+                            "citations": [reference],
+                            "review_due_at": (AT + timedelta(days=1)).isoformat(),
+                            "valid_until": (AT + timedelta(days=2)).isoformat(),
+                        }
+            elif stage == "critique":
+                for row in response["roles"]:
+                    row["disclosure_review"] = (
+                        None
+                        if baseline is None
+                        else {
+                            "proposal_hash": payload["disclosure_proposal"]["content_hash"],
+                            "decision": "accepted",
+                            "rationale": "复核原件基线、截止和指定类别。",
+                            "citations": [reference],
+                        }
+                    )
+            else:
+                response["disclosure_adoption_hash"] = (
+                    payload["disclosure_proposal"]["content_hash"] if baseline is not None else None
+                )
         return json.dumps(response), UsageSnapshot(input_tokens=100, output_tokens=100)
 
     monkeypatch.setattr("nexus.worker._ONCE_STARTED_AT", AT)
@@ -329,7 +399,11 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             if monitoring:
                 assert all(
                     run.prompt_manifest["portfolio"]["version"]
-                    == "local-portfolio-synthesis-v9-daily-pending"
+                    == (
+                        "local-portfolio-synthesis-v10-sec-monitor"
+                        if disclosure
+                        else "local-portfolio-synthesis-v9-daily-pending"
+                    )
                     for run in runs
                 ), [run.prompt_manifest["portfolio"] for run in runs]
             assert all(
