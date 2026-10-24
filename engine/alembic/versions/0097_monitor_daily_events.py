@@ -191,13 +191,6 @@ BEGIN
   IF jsonb_typeof(predecessor) IS DISTINCT FROM 'object'
    OR NOT (predecessor ?& ARRAY['plan_id','generation'])
    OR ((predecessor->'plan_id'='null'::jsonb) IS DISTINCT FROM (predecessor->'generation'='null'::jsonb))
-   OR (predecessor->>'plan_id' IS NULL AND EXISTS(SELECT 1 FROM public.research_monitor_plans p
-     WHERE p.kind=k AND p.account_id::text=c->>'account_id' AND p.instrument_id::text=c->>'instrument_id'
-      AND greatest(p.created_at,p.effective_at)<=s.observed_at))
-   OR EXISTS(SELECT 1 FROM public.research_monitor_plans p WHERE p.kind=k
-     AND p.account_id::text=c->>'account_id' AND p.instrument_id::text=c->>'instrument_id'
-     AND greatest(p.created_at,p.effective_at)<=s.observed_at
-     AND p.generation>(predecessor->>'generation')::integer)
    OR (predecessor->>'plan_id' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.research_monitor_plans p
      WHERE p.id::text=predecessor->>'plan_id' AND p.generation=(predecessor->>'generation')::integer
       AND p.kind=k AND p.account_id::text=c->>'account_id' AND p.instrument_id::text=c->>'instrument_id'
