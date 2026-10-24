@@ -46,6 +46,7 @@ describe("saved price monitoring readback", () => {
     expect(screen.getByText(/买卖报价中间价/)).toHaveTextContent("未复权");
     expect(screen.getByText(/不低于/)).toHaveTextContent("123.457 USD");
     expect(screen.getByText(/60 秒/)).toBeVisible();
+    expect(screen.getByText(/研究完成不等于触发影响已完成复核/)).toBeVisible();
   });
 
   it.each([

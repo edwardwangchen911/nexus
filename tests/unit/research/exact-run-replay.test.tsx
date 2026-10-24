@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BriefPanel } from "../../../app/(protected)/briefs/[sessionDate]/page";
 import ResearchPage from "../../../app/(protected)/research/[instrumentId]/page";
+import { disclosureMonitoring } from "./disclosure-monitoring-fixture";
 import { briefData, decisionTime, instrumentId, researchAdmissionEnvelope, researchEnvelope, runId } from "./fixtures";
 
 let query = new URLSearchParams();
@@ -69,6 +70,30 @@ describe("brief links preserve the exact saved run", () => {
     await act(async () => resolveOld(Response.json(researchEnvelope())));
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "个股研究证据页" })).toHaveAttribute("data-state", "empty");
+  });
+
+  it("keeps saved SEC evidence visibly stale after a failed GET and clears it on permission loss", async () => {
+    const envelope = researchEnvelope();
+    Object.assign(envelope.data, { disclosure_monitoring: disclosureMonitoring() });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json(envelope))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }));
+    vi.stubGlobal("fetch", fetch);
+    render(<ResearchPage />);
+    await screen.findByRole("region", { name: "SEC 披露监控记录" });
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: "个股研究证据页" })).toHaveAttribute("data-state", "stale"));
+    expect(screen.getByRole("region", { name: "SEC 披露监控记录" })).toBeVisible();
+    expect(screen.getByText(/保留最后证据供核验/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: "个股研究证据页" })).toHaveAttribute("data-state", "forbidden"));
+    expect(screen.queryByRole("region", { name: "SEC 披露监控记录" })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    for (const [url, init] of fetch.mock.calls) {
+      expect(url).toBe(`/api/v1/research-runs/${runId}`);
+      expect(init.method).toBeUndefined();
+    }
   });
 
   it("keeps the existing as_of entry and admission behavior", async () => {

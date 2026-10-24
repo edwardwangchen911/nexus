@@ -5,7 +5,7 @@ import { Badge } from "./ui/badge";
 
 export type PriceMonitoringView = components["schemas"]["ResearchMonitoringView"];
 
-const stateLabels = {
+export const stateLabels = {
   not_installed: "尚未安装监控计划", valid: "计划有效期内", expired: "计划已过期",
   superseded: "已由新研究替代", withdrawn: "计划已撤回", unknown: "计划状态未知",
 } as const;
@@ -17,36 +17,39 @@ const checkReasons = {
   price_missing: "缺少可用价格，无法判断本次条件。",
 } as const;
 
-const coverageReasons = {
+export const coverageReasons = {
   audit_rejected: "研究审查未通过，监控覆盖尚未建立。",
   source_invalid: "监控所需来源未通过核验，覆盖暂不可用。",
   no_condition: "研究未提供可安装的价格复核条件。",
   run_failed: "研究运行失败，未建立新的监控覆盖。",
   usage_unknown: "研究用量未知，预算继续保留，监控覆盖尚待核对。",
+  events_unresolved: "仍有事件尚未解决，该类监控覆盖尚未接替。",
+  review_unverified: "事件处理提案未通过完整复核，不能据此确认覆盖。",
+  replacement_rejected: "监控计划接替未完成，未建立新的监控覆盖。",
   awaiting_reconciliation: "研究结果仍待核对，监控覆盖尚未确认。",
 } as const;
 
-const researchStatuses = {
+export const researchStatuses = {
   pending: "等待处理", blocked: "处理受阻", admitted: "研究已登记",
   completed: "研究已完成", failed: "研究失败", unknown: "研究结果未知", covered: "已由其他研究覆盖",
 } as const;
 
-const blockedReasons = {
+export const blockedReasons = {
   budget: "预算不足或预算仍被占用。", account_occupied: "账户已有研究任务占用。",
   inputs: "研究输入尚不满足要求。", overflow: "待处理任务达到容量上限。", unknown: "受阻原因尚未确认。",
 } as const;
 
-const usageStatuses = {
+export const usageStatuses = {
   not_started: "研究尚未开始", in_progress: "用量待结算", known: "用量已确认",
   unknown: "用量未知，预算继续保留；不会据此重放研究。",
 } as const;
 
-const notificationStatuses = {
+export const notificationStatuses = {
   queued: "通知等待处理", delivering: "通知正在处理", published: "通知发布处理已完成",
   dead_letter: "通知处理失败", unknown: "通知处理状态未知",
 } as const;
 
-function researchHref(instrumentId: string, runId: string): string {
+export function researchHref(instrumentId: string, runId: string): string {
   return `/research/${encodeURIComponent(instrumentId)}?run_id=${encodeURIComponent(runId)}`;
 }
 
@@ -91,7 +94,7 @@ export function ResearchMonitoring({ monitoring, instrumentId }: { monitoring: P
       </section>
       <section className="decision-card__section" aria-label="触发与后续处理">
         <h3>触发与后续处理</h3>
-        <p>已记录 {monitoring.trigger_count} 次触发。触发记录与研究完成、通知处理分别判断。</p>
+        <p>已记录 {monitoring.trigger_count} 次触发。触发记录与研究完成、通知处理分别判断。研究完成不等于触发影响已完成复核。</p>
         {recent.length ? <details>
           <summary>查看最近 {recent.length} 次触发</summary>
           <ol>{recent.map((trigger) => <li key={trigger.trigger_id}>
