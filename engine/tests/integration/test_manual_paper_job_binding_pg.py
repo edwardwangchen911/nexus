@@ -286,6 +286,26 @@ async def test_formal_entries_require_settled_matching_historical_jobs(
                     )
                 )
             admitted = False
+        # Monitor admission may qualify a completed scheduled execution, but
+        # that option cannot waive exact Job identity, known usage or leases.
+        from nexus.paper.manual_request import require_manual_account_available
+
+        async with sessions.begin() as session:
+            if admitted:
+                await require_manual_account_available(
+                    session,
+                    account_id=authority.account_id,
+                    now=observed_at,
+                    allow_scheduled_completion=True,
+                )
+            else:
+                with pytest.raises(ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"):
+                    await require_manual_account_available(
+                        session,
+                        account_id=authority.account_id,
+                        now=observed_at,
+                        allow_scheduled_completion=True,
+                    )
         # Provider collection releases the reservation transaction. Recheck
         # history at cycle creation before admitting any additional research.
         async with sessions() as session:

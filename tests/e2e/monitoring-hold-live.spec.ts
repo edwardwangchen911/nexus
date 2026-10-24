@@ -1,0 +1,54 @@
+import fs from "node:fs";
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+
+const directory = process.env.NEXUS_TEST_MONITOR_BROWSER_DIR;
+test.skip(!directory, "requires the owned filled-position monitoring fixture");
+
+test("normal BFF and page distinguish a completed hold and its exact incremental research", async ({ page }) => {
+  const ready = JSON.parse(fs.readFileSync(path.join(directory!, "ready.json"), "utf8"));
+  expect(ready.held_count).toBe(2);
+  expect(ready.daily_stages).toBe(9);
+  expect(ready.increment_stages).toBe(3);
+  const writes: string[] = [];
+  const errors: string[] = [];
+  page.on("request", request => { if (request.url().includes("/api/") && request.method() !== "GET") writes.push(request.method()); });
+  page.on("pageerror", error => errors.push(String(error)));
+  await page.route("**/*", route => ["127.0.0.1", "localhost"].includes(new URL(route.request().url()).hostname)
+    ? route.continue() : route.abort());
+  const responsePromise = page.waitForResponse(response => response.url().includes(`/api/v1/research-runs/${ready.run_id}`));
+  await page.goto(`/research/${ready.instrument_id}?run_id=${ready.run_id}`);
+  const response = await responsePromise;
+  expect(response.status()).toBe(200);
+  const body = await response.json();
+  expect(body.data.intent).toEqual(ready.response.data.intent);
+  expect(body.data.monitoring).toEqual(ready.response.data.monitoring);
+  expect(body.data.intent.stance).toBe("hold");
+  expect(body.data.intent.exposure_action).toBe("maintain");
+  expect(body.data.intent.quality_status).toBe("complete");
+  await expect(page.getByRole("article", { name: "委员会决策记录" }).locator(".decision-card__badges")).toContainText("持有");
+  const price = page.getByRole("region", { name: "价格监控记录" });
+  await expect(price).toContainText("交易保持锁定");
+  await expect(price).toContainText("已由新研究替代");
+  await price.locator("summary").click();
+  await expect(price).toContainText("用量已确认");
+  await expect(price).toContainText("通知发布处理已完成");
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.screenshot({ path: path.join(directory!, "desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(directory!, "mobile.png"), fullPage: true });
+  await price.screenshot({ path: path.join(directory!, "price-mobile.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  const childPromise = page.waitForResponse(response => response.url().includes(`/api/v1/research-runs/${ready.child_id}`));
+  await price.getByRole("link", { name: "查看本次触发的研究" }).click();
+  const childResponse = await childPromise;
+  expect(childResponse.status()).toBe(200);
+  const child = await childResponse.json();
+  expect(child.data.run_id).toBe(ready.child_id);
+  expect(child.data.intent.stance).toBe("hold");
+  expect(child.data.intent.quality_status).toBe("complete");
+  await expect(page.getByRole("region", { name: "个股研究证据页" })).toHaveAttribute("data-state", "ready");
+  expect(writes).toEqual([]);
+  expect(errors).toEqual([]);
+  fs.writeFileSync(path.join(directory!, "browser-proof.json"), JSON.stringify({ passed: true, writes, errors, status: response.status(), child_status: childResponse.status() }));
+});

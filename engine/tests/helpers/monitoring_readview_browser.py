@@ -11,7 +11,12 @@ import uvicorn
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET
 
 
-async def verify_monitoring_browser(application, *, directory: Path) -> None:
+async def verify_monitoring_browser(
+    application,
+    *,
+    directory: Path,
+    spec_path: str = "tests/e2e/monitoring-readview-live.spec.ts",
+) -> None:
     for port in (8129, 4193):
         with socket.socket() as probe:
             # Match the server's normal TCP restart semantics; TIME_WAIT is not
@@ -84,7 +89,7 @@ async def verify_monitoring_browser(application, *, directory: Path) -> None:
             "npx",
             "playwright",
             "test",
-            "tests/e2e/monitoring-readview-live.spec.ts",
+            spec_path,
             "--workers=1",
             "--reporter=line",
             env=environment,

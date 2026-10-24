@@ -266,7 +266,11 @@ async def _admit_trigger(
         if run is None:
             raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
         return await require_increment_binding(session, run)
-    await require_manual_account_available(session, account_id=account_id, now=now)
+    # A monitor continues the scheduled loop after its deterministic execution
+    # proof; the history validator still checks every Job, fee and live lease.
+    await require_manual_account_available(
+        session, account_id=account_id, now=now, allow_scheduled_completion=True
+    )
     await lock_security(session, account_id=account_id, instrument_id=trigger.instrument_id)
     await session.refresh(trigger, with_for_update=True)
     from nexus.monitoring.mixed_readback import unadmitted_stock_count

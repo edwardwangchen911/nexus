@@ -102,6 +102,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_monitor_pending_pg.py",
     "engine/tests/integration/test_monitor_daily_pending_pg.py",
     "engine/tests/integration/test_monitor_view_pg.py",
+    "engine/tests/integration/test_monitor_hold_path_pg.py",
     "engine/tests/integration/test_monitor_kinds_pg.py",
     "engine/tests/integration/test_disclosure_context_pg.py",
     "engine/tests/integration/test_disclosure_producer_pg.py",

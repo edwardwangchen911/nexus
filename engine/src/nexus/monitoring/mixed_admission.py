@@ -108,7 +108,9 @@ async def _admit_batch(
         if run is None:
             raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
         return await require_increment_binding(session, run)
-    await require_manual_account_available(session, account_id=account_id, now=now)
+    await require_manual_account_available(
+        session, account_id=account_id, now=now, allow_scheduled_completion=True
+    )
     from nexus.monitoring.mixed_readback import unadmitted_stock_count
 
     if (

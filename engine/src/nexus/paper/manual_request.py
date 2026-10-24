@@ -281,6 +281,7 @@ async def require_manual_account_available(
     account_id: UUID,
     now: datetime,
     excluding_request_id: UUID | None = None,
+    allow_scheduled_completion: bool = False,
 ) -> None:
     from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
 
@@ -289,7 +290,11 @@ async def require_manual_account_available(
     # Keep the primary request/occupancy diagnostic before its auxiliary claim.
     # Both guards remain required before admitting any new request.
     await require_manual_account_state_available(
-        session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
+        session,
+        account_id=account_id,
+        now=now,
+        excluding_request_id=excluding_request_id,
+        allow_scheduled_completion=allow_scheduled_completion,
     )
     await require_acknowledged_native_claims(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
@@ -302,6 +307,7 @@ async def require_manual_account_state_available(
     account_id: UUID,
     now: datetime,
     excluding_request_id: UUID | None = None,
+    allow_scheduled_completion: bool = False,
 ) -> None:
     """Account state gates independent of native claim acceptance checks."""
     await lock_portfolio_account(session, account_id)
@@ -311,7 +317,12 @@ async def require_manual_account_state_available(
     await require_manual_request_history(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
     )
-    await require_settled_account_cycle_history(session, account_id=account_id, now=now)
+    await require_settled_account_cycle_history(
+        session,
+        account_id=account_id,
+        now=now,
+        allow_scheduled_completion=allow_scheduled_completion,
+    )
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
     await require_activation_projection_unoccupied(

@@ -291,7 +291,7 @@ describe("research evidence docket", () => {
     expect(screen.getByText("时点冻结研究")).toBeVisible();
     expect(screen.getByText("研究证据").closest("li")).toHaveAttribute("aria-current", "step");
     expect(screen.getByRole("heading", { name: "委员会决策记录" })).toBeVisible();
-    expect(screen.getByText("保持观察", { exact: true })).toBeVisible();
+    expect(screen.getByText("持有", { exact: true })).toBeVisible();
     expect(screen.getByRole("heading", { name: "支持论点" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "反方论点" })).toBeVisible();
     expect(screen.getByText(/空头角色认为增长放缓/)).toBeVisible();
