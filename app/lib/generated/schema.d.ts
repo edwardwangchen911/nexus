@@ -2550,7 +2550,7 @@ export interface components {
             unknown_reason: string | null;
         };
         /** @enum {string} */
-        CoverageReason: "audit_rejected" | "source_invalid" | "no_condition" | "run_failed" | "usage_unknown" | "awaiting_reconciliation";
+        CoverageReason: "audit_rejected" | "source_invalid" | "no_condition" | "run_failed" | "usage_unknown" | "awaiting_reconciliation" | "events_unresolved" | "review_unverified" | "replacement_rejected";
         CurrencyCode: string;
         /** @enum {string} */
         CycleStatus: "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
@@ -6290,6 +6290,100 @@ export interface components {
              */
             schema_version: "research_condition_evaluation_v1";
         };
+        /** ResearchDisclosureMonitorCheck */
+        ResearchDisclosureMonitorCheck: {
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Reason */
+            reason: "observation_unverified" | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "true" | "false" | "unknown";
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+        };
+        /** ResearchDisclosureMonitoringView */
+        ResearchDisclosureMonitoringView: {
+            /** Baseline As Of */
+            baseline_as_of: string | null;
+            condition: components["schemas"]["DisclosureReviewCondition"] | null;
+            coverage_reason: components["schemas"]["CoverageReason"] | null;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            latest_check: components["schemas"]["ResearchDisclosureMonitorCheck"] | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Plan Id */
+            plan_id: string | null;
+            /** Replacement Run Id */
+            replacement_run_id: string | null;
+            /** Review Due At */
+            review_due_at: string | null;
+            state: components["schemas"]["MonitoringState"];
+            /**
+             * Trigger Count
+             * @default 0
+             */
+            trigger_count: number;
+            /**
+             * Triggers
+             * @default []
+             */
+            triggers: components["schemas"]["ResearchDisclosureMonitorTrigger"][];
+            /** Valid Until */
+            valid_until: string | null;
+        };
+        /** ResearchDisclosureMonitorTrigger */
+        ResearchDisclosureMonitorTrigger: {
+            /** Batch Id */
+            batch_id: string | null;
+            blocked_reason: components["schemas"]["BlockedReason"] | null;
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Event Key */
+            event_key: string;
+            /**
+             * Event Review
+             * @enum {string}
+             */
+            event_review: "addressed" | "unresolved" | "unverified" | "not_performed";
+            /**
+             * Notification Status
+             * @enum {string}
+             */
+            notification_status: "queued" | "delivering" | "published" | "dead_letter" | "unknown";
+            /** Run Id */
+            run_id: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "blocked" | "admitted" | "completed" | "failed" | "unknown" | "covered";
+            /**
+             * Trigger Id
+             * Format: uuid
+             */
+            trigger_id: string;
+            usage_status: components["schemas"]["UsageStatus"];
+        };
         /** ResearchInputActionEvent */
         ResearchInputActionEvent: {
             /** Category */
@@ -7503,6 +7597,7 @@ export interface components {
             decision_time: string;
             /** Disagreement */
             disagreement?: string | null;
+            disclosure_monitoring?: components["schemas"]["ResearchDisclosureMonitoringView"] | null;
             /** Evidence */
             evidence: components["schemas"]["EvidenceRef"][];
             failed_stage_input?: components["schemas"]["StageInputIdentity"] | null;

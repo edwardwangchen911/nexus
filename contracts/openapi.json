@@ -3601,7 +3601,10 @@
           "no_condition",
           "run_failed",
           "usage_unknown",
-          "awaiting_reconciliation"
+          "awaiting_reconciliation",
+          "events_unresolved",
+          "review_unverified",
+          "replacement_rejected"
         ],
         "type": "string"
       },
@@ -13194,6 +13197,295 @@
         "title": "ResearchConditionEvaluation",
         "type": "object"
       },
+      "ResearchDisclosureMonitorCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "const": "observation_unverified",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "result": {
+            "enum": [
+              "true",
+              "false",
+              "unknown"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "scheduled_at": {
+            "format": "date-time",
+            "title": "Scheduled At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "scheduled_at",
+          "checked_at",
+          "reason"
+        ],
+        "title": "ResearchDisclosureMonitorCheck",
+        "type": "object"
+      },
+      "ResearchDisclosureMonitorTrigger": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "blocked_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BlockedReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "event_key": {
+            "title": "Event Key",
+            "type": "string"
+          },
+          "event_review": {
+            "enum": [
+              "addressed",
+              "unresolved",
+              "unverified",
+              "not_performed"
+            ],
+            "title": "Event Review",
+            "type": "string"
+          },
+          "notification_status": {
+            "enum": [
+              "queued",
+              "delivering",
+              "published",
+              "dead_letter",
+              "unknown"
+            ],
+            "title": "Notification Status",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "blocked",
+              "admitted",
+              "completed",
+              "failed",
+              "unknown",
+              "covered"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger_id": {
+            "format": "uuid",
+            "title": "Trigger Id",
+            "type": "string"
+          },
+          "usage_status": {
+            "$ref": "#/components/schemas/UsageStatus"
+          }
+        },
+        "required": [
+          "trigger_id",
+          "batch_id",
+          "event_key",
+          "checked_at",
+          "status",
+          "blocked_reason",
+          "run_id",
+          "usage_status",
+          "notification_status",
+          "event_review"
+        ],
+        "title": "ResearchDisclosureMonitorTrigger",
+        "type": "object"
+      },
+      "ResearchDisclosureMonitoringView": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline As Of"
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DisclosureReviewCondition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_locked": {
+            "const": true,
+            "default": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "latest_check": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchDisclosureMonitorCheck"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "plan_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Id"
+          },
+          "replacement_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replacement Run Id"
+          },
+          "review_due_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Due At"
+          },
+          "state": {
+            "$ref": "#/components/schemas/MonitoringState"
+          },
+          "trigger_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Trigger Count",
+            "type": "integer"
+          },
+          "triggers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ResearchDisclosureMonitorTrigger"
+            },
+            "maxItems": 5,
+            "title": "Triggers",
+            "type": "array"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          }
+        },
+        "required": [
+          "observed_at",
+          "state",
+          "coverage_reason",
+          "plan_id",
+          "condition",
+          "baseline_as_of",
+          "review_due_at",
+          "valid_until",
+          "replacement_run_id",
+          "latest_check",
+          "trigger_count",
+          "triggers",
+          "execution_locked"
+        ],
+        "title": "ResearchDisclosureMonitoringView",
+        "type": "object"
+      },
       "ResearchInputActionEvent": {
         "additionalProperties": false,
         "properties": {
@@ -15993,6 +16285,16 @@
               }
             ],
             "title": "Disagreement"
+          },
+          "disclosure_monitoring": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchDisclosureMonitoringView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "evidence": {
             "items": {

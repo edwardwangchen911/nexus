@@ -590,3 +590,43 @@ price proof与API读回仍有效；损坏证明时仅在隔离测试库临时关
 的绑定及精确activation幂等回执（target_created=false、无batch），不能错误要求新target。
 最初同时接受两个收尾码的宽断言已移除；两次收紧时发现的错误期望均保留日志，不改生产
 政策或夹具质量，不据本case回填旧partial、未知用量或自然结果。最终精确整链1项通过（371.12秒）；坏proof拒绝后十类ID集合零新增，原快照/hash/归属及旧预算值保持。
+
+### 2026-10-25 双类监控正常API/BFF/页面（本地候选）
+
+新增可空 disclosure_monitoring 读模型，旧研究没有声明SEC监控时保持null；价格与SEC各有
+独立计划状态/覆盖原因/检查时点。每项披露分别显示原批次、申报号、原/接替Run、用量与
+通知状态，以及 addressed/unresolved/unverified/not_performed，不从Job completed推导已复核。
+最近五项只是页面有界预览，完整总数与原批次不变；不把索引发现说成经营影响或设备送达。
+
+三类固定gap原因接入生成合同、BFF闭合校验与两卡片文案：仍有事件未解决、完整复核尚未
+通过、计划接替未完成。不猜是资料缺口、审核否决或研究质量不足。GET只读，不reconcile、
+采集、调用模型或派发Job；交易锁、原正式门禁及十秒BFF上限不改。无新依赖/配置/迁移。
+同源mixed资格仅在一次reader作用域按精确Run/Output复用，逐事件hash/review/member和
+双kind coverage仍独验。坏daily proof不借用新Run用量；SEC额外核未来Job终态、子Run及
+通知时点，未来数据退未知。旧price历史asof相对SEC仍有静态差异，列入后续完整时点矩阵，
+不以公开GET固定current read_at为由假称任意历史时点均已验证。
+
+后端7项真实隔离PG通过（604.23秒），覆盖正常受保护ASGI双SEC同批/price兼容/旧时点、
+正常mixed及两类部分未解决、审核/接替拒绝、合法新daily proof与单坏proof原Run/known回退。
+新6unit通过；完整引擎fast6865通过/10skip/1deselected（243.16秒）、661源Mypy及Ruff通过。
+正常generate、check:generated、TypeScript、ESLint和Vinext build通过。Web标准全套1344通过/
+1skip（37.54秒）；先前并发时既有工作台摘要等待1fail保留，单文件26及限并发全套通过，
+未改该断言/超时/生产代码，不把资源假设当已确认根因。独立只读复核无新增P1/P2。
+
+实际loopback TCP API→正常BFF→Chrome页面已覆盖待处理与三种gap，手机390px无横溢，
+截图已人工核看；pending后的503/403由浏览器受控传输注入，分别保留stale旧内容/清空两pane。
+三种gap来自明确合成coverage投影，不冒充自然模型结论；正常生产者语义由上述native PG证明。
+未知/已复核及精确事件研究链接的最后严格2项通过（91.81秒）；前四类同代码实际页已过，
+合计六类真实HTTP/BFF/浏览器证据齐备，不能称存在一次最终六项同命令全绿。所有资料/SDK/通知为替身，
+业务库/宿主、旧请求、未知接受及预算保护未动；不宣称CLI进程、自然行情、真实模型或送达。
+
+未知混合研究即使租约自然到期，也因费用未知停在awaiting_mixed_review，不获覆盖采纳；
+API应显示awaiting_reconciliation，逐项用量unknown且budget reserved。测试先错误要求
+usage_unknown coverage，现按原consumer已知结算门禁严格核对“无覆盖行+待复核计数”，
+不写假unknown覆盖、不接受未知影响或放宽断言集合。十秒耗时用真实单调时钟；合成数据库
+与worker使用显式固定业务读时点，HMAC/实际网络耗时不改。端口探测按正常SO_REUSEADDR
+语义排除TIME_WAIT，不复用其他存活服务。
+
+仍需剩余hold/安全时点及完整矩阵、指定Chat全diff终审、最终head全部必需CI、镜像/兼容
+0086采纳+0097/v2/gap回滚、合入部署和自然市场；本轮尚未push/创建PR/合入/部署，完整目标
+保持未完成。最终CI分组耗时须按实际同head全部job日志聚合，不以扩业务期限/删测试掩盖。
