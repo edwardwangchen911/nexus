@@ -344,3 +344,27 @@ class MonitorObservationBatch(ImmutableCreatedAt, Base):
     check_ids: Mapped[list[str]] = mapped_column(JSONB)
     trigger_ids: Mapped[list[str]] = mapped_column(JSONB)
     outbox_id: Mapped[UUID | None] = mapped_column(ForeignKey("outbox_events.id"), unique=True)
+
+
+class MonitorMixedEventReceipt(ImmutableCreatedAt, Base):
+    """An addressed frozen event, with original dual review and typed coverage."""
+
+    __tablename__ = "research_monitor_mixed_event_receipts"
+    __table_args__ = (
+        UniqueConstraint("trigger_id"),
+        CheckConstraint("context_hash ~ '^[0-9a-f]{64}$'", name="context_hash_canonical"),
+        CheckConstraint("proposal_hash ~ '^[0-9a-f]{64}$'", name="proposal_hash_canonical"),
+        CheckConstraint("review_hash ~ '^[0-9a-f]{64}$'", name="review_hash_canonical"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
+    batch_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_batches.id"))
+    trigger_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_triggers.id"))
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    output_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_outputs.id"))
+    materials_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    context_hash: Mapped[str] = mapped_column(String(64))
+    proposal_hash: Mapped[str] = mapped_column(String(64))
+    review_hash: Mapped[str] = mapped_column(String(64))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
