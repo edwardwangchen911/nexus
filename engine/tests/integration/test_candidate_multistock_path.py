@@ -45,6 +45,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     decision_delay=None,
     sdk_lifecycle_case=None,
     monitoring=False,
+    monitoring_rejected=False,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -167,7 +168,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 for row in response["roles"]:
                     row["monitoring_review"] = {
                         "proposal_hash": payload["monitoring_proposal"]["content_hash"],
-                        "decision": "accepted",
+                        "decision": "rejected"
+                        if monitoring_rejected and row["role"] == "evidence_audit"
+                        else "accepted",
                         "rationale": "核对冻结证据、价格口径和复核时限。",
                         "citations": [0],
                     }

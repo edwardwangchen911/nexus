@@ -172,3 +172,22 @@ def test_invalid_timeout_is_rejected(seconds):
 
     with pytest.raises(ValueError, match="^MONITOR_SCAN_TIMEOUT_INVALID$"):
         host.PriceMonitorCoordinator(scan, timeout_seconds=seconds)
+
+
+@pytest.mark.asyncio
+async def test_delayed_failure_keeps_started_bucket_not_a_skipped_busy_bucket():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def scan():
+        started.set()
+        await release.wait()
+        raise RuntimeError("private-canary")
+
+    monitor = host.PriceMonitorCoordinator(scan)
+    assert monitor.kick(NOW)
+    await started.wait()
+    assert not monitor.kick(NOW + timedelta(minutes=5))
+    release.set()
+    await monitor.close()
+    assert monitor.last_diagnostic == "MONITOR_SCAN_FAILED"
+    assert monitor.diagnostic_bucket == NOW.replace(minute=30, second=0, microsecond=0)

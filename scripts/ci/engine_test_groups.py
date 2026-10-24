@@ -95,6 +95,8 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_monitoring_pg.py",
     "engine/tests/integration/test_research_monitoring_migration.py",
     "engine/tests/integration/test_monitoring_producer_pg.py",
+    "engine/tests/integration/test_monitor_plan_replacement_pg.py",
+    "engine/tests/integration/test_research_monitor_notification_pg.py",
 )
 
 # CI progress timestamps place this boundary near half of PostgreSQL wall time.

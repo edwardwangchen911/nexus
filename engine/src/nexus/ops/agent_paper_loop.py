@@ -2578,6 +2578,49 @@ async def run_local_agent_paper_loop(
                     return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
                 raise
 
+            from nexus.monitoring.host import PriceMonitorCoordinator
+            from nexus.ops.research_monitor import scan_host_once
+
+            async def scan_monitor() -> object:
+                return await scan_host_once(
+                    settings,
+                    account_id=account_id,
+                    calendar_authority_id=calendar_authority_id,
+                    repo_root=repo_root,
+                    env_file=env_file,
+                )
+
+            monitor = PriceMonitorCoordinator(scan_monitor)
+            reported_monitor_bucket: datetime | None = None
+
+            def report_monitor_diagnostic() -> None:
+                nonlocal reported_monitor_bucket
+                if (
+                    monitor.busy
+                    or monitor.last_diagnostic is None
+                    or monitor.diagnostic_bucket is None
+                    or monitor.diagnostic_bucket == reported_monitor_bucket
+                ):
+                    return
+                reported_monitor_bucket = monitor.diagnostic_bucket
+                # Fixed monitor diagnostics are distinct from research unknowns.
+                # Never print the scan result, configuration or exception text.
+                try:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "research.monitor.scan_failed",
+                                "error_code": monitor.last_diagnostic,
+                                "scheduled_at": monitor.diagnostic_bucket.isoformat(),
+                            },
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except OSError:
+                    pass
+
             async def inspect() -> AgentPaperLoopSnapshot:
                 nonlocal account_id, calendar_authority_id, settings
                 environment = load_agent_paper_service_environment(
@@ -2656,6 +2699,9 @@ async def run_local_agent_paper_loop(
                     started_at=started_at,
                     seen_at=seen_at,
                 )
+                report_monitor_diagnostic()
+                if settings.agent_paper_cycle_enabled and not shutdown.is_set():
+                    monitor.kick(seen_at)
 
             async def wake_for_pending_work() -> bool:
                 from nexus.ops.manual_paper_host import manual_work_pending
@@ -2697,6 +2743,11 @@ async def run_local_agent_paper_loop(
                 if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
                     return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
                 raise
+            finally:
+                try:
+                    await monitor.close()
+                finally:
+                    report_monitor_diagnostic()
         finally:
             for installed_signal in installed_signals:
                 event_loop.remove_signal_handler(installed_signal)

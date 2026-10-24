@@ -35,6 +35,7 @@ class PriceMonitorCoordinator:
         self._closed = False
         self._last_bucket: datetime | None = None
         self._last_diagnostic: str | None = None
+        self._diagnostic_bucket: datetime | None = None
 
     @property
     def busy(self) -> bool:
@@ -48,6 +49,10 @@ class PriceMonitorCoordinator:
     def last_diagnostic(self) -> str | None:
         return self._last_diagnostic
 
+    @property
+    def diagnostic_bucket(self) -> datetime | None:
+        return self._diagnostic_bucket
+
     def kick(self, now: datetime) -> bool:
         """Synchronously start at most one scan, returning whether one started."""
         if self._closed:
@@ -60,10 +65,11 @@ class PriceMonitorCoordinator:
         if self.busy:
             return False
         self._last_diagnostic = None
-        self._task = create_task(self._run_scan(), name="nexus-price-monitor")
+        self._diagnostic_bucket = None
+        self._task = create_task(self._run_scan(bucket), name="nexus-price-monitor")
         return True
 
-    async def _run_scan(self) -> None:
+    async def _run_scan(self, bucket: datetime) -> None:
         try:
             async with timeout(self._timeout_seconds):
                 await self._scan()
@@ -74,6 +80,9 @@ class PriceMonitorCoordinator:
         except Exception:
             # Never retain or expose provider/DB exception text or callback data.
             self._last_diagnostic = "MONITOR_SCAN_FAILED"
+        finally:
+            if self._last_diagnostic is not None:
+                self._diagnostic_bucket = bucket
 
     async def close(self) -> None:
         """Stop admissions and collect the owned scan, including on cancellation."""
