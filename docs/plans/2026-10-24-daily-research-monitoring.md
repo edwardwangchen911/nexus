@@ -416,3 +416,37 @@ unit通过。正常宿主/正文/市场组合24PG通过（261.97秒），最后�
 准备发生在已登记trigger之后），未解决旧typed事件在未来研究中的精确消费、API/BFF及实际
 页面；随后仍需完整diff Chat终审、最终同head全部必需CI、兼容0096回滚/镜像/合入部署和
 自然交易时段观察。本片不冒充完整自动检测或真实模型验收，未知业务占用保持。
+
+### 2026-10-25 五分钟正常 current 观测生产者接线（本地候选）
+
+现有宿主在每个实际观察到的 UTC 五分钟桶先调用正常`observe --calendar-authority-id`来源
+入口，再执行独立只读D扫描；不另开宿主，不从页面/GET暗触采集。旧profile、禁用、休市、
+无有效对应计划或已有合格fresh事实均零外呼。只读扫描仍保持原8秒截止；新的前置采集总
+包络240秒，SEC和L1分别90秒，不改变已有HTTP/Worker/模型/BFF十秒约束。采集失败仍检查
+落盘事实，过期/缺失是unknown，不是false；取消则不继续D扫描，关闭收集自有任务。
+
+SEC只取原候选/原baseline绑定的issuer和identity，保留真实目录/回执/bytes验证。来源事实
+import不授计划资格，D仍重验当前source_current、issuer和原baseline，不换baseline吞pending。
+正常collector根因一并修复：204/206在body读取前拒绝，不再固定伪记200，原单次尝试/容量
+和HTTP超时不变。L1仅合并需要的原候选股一次正常socket capture→原件解析/导入，不调用
+整轮risk/corporate-actions/Nasdaq准备，也不扩订阅scope；metadata与最终scope/回执同事务
+承认，失败回滚元数据保留对象原件。observed/available/received各自保留，不拿DB写入时间
+刷新旧证据。请求数不能确认时为None，不与模型未知费用混为一笔结算。
+
+source tick先在短事务声明固定account/证券/feed/current桶身份，网络不持account/security/
+schema锁，同桶并发/重启/失败/unknown不重放，错过桶不补跑。下一桶是独立的新current
+观察，不重试旧桶或旧研究。已有Model未知预算/租约不解除，不创建Run/Job/hold。QUOTE
+取消收尾原shield可能留下后台writer，事件控制RED后改为当前task直接有界await并传播新的
+CancelledError；仅审计收尾5秒，未完成claim保留围栏，无后续scan/悬空任务。
+
+最终根正常CLI→实际原件导入→D/outbox 3场景通过（42.98秒）：价格+两披露=3trigger/1合并
+outbox，重复同桶零新增；price-only无触发零Model/通知；双源失败读过期事实为unknown且
+false=0。根组合22PG通过（129.98秒），包含并发、取消/超时、fresh复用、原件身份漂移、
+跨桶、正常L1归档/导入及取消收尾。完整fast6813通过/10skip/1deselected（227.89秒），最终
+65定向unit（3.71秒）、Mypy655源、Ruff/format/diff通过。集中只读终审无未修P1/P2；非Chat
+终审。测试全部隔离合成HTTP/socket/模型，业务库/宿主/未知占用未动。
+
+仍需旧typed unresolved在独立新正常研究中的精确消费、API/BFF及实际页面矩阵，然后全diff
+指定Chat终审、最终同head全部必需CI、镜像/兼容0096回滚/合入部署及自然交易时段证据。
+本片证明正常来源→确定性检查，不把outbox写入当设备送达，不把模拟socket当真实网络或
+Model调用，也不以绿CI/健康替代全产品闭环。

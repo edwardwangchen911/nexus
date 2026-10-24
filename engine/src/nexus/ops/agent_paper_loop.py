@@ -2651,7 +2651,7 @@ async def run_local_agent_paper_loop(
                 raise
 
             from nexus.monitoring.host import PriceMonitorCoordinator
-            from nexus.ops.research_monitor import scan_host_once
+            from nexus.ops.research_monitor import refresh_host_observations, scan_host_once
 
             # The process lock and initial calendar belong to this database. A
             # later config reload must never silently move the running host.
@@ -2679,7 +2679,17 @@ async def run_local_agent_paper_loop(
                     env_file=env_file,
                 )
 
-            monitor = PriceMonitorCoordinator(scan_monitor)
+            async def prepare_monitor(scheduled_at: datetime) -> object:
+                return await refresh_host_observations(
+                    settings,
+                    account_id=account_id,
+                    calendar_authority_id=calendar_authority_id,
+                    scheduled_at=scheduled_at,
+                    repo_root=repo_root,
+                    env_file=env_file,
+                )
+
+            monitor = PriceMonitorCoordinator(scan_monitor, prepare=prepare_monitor)
             reported_monitor_bucket: datetime | None = None
 
             def report_monitor_diagnostic() -> None:

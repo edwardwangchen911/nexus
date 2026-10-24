@@ -35,6 +35,8 @@ class PriceMonitorCoordinator:
         scan: Callable[[], Awaitable[object]],
         *,
         timeout_seconds: float = 8.0,
+        prepare: Callable[[datetime], Awaitable[object]] | None = None,
+        preparation_timeout_seconds: float = 240.0,
     ) -> None:
         if (
             isinstance(timeout_seconds, bool)
@@ -43,6 +45,15 @@ class PriceMonitorCoordinator:
             or timeout_seconds <= 0
         ):
             raise ValueError("MONITOR_SCAN_TIMEOUT_INVALID")
+        if (
+            isinstance(preparation_timeout_seconds, bool)
+            or not isinstance(preparation_timeout_seconds, int | float)
+            or not isfinite(preparation_timeout_seconds)
+            or preparation_timeout_seconds <= 0
+        ):
+            raise ValueError("MONITOR_OBSERVATION_TIMEOUT_INVALID")
+        self._prepare = prepare
+        self._preparation_timeout_seconds = float(preparation_timeout_seconds)
         self._scan = scan
         self._timeout_seconds = float(timeout_seconds)
         self._task: Task[None] | None = None
@@ -84,13 +95,34 @@ class PriceMonitorCoordinator:
         return True
 
     async def _run_scan(self, bucket: datetime) -> None:
+        phase = "observations" if self._prepare is not None else "scan"
         try:
+            if self._prepare is not None:
+                try:
+                    async with timeout(self._preparation_timeout_seconds):
+                        prepared = await self._prepare(bucket)
+                    if isinstance(prepared, dict) and prepared.get("status") in {
+                        "partial",
+                        "unknown",
+                        "blocked",
+                        "unavailable",
+                    }:
+                        self._last_diagnostic = "MONITOR_OBSERVATIONS_INCOMPLETE"
+                except TimeoutError:
+                    self._last_diagnostic = "MONITOR_OBSERVATIONS_TIMEOUT"
+                except Exception:
+                    self._last_diagnostic = "MONITOR_OBSERVATIONS_FAILED"
+            phase = "scan"
             async with timeout(self._timeout_seconds):
                 await self._scan()
         except TimeoutError:
             self._last_diagnostic = "MONITOR_SCAN_TIMEOUT"
         except CancelledError:
-            self._last_diagnostic = "MONITOR_SCAN_CANCELLED"
+            self._last_diagnostic = (
+                "MONITOR_OBSERVATIONS_CANCELLED"
+                if phase == "observations"
+                else "MONITOR_SCAN_CANCELLED"
+            )
         except Exception:
             # Never retain or expose provider/DB exception text or callback data.
             self._last_diagnostic = "MONITOR_SCAN_FAILED"

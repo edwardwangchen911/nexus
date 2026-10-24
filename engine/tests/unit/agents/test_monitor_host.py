@@ -191,3 +191,75 @@ async def test_delayed_failure_keeps_started_bucket_not_a_skipped_busy_bucket():
     await monitor.close()
     assert monitor.last_diagnostic == "MONITOR_SCAN_FAILED"
     assert monitor.diagnostic_bucket == NOW.replace(minute=30, second=0, microsecond=0)
+
+
+@pytest.mark.asyncio
+async def test_observation_preparation_has_separate_deadline_and_never_steals_scan_budget(
+    monkeypatch,
+):
+    prepared, release, scanned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    deadlines = []
+    buckets = []
+
+    def deadline(seconds):
+        deadlines.append(seconds)
+        return asyncio.timeout(None)
+
+    monkeypatch.setattr(host, "timeout", deadline)
+
+    async def prepare(bucket):
+        buckets.append(bucket)
+        prepared.set()
+        await release.wait()
+        return {"status": "partial"}
+
+    async def scan():
+        scanned.set()
+
+    monitor = host.PriceMonitorCoordinator(scan, prepare=prepare)
+    assert monitor.kick(NOW)
+    await prepared.wait()
+    assert deadlines == [240.0] and not scanned.is_set()
+    assert not monitor.kick(NOW + timedelta(minutes=1))
+    assert not monitor.kick(NOW + timedelta(minutes=5))
+    release.set()
+    await scanned.wait()
+    await monitor.close()
+    assert deadlines == [240.0, 8.0]
+    assert buckets == [NOW.replace(minute=NOW.minute // 5 * 5, second=0, microsecond=0)]
+    assert monitor.last_diagnostic == "MONITOR_OBSERVATIONS_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_preparation_timeout_still_checks_persisted_unknown_without_same_bucket_retry(
+    monkeypatch,
+):
+    started, collected, scanned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    preparation_deadline = asyncio.timeout(None)
+    deadlines = []
+
+    def deadline(seconds):
+        deadlines.append(seconds)
+        return preparation_deadline if len(deadlines) == 1 else asyncio.timeout(None)
+
+    monkeypatch.setattr(host, "timeout", deadline)
+
+    async def prepare(_bucket):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            collected.set()
+
+    async def scan():
+        scanned.set()
+
+    monitor = host.PriceMonitorCoordinator(scan, prepare=prepare)
+    assert monitor.kick(NOW)
+    await started.wait()
+    preparation_deadline.reschedule(asyncio.get_running_loop().time())
+    await scanned.wait()
+    await monitor.close()
+    assert collected.is_set() and deadlines == [240.0, 8.0]
+    assert not monitor.kick(NOW + timedelta(minutes=1))
+    assert monitor.last_diagnostic == "MONITOR_OBSERVATIONS_TIMEOUT"

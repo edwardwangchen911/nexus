@@ -298,3 +298,57 @@ async def test_running_host_cannot_rebind_monitor_identity_after_inspection(
     )
     assert result == loop.AgentPaperLoopAction.STOP_REQUESTED
     assert seen == [settings.database_url] and scans == [settings.database_url]
+
+
+@pytest.mark.asyncio
+async def test_normal_host_observes_sources_before_its_read_only_scan(monkeypatch, tmp_path):
+    events = []
+
+    async def observe(_settings, **kwargs):
+        assert kwargs["scheduled_at"] == AT
+        events.append("observe")
+        return {"status": "refreshed"}
+
+    async def scan(_settings, **kwargs):
+        assert events == ["observe"]
+        events.append("scan")
+
+    async def calendar(_settings):
+        return CALENDAR
+
+    async def heartbeat(_settings, **kwargs):
+        pass
+
+    async def foreground(**kwargs):
+        await kwargs["heartbeat"](AT)
+        for _ in range(20):
+            if events == ["observe", "scan"]:
+                break
+            await asyncio.sleep(0)
+        assert events == ["observe", "scan"]
+        return loop.AgentPaperLoopAction.STOP_REQUESTED
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", calendar)
+    monkeypatch.setattr(loop, "heartbeat_agent_paper_loop", heartbeat)
+    monkeypatch.setattr(loop, "run_foreground_loop", foreground)
+    monkeypatch.setattr(research_monitor, "refresh_host_observations", observe, raising=False)
+    monkeypatch.setattr(research_monitor, "scan_host_once", scan)
+    result = await loop.run_local_agent_paper_loop(
+        EngineSettings(
+            database_url="postgresql+asyncpg://localhost/nexus_test_monitor",
+            agent_paper_account_id=ACCOUNT,
+            agent_paper_cycle_enabled=True,
+        ),
+        account_id=ACCOUNT,
+        repo_root=tmp_path,
+        clock=lambda: AT,
+    )
+    assert result == loop.AgentPaperLoopAction.STOP_REQUESTED and events == ["observe", "scan"]
+
+
+def test_observe_is_a_normal_protected_cli_action():
+    args = research_monitor.parser().parse_args(
+        ["observe", "--calendar-authority-id", str(CALENDAR)]
+    )
+    assert args.action == "observe" and args.calendar_authority_id == CALENDAR

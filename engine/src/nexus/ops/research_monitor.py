@@ -44,6 +44,10 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--plan-id", type=UUID, required=True)
     scan = commands.add_parser("scan", help="Check only the current market-session bucket")
     scan.add_argument("--calendar-authority-id", type=UUID, required=True)
+    observe = commands.add_parser(
+        "observe", help="Refresh this current observation bucket without research"
+    )
+    observe.add_argument("--calendar-authority-id", type=UUID, required=True)
     content = commands.add_parser(
         "import-content", help="Import exact SEC filing inventory and every declared text original"
     )
@@ -93,6 +97,144 @@ async def scan_host_once(
     if not current.agent_paper_cycle_enabled:
         return {"status": "disabled", "model_requests": 0, "provider_requests": 0}
     return await scan_configured_once(current, calendar_authority_id=calendar_authority_id)
+
+
+async def refresh_host_observations(
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    calendar_authority_id: UUID,
+    scheduled_at: datetime,
+    repo_root: Path,
+    env_file: Path | None = None,
+) -> dict[str, object]:
+    # Legacy hosts never gain a provider loop merely by loading new code.
+    if (
+        not settings.agent_paper_cycle_enabled
+        or settings.agent_paper_formal_model_config_id is None
+    ):
+        return {
+            "status": "disabled",
+            "model_requests": 0,
+            "provider_requests": 0,
+            "execution_locked": True,
+        }
+    environment: dict[str, str] = {}
+    current = await load_host_settings(
+        settings,
+        account_id=account_id,
+        calendar_authority_id=calendar_authority_id,
+        repo_root=repo_root,
+        env_file=env_file,
+        private_context=environment,
+    )
+    from nexus.ops.agent_paper_formal import require_formal_host_configuration_match
+
+    require_formal_host_configuration_match(settings, current)
+    if settings.agent_paper_candidate_batch_id != current.agent_paper_candidate_batch_id:
+        raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+    return await refresh_configured_observations(
+        current,
+        calendar_authority_id=calendar_authority_id,
+        scheduled_at=scheduled_at,
+        environment=environment,
+        repo_root=repo_root,
+    )
+
+
+async def refresh_configured_observations(
+    settings: EngineSettings,
+    *,
+    calendar_authority_id: UUID,
+    environment: dict[str, str],
+    repo_root: Path,
+    scheduled_at: datetime | None = None,
+) -> dict[str, object]:
+    from nexus.domain.time import require_utc
+    from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
+
+    fixed: dict[str, object] = {"model_requests": 0, "job_created": False, "execution_locked": True}
+    if (
+        not settings.agent_paper_cycle_enabled
+        or settings.agent_paper_account_id is None
+        or settings.agent_paper_formal_model_config_id is None
+    ):
+        return {**fixed, "status": "disabled", "provider_requests": 0}
+    _validate_local_database(settings.database_url)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout='5s'"))
+            if (
+                await session.scalar(text("SELECT version_num FROM alembic_version"))
+                != CURRENT_MIGRATION_HEAD
+            ):
+                raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
+            now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+            current_bucket = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+            bucket = current_bucket if scheduled_at is None else require_utc(scheduled_at)
+            if bucket != current_bucket:
+                return {**fixed, "status": "missed_bucket", "provider_requests": 0}
+            calendar = await load_agent_paper_service_calendar_authority(
+                session, now=now, expected_calendar_authority_id=calendar_authority_id
+            )
+            if not calendar.market_open_at <= now < calendar.market_close_at:
+                return {**fixed, "status": "market_closed", "provider_requests": 0}
+    finally:
+        await factory.kw["bind"].dispose()
+    from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
+    from nexus.ops.monitor_price_refresh import refresh_price_observations
+
+    results: dict[str, dict[str, object]] = {}
+    # SEC first; the final L1 capture keeps quotes fresh for the independent scan.
+    for source, refresh in (
+        ("disclosure", refresh_disclosure_observations),
+        ("price", refresh_price_observations),
+    ):
+        try:
+            results[source] = await refresh(
+                settings,
+                account_id=settings.agent_paper_account_id,
+                calendar_authority_id=calendar_authority_id,
+                scheduled_at=bucket,
+                environment=environment,
+                repo_root=repo_root,
+            )
+        except Exception:
+            results[source] = {
+                "status": "unknown",
+                "error_code": "MONITOR_OBSERVATION_REFRESH_FAILED",
+                "provider_requests": None,
+                "model_requests": 0,
+            }
+    request_counts = [value.get("provider_requests") for value in results.values()]
+    known_requests = all(type(value) is int and value >= 0 for value in request_counts)
+    ready_statuses = {
+        "refreshed",
+        "unchanged",
+        "prepared",
+        "disabled",
+        "skipped",
+        "market_closed",
+        "missed_bucket",
+    }
+    status = (
+        "refreshed"
+        if all(value.get("status") in ready_statuses for value in results.values())
+        else "partial"
+    )
+    return {
+        **fixed,
+        "status": status,
+        "scheduled_at": bucket.isoformat(),
+        "sources": results,
+        "provider_requests": sum(value for value in request_counts if isinstance(value, int))
+        if known_requests
+        else None,
+    }
 
 
 async def load_host_settings(
@@ -194,6 +336,13 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action == "observe":
+        return await refresh_configured_observations(
+            settings,
+            calendar_authority_id=args.calendar_authority_id,
+            environment=getattr(args, "_observation_environment", {}),
+            repo_root=getattr(args, "repo_root", Path.cwd()),
+        )
     if args.action == "prepare-pending":
         from nexus.ops.monitor_batch_prepare import prepare_pending_batch
 
@@ -688,6 +837,8 @@ async def run_configured(
     environment: dict[str, str], args: argparse.Namespace
 ) -> dict[str, object]:
     settings = _FileEngineSettings.model_validate(environment)
+    if args.action == "observe":
+        args = argparse.Namespace(**vars(args), _observation_environment=dict(environment))
     if args.action in {"collect-content", "prepare-pending"}:
         args = argparse.Namespace(**vars(args), _sec_contact=environment.get("SEC_CONTACT"))
 
