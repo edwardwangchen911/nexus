@@ -1767,6 +1767,7 @@ async def _admit_cycle_research(
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
     omit_monitor_events_for: frozenset[UUID] = frozenset(),
+    daily_event_preview_deadline: float | None = None,
 ) -> AgentPaperCycleResult:
     if formal_stage_capacity and any(
         value is not None
@@ -1792,129 +1793,134 @@ async def _admit_cycle_research(
     )
     from nexus.agents.committee import DISCLOSURE_SCOPE_PROMPT_VERSION
     from nexus.agents.persistence import resolve_research_prompt_authority
-    from nexus.monitoring.daily_v2_capacity import DailyEventCapacityExceeded
+    from nexus.monitoring.daily_v2_capacity import (
+        DailyEventCapacityExceeded,
+        DailyEventCapacityScope,
+    )
 
     cycle_id = cycle.id
     instruments = frozenset(candidate.instrument_id for candidate in manifest)
     if not omit_monitor_events_for <= instruments:
         raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
+    capacity_scope = DailyEventCapacityScope(deadline=daily_event_preview_deadline)
     run_ids: list[UUID] = []
     try:
         async with session.begin_nested():
-            for candidate in manifest:
-                snapshot_actor = (
-                    "local-agent-paper-cycle"
-                    if version_evaluation_id is None
-                    else AGENT_VERSION_INCUMBENT_ACTOR
-                    if version_lane == "incumbent"
-                    else AGENT_VERSION_CHALLENGER_ACTOR
-                )
-                snapshot_key = (
-                    f"agent-paper:{cycle.id}:{candidate.instrument_id}"
-                    if version_evaluation_id is None
-                    else f"agent-version:{version_evaluation_id}:{version_lane}:"
-                    f"{cycle.decision_slot_at.isoformat()}:{candidate.instrument_id}"
-                )
-                source_version = version_source_run_id
-                reuse_latest = False
-                if (
-                    version_evaluation_id is None
-                    and not candidate_stage_capacity
-                    and not formal_stage_capacity
-                ):
-                    from nexus.paper.economic_cycle import read_economic_cycle
+            async with capacity_scope:
+                for candidate in manifest:
+                    snapshot_actor = (
+                        "local-agent-paper-cycle"
+                        if version_evaluation_id is None
+                        else AGENT_VERSION_INCUMBENT_ACTOR
+                        if version_lane == "incumbent"
+                        else AGENT_VERSION_CHALLENGER_ACTOR
+                    )
+                    snapshot_key = (
+                        f"agent-paper:{cycle.id}:{candidate.instrument_id}"
+                        if version_evaluation_id is None
+                        else f"agent-version:{version_evaluation_id}:{version_lane}:"
+                        f"{cycle.decision_slot_at.isoformat()}:{candidate.instrument_id}"
+                    )
+                    source_version = version_source_run_id
+                    reuse_latest = False
+                    if (
+                        version_evaluation_id is None
+                        and not candidate_stage_capacity
+                        and not formal_stage_capacity
+                    ):
+                        from nexus.paper.economic_cycle import read_economic_cycle
 
-                    if await read_economic_cycle(session, cycle_id=cycle.id) is None:
-                        from nexus.paper.agent_version_evaluation import (
-                            load_selected_internal_agent_version,
-                        )
+                        if await read_economic_cycle(session, cycle_id=cycle.id) is None:
+                            from nexus.paper.agent_version_evaluation import (
+                                load_selected_internal_agent_version,
+                            )
 
-                        selected = await load_selected_internal_agent_version(
-                            session, now=authority.decision_time
-                        )
-                        if selected is not None:
-                            source_version = selected.source_run_id
-                        else:
-                            reuse_latest = True
-                _, selected_prompts, _ = await resolve_research_prompt_authority(
-                    session,
-                    actor_id=snapshot_actor,
-                    idempotency_key=snapshot_key,
-                    prompt_version_id=version_prompt_id,
-                    version_source_run_id=source_version,
-                    reuse_latest_actor_agent_version=reuse_latest,
-                )
-                disclosure_scope = (
-                    selected_prompts is not None
-                    and selected_prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION
-                )
-                research_snapshot_id = candidate.research_snapshot_id
-                if authority.execution_session == authority.decision_session:
-                    if not isinstance(candidate, CandidateManifestEntry):
-                        raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
-                    research_snapshot_id = (
-                        await prepare_agent_paper_research_snapshot(
+                            selected = await load_selected_internal_agent_version(
+                                session, now=authority.decision_time
+                            )
+                            if selected is not None:
+                                source_version = selected.source_run_id
+                            else:
+                                reuse_latest = True
+                    _, selected_prompts, _ = await resolve_research_prompt_authority(
+                        session,
+                        actor_id=snapshot_actor,
+                        idempotency_key=snapshot_key,
+                        prompt_version_id=version_prompt_id,
+                        version_source_run_id=source_version,
+                        reuse_latest_actor_agent_version=reuse_latest,
+                    )
+                    disclosure_scope = (
+                        selected_prompts is not None
+                        and selected_prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION
+                    )
+                    research_snapshot_id = candidate.research_snapshot_id
+                    if authority.execution_session == authority.decision_session:
+                        if not isinstance(candidate, CandidateManifestEntry):
+                            raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
+                        research_snapshot_id = (
+                            await prepare_agent_paper_research_snapshot(
+                                session,
+                                cycle_id=cycle.id,
+                                decision_time=authority.decision_time,
+                                candidate=candidate,
+                                projection=projection,
+                                disclosure_scope=disclosure_scope,
+                                omit_monitor_event_bundle=candidate.instrument_id
+                                in omit_monitor_events_for,
+                            )
+                        ).id
+                    if version_evaluation_id is None:
+                        admission = await admit_agent_paper_research(
                             session,
                             cycle_id=cycle.id,
-                            decision_time=authority.decision_time,
-                            candidate=candidate,
-                            projection=projection,
-                            disclosure_scope=disclosure_scope,
-                            omit_monitor_event_bundle=candidate.instrument_id
-                            in omit_monitor_events_for,
+                            instrument_id=candidate.instrument_id,
+                            research_snapshot_id=research_snapshot_id,
+                            research_as_of=authority.decision_time,
+                            daily_limit_usd=daily_limit_usd,
+                            now=authority.decision_time,
+                            model_config_id=profile_model_id,
+                            candidate_stage_capacity=candidate_stage_capacity,
+                            formal_stage_capacity=formal_stage_capacity,
                         )
-                    ).id
-                if version_evaluation_id is None:
-                    admission = await admit_agent_paper_research(
-                        session,
-                        cycle_id=cycle.id,
-                        instrument_id=candidate.instrument_id,
-                        research_snapshot_id=research_snapshot_id,
-                        research_as_of=authority.decision_time,
-                        daily_limit_usd=daily_limit_usd,
-                        now=authority.decision_time,
-                        model_config_id=profile_model_id,
-                        candidate_stage_capacity=candidate_stage_capacity,
-                        formal_stage_capacity=formal_stage_capacity,
+                    else:
+                        admission = await admit_agent_paper_research(
+                            session,
+                            cycle_id=cycle.id,
+                            instrument_id=candidate.instrument_id,
+                            research_snapshot_id=research_snapshot_id,
+                            research_as_of=authority.decision_time,
+                            daily_limit_usd=daily_limit_usd,
+                            now=authority.decision_time,
+                            actor_id=(
+                                AGENT_VERSION_INCUMBENT_ACTOR
+                                if version_lane == "incumbent"
+                                else AGENT_VERSION_CHALLENGER_ACTOR
+                            ),
+                            admission_idempotency_key=(
+                                f"agent-version:{version_evaluation_id}:{version_lane}:"
+                                f"{cycle.decision_slot_at.isoformat()}:"
+                                f"{candidate.instrument_id}"
+                            ),
+                            version_source_run_id=version_source_run_id,
+                            prompt_version_id=version_prompt_id,
+                            model_config_id=version_model_id,
+                        )
+                    admitted = await session.get(AgentResearchRunRecord, admission.run_id)
+                    admitted_portfolio = (
+                        (admitted.prompt_manifest or {}).get("portfolio", {})
+                        if admitted is not None
+                        else {}
                     )
-                else:
-                    admission = await admit_agent_paper_research(
-                        session,
-                        cycle_id=cycle.id,
-                        instrument_id=candidate.instrument_id,
-                        research_snapshot_id=research_snapshot_id,
-                        research_as_of=authority.decision_time,
-                        daily_limit_usd=daily_limit_usd,
-                        now=authority.decision_time,
-                        actor_id=(
-                            AGENT_VERSION_INCUMBENT_ACTOR
-                            if version_lane == "incumbent"
-                            else AGENT_VERSION_CHALLENGER_ACTOR
-                        ),
-                        admission_idempotency_key=(
-                            f"agent-version:{version_evaluation_id}:{version_lane}:"
-                            f"{cycle.decision_slot_at.isoformat()}:"
-                            f"{candidate.instrument_id}"
-                        ),
-                        version_source_run_id=version_source_run_id,
-                        prompt_version_id=version_prompt_id,
-                        model_config_id=version_model_id,
-                    )
-                admitted = await session.get(AgentResearchRunRecord, admission.run_id)
-                admitted_portfolio = (
-                    (admitted.prompt_manifest or {}).get("portfolio", {})
-                    if admitted is not None
-                    else {}
-                )
-                if (
-                    not isinstance(admitted_portfolio, dict)
-                    or (admitted_portfolio.get("version") == DISCLOSURE_SCOPE_PROMPT_VERSION)
-                    != disclosure_scope
-                ):
-                    # Authority registration raced an unpinned preparation: no Job
-                    # or reservation from this nested transaction may be committed.
-                    raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
-                run_ids.append(admission.run_id)
+                    if (
+                        not isinstance(admitted_portfolio, dict)
+                        or (admitted_portfolio.get("version") == DISCLOSURE_SCOPE_PROMPT_VERSION)
+                        != disclosure_scope
+                    ):
+                        # Authority registration raced an unpinned preparation: no Job
+                        # or reservation from this nested transaction may be committed.
+                        raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
+                    run_ids.append(admission.run_id)
     except ValueError as error:
         # Rollback of the complete pool has finished before handling the error.
         # Never reuse a Run, pending Job, hold, or ORM state from that savepoint.
@@ -1944,6 +1950,7 @@ async def _admit_cycle_research(
                 candidate_stage_capacity=candidate_stage_capacity,
                 formal_stage_capacity=formal_stage_capacity,
                 omit_monitor_events_for=omit_monitor_events_for | {error.instrument_id},
+                daily_event_preview_deadline=capacity_scope.deadline,
             )
         await _append_event(
             session,
