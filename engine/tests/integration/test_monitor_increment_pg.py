@@ -442,7 +442,7 @@ async def test_normal_trigger_admission_is_single_stock_idempotent_and_blocks_co
             await asyncio.to_thread(command.downgrade, config, "0088_monitor_increments")
 
 
-async def append_fresh_inputs(factory, instrument_id, at):
+async def append_fresh_inputs(factory, instrument_id, at, *, midpoint=None):
     from nexus.market.intraday_ingestion import canonical_quote_observation
     from nexus.persistence.models.data import DataArtifact
     from nexus.persistence.models.market import LatestQuote
@@ -483,14 +483,16 @@ async def append_fresh_inputs(factory, instrument_id, at):
             data_artifact_id=artifact.id,
             revision=artifact.sha256,
         )
+        if midpoint is not None:
+            values.update(bid=midpoint, ask=midpoint)
         raw = canonical_quote_observation(
             instrument_id=instrument_id,
             source="schwab",
             feed="l1",
             delivery_mode="real_time",
             event_kind="quote",
-            bid=old.bid,
-            ask=old.ask,
+            bid=values["bid"],
+            ask=values["ask"],
             last=None,
             observed_at=at,
             available_at=at,
@@ -505,7 +507,20 @@ async def append_fresh_inputs(factory, instrument_id, at):
                 )
             )
         )
+        # Repeated preparation appends one new fact per authority scope; prior
+        # snapshots stay immutable and are not duplicated at the new timestamp.
+        latest = {}
         for risk in risks:
+            key = (
+                risk.source_policy_id,
+                risk.universe_snapshot_id,
+                risk.decision_session,
+                risk.kind,
+                tuple(risk.required_instrument_ids),
+            )
+            if key not in latest or risk.available_at > latest[key].available_at:
+                latest[key] = risk
+        for risk in latest.values():
             values = {
                 c.name: getattr(risk, c.name)
                 for c in risk.__table__.columns

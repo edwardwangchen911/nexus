@@ -23,7 +23,7 @@ RETURNS boolean LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $$
     SELECT p.id,p.predecessor_id,p.generation,p.account_id,p.instrument_id,p.condition_hash
       FROM public.research_monitor_plans p JOIN lineage c ON p.id=c.predecessor_id
       WHERE p.generation=c.generation-1 AND p.account_id=c.account_id
-        AND p.instrument_id=c.instrument_id
+        AND p.instrument_id=c.instrument_id AND p.condition_hash=c.condition_hash
   )
   SELECT EXISTS (
     SELECT 1 FROM lineage ancestor JOIN public.research_monitor_plans current ON current.id=current_id
@@ -137,6 +137,8 @@ BEGIN
      OR member.instrument_id::text IS DISTINCT FROM context->>'instrument_id'
      OR member.plan_id::text IS DISTINCT FROM context->>'plan_id'
      OR member.research_as_of IS DISTINCT FROM frozen.observed_at
+     OR EXISTS (SELECT 1 FROM public.agent_research_runs other
+       WHERE other.data_snapshot_id=frozen.id AND other.id<>member.run_id)
      OR NOT EXISTS (
        SELECT 1 FROM public.agent_research_runs r JOIN public.jobs j ON j.id=member.job_id
        WHERE r.id=member.run_id AND r.data_snapshot_id=frozen.id

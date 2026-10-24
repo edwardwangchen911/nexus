@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import Text, cast, exists, func, select, text
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.ops.agent_paper_loop import (
@@ -28,10 +29,14 @@ WORKER_ACTION = "research.monitor.worker_dispatched"
 
 def unchecked(now: datetime) -> ColumnElement[bool]:
     bucket = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+    peer = aliased(MonitorTrigger)
     return ~exists(
-        select(AuditEvent.id).where(
+        select(AuditEvent.id)
+        .join(peer, AuditEvent.payload["trigger_id"].astext == cast(peer.id, Text))
+        .where(
             AuditEvent.action == DISPATCH_ACTION,
-            AuditEvent.payload["trigger_id"].astext == cast(MonitorTrigger.id, Text),
+            peer.account_id == MonitorTrigger.account_id,
+            peer.instrument_id == MonitorTrigger.instrument_id,
             AuditEvent.occurred_at >= bucket,
         )
     )
@@ -65,22 +70,31 @@ async def inspect_monitor_queue(
             await session.execute(text("SET LOCAL statement_timeout='5s'"))
             active = tuple(
                 await session.scalars(
-                    select(MonitorTrigger)
+                    select(MonitorTrigger.research_run_id)
                     .where(
                         MonitorTrigger.account_id == account_id,
                         MonitorTrigger.status.in_(("admitted", "unknown")),
                     )
-                    .order_by(MonitorTrigger.created_at, MonitorTrigger.id)
+                    .distinct()
                     .limit(2)
                 )
             )
             if len(active) > 1:
                 raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
             if active:
-                trigger = active[0]
                 member = await session.scalar(
-                    select(MonitorIncrement).where(MonitorIncrement.trigger_id == trigger.id)
+                    select(MonitorIncrement).where(MonitorIncrement.run_id == active[0])
                 )
+                if member is None:
+                    raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
+                trigger = await session.get(MonitorTrigger, member.trigger_id)
+                from nexus.monitoring.admission import require_increment_binding
+                from nexus.persistence.models.agents import AgentResearchRunRecord
+
+                original = await session.get(AgentResearchRunRecord, member.run_id)
+                if trigger is None or original is None:
+                    raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
+                await require_increment_binding(session, original)
                 job = None if member is None else await session.get(Job, member.job_id)
                 sent = (
                     None
@@ -185,12 +199,13 @@ async def dispatch_configured_once(
                 if original is None:
                     raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
                 member = await require_increment_binding(session, original)
+                trigger_id = member.trigger_id
                 job = await session.get(Job, member.job_id)
                 assert job is not None
                 if trigger.status in {"completed", "failed", "unknown"}:
                     return {
                         "status": trigger.status,
-                        "trigger_id": str(trigger.id),
+                        "trigger_id": str(member.trigger_id),
                         "run_id": str(original.id),
                         "execution_locked": True,
                     }
@@ -244,6 +259,7 @@ async def dispatch_configured_once(
             if admitted["status"] != "admitted":
                 return admitted
             job_id = UUID(str(admitted["job_id"]))
+            trigger_id = UUID(str(admitted["trigger_id"]))
         if job_id is not None:
             # Native claim, one attempt, exact Job and capacity/lease checks. No fallback key.
             async with factory() as session, session.begin():

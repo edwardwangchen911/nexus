@@ -203,6 +203,11 @@ async def read_monitor_context(
     ):
         return None
     # Each trigger retains its original observation/time, separately from the new quote.
+    from nexus.monitoring.pending import compatible_check, same_condition_lineage
+
+    lineage = await same_condition_lineage(session, plan)
+    if len({item.trigger_id for item in context.trigger_checks}) != len(context.trigger_checks):
+        return None
     for item in context.trigger_checks:
         trigger = await session.get(MonitorTrigger, item.trigger_id)
         check = await session.get(MonitorCheck, item.check_id)
@@ -212,7 +217,7 @@ async def read_monitor_context(
             or trigger.check_id != check.id
             or trigger.account_id != context.account_id
             or trigger.instrument_id != instrument_id
-            or check.plan_id != plan.id
+            or not compatible_check(trigger, check, plan, lineage)
             or check.result != "true"
             or trigger.cause != item.cause
             or check.checked_at != item.checked_at

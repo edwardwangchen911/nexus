@@ -90,6 +90,23 @@ async def require_increment_binding(
         or member.manifest_hash != increment_manifest_hash(member, run, job)
     ):
         raise ValueError(invalid)
+    frozen_ids = [item.trigger_id for item in bound[0].trigger_checks]
+    rows = tuple(
+        await session.scalars(
+            select(MonitorTrigger).where(MonitorTrigger.research_run_id == run.id)
+        )
+    )
+    if (
+        len(set(frozen_ids)) != len(frozen_ids)
+        or {row.id for row in rows} != set(frozen_ids)
+        or any(
+            row.account_id != member.account_id
+            or row.instrument_id != member.instrument_id
+            or (row.status, row.reason) != (trigger.status, trigger.reason)
+            for row in rows
+        )
+    ):
+        raise ValueError(invalid)
     return member
 
 
@@ -216,7 +233,7 @@ async def _admit_trigger(
     from nexus.paper.projection import load_paper_projection
     from nexus.paper.target_service import lock_portfolio_account
     from nexus.persistence.models.agents import AgentResearchOutputRecord
-    from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan
+    from nexus.persistence.models.monitoring import MonitorPlan
     from nexus.strategy.intents import ResearchIntent
 
     now = require_utc(now)
@@ -236,27 +253,27 @@ async def _admit_trigger(
     await require_manual_account_available(session, account_id=account_id, now=now)
     await lock_security(session, account_id=account_id, instrument_id=trigger.instrument_id)
     await session.refresh(trigger, with_for_update=True)
-    check = await session.get(MonitorCheck, trigger.check_id)
-    plan = None if check is None else await session.get(MonitorPlan, check.plan_id)
-    latest = await session.scalar(
-        select(MonitorPlan.id)
+    from nexus.monitoring.pending import compatible_check, pending_stock, same_condition_lineage
+
+    pending = await pending_stock(
+        session, account_id=account_id, instrument_id=trigger.instrument_id, now=now
+    )
+    if trigger.id not in {item.id for item, _ in pending}:
+        raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
+    trigger, check = pending[0]
+    plan = await session.scalar(
+        select(MonitorPlan)
         .where(
             MonitorPlan.account_id == account_id, MonitorPlan.instrument_id == trigger.instrument_id
         )
         .order_by(MonitorPlan.generation.desc())
         .limit(1)
     )
-    if (
-        plan is None
-        or check is None
-        or check.observation is None
-        or check.result != "true"
-        or latest != plan.id
-        or not plan.effective_at <= now < plan.valid_until
-        or trigger.status not in {"pending", "blocked"}
-        or check.checked_at > now
-    ):
+    if plan is None or not plan.effective_at <= now < plan.valid_until:
         raise ValueError("MONITOR_TRIGGER_SUPERSEDED_OR_EXPIRED")
+    lineage = await same_condition_lineage(session, plan)
+    if any(not compatible_check(item, checked, plan, lineage) for item, checked in pending):
+        raise ValueError("MONITOR_PENDING_CONDITION_UNRESOLVED")
     calendar = await load_agent_paper_service_calendar_authority(
         session, now=now, expected_calendar_authority_id=calendar_authority_id
     )
@@ -349,14 +366,15 @@ async def _admit_trigger(
         decision_quote=quote,
         candidate=candidates[0],
         authority=authority,
-        trigger_checks=(
+        trigger_checks=tuple(
             TriggerCheck(
-                trigger_id=trigger.id,
-                check_id=check.id,
-                cause=cast(Literal["initial_match", "crossed"], trigger.cause),
-                checked_at=check.checked_at,
-                observation=PriceObservation.model_validate(check.observation),
-            ),
+                trigger_id=item.id,
+                check_id=checked.id,
+                cause=cast(Literal["initial_match", "crossed"], item.cause),
+                checked_at=checked.checked_at,
+                observation=PriceObservation.model_validate(checked.observation),
+            )
+            for item, checked in pending
         ),
         paper_portfolio=AgentPaperPortfolioContext(
             candidate_position_weight=str(weight),
@@ -414,7 +432,8 @@ async def _admit_trigger(
     )
     member.manifest_hash = increment_manifest_hash(member, admitted.run, job)
     session.add(member)
-    trigger.status, trigger.reason, trigger.research_run_id = "admitted", None, admitted.run.id
+    for item, _ in pending:
+        item.status, item.reason, item.research_run_id = "admitted", None, admitted.run.id
     await session.flush()
     await require_increment_binding(session, admitted.run)
     from nexus.audit.service import append_audit_event
@@ -555,6 +574,8 @@ async def finish_increment(
     if run is None:
         raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
     member = await require_increment_binding(session, run)
+    trigger = await session.get(MonitorTrigger, member.trigger_id)
+    assert trigger is not None
     if trigger.status in {"completed", "failed", "unknown"}:
         return trigger
     job = await session.get(Job, member.job_id)
@@ -604,6 +625,15 @@ async def finish_increment(
             "failed",
             ("MONITOR_CAPACITY_REJECTED" if rejected_before_claim else "MONITOR_RESEARCH_FAILED"),
         )
+    # One native outcome applies to exactly the frozen group, atomically.
+    with session.no_autoflush:
+        members = tuple(
+            await session.scalars(
+                select(MonitorTrigger).where(MonitorTrigger.research_run_id == run.id)
+            )
+        )
+        for item in members:
+            item.status, item.reason = trigger.status, trigger.reason
     await append_audit_event(
         session,
         actor_id="research-monitor",

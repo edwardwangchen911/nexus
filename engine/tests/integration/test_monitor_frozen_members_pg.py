@@ -114,6 +114,26 @@ async def admit_group(session, settings, anchor, now):
 @pytest.mark.asyncio
 async def test_missing_group_member_rejected_at_commit(migrated_database_url, monkeypatch):
     factory, settings, anchor, _extra, now = await prepare_group(migrated_database_url, monkeypatch)
+    from nexus.monitoring import admission, pending
+    from nexus.persistence.models.monitoring import MonitorIncrement
+
+    native_pending = pending.pending_stock
+
+    async def omitted_member(*args, **kwargs):
+        return tuple(
+            pair for pair in await native_pending(*args, **kwargs) if pair[0].id == anchor.id
+        )
+
+    async def bypass_python_binding(session, run):
+        return await session.scalar(
+            select(MonitorIncrement).where(MonitorIncrement.run_id == run.id)
+        )
+
+    # Deliberately broken producer: the frozen context has two members, but the
+    # producer associates only one. Bypass the separate Python reader so the
+    # independent database commit fence, not application validation, is exercised.
+    monkeypatch.setattr(pending, "pending_stock", omitted_member)
+    monkeypatch.setattr(admission, "require_increment_binding", bypass_python_binding)
     with pytest.raises(DBAPIError, match="MONITOR_FROZEN_MEMBERS_INVALID"):
         async with factory() as session, session.begin():
             await admit_group(session, settings, anchor, now)
@@ -213,7 +233,7 @@ async def test_snapshot_rejects_malformed_or_foreign_members(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [None, "generation", "condition"])
+@pytest.mark.parametrize("fault", [None, "generation", "condition", "intermediate_condition"])
 async def test_context_ownership_accepts_only_same_condition_contiguous_ancestor(
     migrated_database_url, monkeypatch, fault
 ):
@@ -261,6 +281,36 @@ async def test_context_ownership_accepts_only_same_condition_contiguous_ancestor
             review_due_at=prior.review_due_at,
             valid_until=prior.valid_until,
         )
+        if fault == "intermediate_condition":
+            middle_output = AgentResearchOutputRecord(
+                run_id=source.run_id,
+                sequence=101,
+                status=source.status,
+                role=source.role,
+                content_hash=source.content_hash,
+                payload=source.payload,
+                intent=source.intent,
+            )
+            session.add(middle_output)
+            await session.flush()
+            middle = MonitorPlan(
+                account_id=prior.account_id,
+                instrument_id=prior.instrument_id,
+                generation=2,
+                source_run_id=prior.source_run_id,
+                source_output_id=middle_output.id,
+                data_snapshot_id=prior.data_snapshot_id,
+                predecessor_id=prior.id,
+                condition_hash="d" * 64,
+                condition={**prior.condition, "threshold": "200000"},
+                source_hash=middle_output.content_hash,
+                effective_at=prior.effective_at,
+                review_due_at=prior.review_due_at,
+                valid_until=prior.valid_until,
+            )
+            session.add(middle)
+            await session.flush()
+            plan.generation, plan.predecessor_id = 3, middle.id
         session.add(plan)
         await session.flush()
         inherited = context.model_copy(
@@ -282,4 +332,27 @@ async def test_context_ownership_accepts_only_same_condition_contiguous_ancestor
         with pytest.raises(DBAPIError):
             async with factory() as session, session.begin():
                 await _freeze_increment_snapshot(session, inherited)
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_frozen_snapshot_cannot_be_reused_by_second_run(migrated_database_url, monkeypatch):
+    from nexus.persistence.models.agents import AgentResearchRunRecord
+
+    factory, _settings, _anchor, run_id, _job, _now = await admitted(
+        migrated_database_url, monkeypatch
+    )
+    with pytest.raises(DBAPIError, match="MONITOR_FROZEN_MEMBERS_INVALID"):
+        async with factory() as session, session.begin():
+            original = await session.get(AgentResearchRunRecord, run_id)
+            fields = {
+                column.name: getattr(original, column.name)
+                for column in original.__table__.columns
+                if column.name not in {"id", "created_at", "idempotency_key"}
+            }
+            session.add(
+                AgentResearchRunRecord(
+                    **fields, id=uuid4(), idempotency_key="forbidden-second-monitor-run"
+                )
+            )
     await factory.kw["bind"].dispose()

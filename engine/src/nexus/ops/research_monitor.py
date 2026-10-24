@@ -190,6 +190,8 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                         else "MONITOR_INPUTS_UNAVAILABLE"
                     )
                     safe_codes = {
+                        "MONITOR_PENDING_OVERFLOW",
+                        "MONITOR_PENDING_CONDITION_UNRESOLVED",
                         "MONITOR_DAILY_CALL_LIMIT",
                         "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
                         "MONITOR_SOURCE_INVALID",
