@@ -2585,6 +2585,20 @@ async def run_local_agent_paper_loop(
         or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    if settings.formal_budget_protection_enabled:
+        bound_environment, pinned_calendar = await _load_bound_loop_environment(
+            settings, repo_root, {} if env_file is not None else os.environ, env_file=env_file
+        )
+        initial = (
+            _FileEngineSettings.model_validate(bound_environment)
+            if env_file is not None
+            else EngineSettings.model_validate(bound_environment)
+        )
+        if make_url(initial.database_url or "") != database:
+            raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+        settings = initial.model_copy(update={"release_revision": settings.release_revision})
+        if pinned_calendar is not None:
+            account_id = UUID(bound_environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = clock()
     with acquire_agent_paper_lock():
@@ -2630,7 +2644,7 @@ async def run_local_agent_paper_loop(
 
             # The process lock and initial calendar belong to this database. A
             # later config reload must never silently move the running host.
-            host_database = make_url(settings.database_url)
+            host_database = database
             monitor_host_scope: (
                 tuple[UUID, UUID, UUID | None, UUID | None, AgentRuntimeMode | None] | None
             ) = (
