@@ -32,3 +32,43 @@ def test_disclosure_view_is_separate_readonly_contract():
         "not_performed",
     ]
 
+
+def test_disclosure_reader_only_declared_by_sec_prompt_version():
+    from types import SimpleNamespace
+
+    from nexus.agents.committee import DISCLOSURE_SCOPE_PROMPT_VERSION
+    from nexus.api.routes.research import _declares_disclosure_monitoring
+
+    for manifest in (
+        {},
+        {"portfolio": None},
+        {"portfolio": {"version": "local-portfolio-synthesis-v7"}},
+    ):
+        assert not _declares_disclosure_monitoring(SimpleNamespace(prompt_manifest=manifest))
+    assert _declares_disclosure_monitoring(
+        SimpleNamespace(prompt_manifest={"portfolio": {"version": DISCLOSURE_SCOPE_PROMPT_VERSION}})
+    )
+
+
+@pytest.mark.asyncio
+async def test_future_native_settlement_cannot_be_shown_as_known_at_old_read_time():
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from nexus.api.research_disclosure_monitoring import _usage
+
+    now = datetime(2026, 10, 9, 14, tzinfo=UTC)
+    run = SimpleNamespace(
+        id=uuid4(),
+        created_at=now,
+        status="completed",
+        settled_cost_usd=0,
+        input_tokens=10,
+        output_tokens=5,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=SimpleNamespace(finished_at=now + timedelta(seconds=1)))
+    )
+    assert await _usage(session, run, now) == "unknown"
