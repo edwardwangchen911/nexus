@@ -630,3 +630,27 @@ usage_unknown coverage，现按原consumer已知结算门禁严格核对“无�
 仍需剩余hold/安全时点及完整矩阵、指定Chat全diff终审、最终head全部必需CI、镜像/兼容
 0086采纳+0097/v2/gap回滚、合入部署和自然市场；本轮尚未push/创建PR/合入/部署，完整目标
 保持未完成。最终CI分组耗时须按实际同head全部job日志聚合，不以扩业务期限/删测试掩盖。
+
+### 2026-10-25 价格监控的研究、结算与通知读取时点
+
+正常认证GET的五个新增反例先在旧实现全部失败：未来child的UUID提前可见、Job终结前
+提前显示known、后来published/dead_letter提前可见，以及未到observed_at的v1 daily回执
+把另一Run的known用量借给仍pending的原触发。另对created_at单独移除过滤，观察新增
+反例失败后恢复；两个独立回执时间边界均在JOIN/COALESCE之前过滤，不只修改covered标签。
+
+最小修复保留原触发及坏v2 proof回原Run路径；研究链接与用量统一取同一可见child，未来
+子Run隐藏链接，缺少已到读取时点的Job终结证明时状态与用量保持unknown。通知终态还须
+published_at/dead_lettered_at可见；不从当前可变摘要反推过去，不修改旧数据、采纳或结算。
+读取前后比对扩至12张表完整行hash，新增租约、通知尝试及审计，预算、调度和正式门禁未改。
+
+首轮正常API七项通过；最终八项时点/原unknown与SEC、混合研究、daily及坏证明邻域共21项
+通过（703.36秒），结果见writer私有price-asof-api-final.log。十二表完整行hash保持，
+既有unknown保护及合法/损坏v2 proof归属回归通过；不以Job completed推导事件已addressed。
+完整引擎fast6865通过/10skip/1deselected（245.64秒），661源Mypy、Ruff、格式、TS及e2e lint通过。
+正常TCP API→BFF→Chrome的未知用量/已复核两项再次通过（108.72秒），展开价格触发详情
+核对预算保留、known及精确研究链接，390px/桌面无横溢或页面异常；API全GET，最慢2.423秒。
+十秒截止不变，资料/SDK/通知仍是替身；不把本片算作真实模型、自然市场或通知设备送达。
+
+这一片只推进旧price读时点缺口，未新增依赖、配置、迁移或业务运行；仍需hold与剩余完整
+CLI/安全矩阵、指定Chat全diff终审、最终head全部必需CI、镜像及兼容回滚、合入部署与自然
+运行。此前部署和真实验收不被本地回归取代，完整目标未完成。

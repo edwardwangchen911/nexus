@@ -25,7 +25,7 @@ from nexus.persistence.models.monitoring import (
     MonitorPlan,
     MonitorTrigger,
 )
-from nexus.persistence.models.runtime import OutboxEvent
+from nexus.persistence.models.runtime import Job, OutboxEvent
 
 _REASONS: dict[str, CoverageReason] = {
     "MONITOR_AUDIT_REJECTED": "audit_rejected",
@@ -161,7 +161,9 @@ async def read_monitoring_view(
             .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
             .outerjoin(
                 MonitorDailyTriggerReceipt,
-                MonitorDailyTriggerReceipt.trigger_id == MonitorTrigger.id,
+                (MonitorDailyTriggerReceipt.trigger_id == MonitorTrigger.id)
+                & (MonitorDailyTriggerReceipt.created_at <= now)
+                & (MonitorDailyTriggerReceipt.observed_at <= now),
             )
             .outerjoin(
                 MonitorDailyEventReceipt,
@@ -225,10 +227,26 @@ async def read_monitoring_view(
                     if trigger.research_run_id is None
                     else await session.get(AgentResearchRunRecord, trigger.research_run_id)
                 )
-        covered = daily is not None and max(daily.created_at, daily.observed_at) <= now
+        hidden_child = child is not None and (
+            child.created_at > now or child.instrument_id != trigger.instrument_id
+        )
+        if hidden_child:
+            child = None
+        terminal_unconfirmed = False
+        if child is not None and child.status in {"completed", "failed", "abstained"}:
+            job = await session.scalar(select(Job).where(Job.payload == {"run_id": str(child.id)}))
+            terminal_unconfirmed = job is None or job.finished_at is None or job.finished_at > now
+        covered = (
+            daily is not None
+            and max(daily.created_at, daily.observed_at) <= now
+            and not hidden_child
+            and not terminal_unconfirmed
+        )
         usage: UsageStatus = (
             "not_started"
-            if child is None or child.created_at > now or child.status == "prepared"
+            if child is None or child.status == "prepared"
+            else "unknown"
+            if terminal_unconfirmed
             else (
                 "known"
                 if child.settled_cost_usd is not None
@@ -256,12 +274,19 @@ async def read_monitoring_view(
                 trigger_id=trigger.id,
                 cause=trigger.cause,
                 checked_at=checked.checked_at,
-                status="unknown" if invalid_proof else "covered" if covered else trigger.status,
+                status="unknown"
+                if invalid_proof or hidden_child or terminal_unconfirmed
+                else "covered"
+                if covered
+                else trigger.status,
                 blocked_reason=blocked,
-                run_id=(daily.run_id if covered else trigger.research_run_id),
+                run_id=None if child is None else child.id,
                 usage_status=usage,
                 notification_status=notification.status
-                if notification is not None and notification.created_at <= now
+                if notification is not None
+                and notification.created_at <= now
+                and (notification.published_at is None or notification.published_at <= now)
+                and (notification.dead_lettered_at is None or notification.dead_lettered_at <= now)
                 else "unknown",
             )
         )

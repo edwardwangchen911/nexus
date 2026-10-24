@@ -21,7 +21,14 @@ test("normal BFF and page retain independent saved price and SEC monitoring", as
   const body = await response.json();
   expect(body.data.monitoring).toEqual(ready.response.data.monitoring);
   expect(body.data.disclosure_monitoring).toEqual(ready.response.data.disclosure_monitoring);
-  await expect(page.getByRole("region", { name: "价格监控记录" })).toBeVisible();
+  const price = page.getByRole("region", { name: "价格监控记录" });
+  await expect(price).toBeVisible();
+  await price.locator("summary").click();
+  for (const trigger of body.data.monitoring.triggers) {
+    if (trigger.run_id) await expect(price.locator(`a[href="/research/${ready.instrument_id}?run_id=${trigger.run_id}"]`).first()).toBeVisible();
+  }
+  if (ready.reason === "unknown_usage") await expect(price).toContainText("用量未知，预算继续保留");
+  if (ready.reason === "addressed") await expect(price).toContainText("用量已确认");
   const sec = page.getByRole("region", { name: "SEC 披露监控记录" });
   await expect(sec).toBeVisible();
   await expect(sec).toContainText("交易保持锁定");
@@ -45,6 +52,7 @@ test("normal BFF and page retain independent saved price and SEC monitoring", as
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: path.join(directory!, "mobile.png"), fullPage: true });
   await sec.screenshot({ path: path.join(directory!, "sec-mobile.png") });
+  await price.screenshot({ path: path.join(directory!, "price-mobile.png") });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   if (ready.reason === "addressed") {
     await expect(sec).toContainText("事件已复核处理");
