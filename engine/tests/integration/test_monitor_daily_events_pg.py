@@ -29,6 +29,9 @@ def pending_migration_head(monkeypatch):
     monkeypatch.setattr(
         "nexus.persistence.migrations.CURRENT_MIGRATION_HEAD", "0097_monitor_daily_events"
     )
+    monkeypatch.setattr(
+        "nexus.ops.research_monitor.CURRENT_MIGRATION_HEAD", "0097_monitor_daily_events"
+    )
 
 
 async def v2_receipt_source(url, monkeypatch, *, fault=None):
@@ -38,24 +41,44 @@ async def v2_receipt_source(url, monkeypatch, *, fault=None):
     """
     from datetime import timedelta
     from decimal import Decimal
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
     from uuid import uuid4
 
+    from helpers.monitor_materials import prepared_materials
     from nexus.agents.actionable_research import _hash
     from nexus.agents.execution import _advance
     from nexus.agents.persistence import reserve_daily_budget, settle_daily_budget
     from nexus.jobs.models import JobKeyV1, QueueName, RetryPolicy
     from nexus.jobs.repository import claim_next_job, enqueue_job, finalize_job
     from nexus.paper.agent_cycle import _append_event
-    from nexus.persistence.models.agents import AgentResearchOutputRecord
+    from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
     from nexus.persistence.models.monitoring import (
         MonitorCheck,
         MonitorDailyEventReceipt,
         MonitorPlan,
+        MonitorTrigger,
     )
     from nexus.persistence.models.paper import AgentPaperCycleRecord
     from sqlalchemy import select
 
-    factory, settings, trigger, parent, now = await ready_trigger(url, monkeypatch)
+    with TemporaryDirectory(prefix="daily-v2-originals-") as directory:
+        factory, settings, _, captured, pointer, batch_id, materials_id = await prepared_materials(
+            url, monkeypatch, Path(directory)
+        )
+    now = captured["clock"][0] + timedelta(minutes=5)
+    async with factory() as session:
+        material = await session.get(DataSnapshot, materials_id)
+        trigger = next(
+            row
+            for row in await session.scalars(
+                select(MonitorTrigger).where(MonitorTrigger.batch_id == batch_id)
+            )
+            if row.kind == "price"
+        )
+        check = await session.get(MonitorCheck, trigger.check_id)
+        source_plan = await session.get(MonitorPlan, check.plan_id)
+        parent = await session.get(AgentResearchRunRecord, source_plan.source_run_id)
     async with factory() as session, session.begin():
         base = await session.get(DataSnapshot, parent.data_snapshot_id)
         prior_cycle = await session.get(
@@ -73,57 +96,39 @@ async def v2_receipt_source(url, monkeypatch, *, fault=None):
         session.add(cycle)
         await session.flush()
         context = {
-            "purpose": "daily_monitor_context_v1",
-            "cycle_id": str(cycle.id),
-            "account_id": str(trigger.account_id),
-            "instrument_id": str(trigger.instrument_id),
-            "decision_time": now.isoformat(),
-            "parents": [
-                {
-                    "plan_id": str(plan.id),
-                    "generation": plan.generation,
-                    "condition": plan.condition,
-                    "condition_hash": plan.condition_hash,
-                    "parent_run_id": str(parent.id),
-                    "parent_output_id": str(parent_output.id),
-                    "parent_output_hash": parent_output.content_hash,
-                    "parent_intent": parent_output.intent,
-                }
-            ],
-            "trigger_checks": [
-                {
-                    "trigger_id": str(trigger.id),
-                    "check_id": str(check.id),
-                    "plan_id": str(plan.id),
-                    "cause": trigger.cause,
-                    "checked_at": check.checked_at.isoformat(),
-                    "observation": check.observation,
-                }
-            ],
-        }
-        legacy = context
-        context = {
             "purpose": "daily_monitor_context_v2",
             "cycle_id": str(cycle.id),
             "account_id": str(trigger.account_id),
             "instrument_id": str(trigger.instrument_id),
             "decision_time": now.isoformat(),
             "trigger_checks": [
-                legacy["trigger_checks"][0]
+                item
                 | {
-                    "kind": trigger.kind,
-                    "event_key": trigger.event_key,
                     "original_run_id": None,
                     "original_output_id": None,
-                    "batch_id": None,
-                    "materials_snapshot_id": None,
+                    "batch_id": str(batch_id),
+                    "materials_snapshot_id": str(materials_id),
+                }
+                for item in material.payload["members"]
+            ],
+            "materials": [
+                {
+                    "snapshot_id": str(materials_id),
+                    "content_hash": material.revision,
+                    "payload": material.payload,
                 }
             ],
-            "materials": [],
-            "legacy": legacy,
+            "legacy": None,
             "predecessors": {
-                "price": {"plan_id": str(plan.id), "generation": plan.generation},
-                "disclosure": {"plan_id": None, "generation": None},
+                kind: next(
+                    (
+                        {"plan_id": item["plan_id"], "generation": item["generation"]}
+                        for item in material.payload["parents"]
+                        if item["kind"] == kind
+                    ),
+                    {"plan_id": None, "generation": None},
+                )
+                for kind in ("price", "disclosure")
             },
         }
         payload = copy.deepcopy(base.payload)
@@ -244,11 +249,12 @@ async def v2_receipt_source(url, monkeypatch, *, fault=None):
             "context_hash": context_hash,
             "items": [
                 {
-                    "trigger_id": str(trigger.id),
+                    "trigger_id": member["trigger_id"],
                     "status": "unresolved" if fault == "unresolved" else "addressed",
                     "rationale": "Reviewed synthetic evidence",
                     "evidence_refs": [ref],
                 }
+                for member in context["trigger_checks"]
             ],
         }
         proposal_hash = _hash(proposal)
@@ -351,8 +357,8 @@ async def v2_receipt_source(url, monkeypatch, *, fault=None):
             event_key=trigger.event_key,
             original_run_id=None,
             original_output_id=None,
-            batch_id=None,
-            materials_snapshot_id=None,
+            batch_id=batch_id,
+            materials_snapshot_id=materials_id,
             observed_at=now + timedelta(seconds=2),
         )
     return factory, receipt, trigger, now, plan.id
@@ -360,6 +366,10 @@ async def v2_receipt_source(url, monkeypatch, *, fault=None):
 
 async def add_pair(session, receipt, now, prior, *, missing=False):
     from nexus.persistence.models.monitoring import MonitorCoverageReceipt
+
+    frozen = await session.get(DataSnapshot, receipt.snapshot_id)
+    predecessors = frozen.payload["agent_paper_context"]["pending_monitoring_v2"]["predecessors"]
+    from uuid import UUID
 
     for kind in ("price",) if missing else ("price", "disclosure"):
         session.add(
@@ -369,7 +379,9 @@ async def add_pair(session, receipt, now, prior, *, missing=False):
                 run_id=receipt.run_id,
                 output_id=receipt.output_id,
                 kind=kind,
-                prior_plan_id=prior if kind == "price" else None,
+                prior_plan_id=None
+                if predecessors[kind]["plan_id"] is None
+                else UUID(predecessors[kind]["plan_id"]),
                 active_plan_id=None,
                 research_as_of=now,
                 observed_at=receipt.observed_at,
@@ -483,29 +495,31 @@ def test_daily_v2_empty_roundtrip(migrated_database_url, monkeypatch):
 async def test_daily_v2_keeps_v1_and_excludes_double_consumption(
     migrated_database_url, monkeypatch
 ):
-    from datetime import timedelta
-
     from integration.test_monitor_daily_receipts_pg import receipt_source
-    from nexus.persistence.models.agents import AgentResearchRunRecord
-    from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan
 
     factory, old_receipt, trigger = await receipt_source(migrated_database_url, monkeypatch)
-    async with factory() as session:
-        check = await session.get(MonitorCheck, trigger.check_id)
-        plan = await session.get(MonitorPlan, check.plan_id)
-        parent = await session.get(AgentResearchRunRecord, plan.source_run_id)
+    from nexus.persistence.models.monitoring import MonitorDailyEventReceipt
 
-    async def same_original(*_args):
-        return factory, None, trigger, parent, old_receipt.observed_at + timedelta(minutes=5)
-
-    monkeypatch.setattr(__name__ + ".ready_trigger", same_original)
-    _, new_receipt, _, now, prior = await v2_receipt_source(migrated_database_url, monkeypatch)
+    new_receipt = MonitorDailyEventReceipt(
+        account_id=old_receipt.account_id,
+        instrument_id=old_receipt.instrument_id,
+        trigger_id=trigger.id,
+        kind=trigger.kind,
+        event_key=trigger.event_key,
+        cycle_id=old_receipt.cycle_id,
+        run_id=old_receipt.run_id,
+        output_id=old_receipt.output_id,
+        snapshot_id=old_receipt.snapshot_id,
+        context_hash=old_receipt.context_hash,
+        proposal_hash=old_receipt.review_bundle_hash,
+        review_hash="0" * 64,
+        observed_at=old_receipt.observed_at,
+    )
     # The old public daily path still commits unchanged.
     async with factory() as session, session.begin():
         session.add(old_receipt)
     with pytest.raises(DBAPIError, match="MONITOR_EVENT_ALREADY_CONSUMED"):
         async with factory() as session, session.begin():
-            await add_pair(session, new_receipt, now, prior)
             session.add(new_receipt)
     await factory.kw["bind"].dispose()
 
@@ -527,7 +541,7 @@ async def test_daily_v2_snapshot_freezes_exact_legacy_and_time(migrated_database
         if mutate == "future":
             context["decision_time"] = "2099-01-01T00:00:00Z"
         if mutate == "parent":
-            context["legacy"]["parents"] = []
+            context["materials"][0]["payload"]["parents"] = []
         if mutate == "original_run":
             context["trigger_checks"][0]["original_run_id"] = str(uuid4())
         with pytest.raises(DBAPIError, match="MONITOR_DAILY_V2"):
@@ -672,6 +686,11 @@ async def test_daily_v2_plan_requires_atomic_consumption(migrated_database_url, 
     async with factory() as session:
         old = await session.get(MonitorPlan, prior)
         output = await session.get(AgentResearchOutputRecord, receipt.output_id)
+        frozen = await session.get(DataSnapshot, receipt.snapshot_id)
+        disclosure_prior = frozen.payload["agent_paper_context"]["pending_monitoring_v2"][
+            "predecessors"
+        ]["disclosure"]["plan_id"]
+        from uuid import UUID
     new_plan = clone(
         old,
         generation=old.generation + 1,
@@ -695,7 +714,7 @@ async def test_daily_v2_plan_requires_atomic_consumption(migrated_database_url, 
                         run_id=receipt.run_id,
                         output_id=receipt.output_id,
                         kind=kind,
-                        prior_plan_id=prior if kind == "price" else None,
+                        prior_plan_id=prior if kind == "price" else UUID(disclosure_prior),
                         active_plan_id=new_plan.id if kind == "price" else None,
                         research_as_of=now,
                         observed_at=receipt.observed_at,
@@ -712,4 +731,44 @@ async def test_daily_v2_plan_requires_atomic_consumption(migrated_database_url, 
     else:
         with pytest.raises(DBAPIError, match="MONITOR_DAILY_V2_PLAN_INVALID"):
             await install()
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_v2_rejects_rehashed_parentless_original(migrated_database_url, monkeypatch):
+    from uuid import uuid4
+
+    from nexus.monitoring.mixed_contracts import canonical_hash
+
+    factory, receipt, _, _, _ = await v2_receipt_source(migrated_database_url, monkeypatch)
+    async with factory() as session:
+        frozen = await session.get(DataSnapshot, receipt.snapshot_id)
+        original = await session.get(DataSnapshot, receipt.materials_snapshot_id)
+    corrupt = copy.deepcopy(original.payload)
+    corrupt["parents"] = []
+    replacement = clone(original, id=uuid4(), payload=corrupt, revision=canonical_hash(corrupt))
+    payload = copy.deepcopy(frozen.payload)
+    context = payload["agent_paper_context"]["pending_monitoring_v2"]
+    context["materials"] = [
+        {
+            "snapshot_id": str(replacement.id),
+            "content_hash": replacement.revision,
+            "payload": corrupt,
+        }
+    ]
+    for member in context["trigger_checks"]:
+        member["materials_snapshot_id"] = str(replacement.id)
+    with pytest.raises(DBAPIError, match="MONITOR_DAILY_V2_MATERIAL_CLOSED_SET_INVALID"):
+        async with factory() as session, session.begin():
+            session.add(replacement)
+            await session.flush()
+            session.add(
+                clone(
+                    frozen,
+                    payload=payload,
+                    revision=hashlib.sha256(
+                        json.dumps(payload, sort_keys=True).encode()
+                    ).hexdigest(),
+                )
+            )
     await factory.kw["bind"].dispose()

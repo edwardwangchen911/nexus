@@ -28,6 +28,8 @@ BEGIN
     OR trigger_row.kind IS DISTINCT FROM NEW.kind OR trigger_row.event_key IS DISTINCT FROM NEW.event_key
     OR trigger_row.batch_id IS DISTINCT FROM NEW.batch_id
     OR trigger_row.research_run_id IS DISTINCT FROM NEW.original_run_id
+    OR (NEW.original_run_id IS NULL AND trigger_row.status NOT IN ('pending','blocked'))
+    OR (NEW.original_run_id IS NOT NULL AND trigger_row.status<>'completed')
   THEN RAISE EXCEPTION 'MONITOR_DAILY_RECEIPT_INVALID_TRIGGER'; END IF;
   SELECT * INTO frozen FROM public.data_snapshots WHERE id=NEW.snapshot_id;
   PERFORM public.nexus_validate_daily_monitor_v2(NEW.snapshot_id);
@@ -182,6 +184,8 @@ BEGIN
  THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_CONTEXT_INVALID'; END IF;
  n:=jsonb_array_length(c->'trigger_checks');
  IF n NOT BETWEEN 1 AND 32
+  OR jsonb_array_length(c->'materials') NOT BETWEEN 1 AND 32
+  OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(c->'trigger_checks') x WHERE x->>'batch_id' IS NOT NULL)
   OR (SELECT count(DISTINCT x->>'trigger_id') FROM jsonb_array_elements(c->'trigger_checks') x)<>n
   OR (SELECT count(DISTINCT x->>'check_id') FROM jsonb_array_elements(c->'trigger_checks') x)<>n
   OR (SELECT count(DISTINCT x->>'snapshot_id') FROM jsonb_array_elements(c->'materials') x)<>jsonb_array_length(c->'materials')
@@ -221,6 +225,23 @@ BEGIN
    OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(c->'trigger_checks') x WHERE x->>'materials_snapshot_id'=material->>'snapshot_id')
   THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_MATERIAL_BATCH_INVALID'; END IF;
   PERFORM public.nexus_monitor_validate_batch_readonly(b.id);
+  IF jsonb_array_length(material->'payload'->'parents') NOT BETWEEN 1 AND 2
+   OR (SELECT count(DISTINCT pp->>'plan_id') FROM jsonb_array_elements(material->'payload'->'parents') pp)<>jsonb_array_length(material->'payload'->'parents')
+   OR (SELECT count(DISTINCT pp->>'kind') FROM jsonb_array_elements(material->'payload'->'parents') pp)<>jsonb_array_length(material->'payload'->'parents')
+   OR EXISTS((SELECT pp->>'plan_id' FROM jsonb_array_elements(material->'payload'->'parents') pp EXCEPT SELECT mm->>'plan_id' FROM jsonb_array_elements(material->'payload'->'members') mm)
+    UNION ALL (SELECT mm->>'plan_id' FROM jsonb_array_elements(material->'payload'->'members') mm EXCEPT SELECT pp->>'plan_id' FROM jsonb_array_elements(material->'payload'->'parents') pp))
+   OR EXISTS(SELECT 1 FROM jsonb_array_elements(material->'payload'->'members') mm WHERE NOT EXISTS(
+    SELECT 1 FROM public.research_monitor_triggers mt JOIN public.research_monitor_checks mc ON mc.id=mt.check_id
+     WHERE mt.id::text=mm->>'trigger_id' AND mt.batch_id=b.id
+      AND mc.id::text=mm->>'check_id' AND mc.plan_id::text=mm->>'plan_id'
+      AND mt.kind=mm->>'kind' AND mt.event_key=mm->>'event_key' AND mt.cause=mm->>'cause'
+      AND mc.checked_at=(mm->>'checked_at')::timestamptz AND mc.observation=mm->'observation'))
+   OR jsonb_array_length(material->'payload'->'contents')<>(SELECT count(*) FROM jsonb_array_elements(material->'payload'->'members') mm WHERE mm->>'kind'='disclosure')
+   OR (SELECT count(DISTINCT cc->>'snapshot_id') FROM jsonb_array_elements(material->'payload'->'contents') cc)<>jsonb_array_length(material->'payload'->'contents')
+   OR EXISTS(SELECT 1 FROM jsonb_array_elements(material->'payload'->'contents') cc WHERE NOT EXISTS(
+    SELECT 1 FROM jsonb_array_elements(material->'payload'->'members') mm WHERE mm->>'kind'='disclosure'
+     AND mm->>'event_key'='sec:'||(cc->'archive'->>'issuer_cik')||':'||(cc->'archive'->'entry'->>'accession_number')))
+  THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_MATERIAL_CLOSED_SET_INVALID'; END IF;
   FOR parent IN SELECT value FROM jsonb_array_elements(material->'payload'->'parents') LOOP
    IF NOT EXISTS(SELECT 1 FROM public.research_monitor_plans p
     JOIN public.agent_research_runs r ON r.id=p.source_run_id
@@ -255,7 +276,6 @@ BEGIN
   IF NOT FOUND OR t.account_id::text<>c->>'account_id' OR t.instrument_id::text<>c->>'instrument_id'
    OR t.kind IS DISTINCT FROM item->>'kind' OR t.event_key IS DISTINCT FROM item->>'event_key'
    OR t.batch_id::text IS DISTINCT FROM item->>'batch_id'
-   OR t.research_run_id::text IS DISTINCT FROM item->>'original_run_id'
    OR NOT (item ?& ARRAY['original_run_id','original_output_id','batch_id','materials_snapshot_id'])
    OR NOT EXISTS(SELECT 1 FROM public.research_monitor_checks ch JOIN public.research_monitor_plans p ON p.id=ch.plan_id
     WHERE ch.id=t.check_id AND ch.id::text=item->>'check_id' AND p.id::text=item->>'plan_id'
@@ -269,7 +289,7 @@ BEGIN
      AND greatest(t.created_at,ch.created_at,ch.checked_at,p.created_at)<=s.observed_at)
   THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_MEMBER_INVALID'; END IF;
   IF t.batch_id IS NULL THEN
-   IF t.kind<>'price' OR t.research_run_id IS NOT NULL OR t.status NOT IN ('pending','blocked')
+   IF t.kind<>'price' OR item->>'original_run_id' IS NOT NULL
     OR item->>'materials_snapshot_id' IS NOT NULL OR item->>'original_output_id' IS NOT NULL
     OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(c->'legacy'->'trigger_checks') l
       WHERE l=item-ARRAY['kind','event_key','original_run_id','original_output_id','batch_id','materials_snapshot_id'])
@@ -283,16 +303,16 @@ BEGIN
     OR (t.kind='disclosure' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(material->'payload'->'contents') cc
       WHERE 'sec:'||(cc->'archive'->>'issuer_cik')||':'||(cc->'archive'->'entry'->>'accession_number')=t.event_key))
    THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_MATERIAL_MEMBER_INVALID'; END IF;
-   IF t.research_run_id IS NULL THEN
-    IF t.status NOT IN ('pending','blocked') OR item->>'original_output_id' IS NOT NULL
+   IF item->>'original_run_id' IS NULL THEN
+    IF item->>'original_output_id' IS NOT NULL
     THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_ORIGINAL_INVALID'; END IF;
-   ELSIF t.status<>'completed' OR NOT EXISTS(
+   ELSIF NOT EXISTS(
     SELECT 1 FROM public.research_monitor_increments m JOIN public.agent_research_runs r ON r.id=m.run_id
     JOIN public.agent_research_outputs o ON o.run_id=r.id AND o.id::text=item->>'original_output_id'
     JOIN public.agent_research_outputs proposer ON proposer.run_id=r.id AND proposer.role='market_state'
     JOIN public.agent_daily_budget_reservations br ON br.run_id=r.id JOIN public.jobs j ON j.id=m.job_id
     JOIN public.job_leases l ON l.job_id=j.id JOIN public.job_attempts a ON a.job_id=j.id
-    WHERE m.batch_id=t.batch_id AND m.run_id=t.research_run_id AND m.account_id=t.account_id AND m.instrument_id=t.instrument_id
+    WHERE m.batch_id=t.batch_id AND m.run_id::text=item->>'original_run_id' AND m.account_id=t.account_id AND m.instrument_id=t.instrument_id
      AND r.data_snapshot_id=m.snapshot_id AND r.instrument_id=t.instrument_id
      AND j.scope_kind='instrument' AND j.scope_id=t.instrument_id::text AND j.effective_at=r.decision_time
      AND (SELECT count(*) FROM public.agent_research_outputs final WHERE final.run_id=r.id AND final.role IS NULL AND final.status='completed')=1
@@ -531,7 +551,18 @@ def upgrade():
         "CREATE TRIGGER trg_daily_v2_immutable BEFORE UPDATE OR DELETE ON research_monitor_daily_event_receipts FOR EACH ROW EXECUTE FUNCTION nexus_monitor_immutable()"
     )
     op.execute("""CREATE FUNCTION public.nexus_daily_v2_snapshot_guard() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
-      BEGIN PERFORM public.nexus_validate_daily_monitor_v2(NEW.id); RETURN NULL; END $$""")
+      DECLARE c jsonb; item jsonb; BEGIN
+      PERFORM public.nexus_validate_daily_monitor_v2(NEW.id);
+      c:=NEW.payload->'agent_paper_context'->'pending_monitoring_v2';
+      IF c IS NOT NULL THEN
+       FOR item IN SELECT value FROM jsonb_array_elements(c->'trigger_checks') LOOP
+        IF NOT EXISTS(SELECT 1 FROM public.research_monitor_triggers t WHERE t.id::text=item->>'trigger_id'
+         AND t.research_run_id::text IS NOT DISTINCT FROM item->>'original_run_id'
+         AND ((item->>'original_run_id' IS NULL AND t.status IN ('pending','blocked'))
+          OR (item->>'original_run_id' IS NOT NULL AND t.status='completed')))
+        THEN RAISE EXCEPTION 'MONITOR_DAILY_V2_OCCUPANCY_CHANGED'; END IF;
+       END LOOP;
+      END IF; RETURN NULL; END $$""")
     op.execute("""CREATE FUNCTION public.nexus_daily_v2_receipt_guard() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
       BEGIN PERFORM public.nexus_validate_daily_event_receipt(NEW.id); RETURN NULL; END $$""")
     op.execute("""CREATE FUNCTION public.nexus_daily_v2_trigger_guard() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
