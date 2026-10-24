@@ -199,7 +199,10 @@ async def dispatch_configured_once(
             trigger = await session.get(MonitorTrigger, trigger_id)
             if (
                 trigger is None
-                or trigger.kind != "price"
+                or (
+                    trigger.kind != "price"
+                    and (trigger.batch_id is None or trigger.research_run_id is None)
+                )
                 or trigger.account_id != settings.agent_paper_account_id
             ):
                 raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
@@ -420,7 +423,10 @@ async def confirm_monitor_shutdown(
             if (
                 not isinstance(now, datetime)
                 or trigger is None
-                or trigger.kind != "price"
+                or (
+                    trigger.kind != "price"
+                    and (trigger.batch_id is None or trigger.research_run_id is None)
+                )
                 or trigger.account_id != account_id
                 or trigger.status not in {"completed", "failed"}
                 or trigger.research_run_id is None

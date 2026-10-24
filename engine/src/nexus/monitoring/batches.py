@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import TypedDict
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
@@ -17,6 +17,7 @@ from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.monitoring import (
     MonitorCheck,
+    MonitorIncrement,
     MonitorObservationBatch,
     MonitorPlan,
     MonitorTrigger,
@@ -26,6 +27,9 @@ from nexus.persistence.models.runtime import OutboxEvent
 
 
 class BatchScanReport(TypedDict):
+    impact_review: str
+    coverage: str
+    unresolved_event_count: int
     status: str
     batch_id: str
     checks: int
@@ -68,7 +72,22 @@ async def _report(
         )
         or 0
     )
+    unresolved = (
+        await session.scalar(
+            select(func.count())
+            .select_from(MonitorTrigger)
+            .where(
+                MonitorTrigger.account_id == batch.account_id,
+                MonitorTrigger.instrument_id == batch.instrument_id,
+                MonitorTrigger.batch_id.is_not(None),
+            )
+        )
+        or 0
+    )
     return {
+        "impact_review": "not_verified",
+        "coverage": "unresolved",
+        "unresolved_event_count": unresolved,
         "status": status,
         "batch_id": str(batch.id),
         "checks": len(checks),
@@ -95,13 +114,17 @@ async def disclosure_source_current(
     latest = await session.scalar(
         select(AgentResearchRunRecord.id)
         .join(DataSnapshot, DataSnapshot.id == AgentResearchRunRecord.data_snapshot_id)
-        .join(
+        .outerjoin(
             AgentPaperCycleRecord,
             DataSnapshot.payload["agent_paper_context"]["cycle_id"].astext
             == cast(AgentPaperCycleRecord.id, String),
         )
+        .outerjoin(MonitorIncrement, MonitorIncrement.run_id == AgentResearchRunRecord.id)
         .where(
-            AgentPaperCycleRecord.account_id == plan.account_id,
+            or_(
+                AgentPaperCycleRecord.account_id == plan.account_id,
+                MonitorIncrement.account_id == plan.account_id,
+            ),
             AgentResearchRunRecord.instrument_id == plan.instrument_id,
             AgentResearchRunRecord.decision_time <= now,
             AgentResearchRunRecord.created_at <= now,

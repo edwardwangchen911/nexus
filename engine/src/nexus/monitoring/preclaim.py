@@ -125,7 +125,12 @@ async def preclaim_rejection_qualified(
         and proof.payload == _payload(member, code)
         and proof.occurred_at == job.finished_at
         and run.actor_id == f"monitor:{member.account_id}"
-        and run.idempotency_key == f"monitor:{member.trigger_id}"
+        and run.idempotency_key
+        == (
+            f"monitor-batch:{member.batch_id}"
+            if member.batch_id is not None
+            else f"monitor:{member.trigger_id}"
+        )
         and output.role is None
         and output.status == "abstained"
         and output.intent is None
@@ -177,7 +182,7 @@ async def close_capacity_rejected_increment_once(
             trigger = await session.get(MonitorTrigger, trigger_id)
             if (
                 trigger is None
-                or trigger.kind != "price"
+                or (trigger.kind != "price" and trigger.batch_id is None)
                 or trigger.account_id != account_id
                 or trigger.research_run_id is None
             ):
@@ -231,7 +236,12 @@ async def close_capacity_rejected_increment_once(
                     or job.attempt_count != 0
                     or job.manual_retry_count != 0
                     or run.actor_id != f"monitor:{account_id}"
-                    or run.idempotency_key != f"monitor:{trigger_id}"
+                    or run.idempotency_key
+                    != (
+                        f"monitor-batch:{member.batch_id}"
+                        if member.batch_id is not None
+                        else f"monitor:{trigger_id}"
+                    )
                     or not await formal_stage_job_qualified(session, job)
                 ):
                     raise ValueError(INVALID)

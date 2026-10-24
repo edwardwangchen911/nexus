@@ -260,6 +260,18 @@ async def reconcile_account_results(
         )
         if existing is not None:
             continue
+        mixed_member = await session.scalar(
+            select(MonitorIncrement).where(
+                MonitorIncrement.run_id == run.id, MonitorIncrement.batch_id.is_not(None)
+            )
+        )
+        if mixed_member is not None:
+            # Native completion is not the future per-kind reviewed consumption.
+            await finish_increment(
+                session, account_id=account_id, trigger_id=mixed_member.trigger_id, now=now
+            )
+            counts["awaiting_mixed_review"] = counts.get("awaiting_mixed_review", 0) + 1
+            continue
         if not await _native_finished(session, run, now):
             counts["awaiting_native_finish"] += 1
             continue

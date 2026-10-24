@@ -31,7 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 
 
-async def installed(database_url, monkeypatch, root, *, added=2):
+async def installed(database_url, monkeypatch, root, *, added=2, kinds=("price", "disclosure")):
     factory, settings, store, captured, pointer = await reader_source(
         database_url, monkeypatch, root
     )
@@ -52,7 +52,7 @@ async def installed(database_url, monkeypatch, root, *, added=2):
     )
     captured["clock"][0] = AT + timedelta(seconds=6)
     await _set_test_insert_clock(factory, captured["clock"][0])
-    for kind in ("price", "disclosure"):
+    for kind in kinds:
         result = await run(
             settings,
             parser().parse_args(

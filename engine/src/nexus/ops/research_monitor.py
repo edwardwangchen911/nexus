@@ -46,6 +46,12 @@ def parser() -> argparse.ArgumentParser:
     content.add_argument("--index-snapshot-id", type=UUID, required=True)
     content.add_argument("--accession", required=True)
     content.add_argument("--archive-dir", type=Path, required=True)
+    collect = commands.add_parser(
+        "collect-content", help="Collect exact SEC filing originals without research admission"
+    )
+    collect.add_argument("--index-snapshot-id", type=UUID, required=True)
+    collect.add_argument("--accession", required=True)
+    collect.add_argument("--archive-dir", type=Path, required=True)
     preparation = commands.add_parser(
         "prepare-batch",
         help="Freeze parent theses and verified SEC content without admitting research",
@@ -54,6 +60,12 @@ def parser() -> argparse.ArgumentParser:
     admit = commands.add_parser("admit", help="Admit one new single-security trigger review")
     admit.add_argument("--trigger-id", type=UUID, required=True)
     admit.add_argument("--calendar-authority-id", type=UUID, required=True)
+    mixed = commands.add_parser(
+        "admit-batch", help="Admit one sealed mixed single-stock research job"
+    )
+    mixed.add_argument("--batch-id", type=UUID, required=True)
+    mixed.add_argument("--materials-snapshot-id", type=UUID, required=True)
+    mixed.add_argument("--calendar-authority-id", type=UUID, required=True)
     finish = commands.add_parser("finish", help="Record the original incremental job outcome")
     finish.add_argument("--trigger-id", type=UUID, required=True)
     return result
@@ -120,10 +132,63 @@ async def scan_configured_once(
     )
 
 
+async def _collect_content_with_scope(
+    settings: EngineSettings, args: argparse.Namespace
+) -> dict[str, object]:
+    from nexus.ops.monitor_content_local import collect_filing_content
+    from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
+    from nexus.persistence.models.data import DataSnapshot
+
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key,0))"),
+                {"key": SCHEMA_ADMISSION_LOCK_KEY},
+            )
+            if (
+                await session.scalar(text("SELECT version_num FROM alembic_version"))
+                != CURRENT_MIGRATION_HEAD
+            ):
+                raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
+            now = await session.scalar(select(func.clock_timestamp()))
+            candidate = (
+                None
+                if settings.agent_paper_candidate_batch_id is None
+                else await load_agent_paper_candidate_batch(
+                    session, batch_id=settings.agent_paper_candidate_batch_id
+                )
+            )
+            source = await session.get(DataSnapshot, args.index_snapshot_id)
+            index = None if source is None else source.payload.get("index")
+            if (
+                not isinstance(now, datetime)
+                or candidate is None
+                or candidate.account_id != settings.agent_paper_account_id
+                or candidate.created_at > now
+                or not isinstance(index, dict)
+                or index.get("instrument_id")
+                not in {str(value) for value in candidate.instrument_ids}
+            ):
+                raise ValueError("MONITOR_SCOPE_INVALID")
+    finally:
+        await factory.kw["bind"].dispose()
+    # Source transport runs after the short scope transaction has closed.
+    return await collect_filing_content(
+        settings,
+        index_snapshot_id=args.index_snapshot_id,
+        accession=args.accession,
+        archive_dir=args.archive_dir,
+        contact=getattr(args, "_sec_contact", None) or "",
+    )
+
+
 async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, object]:
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action == "collect-content":
+        return await _collect_content_with_scope(settings, args)
     factory = session_factory(settings)
     try:
         async with factory() as session, session.begin():
@@ -203,8 +268,54 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 return {
                     "status": finished_trigger.status,
                     "reason": finished_trigger.reason,
+                    **(
+                        {
+                            "impact_review": "not_verified",
+                            "coverage": "unresolved",
+                            "unresolved_event_count": await session.scalar(
+                                select(func.count())
+                                .select_from(type(finished_trigger))
+                                .where(type(finished_trigger).batch_id == finished_trigger.batch_id)
+                            ),
+                        }
+                        if finished_trigger.batch_id is not None
+                        else {}
+                    ),
                     "trigger_id": str(finished_trigger.id),
                     "run_id": str(finished_trigger.research_run_id),
+                    "execution_locked": True,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                }
+            if args.action == "admit-batch":
+                from nexus.monitoring.mixed_admission import admit_batch
+
+                if (
+                    settings.agent_paper_candidate_batch_id is None
+                    or settings.agent_paper_formal_model_config_id is None
+                ):
+                    raise ValueError("MONITOR_CONFIGURATION_UNAVAILABLE")
+                member = await admit_batch(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    batch_id=args.batch_id,
+                    materials_snapshot_id=args.materials_snapshot_id,
+                    candidate_batch_id=settings.agent_paper_candidate_batch_id,
+                    calendar_authority_id=args.calendar_authority_id,
+                    model_config_id=settings.agent_paper_formal_model_config_id,
+                    daily_limit_usd=settings.agent_daily_budget_usd,
+                    daily_sdk_call_limit=settings.agent_monitor_daily_sdk_call_limit,
+                    now=now,
+                )
+                from nexus.persistence.models.monitoring import MonitorTrigger
+
+                first = await session.get(MonitorTrigger, member.trigger_id)
+                return {
+                    "status": "admitted" if first is None else first.status,
+                    "batch_id": str(args.batch_id),
+                    "run_id": str(member.run_id),
+                    "job_id": str(member.job_id),
+                    "reserved_sdk_calls": 3,
                     "execution_locked": True,
                     "model_requests": 0,
                     "provider_requests": 0,
@@ -465,7 +576,10 @@ async def run_configured(
     environment: dict[str, str], args: argparse.Namespace
 ) -> dict[str, object]:
     settings = _FileEngineSettings.model_validate(environment)
-    if args.action == "admit":
+    if args.action == "collect-content":
+        args = argparse.Namespace(**vars(args), _sec_contact=environment.get("SEC_CONTACT"))
+
+    if args.action in {"admit", "admit-batch"}:
         from nexus.ops.formal_budget_protection import bind_runtime_environment
 
         bound, calendar = await bind_runtime_environment(settings, environment)
@@ -513,6 +627,24 @@ def main(argv: list[str] | None = None) -> int:
             "SEC_MONITOR_INVENTORY_INVALID",
             "SEC_MONITOR_ORIGINAL_INVALID",
             "SEC_MONITOR_CLOCK_UNAVAILABLE",
+            "SEC_MONITOR_CONTACT_REQUIRED",
+            "SEC_MONITOR_ENTRY_INVALID",
+            "SEC_MONITOR_COLLECTION_DIRECTORY_INVALID",
+            "SEC_MONITOR_COLLECTION_FAILED",
+            "MONITOR_CONTEXT_INVALID",
+            "MONITOR_INCREMENT_BINDING_INVALID",
+            "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
+            "MONITOR_PENDING_OVERFLOW",
+            "MONITOR_PREPARED_INPUTS_CHANGED",
+            "MONITOR_DAILY_CALL_LIMIT",
+            "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+            "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+            "MANUAL_PREPARATION_ACK_BLOCKED",
+            "MONITOR_AWAITING_RECONCILIATION",
+            "MONITOR_PREPARED_INPUTS_INVALID",
+            "MONITOR_CONTENT_MISSING",
+            "MONITOR_CONTENT_CONFLICT",
+            "MONITOR_MARKET_CLOSED",
             "MONITOR_BATCH_UNAVAILABLE",
             "MONITOR_SCOPE_INVALID",
         }

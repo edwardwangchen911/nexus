@@ -57,10 +57,13 @@ def _decision_quote(
     for item in items:
         if not isinstance(item, Mapping):
             continue
-        monitor = (
-            item.get("source") == "nexus_price_monitor_increment"
-            and security_snapshot.get("purpose") == "price_monitor_increment_v1"
-        )
+        monitor = item.get("source") in {
+            "nexus_price_monitor_increment",
+            "nexus_monitor_increment_v2",
+        } and security_snapshot.get("purpose") in {
+            "price_monitor_increment_v1",
+            "monitor_increment_v2",
+        }
         if item.get("source") != "nexus_agent_paper_context" and not monitor:
             continue
         evidence_ref_id = item.get("evidence_ref_id")

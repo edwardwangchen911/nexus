@@ -260,11 +260,15 @@ class _BoundDatabaseExecutors:
         paper_context_id = paper_context[1].id if paper_context is not None else None
         snapshot = await self._session.get(DataSnapshot, self._snapshot_id)
         monitor_refs = tuple(
-            ref for ref in self._evidence if ref.source == "nexus_price_monitor_increment"
+            ref
+            for ref in self._evidence
+            if ref.source in {"nexus_price_monitor_increment", "nexus_monitor_increment_v2"}
         )
         monitor_context = None
         if monitor_refs or (
-            snapshot is not None and snapshot.payload.get("purpose") == "price_monitor_increment_v1"
+            snapshot is not None
+            and snapshot.payload.get("purpose")
+            in {"price_monitor_increment_v1", "monitor_increment_v2"}
         ):
             from nexus.monitoring.context import read_monitor_context
 
@@ -361,7 +365,26 @@ class _BoundDatabaseExecutors:
             ],
         )
         if monitor_context is not None:
-            result = {**result, "purpose": "price_monitor_increment_v1"}
+            from nexus.monitoring.mixed_context import MixedMonitorContext, model_view
+
+            result = {
+                **result,
+                "purpose": "monitor_increment_v2"
+                if isinstance(monitor_context[0], MixedMonitorContext)
+                else "price_monitor_increment_v1",
+            }
+            from nexus.monitoring.mixed_context import MixedMonitorContext
+
+            if isinstance(monitor_context[0], MixedMonitorContext):
+                items = result.get("items")
+                if not isinstance(items, list):
+                    return self._invalid_frozen_evidence_authority("get_security_snapshot")
+                for item in items:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("source") == "nexus_monitor_increment_v2"
+                    ):
+                        item["monitor_context"] = model_view(monitor_context[0])
         if snapshot is not None and snapshot.payload.get("purpose") == "research_only_v2":
             if not observation_bindings:
                 return self._invalid_frozen_evidence_authority("get_security_snapshot")

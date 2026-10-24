@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.jobs.models import job_input_hash
 from nexus.monitoring.context import MonitorResearchContext, read_monitor_context
+from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentResearchRunRecord,
@@ -22,7 +23,9 @@ from nexus.persistence.models.runtime import Job, JobLease
 def increment_manifest_hash(member: MonitorIncrement, run: AgentResearchRunRecord, job: Job) -> str:
     return job_input_hash(
         {
-            "purpose": "price_monitor_increment_v1",
+            "purpose": "monitor_increment_v2"
+            if member.batch_id is not None
+            else "price_monitor_increment_v1",
             "account_id": str(member.account_id),
             "instrument_id": str(member.instrument_id),
             "trigger_id": str(member.trigger_id),
@@ -66,7 +69,7 @@ async def require_increment_binding(
     if (
         job is None
         or trigger is None
-        or trigger.kind != "price"
+        or (trigger.kind != "price" and member.batch_id is None)
         or bound is None
         or member.snapshot_id != run.data_snapshot_id
         or member.instrument_id != run.instrument_id
@@ -91,6 +94,11 @@ async def require_increment_binding(
         or member.manifest_hash != increment_manifest_hash(member, run, job)
     ):
         raise ValueError(invalid)
+    if isinstance(bound[0], MixedMonitorContext):
+        if member.batch_id != bound[0].batch_id:
+            raise ValueError(invalid)
+    elif member.batch_id is not None:
+        raise ValueError(invalid)
     frozen_ids = [item.trigger_id for item in bound[0].trigger_checks]
     rows = tuple(
         await session.scalars(
@@ -101,7 +109,7 @@ async def require_increment_binding(
         len(set(frozen_ids)) != len(frozen_ids)
         or {row.id for row in rows} != set(frozen_ids)
         or any(
-            row.kind != "price"
+            (row.kind != "price" and member.batch_id is None)
             or row.account_id != member.account_id
             or row.instrument_id != member.instrument_id
             or (row.status, row.reason) != (trigger.status, trigger.reason)
@@ -465,12 +473,17 @@ async def _admit_trigger(
 
 
 async def _freeze_increment_snapshot(
-    session: AsyncSession, context: MonitorResearchContext
+    session: AsyncSession, context: MonitorResearchContext | MixedMonitorContext
 ) -> DataSnapshot:
     import hashlib
     import json
 
-    from nexus.monitoring.context import PURPOSE, SOURCE, content
+    from nexus.monitoring.context import SOURCE, content
+    from nexus.monitoring.mixed_context import SOURCE as MIXED_SOURCE
+
+    source = MIXED_SOURCE if isinstance(context, MixedMonitorContext) else SOURCE
+    purpose = context.purpose
+
     from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
     from nexus.persistence.models.data import DataSnapshot
     from nexus.persistence.models.research import ResearchEvidenceRef
@@ -493,7 +506,7 @@ async def _freeze_increment_snapshot(
     raw = content(context)
     digest = hashlib.sha256(raw).hexdigest()
     evidence = ResearchEvidenceRef(
-        source=SOURCE,
+        source=source,
         provider_object_id=str(context.trigger_checks[0].trigger_id),
         revision=digest,
         available_at=context.decision_time,
@@ -509,18 +522,18 @@ async def _freeze_increment_snapshot(
         if k not in {"portfolio_context", "agent_paper_context"}
     }
     payload.update(
-        purpose=PURPOSE,
+        purpose=purpose,
         monitor_context=context.model_dump(mode="json"),
         evidence_ids=[str(row.evidence_ref_id) for row in rows] + [str(evidence.id)],
     )
     snapshot = DataSnapshot(
-        source=SOURCE,
+        source=source,
         provider_object_id=str(context.instrument_id),
         revision=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
         observed_at=context.decision_time,
         available_at=context.decision_time,
         received_at=context.decision_time,
-        schema_version=PURPOSE,
+        schema_version=purpose,
         payload=payload,
     )
     session.add(snapshot)
@@ -574,7 +587,7 @@ async def finish_increment(
     now = require_utc(now)
     await lock_portfolio_account(session, account_id)
     trigger = await session.get(MonitorTrigger, trigger_id)
-    if trigger is None or trigger.kind != "price" or trigger.account_id != account_id:
+    if trigger is None or trigger.account_id != account_id:
         raise ValueError("MONITOR_TRIGGER_UNAVAILABLE")
     await lock_security(session, account_id=account_id, instrument_id=trigger.instrument_id)
     await session.refresh(trigger, with_for_update=True)
@@ -629,7 +642,10 @@ async def finish_increment(
         )
         if output is None:
             raise ValueError("MONITOR_OUTPUT_UNAVAILABLE")
-        trigger.status, trigger.reason = "completed", None
+        trigger.status, trigger.reason = (
+            "completed",
+            ("MONITOR_EVENT_REVIEW_UNRESOLVED" if member.batch_id is not None else None),
+        )
     else:
         trigger.status, trigger.reason = (
             "failed",

@@ -14,6 +14,7 @@ from nexus.domain.time import require_utc
 from nexus.monitoring.context import MonitorResearchContext
 from nexus.monitoring.contracts import PriceMonitoringProposal, PriceReviewCondition
 from nexus.monitoring.evaluation import EpisodeState, Result, advance_episode, compile_proposal
+from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.monitoring.source_qualification import load_qualified_source
 from nexus.monitoring.storage import lock_security
 from nexus.persistence.models.agents import (
@@ -28,7 +29,7 @@ class ApprovedSource:
     run: AgentResearchRunRecord
     output: AgentResearchOutputRecord
     proposal: PriceMonitoringProposal
-    context: AgentPaperResearchContext | MonitorResearchContext
+    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext
 
 
 def consume_episode_baseline(
@@ -45,7 +46,8 @@ def consume_episode_baseline(
 
 
 def consumed_baseline(
-    condition: PriceReviewCondition, context: AgentPaperResearchContext | MonitorResearchContext
+    condition: PriceReviewCondition,
+    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext,
 ) -> Result:
     """Only evidence actually frozen into this research can seed a replacement latch."""
     quote = context.decision_quote
@@ -120,7 +122,7 @@ async def install_plan_from_output(
         session, account_id=account_id, output_id=output_id, now=now
     )
     if (
-        isinstance(source.context, MonitorResearchContext)
+        isinstance(source.context, MonitorResearchContext | MixedMonitorContext)
         and expected_predecessor_id != source.context.plan_id
     ):
         raise ValueError("MONITOR_PLAN_CONFLICT")

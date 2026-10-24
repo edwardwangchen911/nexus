@@ -214,7 +214,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             reference = next(
                 row["index"]
                 for row in payload["evidence"]
-                if row["source"] == "nexus_agent_paper_context"
+                if row["source"] in {"nexus_agent_paper_context", "nexus_monitor_increment_v2"}
             )
             if stage == "research":
                 for row in response["roles"]:

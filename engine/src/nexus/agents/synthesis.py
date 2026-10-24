@@ -239,7 +239,9 @@ def synthesize_intent(
 
     proposed = by_role["market_state"].disclosure_proposal
     if prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION and proposed is not None:
-        paper = (snapshot.payload or {}).get("agent_paper_context")
+        paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
+            "monitor_context"
+        )
         context = paper.get("disclosure_monitoring") if isinstance(paper, dict) else None
         try:
             disclosure_proposal = compile_disclosure_proposal(
@@ -269,7 +271,9 @@ def synthesize_intent(
         prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS
         and daily_proposal is not None
     ):
-        paper = (snapshot.payload or {}).get("agent_paper_context")
+        paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
+            "monitor_context"
+        )
         context = paper.get("pending_monitoring") if isinstance(paper, dict) else None
         try:
             context_hash, trigger_ids = daily_context_identity(context)

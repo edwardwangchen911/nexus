@@ -602,9 +602,10 @@ class StagedCodexCommittee(CodexCommittee):
             isinstance(item, dict) and isinstance(item.get("agent_paper_context"), dict)
             for item in security.get("items", [])
         )
-        monitor_context_present = (
-            isinstance(security, dict) and security.get("purpose") == "price_monitor_increment_v1"
-        )
+        monitor_context_present = isinstance(security, dict) and security.get("purpose") in {
+            "price_monitor_increment_v1",
+            "monitor_increment_v2",
+        }
         if monitor_context_present and (
             self._prompts["portfolio"].version not in MONITORING_SCOPE_PROMPT_VERSIONS
             or not self._paper_stage_scope
@@ -615,7 +616,8 @@ class StagedCodexCommittee(CodexCommittee):
                     item
                     for item in security.get("items", [])
                     if isinstance(item, dict)
-                    and item.get("source") == "nexus_price_monitor_increment"
+                    and item.get("source")
+                    in {"nexus_price_monitor_increment", "nexus_monitor_increment_v2"}
                     and isinstance(item.get("monitor_context"), dict)
                 ]
             )
@@ -887,6 +889,19 @@ class StagedCodexCommittee(CodexCommittee):
                 "request. No orders or target weights; execution remains locked. "
                 "Absence of later portfolio allocation context alone is not a research defect."
             )
+            if isinstance(security, dict) and security.get("purpose") == "monitor_increment_v2":
+                payload["instructions"] = cast(str, payload["instructions"]) + (
+                    " The sealed mixed batch includes price and exact SEC filing events. "
+                    "materials.parents map each plan to materials.parent_theses, which preserve "
+                    "each original thesis and audit once; materials.contents "
+                    "contain the exact document inventory and all declared text originals. "
+                    "Index additions, prepared materials and trigger registration are not impact "
+                    "findings. Re-evaluate every frozen event; retain unsupported or unresolved "
+                    "effects as explicit evidence gaps. 8-K/A relationships and accounting "
+                    "revisions "
+                    "remain unverified; never substitute prose for deterministic financial "
+                    "authority."
+                )
         elif paper_context_present:
             payload["instructions"] = cast(str, payload["instructions"]) + (
                 " In security_snapshot, agent_paper_context is the frozen current "

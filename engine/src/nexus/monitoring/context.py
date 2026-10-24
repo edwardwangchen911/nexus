@@ -15,6 +15,15 @@ from nexus.agents.paper_context import AgentPaperPortfolioContext
 from nexus.domain.time import require_utc
 from nexus.monitoring.contracts import PriceObservation, PriceReviewCondition
 from nexus.monitoring.evaluation import evaluate_price
+from nexus.monitoring.mixed_context import (
+    PURPOSE as MIXED_PURPOSE,
+)
+from nexus.monitoring.mixed_context import (
+    SOURCE as MIXED_SOURCE,
+)
+from nexus.monitoring.mixed_context import (
+    MixedMonitorContext,
+)
 from nexus.paper.agent_cycle_authority import CycleAuthority, validate_candidate_manifest
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
@@ -72,7 +81,7 @@ class MonitorResearchContext(BaseModel):
         return require_utc(value)
 
 
-def content(context: MonitorResearchContext) -> bytes:
+def content(context: MonitorResearchContext | MixedMonitorContext) -> bytes:
     return json.dumps(context.model_dump(mode="json"), sort_keys=True).encode()
 
 
@@ -80,9 +89,9 @@ def is_monitor_snapshot(snapshot: DataSnapshot | None) -> bool:
     return bool(
         snapshot is not None
         and (
-            snapshot.source == SOURCE
-            or snapshot.schema_version == PURPOSE
-            or snapshot.payload.get("purpose") == PURPOSE
+            snapshot.source in {SOURCE, MIXED_SOURCE}
+            or snapshot.schema_version in {PURPOSE, MIXED_PURPOSE}
+            or snapshot.payload.get("purpose") in {PURPOSE, MIXED_PURPOSE}
             or "monitor_context" in snapshot.payload
         )
     )
@@ -90,8 +99,14 @@ def is_monitor_snapshot(snapshot: DataSnapshot | None) -> bool:
 
 async def read_monitor_context(
     session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime
-) -> tuple[MonitorResearchContext, ResearchEvidenceRef] | None:
+) -> tuple[MonitorResearchContext | MixedMonitorContext, ResearchEvidenceRef] | None:
     snapshot = await session.get(DataSnapshot, snapshot_id)
+    if snapshot is not None and snapshot.source == MIXED_SOURCE:
+        from nexus.monitoring.mixed_context import read_mixed_context
+
+        return await read_mixed_context(
+            session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+        )
     if (
         snapshot is None
         or snapshot.source != SOURCE
@@ -254,7 +269,7 @@ async def revalidate_monitor_context(
     run: AgentResearchRunRecord,
     evidence_records: tuple[ResearchEvidenceRef, ...],
 ) -> FrozenMonitorContextStatus:
-    records = tuple(row for row in evidence_records if row.source == SOURCE)
+    records = tuple(row for row in evidence_records if row.source in {SOURCE, MIXED_SOURCE})
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     if not records and not is_monitor_snapshot(snapshot):
         return FrozenMonitorContextStatus.MISSING

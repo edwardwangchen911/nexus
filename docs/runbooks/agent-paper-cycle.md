@@ -1153,3 +1153,27 @@ prepare-batch仅冻结材料：原price检查、SEC事件、父论点及原审�
 新计划、迟到冲突、有效期等仍可阻断再次准备。prepared不代表可执行，返回admission=not_checked、
 impact_review=not_performed、job_created=false、execution_locked=true；没有预算、Job、消费或
 会计采纳副作用。最终v2准入须重新检查当日身份、时段、新鲜价格、账户/未知占用、预算与有效租约。
+
+### 精确采集与混合单股任务（候选）
+
+```bash
+nexus-engine-research-monitor collect-content --index-snapshot-id <精确索引UUID> \
+  --accession <精确accession> --archive-dir <尚不存在的私有子目录>
+nexus-engine-research-monitor admit-batch --batch-id <原封口批次UUID> \
+  --materials-snapshot-id <原prepared包UUID> --calendar-authority-id <已配置日历UUID>
+```
+
+collect-content仅复用现有SEC_CONTACT，不在参数/回执中回显联系方式。父目录须当前用户拥有且
+0700；目标目录须不存在。最多一次清单+17份声明正文、总60秒，严格HTTP200，不重试、不覆盖
+失败目录。失败后先读取该目录result.json和已保存原件，不能以换目录自动重试。精确材料读回
+必须合格才可准备；行情/身份、时段、预算、未知占用及有效租约仍由随后正式准入重验。
+
+admit-batch只为封存证券创建一个原生三阶段Job和3次call hold，既有9次增量限额与全局USD预算
+不变；每日三股研究不计入该增量call表。旧price-v1不得借该入口混收成员。重复只跟踪原Run/Job，
+不是重新调用模型。SDK读取独立v2上下文中的完整正文、父论点/审计；模型判断不改财务事实。
+
+finish对typed成功仍显示impact_review=not_verified、coverage=unresolved及未解决事件数，
+completed仅表示原生研究已终结。逐事件双审/采纳、按kind消费/原子接替尚待完成，旧reconciler
+返回awaiting_mixed_review；不得因此宣称监控版本已接替或宿主可完成coverage退出确认。
+未知结果保持unknown和原预算hold；只有严格证明零调用的原生capacity拒绝才走既有封口证明，
+不退还3次SDK额度。0095有v2事实后不可降级，回滚需保留该schema及读取支持。

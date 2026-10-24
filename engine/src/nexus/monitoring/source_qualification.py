@@ -41,6 +41,7 @@ from nexus.monitoring.context import (
     is_monitor_snapshot,
     read_monitor_context,
 )
+from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -63,12 +64,15 @@ async def _qualify_source(
     intent: ResearchIntent,
     account_id: UUID,
     now: datetime,
-) -> tuple[AgentPaperResearchContext | MonitorResearchContext, tuple[EvidenceRef, ...]]:
+) -> tuple[
+    AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext,
+    tuple[EvidenceRef, ...],
+]:
     invalid = "MONITOR_SOURCE_INVALID"
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     if snapshot is None:
         raise ValueError(invalid)
-    context: AgentPaperResearchContext | MonitorResearchContext
+    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext
     if is_monitor_snapshot(snapshot):
         member = await require_increment_binding(session, run)
         monitor = await read_monitor_context(
@@ -82,7 +86,7 @@ async def _qualify_source(
             monitor is None
             or member.account_id != account_id
             or trigger is None
-            or trigger.kind != "price"
+            or (trigger.kind != "price" and member.batch_id is None)
             or trigger.status == "unknown"
         ):
             raise ValueError(invalid)
@@ -192,7 +196,7 @@ async def _qualify_source(
     )
     if price_status is FrozenPriceAuthorityStatus.INVALID:
         raise ValueError(invalid)
-    if isinstance(context, MonitorResearchContext):
+    if isinstance(context, MonitorResearchContext | MixedMonitorContext):
         if (
             await revalidate_monitor_context(session, run=run, evidence_records=records)
             is not FrozenMonitorContextStatus.VALID
@@ -269,7 +273,7 @@ async def _qualify_source(
 class QualifiedSource:
     run: AgentResearchRunRecord
     output: AgentResearchOutputRecord
-    context: AgentPaperResearchContext | MonitorResearchContext
+    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext
     intent: ResearchIntent
     evidence: tuple[EvidenceRef, ...]
     role_outputs: tuple[CommitteeRoleOutput, ...]

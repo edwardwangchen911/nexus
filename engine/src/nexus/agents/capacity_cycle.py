@@ -190,7 +190,10 @@ async def prepare_cycle_capacity_pool(
     from nexus.persistence.models.data import DataSnapshot
 
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
-    if snapshot is not None and snapshot.payload.get("purpose") == "price_monitor_increment_v1":
+    if snapshot is not None and snapshot.payload.get("purpose") in {
+        "price_monitor_increment_v1",
+        "monitor_increment_v2",
+    }:
         if not formal_stage_capacity:
             raise ValueError(invalid)
         from nexus.monitoring.capacity import prepare_monitor_capacity_pool

@@ -52,7 +52,9 @@ def disclosure_from_inputs(inputs: dict[str, object]) -> object | None:
         paper["disclosure_monitoring"]
         for item in security.get("items", [])
         if isinstance(item, dict)
-        and isinstance(paper := item.get("agent_paper_context"), dict)
+        and isinstance(
+            paper := item.get("agent_paper_context") or item.get("monitor_context"), dict
+        )
         and paper.get("disclosure_monitoring") is not None
     ]
     if len(contexts) > 1:
@@ -96,7 +98,11 @@ def compile_disclosure_proposal(
     adoption_hash: str | None,
 ) -> DisclosureMonitoringProposal:
     expected = baseline_fields(context, instrument_id=instrument_id, research_as_of=now)
-    contexts = tuple(ref for ref in evidence_refs if ref.source == "nexus_agent_paper_context")
+    contexts = tuple(
+        ref
+        for ref in evidence_refs
+        if ref.source in {"nexus_agent_paper_context", "nexus_monitor_increment_v2"}
+    )
     now = require_utc(now)
     if (
         set(reviews) != {"bear", "evidence_audit"}

@@ -89,3 +89,36 @@ def test_finish_requires_only_the_original_trigger_identity():
     assert args.action == "finish"
     with pytest.raises(SystemExit):
         parser().parse_args(["finish", "--trigger-id", str(args.trigger_id), "--accept-unknown"])
+
+
+def test_collect_content_uses_existing_contact_config_and_exact_identity(monkeypatch):
+    from uuid import UUID
+
+    from nexus.ops import research_monitor
+
+    args = research_monitor.parser().parse_args(
+        [
+            "collect-content",
+            "--index-snapshot-id",
+            "01000000-0000-7000-8000-000000000001",
+            "--accession",
+            "0000123456-26-000002",
+            "--archive-dir",
+            "/private/synthetic-archive",
+        ]
+    )
+    assert args.index_snapshot_id == UUID("01000000-0000-7000-8000-000000000001")
+    with pytest.raises(SystemExit):
+        research_monitor.parser().parse_args(
+            [
+                "collect-content",
+                "--index-snapshot-id",
+                str(args.index_snapshot_id),
+                "--accession",
+                args.accession,
+                "--archive-dir",
+                str(args.archive_dir),
+                "--account-id",
+                "other",
+            ]
+        )

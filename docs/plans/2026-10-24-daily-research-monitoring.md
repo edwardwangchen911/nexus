@@ -301,3 +301,48 @@ receipt时间下界；CLI固定缺口码；历史cutoff受后来plan/终态污�
 最终33定向unit、Mypy645源、Ruff全engine/format/diff通过；正常入口测试已加入CI组。
 全部原件、模型、传输均为合成或隔离替身，本片没有真实来源/模型/Bark/业务写入或宿主启动。
 尚未push/PR、远端CI、最终Chat终审或部署，不把这份材料资格证明当完整研究消费闭环。
+
+### 2026-10-24 混合批次单股原生任务及三阶段消费（本地候选）
+
+承接4aa287ef材料包：新增显式 `nexus_monitor_increment_v2` / `monitor_increment_v2`，旧price-v1
+序列化与入口继续隔离，不以缺省kind接收SEC。正常 `admit-batch`冻结原材料ID/hash/全部成员、
+两kind父论点/原审计、新决策报价/候选/账户投影及新T0 SEC baseline或明确gap；一批只创建一个
+证券的Run/原生Job/一次USD hold和3次SDK call hold。重复入口返回原身份与原状态，未知不重放。
+
+0095新增Increment nullable unique batch_id，旧行NULL；显式v2 evidence ownership及四表deferred
+接缝检验完整batch/material/parents/typed成员、唯一Run和整组状态，原v1函数保留独立分支。
+空schema可降0094，存在v2事实禁止降级；未来回滚镜像必须保留0095及其读取/绑定能力。
+DB结构性独立3PG验证只是关系围栏，正常CLI/Worker原件链另验，不互相替代。
+
+新版本通过正常readonly tools及正式capacity pool送入SDK三阶段。初次真实编译触发原wire
+上界：不是上游缺正文，而是同一父论点/八角色审计被两个kind重复传输。确定性model_view
+按原output身份只传一次父论点/原审计，保留完整文档text/哈希和精确source引用；完整receipt/
+artifact绑定仍在不可变材料包逐次验证。没有提高100479字节、96k累计输入、8192输出或截止。
+
+新增正常精确内容采集 `collect-content`：指定旧index/accession，固定官方目录清单及全部声明
+文本原件，严格HTTP200/无重试/最多清单+17份正文/总60秒。使用已保护的本地配置与SEC_CONTACT；
+账户/candidate scope在短只读事务内检查，网络在事务之外。失败保留已收bytes/receipts及固定
+stage/请求数回执，不覆盖失败目录、不换accession、不退回“最新一条”。本片只隔离Mock验证，
+未真实调用SEC。采集者源a56d85cf、DB源1c8a7ade已由唯一主writer串行整合。
+
+集中只读审查确认并补齐：SEC-first typed成员不能被宿主/零调用封口硬拒绝，v2须用batch
+幂等键；已知模型完成不能冒充逐事件impact审查。成功typed触发保留原归属/原生completed状态，
+固定reason MONITOR_EVENT_REVIEW_UNRESOLVED；finish和batch报告显式impact_review=not_verified、
+coverage=unresolved及未解决数，unknown保留原unknown/预算hold。绝不回退pending或解绑以重跑。
+旧reconciler对v2明确awaiting_mixed_review，不装入旧price-only消费/接替路径，也不伪记source
+unverified；新的mixed后继会让旧SEC计划等待正式接替，而不是忽略其可能否决。
+
+本片尚未完成逐事件addressed+反方/审计+精确采纳、按kind消费及原子接替；正常宿主自动选择
+待处理typed批次、coverage依赖的宿主退出确认和新页面也仍待下片。原v1自动pending过滤继续
+排除typed，防止半片意外激活模型。账户已知结算可用与完整宿主闭环分别报告。
+完整Goal保持active，后续仍需API/BFF/实际页面、完整diff Chat终审、最终同head全部必需CI、
+最终镜像/兼容回滚/部署与真实交易时段观察；本片不以Job或CI代替全产品验收。
+
+
+本片最终离线证据：根三种正常材料→admit-batch→原生Worker/零调用封口PG通过64.09秒，
+含成功3阶段、critique未知2阶段不重试、纯SEC首成员的零调用容量拒绝；已知账户准入passed，
+unknown过租约后仍拒绝，预留3calls不退。根21项新旧混合/DB/原price增量/原preclaim/collector
+PG通过185.33秒；完整fast6749通过/10skip/1deselected（221.56秒）。最终Mypy648源、Ruff及
+format/diff通过，末尾CLI安全码与定向回归日志单列；正常采集函数另有71unit/5PG独立证据。
+以上均合成原件/HTTP与模型替身、真实隔离持久化，零真实模型/SEC/Bark/业务宿主或账户写入。
+没有释放业务未知预留、重放旧请求或放宽正式门禁；当前尚无远端最终CI、部署或真实交易时段证明。
