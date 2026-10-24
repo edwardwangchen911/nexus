@@ -98,6 +98,9 @@ async def test_returning_condition_consumes_frozen_quote_but_not_postfreeze_chec
         assert account_id == plan_a.account_id
         return sources[output_id]
 
+    # Both public qualification and proposal approval share this controlled source
+    # boundary. Native qualification is exercised by the separate full-path tests.
+    monkeypatch.setattr(installation, "load_qualified_source", approved)
     monkeypatch.setattr(installation, "load_approved_source", approved)
 
     async def install(source, predecessor, minute):
@@ -175,6 +178,9 @@ async def test_scanner_reloads_generation_after_concurrent_installer(
     async def observation(*_args, **_kwargs):
         return quote(original, at)
 
+    # Both public qualification and proposal approval share this controlled source
+    # boundary. Native qualification is exercised by the separate full-path tests.
+    monkeypatch.setattr(installation, "load_qualified_source", approved)
     monkeypatch.setattr(installation, "load_approved_source", approved)
     monkeypatch.setattr(scanning, "load_agent_paper_service_calendar_authority", calendar)
     monkeypatch.setattr(scanning, "lock_security", delayed_lock)

@@ -28,6 +28,20 @@ def frozen_predecessor(context: MixedMonitorContext, kind: str) -> UUID | None:
     return None if not rows else UUID(str(rows[0]["plan_id"]))
 
 
+def frozen_predecessor_changed(
+    context: MixedMonitorContext, kind: str, current: MonitorPlan | None
+) -> bool:
+    expected = frozen_predecessor(context, kind)
+    if expected is not None:
+        return current is None or current.id != expected
+    # Missing parents mean this kind was not frozen, not that no plan existed.
+    # It cannot be replaced here. A plan first visible/effective after the
+    # material cutoff still fences the entire old result from consumption.
+    return current is not None and max(current.created_at, current.effective_at) > (
+        context.materials.prepared_at
+    )
+
+
 async def reconcile_mixed_run(
     session: AsyncSession,
     *,
@@ -128,8 +142,7 @@ async def reconcile_mixed_run(
         )
         priors[kind] = prior
         if source is not None and isinstance(source.context, MixedMonitorContext):
-            expected = frozen_predecessor(source.context, kind)
-            if expected is not None and (None if prior is None else prior.id) != expected:
+            if frozen_predecessor_changed(source.context, kind, prior):
                 superseded = True
     # Predecessor conflicts apply to the entire transaction, never just one kind.
     for kind in ("price", "disclosure"):
