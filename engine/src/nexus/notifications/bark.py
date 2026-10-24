@@ -19,6 +19,10 @@ from nexus.notifications.research_monitor import (
     RESEARCH_MONITOR_EVENT,
     ResearchPriceTriggerNotification,
 )
+from nexus.notifications.research_monitor_batch import (
+    RESEARCH_MONITOR_BATCH_EVENT,
+    ResearchMonitorBatchNotification,
+)
 from nexus.outbox.models import OutboxMessage
 from nexus.paper.notification import (
     PaperNotificationError,
@@ -34,6 +38,7 @@ BARK_EVENT_SCHEMAS: tuple[tuple[str, str], ...] = (
     ("paper.execution.advance.cancelled", "paper_execution_v1"),
     ("paper.execution.cancelled", "paper_execution_v1"),
     RESEARCH_MONITOR_EVENT,
+    RESEARCH_MONITOR_BATCH_EVENT,
 )
 
 _EVENT_STATUS: dict[tuple[str, str], str] = {
@@ -89,6 +94,34 @@ def map_bark_notification(
     read_only_url: str | None,
 ) -> dict[str, str]:
     """Render one validated frozen notification without later data lookups."""
+    if (message.event_type, message.schema_version) == RESEARCH_MONITOR_BATCH_EVENT:
+        try:
+            batch = ResearchMonitorBatchNotification.model_validate(message.payload)
+        except (ValueError, TypeError, ValidationError):
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID") from None
+        if batch.batch_id != message.aggregate_id:
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID")
+        title, body = batch.render()
+        notification = {
+            "title": title,
+            "body": body,
+            "group": "NEXUS",
+            "id": f"research-monitor-batch:{batch.batch_id}",
+            "message_id": str(message.event_id),
+        }
+        if read_only_url is not None:
+            validate_bark_read_only_url(read_only_url)
+            origin = urlsplit(read_only_url)
+            notification["url"] = urlunsplit(
+                (
+                    origin.scheme,
+                    origin.netloc,
+                    f"/research/{batch.instrument_id}",
+                    f"run_id={batch.source_run_ids[0]}",
+                    "",
+                )
+            )
+        return notification
     if (message.event_type, message.schema_version) == RESEARCH_MONITOR_EVENT:
         try:
             trigger = ResearchPriceTriggerNotification.model_validate(message.payload)
@@ -329,7 +362,10 @@ class BarkPublisher:
         await self.publish(message)
 
     async def publish(self, message: OutboxMessage) -> None:
-        if (message.event_type, message.schema_version) != RESEARCH_MONITOR_EVENT:
+        if (message.event_type, message.schema_version) not in {
+            RESEARCH_MONITOR_EVENT,
+            RESEARCH_MONITOR_BATCH_EVENT,
+        }:
             if (
                 "notification_snapshot" not in message.payload
                 and "notification_delivery" not in message.payload
