@@ -55,6 +55,7 @@ class DailyEventCapacityScope:
     async def __aenter__(self) -> Self:
         if self._timeout is not None:
             raise RuntimeError("daily capacity scope cannot be reused")
+        self.check_deadline()
         self._timeout = asyncio.timeout_at(self.deadline)
         await self._timeout.__aenter__()
         self._token = _current_scope.set(self)

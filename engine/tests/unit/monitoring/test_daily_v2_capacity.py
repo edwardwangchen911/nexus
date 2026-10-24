@@ -389,3 +389,19 @@ async def test_inherited_exhausted_deadline_refuses_before_rebuilding_inputs(mon
     module.load_frozen_evidence.assert_not_awaited()
     module.database_read_only_tools.assert_not_awaited()
     assert module._current_scope.get() is None
+
+
+@pytest.mark.asyncio
+async def test_expired_scope_never_enters_body_or_installs_timer(monkeypatch):
+    from nexus.monitoring import daily_v2_capacity as module
+
+    now = asyncio.get_running_loop().time()
+    monkeypatch.setattr(module, "_monotonic", lambda: now)
+    scope = module.DailyEventCapacityScope(deadline=now)
+    entered = False
+    with pytest.raises(ValueError, match="^CODEX_CAPACITY_PRECLAIM_TIMEOUT$"):
+        async with scope:
+            entered = True
+    assert not entered
+    assert scope._timeout is None and scope._token is None
+    assert module._current_scope.get() is None
