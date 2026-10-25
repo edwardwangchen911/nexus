@@ -14,16 +14,207 @@ from nexus.persistence.models.paper import (
     PaperLedgerAccountRecord,
     PaperLedgerEntryRecord,
     PaperLedgerTransactionRecord,
+    PaperPerformanceSnapshotRecord,
+    PaperPositionSnapshotRecord,
 )
 from nexus.risk.canonical import (
     canonical_paper_ledger_transaction_hash,
     canonical_paper_projection_hash,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 PAPER_ACCOUNT_ID = UUID("d31672c0-3922-5ebd-8fdb-cd3174266731")
 PORTFOLIO_ID = UUID("ee2ff673-eaf6-5076-bbab-f4c9cedfc74e")
+
+
+@pytest.mark.asyncio
+async def test_derived_snapshot_knowledge_cutoff_preserves_frozen_and_historical_views(
+    migrated_database_url, monkeypatch
+):
+    monkeypatch.setattr(
+        "nexus.paper.performance.current_paper_performance_price_authority_available", lambda: True
+    )
+    seed = await seed_paper_performance(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    known_at = seed.as_of + timedelta(days=1)
+    try:
+        async with sessions() as session:
+            with pytest.raises(ValueError, match="knowledge time must be timezone-aware"):
+                await load_paper_projection(
+                    session,
+                    account_id=seed.execution.account_id,
+                    as_of=seed.as_of,
+                    derived_snapshots_known_at=known_at.replace(tzinfo=None),
+                )
+            frozen = await load_paper_projection(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+                derived_snapshots_known_at=known_at,
+            )
+        from integration.test_candidate_multistock_path import _set_test_insert_clock
+
+        await _set_test_insert_clock(sessions, known_at + timedelta(days=1))
+        async with sessions.begin() as session:
+            published = await publish_paper_performance_snapshot(
+                session, account_id=seed.execution.account_id, as_of=seed.as_of
+            )
+        async with sessions() as session:
+            performance_row = await session.scalar(
+                select(PaperPerformanceSnapshotRecord).where(
+                    PaperPerformanceSnapshotRecord.account_id == seed.execution.account_id,
+                    PaperPerformanceSnapshotRecord.as_of == seed.as_of,
+                )
+            )
+            assert performance_row.created_at > known_at
+            rows = tuple(
+                await session.scalars(
+                    select(PaperPositionSnapshotRecord).where(
+                        PaperPositionSnapshotRecord.account_id == seed.execution.account_id,
+                        PaperPositionSnapshotRecord.as_of == seed.as_of,
+                    )
+                )
+            )
+            assert rows and all(row.created_at > known_at for row in rows)
+            repeated = await load_paper_projection(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+                derived_snapshots_known_at=known_at,
+            )
+            current = await load_paper_projection(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+                derived_snapshots_known_at=performance_row.created_at,
+            )
+            historical = await load_paper_projection(
+                session, account_id=seed.execution.account_id, as_of=seed.as_of
+            )
+        assert repeated == frozen
+        assert current == historical
+        assert current.projection_hash != frozen.projection_hash
+        assert current.positions and current.positions[0].quantity == seed.execution.quantity
+        assert current.nav == published.performance.nav
+        assert frozen.nav != current.nav
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publication_stage", ["waiting", "inserted"])
+async def test_publication_and_frozen_knowledge_serialize_real_transactions(
+    migrated_database_url, monkeypatch, publication_stage
+):
+    from nexus.paper.target_service import lock_portfolio_account
+
+    monkeypatch.setattr(
+        "nexus.paper.performance.current_paper_performance_price_authority_available", lambda: True
+    )
+    seed = await seed_paper_performance(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    started, allowed, inserted, release = (asyncio.Event() for _ in range(4))
+    pids = {}
+
+    async def publish():
+        async with sessions.begin() as session:
+            pids["publisher"] = await session.scalar(select(func.pg_backend_pid()))
+            # Begin before the freezer's knowledge time: DEFAULT now() would lie
+            # about visibility if this transaction waits before insertion.
+            await session.scalar(select(func.transaction_timestamp()))
+            started.set()
+            await allowed.wait()
+            await publish_paper_performance_snapshot(
+                session, account_id=seed.execution.account_id, as_of=seed.as_of
+            )
+            inserted.set()
+            if publication_stage == "inserted":
+                await release.wait()
+
+    async def blocked(task, waiter, owner):
+        async with asyncio.timeout(10):
+            while not task.done():
+                async with sessions() as session:
+                    if await session.scalar(
+                        text(
+                            "SELECT CAST(:owner AS integer) = ANY("
+                            "pg_blocking_pids(CAST(:waiter AS integer)))"
+                        ),
+                        {"owner": owner, "waiter": waiter},
+                    ):
+                        return True
+                await asyncio.sleep(0.01)
+        return False
+
+    publisher = asyncio.create_task(publish())
+    freezer = None
+    try:
+        await asyncio.wait_for(started.wait(), 10)
+        if publication_stage == "waiting":
+            async with sessions.begin() as session:
+                owner = await session.scalar(select(func.pg_backend_pid()))
+                await lock_portfolio_account(session, seed.execution.account_id)
+                cutoff = await session.scalar(select(func.clock_timestamp()))
+                frozen = await load_paper_projection(
+                    session,
+                    account_id=seed.execution.account_id,
+                    as_of=seed.as_of,
+                    derived_snapshots_known_at=cutoff,
+                )
+                allowed.set()
+                assert await blocked(publisher, pids["publisher"], owner), (
+                    "publication must wait for the frozen account boundary"
+                )
+            await publisher
+            async with sessions() as session:
+                replay = await load_paper_projection(
+                    session,
+                    account_id=seed.execution.account_id,
+                    as_of=seed.as_of,
+                    derived_snapshots_known_at=cutoff,
+                )
+            assert replay == frozen
+        else:
+            allowed.set()
+            await asyncio.wait_for(inserted.wait(), 10)
+            entering = asyncio.Event()
+
+            async def freeze():
+                async with sessions.begin() as session:
+                    pids["freezer"] = await session.scalar(select(func.pg_backend_pid()))
+                    entering.set()
+                    await lock_portfolio_account(session, seed.execution.account_id)
+                    cutoff = await session.scalar(select(func.clock_timestamp()))
+                    return await load_paper_projection(
+                        session,
+                        account_id=seed.execution.account_id,
+                        as_of=seed.as_of,
+                        derived_snapshots_known_at=cutoff,
+                    )
+
+            freezer = asyncio.create_task(freeze())
+            await asyncio.wait_for(entering.wait(), 10)
+            assert await blocked(freezer, pids["freezer"], pids["publisher"]), (
+                "freeze must wait for an uncommitted publication"
+            )
+            release.set()
+            await publisher
+            frozen = await freezer
+            async with sessions() as session:
+                historical = await load_paper_projection(
+                    session, account_id=seed.execution.account_id, as_of=seed.as_of
+                )
+            assert frozen == historical
+    finally:
+        allowed.set()
+        release.set()
+        await asyncio.gather(
+            publisher, *(() if freezer is None else (freezer,)), return_exceptions=True
+        )
+        await engine.dispose()
 
 
 @pytest.fixture(autouse=True)

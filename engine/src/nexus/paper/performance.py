@@ -1009,6 +1009,12 @@ async def publish_paper_performance_snapshot(
     publication_time = await session.scalar(select(func.clock_timestamp()))
     if publication_time is None or effective_at > publication_time:
         raise PaperPerformanceError("PAPER_PERFORMANCE_INVALID")
+    from nexus.paper.target_service import lock_portfolio_account
+
+    # Serialize derived publication with research freezes, before the existing
+    # publication/account-row locks. Transaction-start timestamps are too early
+    # when a publication has waited for an in-flight freeze.
+    await lock_portfolio_account(session, account_id)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1919))"),
         {"scope": f"internal-paper-performance:{account_id}"},
@@ -1026,6 +1032,9 @@ async def publish_paper_performance_snapshot(
     )
     if existing is not None:
         return await _load_publication(session, snapshot=existing, replayed=True)
+    visibility_time = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(visibility_time, datetime):
+        raise PaperPerformanceError("PAPER_PERFORMANCE_INVALID")
     latest_as_of = await session.scalar(
         select(func.max(PaperPerformanceSnapshotRecord.as_of)).where(
             PaperPerformanceSnapshotRecord.account_id == account_id
@@ -1227,6 +1236,7 @@ async def publish_paper_performance_snapshot(
 
     snapshot = PaperPerformanceSnapshotRecord(
         id=new_uuid7(),
+        created_at=visibility_time,
         account_id=account_id,
         as_of=effective_at,
         nav=performance.nav,
@@ -1244,6 +1254,7 @@ async def publish_paper_performance_snapshot(
     session.add_all(
         PaperPositionSnapshotRecord(
             id=new_uuid7(),
+            created_at=visibility_time,
             account_id=account_id,
             instrument_id=position.instrument_id,
             as_of=effective_at,
@@ -1261,6 +1272,7 @@ async def publish_paper_performance_snapshot(
     session.add_all(
         PaperPerformanceAttributionRecord(
             id=new_uuid7(),
+            created_at=visibility_time,
             performance_snapshot_id=snapshot.id,
             account_id=account_id,
             dimension=attribution.dimension,
