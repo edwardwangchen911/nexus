@@ -76,10 +76,67 @@ async def test_pending_stock_is_frozen_whole_or_explicitly_rejected(
     if count == 2:
         import asyncio
 
+        from nexus.monitoring import admission
+        from nexus.paper import target_service
+        from sqlalchemy import text
+
         alternate = parser().parse_args(
             ["admit", "--trigger-id", str(ids[0]), "--calendar-authority-id", str(CALENDAR_ID)]
         )
-        first, second = await asyncio.gather(run(settings, args), run(settings, alternate))
+        ready, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        pids = {}
+        native_admit = admission.admit_trigger
+        native_lock = target_service.lock_portfolio_account
+
+        async def prepared_before_commit(session, **kwargs):
+            member = await native_admit(session, **kwargs)
+            if not ready.is_set():
+                pids["owner"] = await session.scalar(text("SELECT pg_backend_pid()"))
+                ready.set()
+                await release.wait()
+            return member
+
+        async def observed_lock(session, account_id):
+            if ready.is_set():
+                pids["waiter"] = await session.scalar(text("SELECT pg_backend_pid()"))
+                assert await session.scalar(text("SHOW lock_timeout")) == "2s"
+                waiting.set()
+            await native_lock(session, account_id)
+
+        tasks = []
+        with monkeypatch.context() as competing:
+            competing.setattr(admission, "admit_trigger", prepared_before_commit)
+            competing.setattr(target_service, "lock_portfolio_account", observed_lock)
+            try:
+                tasks.append(asyncio.create_task(run(settings, args)))
+                await asyncio.wait_for(ready.wait(), timeout=30)
+                # Heavy preparation finishes before the waiter starts its real
+                # two-second lock budget. Both transactions still overlap.
+                async with factory() as observer:
+                    await observer.execute(text("SELECT 1"))
+                    tasks.append(asyncio.create_task(run(settings, alternate)))
+                    await asyncio.wait_for(waiting.wait(), timeout=10)
+                    assert pids["owner"] != pids["waiter"]
+                    async with asyncio.timeout(10):
+                        while True:
+                            if tasks[1].done():
+                                await tasks[1]
+                                raise AssertionError("contender completed without lock contention")
+                            blockers = await observer.scalar(
+                                text("SELECT pg_blocking_pids(:pid)"),
+                                {"pid": pids["waiter"]},
+                            )
+                            if pids["owner"] in blockers:
+                                break
+                            await asyncio.sleep(0)
+                    release.set()
+                first, second = await asyncio.gather(*tasks)
+            finally:
+                release.set()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         assert first["run_id"] == second["run_id"]
         result = first
     else:
