@@ -31,6 +31,17 @@ test("normal BFF and page retain independent saved price and SEC monitoring", as
   if (ready.reason === "addressed") await expect(price).toContainText("用量已确认");
   const sec = page.getByRole("region", { name: "SEC 披露监控记录" });
   await expect(sec).toBeVisible();
+  if (ready.reason === "addressed") {
+    expect(body.data.monitoring.state).toBe("superseded");
+    expect(body.data.disclosure_monitoring.state).toBe("superseded");
+    expect(body.data.monitoring.replacement_run_id).toBe(ready.replacement_run_id);
+    expect(body.data.disclosure_monitoring.replacement_run_id).toBe(ready.replacement_run_id);
+    const childHref = `/research/${ready.instrument_id}?run_id=${ready.replacement_run_id}`;
+    await expect(price.getByRole("link", { name: "查看替代研究", exact: true })).toHaveAttribute("href", childHref);
+    await expect(sec.getByRole("link", { name: "查看替代披露研究", exact: true })).toHaveAttribute("href", childHref);
+    await expect(price).toContainText("已由新研究替代");
+    await expect(sec).toContainText("已由新研究替代");
+  }
   await expect(sec).toContainText("交易保持锁定");
   await expect(sec).toContainText("共记录 2 项披露事件");
   await sec.locator("summary").click();
