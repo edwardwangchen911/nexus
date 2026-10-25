@@ -31,6 +31,8 @@ def test_empty_receipt_migration_roundtrip(migrated_database_url, monkeypatch):
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
     command.downgrade(config, "0095_monitor_mixed_increments")
     assert asyncio.run(receipt_table(migrated_database_url)) is None
+    command.upgrade(config, HEAD)
+    assert asyncio.run(receipt_table(migrated_database_url)) is not None
     command.upgrade(config, "head")
     assert asyncio.run(receipt_table(migrated_database_url)) is not None
 
@@ -87,8 +89,6 @@ async def native_result(url, monkeypatch, root, mode):
     from nexus.worker import run_agent_worker_once
     from sqlalchemy import func, select
 
-    for path in ("nexus.persistence.migrations", "nexus.ops.research_monitor"):
-        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", HEAD)
     factory, settings, store, captured, pointer, batch, materials = await prepared_materials(
         url, monkeypatch, root
     )
@@ -376,9 +376,6 @@ async def test_legacy_price_admission_ignores_mixed_receipt_guard(
 ):
     from integration import test_monitor_mixed_db_pg as legacy
 
-    for path in ("nexus.persistence.migrations", "nexus.ops.research_monitor"):
-        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", HEAD)
-    monkeypatch.setattr(legacy, "runtime_head", lambda patch: None)
     await legacy.test_legacy_single_price_admission_stays_valid(migrated_database_url, monkeypatch)
 
 
@@ -524,9 +521,6 @@ async def test_readonly_batch_revalidates_original_members(
     from integration import test_monitor_mixed_db_pg as legacy
     from sqlalchemy.exc import DBAPIError
 
-    for path in ("nexus.persistence.migrations", "nexus.ops.research_monitor"):
-        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", HEAD)
-    monkeypatch.setattr(legacy, "runtime_head", lambda patch: None)
     factory, batch, now, context = await legacy.mixed_fixture(
         migrated_database_url, monkeypatch, tmp_path
     )

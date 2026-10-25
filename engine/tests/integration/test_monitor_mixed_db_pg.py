@@ -53,10 +53,10 @@ def clone(row, **changes):
 
 
 def runtime_head(monkeypatch):
-    # The main writer owns the normal runtime-head switch. This isolated test
-    # uses the actual migrated head without editing existing test assertions.
-    for path in ("nexus.persistence.migrations", "nexus.ops.research_monitor"):
-        monkeypatch.setattr(path + ".CURRENT_MIGRATION_HEAD", "0096_monitor_event_receipts")
+    from nexus.ops import research_monitor
+    from nexus.persistence import migrations
+
+    assert research_monitor.CURRENT_MIGRATION_HEAD == migrations.CURRENT_MIGRATION_HEAD
 
 
 async def mixed_fixture(url, monkeypatch, tmp_path):
