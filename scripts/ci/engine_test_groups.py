@@ -144,10 +144,11 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_monitor_notification_pg.py",
 )
 
-# 6208's pg-b completed 216 cases in 19m, then advanced through the native
-# studies until the 40m job limit. Keep whole modules and bound each heavy tail.
+# Four complete runs (40191879729 through 40202879304) put pg-b at 25-32m.
+# Minimize the worst observed group cost while retaining whole modules, the
+# complete selector inventory and its original order. See the CI timing report.
 PG_SPLITS = (
-    "engine/tests/integration/test_scheduled_unknown_acceptance_pg.py",
+    "engine/tests/integration/test_research_monitoring_pg.py",
     "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
     "engine/tests/integration/test_monitor_mixed_increment_pg.py",
 )
