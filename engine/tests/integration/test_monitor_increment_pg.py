@@ -442,7 +442,7 @@ async def test_normal_trigger_admission_is_single_stock_idempotent_and_blocks_co
             await asyncio.to_thread(command.downgrade, config, "0088_monitor_increments")
 
 
-async def append_fresh_inputs(factory, instrument_id, at, *, midpoint=None):
+async def append_fresh_inputs(factory, instrument_id, at, *, midpoint=None, decision_session=None):
     from nexus.market.intraday_ingestion import canonical_quote_observation
     from nexus.persistence.models.data import DataArtifact
     from nexus.persistence.models.market import LatestQuote
@@ -527,6 +527,8 @@ async def append_fresh_inputs(factory, instrument_id, at, *, midpoint=None):
                 if c.name not in {"id", "created_at", "content_hash"}
             }
             values["available_at"] = at
+            if decision_session is not None:
+                values["decision_session"] = decision_session
             digest = canonical_query_authority_hash(
                 **{
                     k: values[k]
