@@ -75,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["fast", "pg-a", "pg-b"]') }}
+        group: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["full"]' || '["fast", "pg-a", "pg-b", "pg-c", "pg-d"]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     services:
@@ -105,7 +105,7 @@ jobs:
           enable-cache: false
       - run: uv sync --frozen --all-packages
       - if: matrix.group == 'fast' || matrix.group == 'full'
-        run: uv run ruff check engine scripts/ci/engine_test_groups.py tests/policy/test_engine_test_groups.py
+        run: uv run ruff check engine scripts/ci/engine_test_groups.py scripts/ci/engine_test_progress.py tests/policy/test_engine_test_groups.py
       - if: matrix.group == 'fast' || matrix.group == 'full'
         run: uv run mypy engine/src
       - run: uv run alembic -c engine/alembic.ini upgrade head
@@ -123,7 +123,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: engine-test-timings-${{ matrix.group }}-${{ github.run_id }}
-          path: test-results/engine-*.xml
+          path: |
+            test-results/engine-*.xml
+            test-results/engine-*.jsonl
           if-no-files-found: ignore
           retention-days: 3
           include-hidden-files: false

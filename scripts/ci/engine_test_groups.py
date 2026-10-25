@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 
@@ -140,37 +141,47 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_monitor_notification_pg.py",
 )
 
-# On 8ac00e8e, pg-b reached node 216 at 11m58s before hitting the 40m job limit.
-# Move its first 217 nodes through the complete unknown_preparation_ack selector
-# to pg-a. This redistributes observed work; final CI must establish headroom.
-PG_SPLIT = "engine/tests/integration/test_scheduled_unknown_acceptance_pg.py"
+# 6208's pg-b completed 216 cases in 19m, then advanced through the native
+# studies until the 40m job limit. Keep whole modules and bound each heavy tail.
+PG_SPLITS = (
+    "engine/tests/integration/test_scheduled_unknown_acceptance_pg.py",
+    "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
+    "engine/tests/integration/test_monitor_mixed_increment_pg.py",
+)
 
 
 def selectors_for(group: str) -> tuple[str, ...]:
-    split = MERGE_SELECTORS.index(PG_SPLIT)
+    first, second, third = (MERGE_SELECTORS.index(path) for path in PG_SPLITS)
     return {
         "fast": MERGE_SELECTORS[:5],
-        "pg-a": MERGE_SELECTORS[5:split],
-        "pg-b": MERGE_SELECTORS[split:],
+        "pg-a": MERGE_SELECTORS[5:first],
+        "pg-b": MERGE_SELECTORS[first:second],
+        "pg-c": MERGE_SELECTORS[second:third],
+        "pg-d": MERGE_SELECTORS[third:],
         "full": ("engine/tests",),
     }[group]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("group", choices=("fast", "pg-a", "pg-b", "full"))
+    parser.add_argument("group", choices=("fast", "pg-a", "pg-b", "pg-c", "pg-d", "full"))
     parser.add_argument("--collect-only", action="store_true")
     args = parser.parse_args()
     command = [sys.executable, "-m", "pytest", "-q", "--import-mode=importlib"]
     if args.group != "full":
         command += ["-m", "not performance"]
     command += ["--durations=30", "--durations-min=1"]
+    command += ["-p", "scripts.ci.engine_test_progress"]
+    if args.group.startswith("pg-"):
+        command.append("-vv")
     if args.collect_only:
         command.append("--collect-only")
     else:
         command.append(f"--junitxml=test-results/engine-{args.group}.xml")
     command.extend(selectors_for(args.group))
-    return subprocess.run(command, check=False).returncode
+    return subprocess.run(
+        command, env={**os.environ, "ENGINE_TEST_GROUP": args.group}, check=False
+    ).returncode
 
 
 if __name__ == "__main__":
