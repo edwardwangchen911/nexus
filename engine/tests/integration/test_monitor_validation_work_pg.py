@@ -161,3 +161,79 @@ async def test_shared_parent_still_rejects_current_pricing_expiry_between_member
     finally:
         captured["clock"][0] = as_of
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_shared_mixed_source_rechecks_ancestor_pricing_before_each_member(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.monitoring import admission
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    factory, _, pointer, _, _, old_run_id, _, _, result, _ = await unresolved_then_daily(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    async with factory() as session:
+        run = await session.scalar(
+            select(AgentResearchRunRecord).where(
+                AgentResearchRunRecord.id.in_(result.research_run_ids),
+                AgentResearchRunRecord.instrument_id == pointer.instrument_id,
+            )
+        )
+        snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        context = DailyEventContext.model_validate(
+            snapshot.payload["agent_paper_context"]["pending_monitoring_v2"]
+        )
+        old_run = await session.get(AgentResearchRunRecord, old_run_id)
+        old_snapshot = await session.get(DataSnapshot, old_run.data_snapshot_id)
+        parent_id = UUID(
+            old_snapshot.payload["monitor_context"]["materials"]["parents"][0]["run_id"]
+        )
+        parent = await session.get(AgentResearchRunRecord, parent_id)
+        model = await session.get(AgentModelConfigRecord, parent.model_config_id)
+        expiry = model.pricing_expires_at
+        assert len(context.trigger_checks) == 3
+        assert await validate_daily_events(session, context)
+    native = source_qualification.load_qualified_source
+    binding = admission.require_increment_binding
+    scalar = AsyncSession.scalar
+    expired = False
+    qualified_old = []
+    binding_rejections = []
+
+    async def advancing_clock(self, statement, *args, **kwargs):
+        if expired and str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return expiry
+        return await scalar(self, statement, *args, **kwargs)
+
+    async def qualified(session, **kwargs):
+        nonlocal expired
+        source = await native(session, **kwargs)
+        if source.run.id == old_run_id:
+            qualified_old.append(source.output.id)
+            expired = True
+        return source
+
+    async def checked_binding(session, run):
+        try:
+            return await binding(session, run)
+        except ValueError:
+            if expired and run.id == old_run_id:
+                binding_rejections.append(run.id)
+            raise
+
+    monkeypatch.setattr(AsyncSession, "scalar", advancing_clock)
+    monkeypatch.setattr(source_qualification, "load_qualified_source", qualified)
+    monkeypatch.setattr(admission, "require_increment_binding", checked_binding)
+    try:
+        async with factory() as session:
+            # The next member still calls the real binding/context reader before
+            # consulting the local source dictionary. That read requalifies the
+            # formal ancestor against the advanced current clock.
+            assert not await validate_daily_events(session, context)
+            assert len(qualified_old) == 1
+            assert binding_rejections == [old_run_id]
+            assert context.decision_time < expiry
+    finally:
+        await factory.kw["bind"].dispose()
