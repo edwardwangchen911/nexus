@@ -14,7 +14,7 @@ OUTPUT_DIRECTORY = Path("test-results").resolve()
 
 def _write(event: str, **fields: Any) -> None:
     group = os.environ.get("ENGINE_TEST_GROUP", "")
-    if re.fullmatch(r"(?:fast|pg-[a-d]|full)", group) is None:
+    if re.fullmatch(r"(?:fast|pg-[a-g]|full)", group) is None:
         return
     OUTPUT_DIRECTORY.mkdir(exist_ok=True)
     value = {"event": event, "utc": datetime.now(UTC).isoformat(), **fields}
