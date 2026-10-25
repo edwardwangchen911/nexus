@@ -145,31 +145,37 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_monitor_notification_pg.py",
 )
 
-# Four complete runs (40191879729 through 40202879304) put pg-b at 25-32m.
+# Complete same-tree runs 40226113806 and 40228451043 still exceed 27m.
 # Minimize the worst observed group cost while retaining whole modules, the
 # complete selector inventory and its original order. See the CI timing report.
 PG_SPLITS = (
-    "engine/tests/integration/test_research_monitoring_pg.py",
-    "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
+    "engine/tests/integration/test_candidate_multistock_path.py::test_v11_formal_synthesis_sdk_lifecycle",
+    "engine/tests/integration/test_disclosure_monitoring_api_pg.py",
+    "engine/tests/integration/test_monitor_filing_content_pg.py",
+    "engine/tests/integration/test_daily_v2_capacity_pg.py",
     "engine/tests/integration/test_monitor_mixed_increment_pg.py",
+    "engine/tests/integration/test_monitor_market_prepare_pg.py",
 )
+MERGE_GROUPS = ("fast", "pg-a", "pg-b", "pg-c", "pg-d", "pg-e", "pg-f", "pg-g")
 
 
 def selectors_for(group: str) -> tuple[str, ...]:
-    first, second, third = (MERGE_SELECTORS.index(path) for path in PG_SPLITS)
+    boundaries = (5, *(MERGE_SELECTORS.index(path) for path in PG_SPLITS), len(MERGE_SELECTORS))
     return {
         "fast": MERGE_SELECTORS[:5],
-        "pg-a": MERGE_SELECTORS[5:first],
-        "pg-b": MERGE_SELECTORS[first:second],
-        "pg-c": MERGE_SELECTORS[second:third],
-        "pg-d": MERGE_SELECTORS[third:],
+        **{
+            name: MERGE_SELECTORS[start:end]
+            for name, start, end in zip(
+                MERGE_GROUPS[1:], boundaries[:-1], boundaries[1:], strict=True
+            )
+        },
         "full": ("engine/tests",),
     }[group]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("group", choices=("fast", "pg-a", "pg-b", "pg-c", "pg-d", "full"))
+    parser.add_argument("group", choices=(*MERGE_GROUPS, "full"))
     parser.add_argument("--collect-only", action="store_true")
     args = parser.parse_args()
     command = [sys.executable, "-m", "pytest", "-q", "--import-mode=importlib"]

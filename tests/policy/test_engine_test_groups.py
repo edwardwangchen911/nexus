@@ -14,18 +14,51 @@ from scripts.ci.engine_test_groups import MERGE_SELECTORS, selectors_for
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts/ci/engine_test_groups.py"
+MERGE_GROUPS = ("fast", "pg-a", "pg-b", "pg-c", "pg-d", "pg-e", "pg-f", "pg-g")
 
 
 def test_merge_groups_cover_inventory_once_without_manual_suite() -> None:
-    selected = [
-        selector
-        for group in ("fast", "pg-a", "pg-b", "pg-c", "pg-d")
-        for selector in selectors_for(group)
-    ]
+    selected = [selector for group in MERGE_GROUPS for selector in selectors_for(group)]
     assert selected == list(MERGE_SELECTORS)
     assert len(selected) == len(set(selected))
-    assert all(selectors_for(group) for group in ("fast", "pg-a", "pg-b", "pg-c", "pg-d"))
+    assert all(selectors_for(group) for group in MERGE_GROUPS)
     assert "engine/tests" not in selected
+
+
+def test_workflow_runs_every_merge_group_and_keeps_modules_together() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    matrix = next(line for line in workflow.splitlines() if "group: ${{ fromJSON(" in line)
+    assert json.loads(matrix.split(" || '", 1)[1].split("'", 1)[0]) == list(MERGE_GROUPS)
+    assert "github.event_name == 'workflow_dispatch' && '[\"full\"]'" in matrix
+    module_groups: dict[str, str] = {}
+    for group in MERGE_GROUPS[1:]:
+        for selector in selectors_for(group):
+            module = selector.split("::", 1)[0]
+            assert module_groups.setdefault(module, group) == group
+
+
+@pytest.mark.parametrize("group", MERGE_GROUPS[1:])
+def test_postgres_runner_selects_group_and_propagates_failure(tmp_path: Path, group: str) -> None:
+    (tmp_path / "pytest.py").write_text(
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path('args.json').write_text(json.dumps(sys.argv[1:]))\n"
+        "pathlib.Path('group.txt').write_text(os.environ['ENGINE_TEST_GROUP'])\n"
+        "raise SystemExit(1)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), group],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        check=False,
+    )
+    assert (tmp_path / "args.json").exists(), "Runner must execute pytest"
+    assert result.returncode == 1
+    args = json.loads((tmp_path / "args.json").read_text())
+    assert args[:5] == ["-q", "--import-mode=importlib", "-m", "not performance", "--durations=30"]
+    assert "-vv" in args
+    assert f"--junitxml=test-results/engine-{group}.xml" in args
+    assert args[-len(selectors_for(group)) :] == list(selectors_for(group))
+    assert (tmp_path / "group.txt").read_text() == group
 
 
 @pytest.mark.parametrize("exit_code", [0, 1, 2, 5])
@@ -88,13 +121,14 @@ def test_aggregate_job_fails_closed(result: str) -> None:
     assert (completed.returncode == 0) is (result == "success")
 
 
-def test_postgres_progress_survives_a_failed_test(tmp_path: Path) -> None:
+@pytest.mark.parametrize("group", ("pg-b", "pg-e", "pg-f", "pg-g"))
+def test_postgres_progress_survives_a_failed_test(tmp_path: Path, group: str) -> None:
     case = tmp_path / "test_progress_case.py"
     case.write_text("def test_passes():\n    assert True\n\ndef test_fails():\n    assert False\n")
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.engine_test_progress", str(case)],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": "pg-b"},
+        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": group},
         capture_output=True,
         text=True,
         check=False,
@@ -102,7 +136,7 @@ def test_postgres_progress_survives_a_failed_test(tmp_path: Path) -> None:
     assert completed.returncode == 1
     events = [
         json.loads(line)
-        for line in (tmp_path / "test-results/engine-pg-b.jsonl").read_text().splitlines()
+        for line in (tmp_path / f"test-results/engine-{group}.jsonl").read_text().splitlines()
     ]
     assert [
         row["outcome"] for row in events if row["event"] == "report" and row["when"] == "call"
@@ -140,7 +174,23 @@ def test_progress_keeps_one_output_when_a_test_changes_directory(tmp_path: Path)
     assert events[-1]["event"] == "finish" and events[-1]["exitstatus"] == 0
 
 
-def test_postgres_progress_retains_last_started_case_after_cancellation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("group", ("", "pg-h", "pg-gg", "../outside", "pg-g/../../outside"))
+def test_progress_rejects_unknown_or_unsafe_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, group: str
+) -> None:
+    from scripts.ci import engine_test_progress
+
+    output = tmp_path / "test-results"
+    monkeypatch.setattr(engine_test_progress, "OUTPUT_DIRECTORY", output)
+    monkeypatch.setenv("ENGINE_TEST_GROUP", group)
+    engine_test_progress.pytest_runtest_logstart("test_example.py::test_passes", ("", None, ""))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("group", ("pg-c", "pg-e", "pg-f", "pg-g"))
+def test_postgres_progress_retains_last_started_case_after_cancellation(
+    tmp_path: Path, group: str
+) -> None:
     import time
 
     case = tmp_path / "test_cancel_case.py"
@@ -151,11 +201,11 @@ def test_postgres_progress_retains_last_started_case_after_cancellation(tmp_path
     process = subprocess.Popen(
         [sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.engine_test_progress", str(case)],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": "pg-c"},
+        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": group},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    progress = tmp_path / "test-results/engine-pg-c.jsonl"
+    progress = tmp_path / f"test-results/engine-{group}.jsonl"
     events = []
     try:
         deadline = time.monotonic() + 15
