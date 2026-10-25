@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
@@ -234,8 +235,50 @@ async def read_index_capture(
     if sha256(capture.canonical()).hexdigest() != row.revision:
         raise ValueError("SEC_INDEX_CAPTURE_INVALID")
     originals = []
+    # These rows are immutable in storage. Fetch only scalars so the fast path
+    # does not populate the caller's identity map or change get/autoflush behavior.
+    artifact_values: dict[
+        UUID, Row[tuple[UUID, str, str, str, int, datetime, datetime, datetime]]
+    ] = {}
+    keys = [
+        session.identity_key(DataArtifact, binding.artifact_id) for binding in capture.originals
+    ]
+    if not (
+        session.new
+        or session.dirty
+        or session.deleted
+        or any(key in session.identity_map for key in keys)
+    ):
+        artifact_values = {
+            value.id: value
+            for value in await session.execute(
+                select(
+                    DataArtifact.id,
+                    DataArtifact.source,
+                    DataArtifact.uri,
+                    DataArtifact.sha256,
+                    DataArtifact.byte_size,
+                    DataArtifact.created_at,
+                    DataArtifact.available_at,
+                    DataArtifact.received_at,
+                ).where(DataArtifact.id.in_([binding.artifact_id for binding in capture.originals]))
+            )
+        }
     for binding in capture.originals:
-        artifact = await session.get(DataArtifact, binding.artifact_id)
+        artifact: (
+            DataArtifact | Row[tuple[UUID, str, str, str, int, datetime, datetime, datetime]] | None
+        )
+        # A store read awaits caller code; re-check state on every iteration.
+        if (
+            session.new
+            or session.dirty
+            or session.deleted
+            or session.identity_key(DataArtifact, binding.artifact_id) in session.identity_map
+            or binding.artifact_id not in artifact_values
+        ):
+            artifact = await session.get(DataArtifact, binding.artifact_id)
+        else:
+            artifact = artifact_values[binding.artifact_id]
         if (
             artifact is None
             or artifact.source != "sec"

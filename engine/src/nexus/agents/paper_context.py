@@ -24,6 +24,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
+from nexus.backtest.universe import universe_definition_parse_scope
 from nexus.monitoring.daily_context import DailyMonitorContext, DailyMonitorGap
 from nexus.monitoring.daily_v2_context import DailyEventContext, DailyEventGap
 from nexus.monitoring.disclosure_context import (
@@ -411,6 +412,19 @@ async def prepare_agent_paper_research_snapshot(
 
 
 async def read_agent_paper_research_context(
+    session: AsyncSession,
+    *,
+    snapshot_id: UUID,
+    instrument_id: UUID,
+    as_of: datetime,
+) -> tuple[AgentPaperResearchContext, ResearchEvidenceRef] | None:
+    with universe_definition_parse_scope():
+        return await _read_agent_paper_research_context(
+            session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+        )
+
+
+async def _read_agent_paper_research_context(
     session: AsyncSession,
     *,
     snapshot_id: UUID,

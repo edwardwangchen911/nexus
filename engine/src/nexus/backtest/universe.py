@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TextIO
 from uuid import UUID
 
 import exchange_calendars  # type: ignore[import-untyped]
@@ -91,16 +95,67 @@ class UniversePreflightResult:
     content_hash: str
 
 
+_MAX_DEFINITION_TEXT = 64 * 1024
+_MAX_DEFINITION_VALUES = 16
+
+
+class _DefinitionParseValues(dict[tuple[date, int, object, str], UniverseDefinition]):
+    active = True
+
+
+_DEFINITION_VALUES: ContextVar[_DefinitionParseValues | None] = ContextVar(
+    "universe_definition_parse_values", default=None
+)
+
+
+@contextmanager
+def universe_definition_parse_scope() -> Iterator[None]:
+    """Reuse pure parsing inside one read; never retain file or eligibility authority."""
+    existing = _DEFINITION_VALUES.get()
+    if existing is not None and existing.active:
+        yield
+        return
+    values = _DefinitionParseValues()
+    token = _DEFINITION_VALUES.set(values)
+    try:
+        yield
+    finally:
+        # A child task can inherit the context and outlive its owner.
+        values.active = False
+        values.clear()
+        _DEFINITION_VALUES.reset(token)
+
+
 def load_us_liquid_v1_definition(
     effective_session: date, *, seed_path: Path = _SEED
 ) -> UniverseDefinition:
-    """Parse the fixed repository definition and derive its persisted candidate hash."""
+    """Read the current definition on every call; optionally reuse identical parsing."""
     try:
         with seed_path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            if tuple(reader.fieldnames or ()) != _FIELDS:
-                raise ValueError
-            rows = list(reader)
+            values = _DEFINITION_VALUES.get()
+            if values is None or not values.active or not handle.seekable():
+                return _parse_definition(handle, effective_session)
+            raw = handle.read(_MAX_DEFINITION_TEXT + 1)
+            if len(raw) > _MAX_DEFINITION_TEXT:
+                handle.seek(0)
+                return _parse_definition(handle, effective_session)
+            key = (effective_session, csv.field_size_limit(), csv.get_dialect("excel"), raw)
+            if key in values:
+                return values[key]
+            result = _parse_definition(io.StringIO(raw, newline=""), effective_session)
+            if len(values) < _MAX_DEFINITION_VALUES:
+                values[key] = result
+            return result
+    except (OSError, UnicodeError, csv.Error, KeyError, TypeError, ValueError):
+        raise UniversePreflightError("BACKTEST_UNIVERSE_DEFINITION_INVALID") from None
+
+
+def _parse_definition(handle: TextIO, effective_session: date) -> UniverseDefinition:
+    try:
+        reader = csv.DictReader(handle)
+        if tuple(reader.fieldnames or ()) != _FIELDS:
+            raise ValueError
+        rows = list(reader)
         if len(rows) != 49:
             raise ValueError
         members: list[UniverseDefinitionMember] = []

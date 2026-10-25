@@ -72,6 +72,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_manual_partial_history_seal_pg.py::test_identity_diagnostic_preserves_seal_transaction_rollback",
     "engine/tests/integration/test_sec_exhibit_import.py",
     "engine/tests/integration/test_sec_index_pg.py",
+    "engine/tests/integration/test_sec_index_read_reuse_pg.py",
     "engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result",
     "engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_failure_preserves_recovery_gates",
     "engine/tests/integration/test_candidate_multistock_path.py::test_v11_manual_entry_to_result",
