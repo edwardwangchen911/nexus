@@ -110,7 +110,7 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
     request.get(`/api/v1/paper/management/cycles/${cycleId}`),
     request.get("/api/v1/paper/management/portfolio"),
   ]);
-  const errorCode = async (response: typeof ordersResponse) =>
+  const errorCode = async (response: Pick<typeof ordersResponse, "ok" | "json">) =>
     response.ok() ? "" : (await response.json()).error?.code ?? "UNKNOWN_ERROR";
   expect(ordersResponse.status(), await errorCode(ordersResponse)).toBe(200);
   expect(actualResponse.status(), await errorCode(actualResponse)).toBe(200);
@@ -136,14 +136,27 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   expect(summary.current_target?.target_version_id).toBe(targetId);
 
   const writes: string[] = [];
+  let navigationEpoch = 0;
+  const workbenchEpochs = new WeakMap<object, number>();
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) navigationEpoch += 1;
+  });
   page.on("request", (networkRequest) => {
     if (!["GET", "HEAD"].includes(networkRequest.method())) writes.push(networkRequest.method());
+    if (new URL(networkRequest.url()).pathname === "/api/v1/workbench"
+      && networkRequest.method() === "GET" && networkRequest.frame() === page.mainFrame()) {
+      workbenchEpochs.set(networkRequest, navigationEpoch);
+    }
   });
+  const manualRequestId = process.env.NEXUS_CONTROLLED_MANUAL_REQUEST_ID;
+  const observeWorkbench = (epoch: number) => page.waitForResponse((response) =>
+    workbenchEpochs.get(response.request()) === epoch);
+  let workbenchResponse = manualRequestId ? null : observeWorkbench(navigationEpoch + 1);
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
-  const manualRequestId = process.env.NEXUS_CONTROLLED_MANUAL_REQUEST_ID;
   if (manualRequestId) {
     await page.evaluate((key) => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key, mode: "research_and_paper" })), process.env.NEXUS_CONTROLLED_MANUAL_KEY!);
+    workbenchResponse = observeWorkbench(navigationEpoch + 1);
     await page.reload();
     const manual = page.getByRole("region", { name: "开始研究与内部模拟" });
     await expect(manual.getByText("周期已完成", { exact: false })).toBeVisible();
@@ -157,6 +170,8 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
     expect(await page.evaluate(() => sessionStorage.getItem("nexus-manual-paper-attempt-v1"))).toBeNull();
     await expect(manual.getByRole("button", { name: "研究并内部模拟", exact: true })).toBeEnabled();
   }
+  const workbench = await workbenchResponse!;
+  expect(workbench.status(), await errorCode(workbench)).toBe(200);
   await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
   await expect(page.getByRole("region", { name: "最新决策" }).getByText(firstPartial ? "部分成交" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByText(firstPartial ? "partially_filled" : "本周期订单已终态")).toBeVisible();
