@@ -426,40 +426,53 @@ async def test_filled_hold_and_complete_watch_follow_normal_monitoring_without_n
             OutboxEvent
         ] | {event.id}
 
-    from nexus.outbox.dispatcher import dispatch_outbox_once
-    from nexus.outbox.models import PublisherSpec
-    from nexus.outbox.registry import PublisherRegistry
+    from integration.test_bark_outbox_pg import _decrypted_bark_notification
+    from integration.test_research_monitor_notification_pg import settings as bark_settings
+    from nexus.notifications.worker import run_bark_worker
+    from nexus.persistence.models.runtime import OutboxDeliveryAttempt
 
-    deliveries = []
+    notifications = []
 
-    async def synthetic_notification(message):
-        deliveries.append(message.event_id)
+    async def synthetic_transport(request):
+        notifications.append(_decrypted_bark_notification(request))
+        return httpx.Response(200, json={"code": 200})
 
-    registry = PublisherRegistry(
-        (
-            PublisherSpec(
-                event_type=event.event_type,
-                schema_version=event.schema_version,
-                consumer_idempotent=True,
-                publisher=synthetic_notification,
+    async with httpx.AsyncClient(transport=httpx.MockTransport(synthetic_transport)) as client:
+        options = {
+            "settings": bark_settings(migrated_database_url).model_copy(
+                update={"activated_at": event.created_at}
             ),
-        )
+            "run_forever": False,
+            "client": client,
+            "clock": lambda: clock[0],
+        }
+        assert await run_bark_worker(**options) == 1
+        assert await run_bark_worker(**options) == 0
+    assert len(notifications) == 1
+    assert notifications[0]["id"] == f"research-monitor:{trigger.id}"
+    assert notifications[0]["url"] == (
+        f"https://nexus.local/research/{held_run.instrument_id}?run_id={held_run.id}"
     )
-    assert await dispatch_outbox_once(
-        factory,
-        registry=registry,
-        worker_id="held-monitor-notification",
-        clock=lambda: clock[0],
-        claim_registered_only=True,
-    )
-    assert not await dispatch_outbox_once(
-        factory,
-        registry=registry,
-        worker_id="held-monitor-notification",
-        clock=lambda: clock[0],
-        claim_registered_only=True,
-    )
+    notification_events = {f"research-monitor:{trigger.id}": trigger.outbox_id}
+    deliveries = [notification_events[item["id"]] for item in notifications]
     assert deliveries == [event.id]
+    async with factory() as session:
+        delivered_event = await session.get(OutboxEvent, event.id)
+        assert (delivered_event.status, delivered_event.attempt_count) == ("published", 1)
+        attempts = tuple(
+            await session.scalars(
+                select(OutboxDeliveryAttempt).where(
+                    OutboxDeliveryAttempt.outbox_event_id == event.id
+                )
+            )
+        )
+        assert len(attempts) == 1 and attempts[0].outcome == "published"
+        assert (
+            set(await session.scalars(select(AgentResearchRunRecord.id)))
+            == workload_before[AgentResearchRunRecord]
+        )
+        assert set(await session.scalars(select(Job.id))) == workload_before[Job]
+    assert len(calls) == 9
 
     async with factory() as session:
         clock[0] = max(
