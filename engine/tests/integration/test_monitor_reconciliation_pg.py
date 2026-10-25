@@ -317,3 +317,440 @@ async def test_increment_completion_replaces_or_preserves_explicit_coverage(
             await session.scalar(select(func.count()).select_from(MonitorTrigger)) == trigger_count
         )
     assert calls == (["research", "critique"] if unknown else ["research", "critique", "synthesis"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price_already_installed", [False, True, "receipt"])
+async def test_normal_daily_reconcile_adopts_original_sec_plan_independently(
+    migrated_database_url, monkeypatch, tmp_path, price_already_installed
+):
+    from helpers.disclosure_observations import reader_source
+    from integration.test_candidate_multistock_path import _set_test_insert_clock
+    from nexus.api.research_disclosure_monitoring import read_disclosure_monitoring_view
+    from nexus.monitoring.batches import disclosure_source_current
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        AgentResearchOutputRecord,
+    )
+    from nexus.persistence.models.data import DataSnapshot
+    from nexus.persistence.models.monitoring import (
+        MonitorDailyEventReceipt,
+        MonitorMixedEventReceipt,
+    )
+    from nexus.persistence.models.runtime import Job, OutboxEvent
+
+    factory, settings, _, captured, pointer = await reader_source(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    captured["clock"][0] = AT + timedelta(seconds=6)
+    await _set_test_insert_clock(factory, captured["clock"][0])
+    async with factory() as session:
+        source = await session.get(AgentResearchRunRecord, pointer.source_run_id)
+        snapshot = await session.get(DataSnapshot, source.data_snapshot_id)
+        paper = snapshot.payload["agent_paper_context"]
+        assert paper.get("pending_monitoring_v2") is None
+        assert paper["disclosure_monitoring"] is not None
+        cycle = await session.get(AgentPaperCycleRecord, paper["cycle_id"])
+        # Original native output and all cost/accounting facts stay frozen.
+        frozen_query = select(AgentResearchOutputRecord.id, AgentResearchOutputRecord.content_hash)
+        budget_query = select(
+            AgentDailyBudgetReservationRecord.id,
+            AgentDailyBudgetReservationRecord.state,
+            AgentDailyBudgetReservationRecord.reserved_usd,
+            AgentDailyBudgetReservationRecord.settled_usd,
+        )
+        before_outputs = set((await session.execute(frozen_query)).all())
+        before_budget = set((await session.execute(budget_query)).all())
+        before_counts = [
+            await session.scalar(select(func.count()).select_from(model))
+            for model in (Job, OutboxEvent, MonitorDailyEventReceipt, MonitorMixedEventReceipt)
+        ]
+    settings = settings.model_copy(
+        update={
+            "agent_paper_account_id": pointer.account_id,
+            "agent_paper_candidate_batch_id": cycle.candidate_batch_id,
+        }
+    )
+    if price_already_installed:
+        installed = await run(
+            settings,
+            parser().parse_args(["install", "--output-id", str(pointer.source_output_id)]),
+        )
+        assert installed["plan_id"]
+    saved_price_receipt = None
+    if price_already_installed == "receipt":
+        from nexus.monitoring.reconciliation import _reconcile_run
+
+        async with factory() as session, session.begin():
+            source = await session.get(AgentResearchRunRecord, pointer.source_run_id)
+            price_receipt = await _reconcile_run(
+                session, account_id=pointer.account_id, run=source, now=captured["clock"][0]
+            )
+            saved_price_receipt = price_receipt.id
+    try:
+        result = await run(settings, parser().parse_args(["reconcile"]))
+        assert result["model_requests"] == result["provider_requests"] == 0
+        async with factory() as session:
+            plans = tuple(
+                await session.scalars(
+                    select(MonitorPlan).where(MonitorPlan.source_run_id == pointer.source_run_id)
+                )
+            )
+            assert {row.kind for row in plans} == {"price", "disclosure"}
+            receipts = tuple(
+                await session.scalars(
+                    select(MonitorCoverageReceipt).where(
+                        MonitorCoverageReceipt.run_id == pointer.source_run_id
+                    )
+                )
+            )
+            assert len(receipts) == 2
+            assert {row.kind for row in receipts} == {"price", "disclosure"}
+            assert all(row.status == "installed" for row in receipts)
+            saved = {row.id for row in receipts}
+            if saved_price_receipt is not None:
+                assert saved_price_receipt in saved
+            source = await session.get(AgentResearchRunRecord, pointer.source_run_id)
+            view = await read_disclosure_monitoring_view(session, source, now=captured["clock"][0])
+            disclosure = next(row for row in plans if row.kind == "disclosure")
+            assert view.state == "valid" and view.plan_id == disclosure.id
+            assert await disclosure_source_current(session, disclosure, captured["clock"][0])
+        import os
+        from pathlib import Path
+
+        browser_root = os.environ.get("NEXUS_TEST_MONITOR_BROWSER_DIR")
+        if browser_root and price_already_installed == "receipt":
+            import json
+
+            import httpx
+            from helpers.monitoring_readview_browser import verify_monitoring_browser
+            from helpers.paper_api import app, headers
+
+            monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: captured["clock"][0])
+            application = app(migrated_database_url, now=captured["clock"][0])
+            path = f"/internal/v1/research-runs/{pointer.source_run_id}"
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=application), base_url="http://testserver"
+            ) as client:
+                response = await client.get(path, headers=headers("GET", path))
+            assert response.status_code == 200
+            for field in ("monitoring", "disclosure_monitoring"):
+                assert response.json()["data"][field]["state"] == "valid"
+                assert response.json()["data"][field]["trigger_count"] == 0
+            destination = Path(browser_root).resolve() / "ordinary-daily"
+            destination.mkdir(parents=True, exist_ok=False)
+            (destination / "ready.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": str(pointer.source_run_id),
+                        "instrument_id": str(pointer.instrument_id),
+                        "response": response.json(),
+                    }
+                )
+            )
+            await verify_monitoring_browser(
+                application,
+                directory=destination,
+                spec_path="tests/e2e/monitoring-ordinary-daily-live.spec.ts",
+            )
+        repeated = await run(settings, parser().parse_args(["reconcile"]))
+        assert repeated["recorded"] == 0
+        async with factory() as session:
+            assert saved == set(
+                await session.scalars(
+                    select(MonitorCoverageReceipt.id).where(
+                        MonitorCoverageReceipt.run_id == pointer.source_run_id
+                    )
+                )
+            )
+            assert set((await session.execute(frozen_query)).all()) == before_outputs
+            assert set((await session.execute(budget_query)).all()) == before_budget
+            assert before_counts == [
+                await session.scalar(select(func.count()).select_from(model))
+                for model in (Job, OutboxEvent, MonitorDailyEventReceipt, MonitorMixedEventReceipt)
+            ]
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", ["veto", "no-adoption", "unknown", "replacement-fail", "replacement-fail-legacy"]
+)
+async def test_new_ordinary_daily_sec_refusal_preserves_native_facts(
+    migrated_database_url, monkeypatch, tmp_path, mode
+):
+    import json
+
+    from helpers.disclosure_observations import reader_source
+    from integration.test_candidate_multistock_path import _set_test_insert_clock
+    from integration.test_daily_v2_frozen_context_pg import new_daily
+    from nexus.agents import codex_staged
+    from nexus.monitoring.batches import disclosure_source_current
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        AgentResearchOutputRecord,
+    )
+    from nexus.persistence.models.data import DataSnapshot
+    from nexus.persistence.models.monitoring import (
+        MonitorDailyEventReceipt,
+        MonitorDailyTriggerReceipt,
+        MonitorMixedEventReceipt,
+    )
+    from nexus.persistence.models.runtime import AuditEvent, Job, OutboxEvent
+    from nexus.settings import AgentRuntimeMode
+    from nexus.worker import run_agent_worker_once
+    from unit.agents.test_codex_sdk import _restore_view
+
+    factory, settings, _, captured, pointer = await reader_source(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    captured["clock"][0] = AT + timedelta(seconds=6)
+    await _set_test_insert_clock(factory, captured["clock"][0])
+    async with factory() as session:
+        parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)
+        snapshot = await session.get(DataSnapshot, parent.data_snapshot_id)
+        cycle = await session.get(
+            AgentPaperCycleRecord, snapshot.payload["agent_paper_context"]["cycle_id"]
+        )
+    settings = settings.model_copy(
+        update={
+            "agent_runtime_mode": AgentRuntimeMode.CODEX_SDK,
+            "agent_paper_account_id": pointer.account_id,
+            "agent_paper_candidate_batch_id": cycle.candidate_batch_id,
+        }
+    )
+    await run(settings, parser().parse_args(["reconcile"]))
+    async with factory() as session:
+        prior = await session.scalar(
+            select(MonitorPlan).where(
+                MonitorPlan.source_run_id == pointer.source_run_id, MonitorPlan.kind == "disclosure"
+            )
+        )
+        assert prior is not None
+        old_source_hash = prior.source_hash
+    if mode == "replacement-fail-legacy":
+        from nexus.monitoring.observations import read_latest_price
+        from nexus.monitoring.storage import record_check
+
+        async with factory() as session, session.begin():
+            price = await session.scalar(
+                select(MonitorPlan).where(
+                    MonitorPlan.source_run_id == pointer.source_run_id, MonitorPlan.kind == "price"
+                )
+            )
+            check = await record_check(
+                session,
+                plan_id=price.id,
+                scheduled_at=AT,
+                checked_at=captured["clock"][0],
+                observation=await read_latest_price(
+                    session, instrument_id=pointer.instrument_id, now=captured["clock"][0]
+                ),
+            )
+            assert check.result == "true"
+    now, result = await new_daily(factory, settings, captured, pointer)
+    async with factory() as session:
+        target = await session.scalar(
+            select(AgentResearchRunRecord).where(
+                AgentResearchRunRecord.id.in_(result.research_run_ids),
+                AgentResearchRunRecord.instrument_id == pointer.instrument_id,
+            )
+        )
+        snapshot = await session.get(DataSnapshot, target.data_snapshot_id)
+        assert snapshot.payload["agent_paper_context"].get("pending_monitoring_v2") is None
+        job = await session.scalar(select(Job).where(Job.payload == {"run_id": str(target.id)}))
+    native = codex_staged.invoke_codex
+    seen = []
+    consumed = []
+
+    async def invoke(payload, **kwargs):
+        wire = _restore_view(payload)
+        stage = wire["stage"]
+        seen.append(stage)
+        if mode == "unknown" and stage == "critique":
+            raise TimeoutError("controlled ordinary daily unknown")
+        raw, usage = await native(payload, **kwargs)
+        body = json.loads(raw)
+        if mode == "veto" and stage == "critique":
+            for role in body["roles"]:
+                if role["role"] == "evidence_audit":
+                    assert role["disclosure_review"] is not None
+                    role["disclosure_review"]["decision"] = "rejected"
+        if mode == "no-adoption" and stage == "synthesis":
+            body["disclosure_adoption_hash"] = None
+        if mode == "replacement-fail-legacy":
+            frozen = snapshot.payload["agent_paper_context"]["pending_monitoring"]
+            assert wire["daily_pending_context_hash"] is not None
+            citation = next(
+                row["index"]
+                for row in wire["evidence"]
+                if row["source"] == "nexus_agent_paper_context"
+            )
+            if stage == "research":
+                for role in body["roles"]:
+                    if role["role"] == "orchestrator":
+                        role["daily_pending_proposal"] = {
+                            "context_hash": wire["daily_pending_context_hash"],
+                            "items": [
+                                {
+                                    "trigger_id": row["trigger_id"],
+                                    "status": "addressed",
+                                    "rationale": "逐项核对冻结触发与原始证据。",
+                                    "citations": [citation],
+                                }
+                                for row in frozen["trigger_checks"]
+                            ],
+                        }
+            elif stage == "critique":
+                for role in body["roles"]:
+                    role["daily_pending_review"] = {
+                        "proposal_hash": wire["daily_pending_proposal"]["content_hash"],
+                        "decision": "accepted",
+                        "rationale": "精确核对每项冻结证据。",
+                        "citations": [citation],
+                    }
+            else:
+                body["daily_pending_adoption_hash"] = wire["daily_pending_proposal"]["content_hash"]
+        return json.dumps(body), usage
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    if mode.startswith("replacement-fail"):
+        from nexus.monitoring import disclosure_installation
+
+        install = disclosure_installation.install_disclosure_plan
+
+        async def failed_install(*args, **kwargs):
+            await install(*args, **kwargs)
+            raise ValueError("MONITOR_DISCLOSURE_SOURCE_INVALID")
+
+        monkeypatch.setattr(disclosure_installation, "install_disclosure_plan", failed_install)
+        if mode == "replacement-fail-legacy":
+            from nexus.monitoring import daily_consumption
+
+            consume = daily_consumption.record_daily_consumption
+
+            async def consumed_once(*args, **kwargs):
+                count = await consume(*args, **kwargs)
+                if kwargs["qualified"].run.id == target.id:
+                    consumed.append(count)
+                return count
+
+            monkeypatch.setattr(daily_consumption, "record_daily_consumption", consumed_once)
+    try:
+        assert await run_agent_worker_once(settings, job_ids=(job.id,), formal_stage_capacity=True)
+        assert seen == (
+            ["research", "critique"] if mode == "unknown" else ["research", "critique", "synthesis"]
+        )
+        async with factory() as session:
+            budget_query = select(
+                AgentDailyBudgetReservationRecord.id,
+                AgentDailyBudgetReservationRecord.state,
+                AgentDailyBudgetReservationRecord.reserved_usd,
+                AgentDailyBudgetReservationRecord.settled_usd,
+            )
+            output_query = select(
+                AgentResearchOutputRecord.id, AgentResearchOutputRecord.content_hash
+            )
+            audit_query = select(AuditEvent.id).where(
+                AuditEvent.action.in_(
+                    (
+                        "research.monitor.plan_installed",
+                        "research.monitor.disclosure_plan_installed",
+                        "research.monitor.daily_trigger_covered",
+                    )
+                )
+            )
+            installation_audits = set(await session.scalars(audit_query))
+            budgets = set((await session.execute(budget_query)).all())
+            outputs = set((await session.execute(output_query)).all())
+            unchanged_models = (
+                Job,
+                OutboxEvent,
+                MonitorDailyEventReceipt,
+                MonitorDailyTriggerReceipt,
+                MonitorMixedEventReceipt,
+            )
+            counts = [
+                await session.scalar(select(func.count()).select_from(model))
+                for model in unchanged_models
+            ]
+        observed = await run(settings, parser().parse_args(["reconcile"]))
+        assert observed["model_requests"] == observed["provider_requests"] == 0
+        async with factory() as session:
+            receipt = await session.scalar(
+                select(MonitorCoverageReceipt).where(
+                    MonitorCoverageReceipt.run_id == target.id,
+                    MonitorCoverageReceipt.kind == "disclosure",
+                )
+            )
+            assert receipt.status == (
+                "unknown" if mode == "unknown" else "retained" if mode == "no-adoption" else "gap"
+            )
+            assert receipt.reason == (
+                "MONITOR_CONDITION_REPLACEMENT_REJECTED"
+                if mode.startswith("replacement-fail")
+                else "MONITOR_UNKNOWN_USAGE"
+                if mode == "unknown"
+                else "MONITOR_AUDIT_REJECTED"
+                if mode == "veto"
+                else "MONITOR_PRIOR_EVIDENCE_UNCHANGED"
+            )
+            assert receipt.active_plan_id == (
+                prior.id if mode in {"no-adoption", "unknown"} else None
+            )
+            if mode.startswith("replacement-fail"):
+                assert not await session.scalar(
+                    select(MonitorPlan.id).where(MonitorPlan.source_run_id == target.id)
+                )
+                paired = tuple(
+                    await session.scalars(
+                        select(MonitorCoverageReceipt).where(
+                            MonitorCoverageReceipt.run_id == target.id
+                        )
+                    )
+                )
+                assert len(paired) == 2
+                assert all(row.status == "gap" and row.active_plan_id is None for row in paired)
+            assert await disclosure_source_current(session, prior, now) is (mode == "no-adoption")
+            assert (await session.get(MonitorPlan, prior.id)).source_hash == old_source_hash
+            assert not await session.scalar(
+                select(MonitorPlan.id).where(
+                    MonitorPlan.source_run_id == target.id, MonitorPlan.kind == "disclosure"
+                )
+            )
+            if mode == "unknown":
+                target = await session.get(AgentResearchRunRecord, target.id)
+                reservation = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == target.id
+                    )
+                )
+                # Unknown usage keeps the existing reservation; the accounting
+                # state machine has no synthetic "unknown" reservation state.
+                assert target.settled_cost_usd is None and reservation.state == "reserved"
+                # This subscription profile prices USD at zero; preserve the
+                # exact original reserve rather than inventing a positive fee.
+                original_reserve = next(row for row in budgets if row[0] == reservation.id)
+                assert (
+                    reservation.id,
+                    reservation.state,
+                    reservation.reserved_usd,
+                    reservation.settled_usd,
+                ) == original_reserve
+                assert reservation.pricing_version == target.pricing_version
+                assert target.retry_count == 0
+                assert reservation.settled_usd is None
+            if mode.startswith("replacement-fail"):
+                assert set(await session.scalars(audit_query)) == installation_audits
+            if mode == "replacement-fail-legacy":
+                assert consumed == [1]
+            assert set((await session.execute(budget_query)).all()) == budgets
+            assert set((await session.execute(output_query)).all()) == outputs
+            assert counts == [
+                await session.scalar(select(func.count()).select_from(model))
+                for model in unchanged_models
+            ]
+        assert (await run(settings, parser().parse_args(["reconcile"])))["recorded"] == 0
+    finally:
+        await factory.kw["bind"].dispose()

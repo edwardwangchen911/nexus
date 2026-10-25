@@ -1,6 +1,7 @@
 """Reconcile terminal native research into immutable monitor coverage, without I/O."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import String, cast, or_, select
@@ -54,12 +55,17 @@ def can_retain_plan(
 
 
 async def latest_coverage(
-    session: AsyncSession, *, account_id: UUID, instrument_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    instrument_id: UUID,
+    now: datetime,
+    kind: Literal["price", "disclosure"] = "price",
 ) -> MonitorCoverageReceipt | None:
     row: MonitorCoverageReceipt | None = await session.scalar(
         select(MonitorCoverageReceipt)
         .where(
-            MonitorCoverageReceipt.kind == "price",
+            MonitorCoverageReceipt.kind == kind,
             MonitorCoverageReceipt.account_id == account_id,
             MonitorCoverageReceipt.instrument_id == instrument_id,
             MonitorCoverageReceipt.observed_at <= now,
@@ -288,14 +294,14 @@ async def reconcile_account_results(
                 MonitorCoverageReceipt.run_id == run.id,
             )
         )
-        if existing is not None:
-            continue
         mixed_member = await session.scalar(
             select(MonitorIncrement).where(
                 MonitorIncrement.run_id == run.id, MonitorIncrement.batch_id.is_not(None)
             )
         )
         if mixed_member is not None:
+            if existing is not None:
+                continue
             from nexus.monitoring.mixed_reconciliation import (
                 MixedReplacementRejected,
                 reconcile_mixed_run,
@@ -325,47 +331,120 @@ async def reconcile_account_results(
         if not await _native_finished(session, run, now):
             counts["awaiting_native_finish"] += 1
             continue
+        kinds: tuple[Literal["price", "disclosure"], ...] = ("price",)
+        # Ordinary daily research adopts each independently audited kind. A
+        # price-only incremental review cannot acquire disclosure authority.
+        if isinstance(paper, dict) and (
+            paper.get("disclosure_monitoring") is not None
+            or await session.scalar(
+                select(MonitorPlan.id)
+                .where(
+                    MonitorPlan.kind == "disclosure",
+                    MonitorPlan.account_id == account_id,
+                    MonitorPlan.instrument_id == run.instrument_id,
+                )
+                .limit(1)
+            )
+            is not None
+        ):
+            kinds = ("price", "disclosure")
+        receipts = []
         try:
+            # Both newly adopted kinds share a savepoint. A legal absent
+            # proposal is a per-kind gap; a failed declared installation rolls
+            # back this operation's plans, coverage and legacy consumption.
             async with session.begin_nested():
-                receipt = await _reconcile_run(session, account_id=account_id, run=run, now=now)
-        except ValueError:
-            # This records a failed verification of the declared account lineage,
-            # never an approved source. It withdraws this security's monitoring only.
-            receipt = MonitorCoverageReceipt(
-                account_id=account_id,
-                instrument_id=run.instrument_id,
-                run_id=run.id,
-                output_id=None,
-                prior_plan_id=None,
-                active_plan_id=None,
-                research_as_of=run.decision_time,
-                observed_at=now,
-                status="unverified",
-                reason="MONITOR_SOURCE_UNVERIFIED",
-                quality_status=None,
+                for kind in kinds:
+                    if (
+                        await session.scalar(
+                            select(MonitorCoverageReceipt.id).where(
+                                MonitorCoverageReceipt.kind == kind,
+                                MonitorCoverageReceipt.account_id == account_id,
+                                MonitorCoverageReceipt.run_id == run.id,
+                            )
+                        )
+                        is not None
+                    ):
+                        continue
+                    receipt = await _reconcile_run(
+                        session,
+                        account_id=account_id,
+                        run=run,
+                        now=now,
+                        kind=kind,
+                        atomic_pair=len(kinds) == 2,
+                    )
+                    if receipt is not None:
+                        receipts.append(receipt)
+        except ValueError as error:
+            receipts = []
+            pair_rejected = isinstance(error, _OrdinaryReplacementRejected)
+            reason = str(error) if pair_rejected else "MONITOR_SOURCE_UNVERIFIED"
+            status = (
+                "superseded"
+                if reason == "MONITOR_SOURCE_SUPERSEDED"
+                else "gap"
+                if pair_rejected
+                else "unverified"
             )
-            session.add(receipt)
-            await session.flush()
-            await append_audit_event(
-                session,
-                actor_id="research-monitor",
-                action="research.monitor.coverage_recorded",
-                schema_version="monitor_coverage_v1",
-                occurred_at=now,
-                payload={
-                    "receipt_id": str(receipt.id),
-                    "run_id": str(run.id),
-                    "status": "unverified",
-                    "reason": "MONITOR_SOURCE_UNVERIFIED",
-                    "active_plan_id": None,
-                },
-            )
-        if receipt is None:
-            counts["awaiting_native_finish"] += 1
-            continue
-        status = receipt.status
-        counts["recorded"] += 1
-        counts[status] += 1
+            for kind in kinds:
+                if (
+                    await session.scalar(
+                        select(MonitorCoverageReceipt.id).where(
+                            MonitorCoverageReceipt.kind == kind,
+                            MonitorCoverageReceipt.account_id == account_id,
+                            MonitorCoverageReceipt.run_id == run.id,
+                        )
+                    )
+                    is not None
+                ):
+                    continue
+                receipt = MonitorCoverageReceipt(
+                    kind=kind,
+                    account_id=account_id,
+                    instrument_id=run.instrument_id,
+                    run_id=run.id,
+                    output_id=None,
+                    prior_plan_id=None,
+                    active_plan_id=None,
+                    research_as_of=run.decision_time,
+                    observed_at=now,
+                    status=status,
+                    reason=reason,
+                    quality_status=None,
+                )
+                session.add(receipt)
+                await session.flush()
+                await append_audit_event(
+                    session,
+                    actor_id="research-monitor",
+                    action="research.monitor.coverage_recorded",
+                    schema_version="monitor_coverage_v1",
+                    occurred_at=now,
+                    payload={
+                        "receipt_id": str(receipt.id),
+                        "run_id": str(run.id),
+                        "status": status,
+                        "reason": reason,
+                        "active_plan_id": None,
+                    },
+                )
+                receipts.append(receipt)
+        for receipt in receipts:
+            counts["recorded"] += 1
+            counts[receipt.status] += 1
+        if not receipts:
+            # Existing per-kind receipts are idempotent; a legacy increment
+            # without a terminal finish remains explicitly pending.
+            if not await session.scalar(
+                select(MonitorCoverageReceipt.id)
+                .where(
+                    MonitorCoverageReceipt.account_id == account_id,
+                    MonitorCoverageReceipt.run_id == run.id,
+                )
+                .limit(1)
+            ):
+                counts["awaiting_native_finish"] += 1
     return {
         "status": "reconciled",
         **counts,
@@ -375,13 +454,25 @@ async def reconcile_account_results(
     }
 
 
+class _OrdinaryReplacementRejected(ValueError):
+    """Roll back a new ordinary daily replacement before recording its refusal."""
+
+
 async def _reconcile_run(
-    session: AsyncSession, *, account_id: UUID, run: AgentResearchRunRecord, now: datetime
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    run: AgentResearchRunRecord,
+    now: datetime,
+    kind: Literal["price", "disclosure"] = "price",
+    atomic_pair: bool = False,
 ) -> MonitorCoverageReceipt | None:
     await lock_security(session, account_id=account_id, instrument_id=run.instrument_id)
     # Revalidate frozen lineage before recording even an unavailable result.
     evidence, member = await _scope_evidence(session, run=run, account_id=account_id)
     if member is not None:
+        if kind != "price":
+            raise ValueError("MONITOR_SOURCE_INVALID")
         trigger = await finish_increment(
             session, account_id=account_id, trigger_id=member.trigger_id, now=now
         )
@@ -390,7 +481,7 @@ async def _reconcile_run(
     prior = await session.scalar(
         select(MonitorPlan)
         .where(
-            MonitorPlan.kind == "price",
+            MonitorPlan.kind == kind,
             MonitorPlan.account_id == account_id,
             MonitorPlan.instrument_id == run.instrument_id,
         )
@@ -398,7 +489,7 @@ async def _reconcile_run(
         .limit(1)
     )
     previous = await latest_coverage(
-        session, account_id=account_id, instrument_id=run.instrument_id, now=now
+        session, account_id=account_id, instrument_id=run.instrument_id, now=now, kind=kind
     )
     prior_run = (
         None if prior is None else await session.get(AgentResearchRunRecord, prior.source_run_id)
@@ -456,24 +547,30 @@ async def _reconcile_run(
                 )
                 from nexus.monitoring.daily_consumption import record_daily_consumption
 
-                async with session.begin_nested():
-                    await record_daily_consumption(
-                        session, qualified=qualified, account_id=account_id, now=now
-                    )
+                if kind == "price":
+                    async with session.begin_nested():
+                        await record_daily_consumption(
+                            session, qualified=qualified, account_id=account_id, now=now
+                        )
                 quality = qualified.intent.quality_status
                 vetoed = any(
-                    row.role == "evidence_audit"
-                    and row.vote != "support"
-                    or row.monitoring_review is not None
-                    and row.monitoring_review.decision == "rejected"
+                    row.role == "evidence_audit" and row.vote != "support"
                     for row in qualified.role_outputs
                 )
+                for row in qualified.role_outputs:
+                    review = row.monitoring_review if kind == "price" else row.disclosure_review
+                    vetoed = vetoed or review is not None and review.decision == "rejected"
                 if vetoed:
                     reason = "MONITOR_AUDIT_REJECTED"
                 else:
+                    from nexus.monitoring.disclosure_installation import install_disclosure_plan
+
+                    installer = (
+                        install_plan_from_output if kind == "price" else install_disclosure_plan
+                    )
                     try:
                         async with session.begin_nested():
-                            installed = await install_plan_from_output(
+                            installed = await installer(
                                 session,
                                 account_id=account_id,
                                 output_id=terminal.id,
@@ -495,11 +592,29 @@ async def _reconcile_run(
                             else "MONITOR_INSTALLED"
                         )
                     except ValueError as error:
+                        declared = (
+                            qualified.intent.monitoring_proposal
+                            if kind == "price"
+                            else qualified.intent.disclosure_proposal
+                        )
+                        if atomic_pair and declared is not None:
+                            raise _OrdinaryReplacementRejected(
+                                "MONITOR_SOURCE_SUPERSEDED"
+                                if str(error)
+                                in {"MONITOR_PLAN_CONFLICT", "MONITOR_SOURCE_NOT_NEWER"}
+                                else "MONITOR_CONDITION_REPLACEMENT_REJECTED"
+                            ) from None
                         if str(error) in {"MONITOR_PLAN_CONFLICT", "MONITOR_SOURCE_NOT_NEWER"}:
                             status, reason = "superseded", "MONITOR_SOURCE_SUPERSEDED"
                         else:
                             reason = "MONITOR_NO_APPROVED_CONDITION"
+            except _OrdinaryReplacementRejected:
+                raise
             except ValueError:
+                if atomic_pair:
+                    raise _OrdinaryReplacementRejected(
+                        "MONITOR_CONDITION_REPLACEMENT_REJECTED"
+                    ) from None
                 vetoed, reason = True, "MONITOR_SOURCE_INVALID"
     if status in {"gap", "unknown"} and prior is not None and not vetoed:
         assert prior_run is not None
@@ -523,6 +638,7 @@ async def _reconcile_run(
             if status != "unknown":
                 status, reason = "retained", "MONITOR_PRIOR_EVIDENCE_UNCHANGED"
     receipt = MonitorCoverageReceipt(
+        kind=kind,
         account_id=account_id,
         instrument_id=run.instrument_id,
         run_id=run.id,
