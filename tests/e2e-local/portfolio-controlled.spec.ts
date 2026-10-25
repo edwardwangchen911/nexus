@@ -136,27 +136,29 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   expect(summary.current_target?.target_version_id).toBe(targetId);
 
   const writes: string[] = [];
-  let navigationEpoch = 0;
-  const workbenchEpochs = new WeakMap<object, number>();
-  page.on("framenavigated", (frame) => {
-    if (frame === page.mainFrame()) navigationEpoch += 1;
-  });
   page.on("request", (networkRequest) => {
     if (!["GET", "HEAD"].includes(networkRequest.method())) writes.push(networkRequest.method());
-    if (new URL(networkRequest.url()).pathname === "/api/v1/workbench"
-      && networkRequest.method() === "GET" && networkRequest.frame() === page.mainFrame()) {
-      workbenchEpochs.set(networkRequest, navigationEpoch);
-    }
+  });
+  const workbenchReads: { status: number; code: string | null; response_request_id: string | null }[] = [];
+  let workbenchReadsTruncated = false;
+  page.on("response", async (response) => {
+    if (new URL(response.url()).pathname !== "/api/v1/workbench" || response.request().method() !== "GET") return;
+    if (workbenchReads.length >= 8) { workbenchReadsTruncated = true; return; }
+    const fact = { status: response.status(), code: null as string | null, response_request_id: null as string | null };
+    workbenchReads.push(fact);
+    try {
+      const body = await response.json();
+      const code = body?.error?.code;
+      if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(code)) fact.code = code;
+      const requestId = body?.meta?.request_id;
+      if (typeof requestId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) fact.response_request_id = requestId.toLowerCase();
+    } catch { fact.code = "READBACK_BODY_UNAVAILABLE"; }
   });
   const manualRequestId = process.env.NEXUS_CONTROLLED_MANUAL_REQUEST_ID;
-  const observeWorkbench = (epoch: number) => page.waitForResponse((response) =>
-    workbenchEpochs.get(response.request()) === epoch);
-  let workbenchResponse = manualRequestId ? null : observeWorkbench(navigationEpoch + 1);
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
   if (manualRequestId) {
     await page.evaluate((key) => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key, mode: "research_and_paper" })), process.env.NEXUS_CONTROLLED_MANUAL_KEY!);
-    workbenchResponse = observeWorkbench(navigationEpoch + 1);
     await page.reload();
     const manual = page.getByRole("region", { name: "开始研究与内部模拟" });
     await expect(manual.getByText("周期已完成", { exact: false })).toBeVisible();
@@ -170,9 +172,12 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
     expect(await page.evaluate(() => sessionStorage.getItem("nexus-manual-paper-attempt-v1"))).toBeNull();
     await expect(manual.getByRole("button", { name: "研究并内部模拟", exact: true })).toBeEnabled();
   }
-  const workbench = await workbenchResponse!;
-  expect(workbench.status(), await errorCode(workbench)).toBe(200);
-  await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
+  try {
+    await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
+  } catch (error) {
+    if (error instanceof Error) error.message += `\nCONTROLLED_WORKBENCH_READBACK ${JSON.stringify({ reads: workbenchReads, truncated: workbenchReadsTruncated })}`;
+    throw error;
+  }
   await expect(page.getByRole("region", { name: "最新决策" }).getByText(firstPartial ? "部分成交" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByText(firstPartial ? "partially_filled" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByRole("link", { name: "查看全部订单" })).toHaveAttribute("href", "/paper");
