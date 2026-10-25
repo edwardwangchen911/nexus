@@ -46,6 +46,9 @@ from sqlalchemy import func, select, text
 async def test_observe_cli_to_real_persisted_checks_preserves_research_and_deduplicates(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
+    host_process = mode == "host_process"
+    if host_process:
+        mode = "no_trigger"
     restart_next_session = mode == "restart_next_session"
     valid_next_session = mode == "valid_next_session"
     coordinated_start = restart_next_session or valid_next_session
@@ -111,6 +114,10 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
             "object_store_secret_access_key": SecretStr("synthetic"),
         }
     )
+    if host_process:
+        from nexus.settings import AgentRuntimeMode
+
+        settings = settings.model_copy(update={"agent_runtime_mode": AgentRuntimeMode.CODEX_SDK})
     now = captured["clock"][0] + timedelta(minutes=6)
     captured["clock"][0] = now
     await _set_test_insert_clock(factory, now)
@@ -166,6 +173,27 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
     class Evidence(Store):
         def __init__(self, *a, **kw):
             super().__init__()
+
+        async def archive_raw(self, key, payload):
+            if not host_process:
+                return await super().archive_raw(key, payload)
+            from hashlib import sha256
+
+            path = tmp_path / "host-evidence" / sha256(key.encode()).hexdigest()
+            path.parent.mkdir(exist_ok=True)
+            if path.exists():
+                assert path.read_bytes() == payload
+            else:
+                path.write_bytes(payload)
+            return f"memory://{key}"
+
+        async def read_raw(self, key, *, uri):
+            if not host_process:
+                return await super().read_raw(key, uri=uri)
+            from hashlib import sha256
+
+            assert uri == f"memory://{key}"
+            return (tmp_path / "host-evidence" / sha256(key.encode()).hexdigest()).read_bytes()
 
     evidence = Evidence()
 
@@ -399,6 +427,20 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
             assert count == 1
         else:
             assert count == (1 if mode == "trigger" else 0)
+
+    if host_process:
+        from helpers.monitor_host_process import assert_reconstruction
+
+        await assert_reconstruction(
+            factory,
+            settings,
+            tmp_path,
+            captured,
+            environment,
+            midpoint,
+            threshold,
+            sec_store,
+        )
 
     if restart_next_session:
         # Lose the coordinator's bucket memory and the DB connection pool. The
