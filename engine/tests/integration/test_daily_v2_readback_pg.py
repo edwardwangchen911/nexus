@@ -207,7 +207,7 @@ async def close_daily_cycle(factory, settings, captured, pointer, result, now, m
         assert (await session.get(AgentPaperCycleRecord, result.cycle_id)).execution_locked is True
 
 
-async def partial_daily(url, monkeypatch, root):
+async def partial_daily(url, monkeypatch, root, *, before_reconcile=None):
     saved = []
     prepare = native_fixture.ready_host_batch
 
@@ -292,6 +292,8 @@ async def partial_daily(url, monkeypatch, root):
     assert len(calls) == 9 and all(
         calls.count(stage) == 3 for stage in ("research", "critique", "synthesis")
     )
+    if before_reconcile is not None:
+        await before_reconcile(factory, settings, captured, pointer, batch_id, target, now)
     async with factory() as session, session.begin():
         report = await reconcile_account_results(
             session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now
