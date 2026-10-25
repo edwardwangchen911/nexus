@@ -232,6 +232,14 @@ jobs:
         run: >-
           uv run --package nexus-engine pytest -q --import-mode=importlib
           'engine/tests/integration/test_current_preparation_recovery_pg.py::test_current_host_interruption_recovers_via_normal_cli[accept_prepared_closed]'
+      - name: Verify monitoring budget rejection through BFF and page
+        env:
+          NEXUS_ENV: test
+          DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci
+          NEXUS_TEST_MONITOR_BROWSER_DIR: ${{ github.workspace }}/test-results/monitoring-budget
+        run: >-
+          uv run --package nexus-engine pytest -q --import-mode=importlib
+          'engine/tests/integration/test_monitor_session_budget_pg.py::test_normal_sealed_batches_reset_calls_only_for_new_session[settled]'
       - name: Upload real fixture failure evidence only
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
