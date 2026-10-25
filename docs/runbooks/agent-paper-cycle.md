@@ -218,13 +218,17 @@ uv run --project engine nexus-engine-agent-paper-once run-research \
 如果 Job 已在运行、已终态、绑定冲突、已有 Output 或调用结果不明，命令返回
 `AGENT_PAPER_RESULT_UNKNOWN`；先查原 Cycle/Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
 
-### 价格触发的单股增量研究（新监控链）
+### 价格与 SEC 触发的单股增量研究（候选新监控链）
 
 正常入口为 `nexus-engine-research-monitor`（源码运行可用
 `PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.research_monitor`）。
-先以 `install --output-id <原已完成输出>` 登记原审核通过计划，
-`inspect --plan-id <计划>` 只读检查；`scan --calendar-authority-id <已配置日历>`
-仅检查当前正常交易时段的五分钟桶，不采集行情或调用模型。
+正常每日研究终结后由 `reconcile` 核验原生终态、已知结算、原件和独立审核，
+分别登记价格与披露覆盖；已有价格回执不会跳过该 Run 尚缺的披露对账。
+`scan --calendar-authority-id <已配置日历>` 会先做同一正常对账，再检查当前正常交易时段的
+五分钟桶；这两个动作不采集行情或调用模型。`inspect --plan-id <计划>` 只读检查。
+正常每日接替无需手工补装；保留的 `install --output-id <原已完成输出>` 仅接受符合原合同的
+单类来源，typed/mixed 仍必须走原子对账。缺条件、否决、安装失败和未知用量分别留明确回执，
+不以安装新披露计划冒充旧事件已消费，也不解除未知预算或启动宿主。
 
 SEC 结构事件使用独立的完整索引来源，入口为 `nexus-engine-sec-index`，也可通过
 `PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.sec_index_local` 运行。
