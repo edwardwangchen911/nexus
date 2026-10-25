@@ -18,14 +18,16 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
-from nexus.persistence.models.monitoring import MonitorPlan, MonitorTrigger
-from nexus.persistence.models.runtime import Job, JobLease, OutboxEvent
+from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
+from nexus.persistence.models.runtime import AuditEvent, Job, JobLease, OutboxEvent
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["trigger", "no_trigger", "source_failure"])
+@pytest.mark.parametrize(
+    "mode", ["trigger", "no_trigger", "source_failure", "new_sec_after_install"]
+)
 async def test_observe_cli_to_real_persisted_checks_preserves_research_and_deduplicates(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
@@ -42,7 +44,12 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         migrated_database_url,
         monkeypatch,
         tmp_path,
-        kinds=("price", "disclosure") if mode != "no_trigger" else ("price",),
+        # Ordinary daily reconciliation may install the audited SEC proposal.
+        # A no-trigger source must therefore contain no new SEC facts either.
+        added=0 if mode == "no_trigger" else 2,
+        kinds=("price",)
+        if mode in {"no_trigger", "new_sec_after_install"}
+        else ("price", "disclosure"),
     )
     async with factory() as session:
         parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)
@@ -207,6 +214,16 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
     assert observed["status"] == ("partial" if mode == "source_failure" else "refreshed"), (
         json.dumps(observed, default=str)
     )
+    if mode == "new_sec_after_install":
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(MonitorPlan)
+                    .where(MonitorPlan.kind == "disclosure")
+                )
+                == 0
+            )
     scanned = await research_monitor.run(
         settings, argparse.Namespace(action="scan", calendar_authority_id=CALENDAR_ID)
     )
@@ -217,13 +234,51 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         assert scanned["unknown"] > 0 and scanned["false"] == 0
     if mode == "no_trigger":
         assert scanned["false"] == 1 and not sec_calls
+    if mode == "new_sec_after_install":
+        assert scanned["false"] == 1 and not sec_calls
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(MonitorPlan)
+                    .where(MonitorPlan.kind == "disclosure")
+                )
+                == 1
+            )
+            stale = await session.scalar(
+                select(MonitorCheck).where(MonitorCheck.kind == "disclosure")
+            )
+            assert stale.result == "unknown" and stale.reason == "SEC_INDEX_STALE"
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(AuditEvent.action == "research.monitor.disclosure_refresh_claimed")
+                )
+                == 0
+            )
     assert len(price_calls) == 1
-    assert len(sec_calls) == (0 if mode == "no_trigger" else 1 if mode == "source_failure" else 2)
+    if mode == "new_sec_after_install":
+        assert not sec_calls
+    else:
+        assert len(sec_calls) == (
+            0 if mode == "no_trigger" else 1 if mode == "source_failure" else 2
+        )
     repeated = await research_monitor.run(settings, args)
     again = await research_monitor.run(
         settings, argparse.Namespace(action="scan", calendar_authority_id=CALENDAR_ID)
     )
-    assert again.get("new_triggers", 0) == 0 and len(price_calls) == 1
+    if mode == "new_sec_after_install":
+        assert again["new_triggers"] == 2 and again["notifications"] == 1
+        assert len(price_calls) == 1 and len(sec_calls) == 2
+        await research_monitor.run(settings, args)
+        final = await research_monitor.run(
+            settings, argparse.Namespace(action="scan", calendar_authority_id=CALENDAR_ID)
+        )
+        assert final["new_triggers"] == final["notifications"] == 0
+        assert len(price_calls) == 1 and len(sec_calls) == 2
+    else:
+        assert again.get("new_triggers", 0) == 0 and len(price_calls) == 1
     assert repeated["model_requests"] == 0
     async with factory() as session:
         assert (
@@ -240,9 +295,36 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
             )
             == before
         )
-        assert await session.scalar(select(func.count()).select_from(MonitorTrigger)) == (
-            3 if mode == "trigger" else 0
-        )
+        if mode == "new_sec_after_install":
+            triggers = tuple(await session.scalars(select(MonitorTrigger)))
+            assert len(triggers) == 2
+            assert all(
+                t.kind == "disclosure"
+                and t.cause == "disclosure_added"
+                and t.instrument_id == pointer.instrument_id
+                for t in triggers
+            )
+            current = json.loads((tmp_path / "current/AAPL-submissions.json").read_bytes())
+            baseline = json.loads((tmp_path / "baseline/AAPL-submissions.json").read_bytes())
+            added = set(current["filings"]["recent"]["accessionNumber"]) - set(
+                baseline["filings"]["recent"]["accessionNumber"]
+            )
+            assert {t.event_key for t in triggers} == {
+                f"sec:{int(current['cik']):010d}:{accession}" for accession in added
+            }
+            assert len({t.batch_id for t in triggers}) == len({t.outbox_id for t in triggers}) == 1
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(AuditEvent.action == "research.monitor.disclosure_refresh_claimed")
+                )
+                == 1
+            )
+        else:
+            assert await session.scalar(select(func.count()).select_from(MonitorTrigger)) == (
+                3 if mode == "trigger" else 0
+            )
         count = await session.scalar(
             select(func.count())
             .select_from(OutboxEvent)
@@ -252,5 +334,8 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
                 )
             )
         )
-        assert count == (1 if mode == "trigger" else 0)
+        if mode == "new_sec_after_install":
+            assert count == 1
+        else:
+            assert count == (1 if mode == "trigger" else 0)
     await factory.kw["bind"].dispose()
