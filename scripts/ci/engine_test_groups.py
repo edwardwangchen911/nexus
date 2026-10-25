@@ -139,11 +139,10 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_monitor_notification_pg.py",
 )
 
-# CI progress timestamps place this boundary near half of PostgreSQL wall time.
-PG_SPLIT = (
-    "engine/tests/integration/test_candidate_multistock_path.py"
-    "::test_v11_formal_synthesis_sdk_lifecycle"
-)
+# On 8ac00e8e, pg-b reached node 216 at 11m58s before hitting the 40m job limit.
+# Move its first 217 nodes through the complete unknown_preparation_ack selector
+# to pg-a. This redistributes observed work; final CI must establish headroom.
+PG_SPLIT = "engine/tests/integration/test_scheduled_unknown_acceptance_pg.py"
 
 
 def selectors_for(group: str) -> tuple[str, ...]:
