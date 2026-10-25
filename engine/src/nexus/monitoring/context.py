@@ -176,7 +176,9 @@ async def read_monitor_context(
 
     from nexus.paper.projection import load_paper_projection
 
-    projection = await load_paper_projection(session, account_id=context.account_id, as_of=as_of)
+    projection = await load_paper_projection(
+        session, account_id=context.account_id, as_of=as_of, derived_snapshots_known_at=as_of
+    )
     position = next((p for p in projection.positions if p.instrument_id == instrument_id), None)
     with localcontext() as arithmetic:
         arithmetic.prec = 38

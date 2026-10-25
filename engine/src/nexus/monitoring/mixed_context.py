@@ -169,7 +169,7 @@ async def read_mixed_context(
         ):
             return None
         projection = await load_paper_projection(
-            session, account_id=context.account_id, as_of=as_of
+            session, account_id=context.account_id, as_of=as_of, derived_snapshots_known_at=as_of
         )
         position = next((p for p in projection.positions if p.instrument_id == instrument_id), None)
         if projection.nav <= 0:

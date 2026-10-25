@@ -93,6 +93,10 @@ async def _admit_batch(
     if type(daily_sdk_call_limit) is not int or not 3 <= daily_sdk_call_limit <= 90:
         raise ValueError("MONITOR_CALL_LIMIT_INVALID")
     await lock_portfolio_account(session, account_id)
+    frozen_now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(frozen_now, datetime):
+        raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+    now = require_utc(frozen_now)
     from nexus.monitoring.batch_inputs import _inputs, read_batch_inputs
     from nexus.persistence.models.monitoring import MonitorObservationBatch
 
@@ -213,7 +217,9 @@ async def _admit_batch(
         or parent.model_config_id != model_config_id
     ):
         raise ValueError("MONITOR_SOURCE_INVALID")
-    projection = await load_paper_projection(session, account_id=account_id, as_of=now)
+    projection = await load_paper_projection(
+        session, account_id=account_id, as_of=now, derived_snapshots_known_at=now
+    )
     position = next(
         (p for p in projection.positions if p.instrument_id == trigger.instrument_id), None
     )

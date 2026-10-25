@@ -443,13 +443,24 @@ async def load_paper_projection(
     *,
     account_id: UUID,
     as_of: datetime,
+    derived_snapshots_known_at: datetime | None = None,
 ) -> PaperPortfolioProjection:
-    """Load and fold one account from a caller-owned transaction snapshot."""
+    """Fold business-time facts, optionally pinning derived-snapshot visibility.
+
+    Historical accounting readers retain the default business-as-of view.
+    Frozen research can independently exclude performance/position snapshots
+    published after its knowledge cutoff, including later historical closeouts.
+    Ledger, order and reservation business-time rules remain unchanged.
+    """
     account = await session.get(PaperAccountRecord, account_id)
     if account is None:
         raise ValueError("paper account is missing")
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("projection time must be timezone-aware")
+    if derived_snapshots_known_at is not None and (
+        derived_snapshots_known_at.tzinfo is None or derived_snapshots_known_at.utcoffset() is None
+    ):
+        raise ValueError("derived snapshot knowledge time must be timezone-aware")
 
     ledger_account_rows = tuple(
         (
@@ -684,6 +695,11 @@ async def load_paper_projection(
         .where(
             PaperPositionSnapshotRecord.account_id == account_id,
             PaperPositionSnapshotRecord.as_of <= as_of,
+            *(
+                ()
+                if derived_snapshots_known_at is None
+                else (PaperPositionSnapshotRecord.created_at <= derived_snapshots_known_at,)
+            ),
         )
         .order_by(PaperPositionSnapshotRecord.as_of.desc())
         .limit(1)
@@ -695,6 +711,14 @@ async def load_paper_projection(
                     select(PaperPositionSnapshotRecord).where(
                         PaperPositionSnapshotRecord.account_id == account_id,
                         PaperPositionSnapshotRecord.as_of == latest_position_time,
+                        *(
+                            ()
+                            if derived_snapshots_known_at is None
+                            else (
+                                PaperPositionSnapshotRecord.created_at
+                                <= derived_snapshots_known_at,
+                            )
+                        ),
                     )
                 )
             ).all()
@@ -806,6 +830,11 @@ async def load_paper_projection(
         .where(
             PaperPerformanceSnapshotRecord.account_id == account_id,
             PaperPerformanceSnapshotRecord.as_of <= as_of,
+            *(
+                ()
+                if derived_snapshots_known_at is None
+                else (PaperPerformanceSnapshotRecord.created_at <= derived_snapshots_known_at,)
+            ),
         )
         .order_by(PaperPerformanceSnapshotRecord.as_of.desc())
         .limit(1)

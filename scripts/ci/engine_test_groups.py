@@ -32,6 +32,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_real_fixture_db_guard.py",
     "engine/tests/integration/test_risk_authority_pg.py",
     "engine/tests/integration/test_paper_idempotency_pg.py",
+    "engine/tests/integration/test_paper_projection_pg.py",
     "engine/tests/integration/test_paper_db_guards.py",
     "engine/tests/integration/test_broker_simulation_reconciliation.py",
     "engine/tests/integration/test_agent_paper_cycle_migration.py",
