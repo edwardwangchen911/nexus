@@ -14,9 +14,15 @@ from helpers.paper_api import app, headers
 from helpers.paper_batch import CALENDAR_ID
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.monitoring import MonitorCoverageReceipt, MonitorPlan, MonitorTrigger
+from nexus.persistence.models.monitoring import (
+    MonitorCoverageReceipt,
+    MonitorIncrement,
+    MonitorPlan,
+    MonitorTrigger,
+)
 from nexus.persistence.models.runtime import (
     AuditEvent,
     IdempotencyRecord,
@@ -81,6 +87,19 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
 
             monkeypatch.setattr(codex_staged, "invoke_codex", unknown)
             async with factory() as session:
+                if reason == "addressed":
+                    prior_plans = {
+                        plan.kind: (plan.id, plan.generation)
+                        for plan in await session.scalars(
+                            select(MonitorPlan).where(
+                                MonitorPlan.account_id == pointer.account_id,
+                                MonitorPlan.instrument_id == pointer.instrument_id,
+                                MonitorPlan.source_run_id == pointer.source_run_id,
+                            )
+                        )
+                    }
+                    assert set(prior_plans) == {"price", "disclosure"}
+                    assert {generation for _, generation in prior_plans.values()} == {1}
                 trigger = await session.scalar(
                     select(MonitorTrigger)
                     .where(MonitorTrigger.batch_id == batch_id)
@@ -126,6 +145,50 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
                         )
                         == 0
                     )
+                else:
+                    child = await session.get(AgentResearchRunRecord, native_run_id)
+                    member = await session.scalar(
+                        select(MonitorIncrement).where(MonitorIncrement.run_id == native_run_id)
+                    )
+                    output = await session.scalar(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == native_run_id,
+                            AgentResearchOutputRecord.role.is_(None),
+                            AgentResearchOutputRecord.status == "completed",
+                        )
+                    )
+                    assert child.status == "completed" and child.settled_cost_usd is not None
+                    assert (
+                        member.batch_id == batch_id and member.snapshot_id == child.data_snapshot_id
+                    )
+                    replacements = {
+                        plan.kind: plan
+                        for plan in await session.scalars(
+                            select(MonitorPlan).where(MonitorPlan.source_run_id == native_run_id)
+                        )
+                    }
+                    assert set(replacements) == set(prior_plans)
+                    for kind, plan in replacements.items():
+                        prior_id, prior_generation = prior_plans[kind]
+                        assert plan.generation == prior_generation + 1 == 2
+                        assert plan.predecessor_id == prior_id
+                        assert plan.account_id == pointer.account_id
+                        assert plan.instrument_id == pointer.instrument_id
+                        assert plan.source_output_id == output.id
+                    receipts = {
+                        receipt.kind: receipt
+                        for receipt in await session.scalars(
+                            select(MonitorCoverageReceipt).where(
+                                MonitorCoverageReceipt.run_id == native_run_id
+                            )
+                        )
+                    }
+                    assert set(receipts) == set(replacements)
+                    for kind, receipt in receipts.items():
+                        assert receipt.status == "installed"
+                        assert receipt.output_id == output.id
+                        assert receipt.prior_plan_id == prior_plans[kind][0]
+                        assert receipt.active_plan_id == replacements[kind].id
         elif reason is not None:
             # Controlled persisted coverage projection, not a synthetic model
             # verdict or a claim that a real research source had this outcome.
@@ -214,6 +277,10 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
             )
             assert all(row["usage_status"] == "unknown" for row in disclosure["triggers"])
         elif reason == "addressed":
+            for kind, view in (("price", price), ("disclosure", disclosure)):
+                assert view["state"] == "superseded"
+                assert view["plan_id"] == str(prior_plans[kind][0])
+                assert view["replacement_run_id"] == str(native_run_id)
             assert all(
                 row["event_review"] == "addressed" and row["usage_status"] == "known"
                 for row in disclosure["triggers"]
@@ -242,6 +309,7 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
                         "run_id": str(pointer.source_run_id),
                         "instrument_id": str(pointer.instrument_id),
                         "reason": reason,
+                        "replacement_run_id": str(native_run_id) if reason == "addressed" else None,
                         "response": response.json(),
                     }
                 )
