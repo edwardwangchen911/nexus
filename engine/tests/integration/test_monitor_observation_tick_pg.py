@@ -70,7 +70,7 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         kinds=("price",)
         if mode in {"no_trigger", "new_sec_after_install"}
         else ("price", "disclosure"),
-        monitoring_lifetime_days=4 if valid_next_session else 2,
+        monitoring_lifetime_days=4 if valid_next_session else None,
     )
     async with factory() as session:
         parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)

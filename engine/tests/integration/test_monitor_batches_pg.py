@@ -38,7 +38,7 @@ async def installed(
     *,
     added=2,
     kinds=("price", "disclosure"),
-    monitoring_lifetime_days=2,
+    monitoring_lifetime_days=None,
 ):
     factory, settings, store, captured, pointer = await reader_source(
         database_url, monkeypatch, root, monitoring_lifetime_days=monitoring_lifetime_days

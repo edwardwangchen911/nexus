@@ -49,7 +49,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     monitoring_threshold="123.45",
     disclosure=False,
     before_research=None,
-    monitoring_lifetime_days=2,
+    monitoring_lifetime_days=None,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -58,6 +58,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             "nexus.agents.portfolio_synthesis_persistence.BOUNDED_SYNTHESIS_JOB",
             "portfolio_synthesis_job_v1",
         )
+    wire_lifetime_days = 2 if monitoring_lifetime_days is None else monitoring_lifetime_days
     post_research_at = AT + (decision_delay or timedelta())
     formal = profile in {"formal_v9", "formal_v10", "formal_v11"}
     consumer_mode = (
@@ -191,12 +192,13 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     )
                     if row["monitoring_proposal"] is not None:
                         row["monitoring_proposal"]["condition"]["threshold"] = monitoring_threshold
-                        row["monitoring_proposal"]["review_due_at"] = (
-                            AT + timedelta(days=monitoring_lifetime_days - 1)
-                        ).isoformat()
-                        row["monitoring_proposal"]["valid_until"] = (
-                            AT + timedelta(days=monitoring_lifetime_days)
-                        ).isoformat()
+                        if monitoring_lifetime_days is not None:
+                            row["monitoring_proposal"]["review_due_at"] = (
+                                AT + timedelta(days=monitoring_lifetime_days - 1)
+                            ).isoformat()
+                            row["monitoring_proposal"]["valid_until"] = (
+                                AT + timedelta(days=monitoring_lifetime_days)
+                            ).isoformat()
             elif stage == "critique":
                 for row in response["roles"]:
                     row["daily_pending_review"] = None
@@ -249,11 +251,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                             "rationale": "新收录披露仅触发复核，正文影响仍需核验。",
                             "citations": [reference],
                             "review_due_at": (
-                                AT + timedelta(days=monitoring_lifetime_days - 1)
+                                AT + timedelta(days=wire_lifetime_days - 1)
                             ).isoformat(),
-                            "valid_until": (
-                                AT + timedelta(days=monitoring_lifetime_days)
-                            ).isoformat(),
+                            "valid_until": (AT + timedelta(days=wire_lifetime_days)).isoformat(),
                         }
             elif stage == "critique":
                 for row in response["roles"]:
