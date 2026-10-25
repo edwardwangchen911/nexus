@@ -20,7 +20,7 @@ from nexus.settings import EngineSettings
 from sqlalchemy import select
 
 
-async def reader_source(database_url, monkeypatch, root):
+async def reader_source(database_url, monkeypatch, root, *, monitoring_lifetime_days=2):
     store, captured = MemoryStore(), {}
     monkeypatch.setattr(
         "nexus.monitoring.disclosure_context.configured_exhibit_store", lambda s: store
@@ -59,6 +59,7 @@ async def reader_source(database_url, monkeypatch, root):
         monitoring=True,
         disclosure=True,
         before_research=prepare,
+        monitoring_lifetime_days=monitoring_lifetime_days,
     )
     settings = EngineSettings(
         database_url=database_url, object_store_endpoint="http://127.0.0.1:9000"

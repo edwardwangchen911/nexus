@@ -49,6 +49,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     monitoring_threshold="123.45",
     disclosure=False,
     before_research=None,
+    monitoring_lifetime_days=2,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -190,6 +191,12 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     )
                     if row["monitoring_proposal"] is not None:
                         row["monitoring_proposal"]["condition"]["threshold"] = monitoring_threshold
+                        row["monitoring_proposal"]["review_due_at"] = (
+                            AT + timedelta(days=monitoring_lifetime_days - 1)
+                        ).isoformat()
+                        row["monitoring_proposal"]["valid_until"] = (
+                            AT + timedelta(days=monitoring_lifetime_days)
+                        ).isoformat()
             elif stage == "critique":
                 for row in response["roles"]:
                     row["daily_pending_review"] = None
@@ -241,8 +248,12 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                             "baseline_hash": baseline["snapshot_hash"],
                             "rationale": "新收录披露仅触发复核，正文影响仍需核验。",
                             "citations": [reference],
-                            "review_due_at": (AT + timedelta(days=1)).isoformat(),
-                            "valid_until": (AT + timedelta(days=2)).isoformat(),
+                            "review_due_at": (
+                                AT + timedelta(days=monitoring_lifetime_days - 1)
+                            ).isoformat(),
+                            "valid_until": (
+                                AT + timedelta(days=monitoring_lifetime_days)
+                            ).isoformat(),
                         }
             elif stage == "critique":
                 for row in response["roles"]:
