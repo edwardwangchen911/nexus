@@ -113,6 +113,82 @@ async def stock_batch(factory, settings, instrument_id, clock, now):
     )
 
 
+async def verify_budget_rejection_readback(factory, database_url, monkeypatch, *, batch_id, now):
+    """Read a real normal-entry rejection, never stamp the blocked reason in a fixture."""
+    import os
+    from pathlib import Path
+
+    import httpx
+    from helpers.monitoring_readview_browser import verify_monitoring_browser
+    from helpers.paper_api import app, headers
+    from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
+    from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
+
+    async with factory() as session:
+        trigger = await session.scalar(
+            select(MonitorTrigger).where(MonitorTrigger.batch_id == batch_id)
+        )
+        assert trigger.status == "blocked" and trigger.reason == "MONITOR_DAILY_LIMIT_REACHED"
+        assert trigger.research_run_id is None
+        check = await session.get(MonitorCheck, trigger.check_id)
+        plan = await session.get(MonitorPlan, check.plan_id)
+        assert check.instrument_id == plan.instrument_id == trigger.instrument_id
+        event = await session.get(OutboxEvent, trigger.outbox_id)
+        assert event is not None and event.status == "queued" and event.attempt_count == 0
+        assert str(trigger.id) in event.payload["trigger_ids"]
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(
+                    AuditEvent.action == "research.monitor.batch_admission_blocked",
+                    AuditEvent.payload["batch_id"].as_string() == str(batch_id),
+                )
+            )
+            == 1
+        )
+        source_run_id, instrument_id, trigger_id = (
+            plan.source_run_id,
+            plan.instrument_id,
+            trigger.id,
+        )
+    before = await preserved_rows(factory)
+    monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: now)
+    application = app(database_url, now=now)
+    path = f"/internal/v1/research-runs/{source_run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200, response.text
+    monitoring = response.json()["data"]["monitoring"]
+    assert monitoring["execution_locked"] is True
+    assert monitoring["trigger_count"] == 1
+    saved = monitoring["triggers"][0]
+    assert saved["trigger_id"] == str(trigger_id)
+    assert saved["status"] == "blocked" and saved["blocked_reason"] == "budget"
+    assert saved["run_id"] is None and saved["usage_status"] == "not_started"
+    assert saved["notification_status"] == "queued"
+    browser_root = os.environ.get("NEXUS_TEST_MONITOR_BROWSER_DIR")
+    if browser_root:
+        directory = Path(browser_root).resolve() / "budget-limit"
+        directory.mkdir(parents=True, exist_ok=False)
+        (directory / "ready.json").write_text(
+            json.dumps(
+                {
+                    "run_id": str(source_run_id),
+                    "instrument_id": str(instrument_id),
+                    "trigger_id": str(trigger_id),
+                    "response": response.json(),
+                }
+            )
+        )
+        await verify_monitoring_browser(
+            application, directory=directory, spec_path="tests/e2e/monitoring-budget-live.spec.ts"
+        )
+    assert await preserved_rows(factory) == before
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["settled", "capacity", "unknown"])
 async def test_normal_sealed_batches_reset_calls_only_for_new_session(
@@ -259,6 +335,15 @@ async def test_normal_sealed_batches_reset_calls_only_for_new_session(
             else "MONITOR_DAILY_CALL_LIMIT"
         ), same
         assert await workload_counts(factory) == counts
+        if outcome == "settled":
+            await verify_budget_rejection_readback(
+                factory,
+                migrated_database_url,
+                monkeypatch,
+                batch_id=same_args.batch_id,
+                now=captured["clock"][0],
+            )
+            assert len(stages) == 3
         next_args = await stock_batch(factory, settings, others[1], captured["clock"], monday)
         from nexus.paper.agent_cycle_authority import (
             load_quasi_realtime_cycle_authority,

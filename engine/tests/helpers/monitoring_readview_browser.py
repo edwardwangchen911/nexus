@@ -70,7 +70,16 @@ async def verify_monitoring_browser(
         assert server.started
         environment = {
             key: os.environ[key]
-            for key in ("PATH", "LANG", "LC_ALL", "TZ", "TMPDIR", "TMP", "TEMP")
+            for key in (
+                "PATH",
+                "LANG",
+                "LC_ALL",
+                "TZ",
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                "NEXUS_E2E_BROWSER_CHANNEL",
+            )
             if key in os.environ
         }
         environment.update(
@@ -92,6 +101,8 @@ async def verify_monitoring_browser(
             spec_path,
             "--workers=1",
             "--reporter=line",
+            "--output",
+            str(directory / "playwright-output"),
             env=environment,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
