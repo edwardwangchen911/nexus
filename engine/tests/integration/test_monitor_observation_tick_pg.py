@@ -5,11 +5,12 @@ import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import httpx
 import pytest
 from helpers.paper_batch import CALENDAR_ID
-from integration.test_candidate_multistock_path import _set_test_insert_clock
+from integration.test_candidate_multistock_path import AT, _set_test_insert_clock
 from integration.test_monitor_batches_pg import installed
 from integration.test_schwab_market_stream_import import CREDENTIALS, Socket, Store, _frames
 from nexus.monitoring.host import PriceMonitorCoordinator
@@ -19,7 +20,12 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
-from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
+from nexus.persistence.models.monitoring import (
+    MonitorCheck,
+    MonitorEpisode,
+    MonitorPlan,
+    MonitorTrigger,
+)
 from nexus.persistence.models.runtime import AuditEvent, Job, JobLease, OutboxEvent
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
@@ -28,13 +34,22 @@ from sqlalchemy import func, select, text
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode",
-    ["trigger", "no_trigger", "source_failure", "new_sec_after_install", "restart_next_session"],
+    [
+        "trigger",
+        "no_trigger",
+        "source_failure",
+        "new_sec_after_install",
+        "restart_next_session",
+        "valid_next_session",
+    ],
 )
 async def test_observe_cli_to_real_persisted_checks_preserves_research_and_deduplicates(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
     restart_next_session = mode == "restart_next_session"
-    if restart_next_session:
+    valid_next_session = mode == "valid_next_session"
+    coordinated_start = restart_next_session or valid_next_session
+    if coordinated_start:
         mode = "trigger"
     from nexus.market import object_store
     from nexus.ops import (
@@ -55,6 +70,7 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         kinds=("price",)
         if mode in {"no_trigger", "new_sec_after_install"}
         else ("price", "disclosure"),
+        monitoring_lifetime_days=4 if valid_next_session else None,
     )
     async with factory() as session:
         parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)
@@ -176,13 +192,21 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         if mode == "source_failure":
             raise ValueError("controlled source unavailable")
         frames = _frames(captured["clock"][0] - timedelta(seconds=1))
+        symbols = tuple(arguments.symbol)
         for packet in frames:
             for data in packet.get("data", []):
-                for content in data.get("content", []):
-                    content["1"] = float(midpoint)
-                    content["2"] = float(midpoint)
+                original = data["content"][0]
+                data["content"] = [
+                    {
+                        **original,
+                        "key": symbol,
+                        "1": float(midpoint if symbol == "AAPL" else threshold * 2),
+                        "2": float(midpoint if symbol == "AAPL" else threshold * 2),
+                    }
+                    for symbol in symbols
+                ]
         result = await schwab_market_stream.collect_schwab_stream(
-            symbols=("AAPL",),
+            symbols=symbols,
             directory=arguments.output_dir,
             streamer_url="wss://streamer-api.schwab.com/ws",
             credentials=CREDENTIALS,
@@ -191,10 +215,11 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         )
         path = arguments.output_dir / "receipt.json"
         receipt = json.loads(path.read_text())
-        receipt["started_at"] = (now - timedelta(seconds=2)).isoformat()
-        receipt["ended_at"] = now.isoformat()
+        collected_at = captured["clock"][0]
+        receipt["started_at"] = (collected_at - timedelta(seconds=2)).isoformat()
+        receipt["ended_at"] = collected_at.isoformat()
         for frame in receipt["frames"]:
-            frame["received_at"] = now.isoformat()
+            frame["received_at"] = collected_at.isoformat()
         path.write_text(json.dumps(receipt, sort_keys=True))
         return result
 
@@ -237,7 +262,7 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
         assert not coordinator.kick(at)
         return results
 
-    if restart_next_session:
+    if coordinated_start:
         initial = await coordinated_tick(now)
         observed = initial["observed"]
     else:
@@ -258,7 +283,7 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
             )
     scanned = (
         initial["scanned"]
-        if restart_next_session
+        if coordinated_start
         else await research_monitor.run(
             settings, argparse.Namespace(action="scan", calendar_authority_id=CALENDAR_ID)
         )
@@ -492,4 +517,164 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
                 assert len(added) == 1
                 assert all(row["trigger_ids"] == [] and row["outbox_id"] is None for row in added)
         assert (tuple(price_calls), tuple(sec_calls)) == requests
+    if valid_next_session:
+        frozen_tables = (
+            "research_monitor_plans",
+            "research_monitor_increments",
+            "research_monitor_coverage",
+            "agent_research_runs",
+            "agent_research_outputs",
+            "agent_daily_budget_reservations",
+            "formal_budget_bindings",
+            "agent_portfolio_synthesis_budget_reservations",
+            "portfolio_decision_budget_reservations",
+            "jobs",
+            "job_leases",
+            "outbox_delivery_attempts",
+        )
+
+        async def frozen_rows():
+            async with factory() as session:
+                return {
+                    table: tuple(
+                        await session.scalars(
+                            text(f'SELECT to_jsonb(t)::text AS row FROM "{table}" t ORDER BY row')
+                        )
+                    )
+                    for table in frozen_tables
+                }
+
+        async def original_events():
+            async with factory() as session:
+                return {
+                    table: set(
+                        await session.scalars(
+                            text(f'SELECT to_jsonb(t)::text AS row FROM "{table}" t ORDER BY row')
+                        )
+                    )
+                    for table in ("research_monitor_triggers", "outbox_events")
+                }
+
+        async def source_claims():
+            async with factory() as session:
+                return tuple(
+                    await session.scalars(
+                        text(
+                            "SELECT to_jsonb(t)::text AS row FROM audit_events t "
+                            "WHERE action IN ('research.monitor.price_refresh', "
+                            "'research.monitor.disclosure_refresh_claimed') ORDER BY row"
+                        )
+                    )
+                )
+
+        async def snapshots():
+            async with factory() as session:
+                return set(
+                    await session.scalars(text("SELECT to_jsonb(t)::text FROM data_snapshots t"))
+                )
+
+        frozen = await frozen_rows()
+        original = await original_events()
+        original_snapshots = await snapshots()
+        next_session = monday.replace(hour=13, minute=36, second=0, microsecond=0)
+        async with factory() as session, session.begin():
+            plans = list(await session.scalars(select(MonitorPlan)))
+            assert plans and all(next_session < p.review_due_at < p.valid_until for p in plans)
+            assert all(p.valid_until == AT + timedelta(days=4) for p in plans)
+            assert all(p.review_due_at == AT + timedelta(days=3) for p in plans)
+            episode = await session.get(
+                MonitorEpisode, (pointer.account_id, pointer.instrument_id, plan.condition_hash)
+            )
+            assert episode.sequence == 1 and episode.latched and not episode.observed_false
+            tuesday = next_session + timedelta(days=1)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=CALENDAR_ID,
+                    session=tuesday.date(),
+                    decision_at=tuesday.replace(hour=21),
+                    market_open_at=tuesday.replace(hour=13, minute=30),
+                    market_close_at=tuesday.replace(hour=20),
+                )
+            )
+        for offset, matched in ((0, True), (5, False), (10, True)):
+            captured["clock"][0] = next_session + timedelta(minutes=offset)
+            midpoint = threshold if matched else threshold * 2
+            await _set_test_insert_clock(factory, captured["clock"][0])
+            await factory.kw["bind"].dispose()
+            tick = await coordinated_tick(captured["clock"][0])
+            assert tick["observed"]["status"] == "refreshed", tick
+            assert tick["scanned"]["new_triggers"] == (1 if offset == 10 else 0)
+            assert tick["scanned"]["notifications"] == (1 if offset == 10 else 0)
+            assert tick["scanned"]["expired"] == tick["scanned"]["unknown"] == 0
+            assert await frozen_rows() == frozen
+            assert original_snapshots <= await snapshots()
+            current = await original_events()
+            assert all(original[table] <= current[table] for table in original)
+            if offset < 10:
+                assert current == original
+            else:
+                added_triggers = [
+                    json.loads(row)
+                    for row in current["research_monitor_triggers"]
+                    - original["research_monitor_triggers"]
+                ]
+                assert len(added_triggers) == 1
+                trigger = added_triggers[0]
+                assert (
+                    trigger["kind"] == "price"
+                    and trigger["cause"] == "crossed"
+                    and trigger["episode"] == 2
+                )
+                assert trigger["instrument_id"] == str(pointer.instrument_id)
+                async with factory() as session:
+                    checked = await session.get(MonitorCheck, UUID(trigger["check_id"]))
+                    assert checked.plan_id == plan.id and checked.result == "true"
+                added_notifications = [
+                    json.loads(row) for row in current["outbox_events"] - original["outbox_events"]
+                ]
+                assert len(added_notifications) == 1
+                notification = added_notifications[0]
+                assert notification["event_type"] == "research.monitor.batch_triggered"
+                assert notification["payload"]["trigger_ids"] == [trigger["id"]]
+                assert notification["payload"]["event_ids"] == ["price:" + trigger["id"]]
+                assert notification["payload"]["source_run_ids"] == [str(plan.source_run_id)]
+            async with factory() as session:
+                episode = await session.get(
+                    MonitorEpisode, (pointer.account_id, pointer.instrument_id, plan.condition_hash)
+                )
+                assert episode.sequence == (2 if offset == 10 else 1)
+                assert episode.latched is matched
+                assert episode.observed_false is (offset != 0)
+                checks = list(
+                    await session.scalars(
+                        select(MonitorCheck)
+                        .where(
+                            MonitorCheck.plan_id == plan.id, MonitorCheck.checked_at >= next_session
+                        )
+                        .order_by(MonitorCheck.scheduled_at)
+                    )
+                )
+                assert [c.result for c in checks] == ["true", "false", "true"][: offset // 5 + 1]
+                assert all(
+                    c.scheduled_at == next_session.replace(minute=35) + timedelta(minutes=5 * i)
+                    for i, c in enumerate(checks)
+                )
+            # Re-enter the same Monday bucket with fresh in-memory state. The
+            # durable source claims and event identities must still be reused.
+            requests = (tuple(price_calls), tuple(sec_calls))
+            claims = await source_claims()
+            captured_snapshots = await snapshots()
+            await factory.kw["bind"].dispose()
+            repeated_tick = await coordinated_tick(captured["clock"][0])
+            assert repeated_tick["observed"]["status"] == "refreshed"
+            assert repeated_tick["scanned"]["new_triggers"] == 0
+            assert repeated_tick["scanned"]["notifications"] == 0
+            assert await original_events() == current
+            assert await source_claims() == claims
+            assert await snapshots() == captured_snapshots
+            assert await frozen_rows() == frozen
+            assert (tuple(price_calls), tuple(sec_calls)) == requests
+        assert len(price_calls) == 4
+        assert set(price_calls[-1]) == {"AAPL", "AVGO", "NVDA"}
+        assert len(sec_calls) == 6
     await factory.kw["bind"].dispose()

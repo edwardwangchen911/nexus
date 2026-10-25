@@ -31,9 +31,17 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 
 
-async def installed(database_url, monkeypatch, root, *, added=2, kinds=("price", "disclosure")):
+async def installed(
+    database_url,
+    monkeypatch,
+    root,
+    *,
+    added=2,
+    kinds=("price", "disclosure"),
+    monitoring_lifetime_days=None,
+):
     factory, settings, store, captured, pointer = await reader_source(
-        database_url, monkeypatch, root
+        database_url, monkeypatch, root, monitoring_lifetime_days=monitoring_lifetime_days
     )
     monkeypatch.setattr(
         "nexus.monitoring.disclosure_observations.configured_exhibit_store", lambda session: store
