@@ -110,7 +110,7 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
     request.get(`/api/v1/paper/management/cycles/${cycleId}`),
     request.get("/api/v1/paper/management/portfolio"),
   ]);
-  const errorCode = async (response: typeof ordersResponse) =>
+  const errorCode = async (response: Pick<typeof ordersResponse, "ok" | "json">) =>
     response.ok() ? "" : (await response.json()).error?.code ?? "UNKNOWN_ERROR";
   expect(ordersResponse.status(), await errorCode(ordersResponse)).toBe(200);
   expect(actualResponse.status(), await errorCode(actualResponse)).toBe(200);
@@ -139,9 +139,24 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
   page.on("request", (networkRequest) => {
     if (!["GET", "HEAD"].includes(networkRequest.method())) writes.push(networkRequest.method());
   });
+  const workbenchReads: { status: number; code: string | null; response_request_id: string | null }[] = [];
+  let workbenchReadsTruncated = false;
+  page.on("response", async (response) => {
+    if (new URL(response.url()).pathname !== "/api/v1/workbench" || response.request().method() !== "GET") return;
+    if (workbenchReads.length >= 8) { workbenchReadsTruncated = true; return; }
+    const fact = { status: response.status(), code: null as string | null, response_request_id: null as string | null };
+    workbenchReads.push(fact);
+    try {
+      const body = await response.json();
+      const code = body?.error?.code;
+      if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(code)) fact.code = code;
+      const requestId = body?.meta?.request_id;
+      if (typeof requestId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) fact.response_request_id = requestId.toLowerCase();
+    } catch { fact.code = "READBACK_BODY_UNAVAILABLE"; }
+  });
+  const manualRequestId = process.env.NEXUS_CONTROLLED_MANUAL_REQUEST_ID;
   await page.goto("/workspace");
   await expect(page.getByRole("heading", { name: "交易工作台" })).toBeVisible();
-  const manualRequestId = process.env.NEXUS_CONTROLLED_MANUAL_REQUEST_ID;
   if (manualRequestId) {
     await page.evaluate((key) => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key, mode: "research_and_paper" })), process.env.NEXUS_CONTROLLED_MANUAL_KEY!);
     await page.reload();
@@ -157,7 +172,12 @@ test("controlled multi-candidate two-fill cycle is readable through BFF and four
     expect(await page.evaluate(() => sessionStorage.getItem("nexus-manual-paper-attempt-v1"))).toBeNull();
     await expect(manual.getByRole("button", { name: "研究并内部模拟", exact: true })).toBeEnabled();
   }
-  await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
+  try {
+    await expect(page.locator(".workbench-candidates li")).toHaveCount(candidateCount);
+  } catch (error) {
+    if (error instanceof Error) error.message += `\nCONTROLLED_WORKBENCH_READBACK ${JSON.stringify({ reads: workbenchReads, truncated: workbenchReadsTruncated })}`;
+    throw error;
+  }
   await expect(page.getByRole("region", { name: "最新决策" }).getByText(firstPartial ? "部分成交" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByText(firstPartial ? "partially_filled" : "本周期订单已终态")).toBeVisible();
   await expect(page.getByRole("region", { name: "活动订单" }).getByRole("link", { name: "查看全部订单" })).toHaveAttribute("href", "/paper");

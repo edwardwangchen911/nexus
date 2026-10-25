@@ -3,9 +3,11 @@
 import asyncio
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
+import traceback
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
@@ -19,6 +21,77 @@ from helpers.paper_api import app, headers
 from helpers.paper_api import settings as paper_api_settings
 from nexus.ops.agent_paper_loop import heartbeat_agent_paper_loop
 from nexus.settings import EngineSettings
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+
+class WorkbenchReadbackProbe:
+    """Observe original test requests without replaying or retaining their content."""
+
+    def __init__(self, application: ASGIApp, root: Path) -> None:
+        self.application = application
+        self.source_root = (root / "engine/src").resolve()
+        self.reads: list[dict[str, object]] = []
+        self.truncated = False
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope.get("method") != "GET"
+            or scope.get("path") != "/internal/v1/workbench"
+        ):
+            await self.application(scope, receive, send)
+            return
+        request_id = None
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"x-request-id":
+                try:
+                    parsed = UUID(value.decode("ascii"))
+                    if parsed.version == 7:
+                        request_id = str(parsed)
+                except (ValueError, UnicodeError):
+                    pass
+        fact: dict[str, object] = {
+            "status": None,
+            "response_bytes": 0,
+            "request_id": request_id,
+            "exception_type": None,
+            "source_frames": [],
+        }
+
+        async def observed(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                fact["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                fact["response_bytes"] += len(message.get("body", b""))
+            await send(message)
+
+        try:
+            await self.application(scope, receive, observed)
+        except BaseException as error:
+            name = type(error).__name__
+            fact["exception_type"] = (
+                name if re.fullmatch(r"[A-Za-z_]\w{0,79}", name) else "Exception"
+            )
+            frames = []
+            for frame in traceback.extract_tb(error.__traceback__):
+                try:
+                    source = Path(frame.filename).resolve().relative_to(self.source_root)
+                except ValueError:
+                    continue
+                frames.append(
+                    {
+                        "module": source.with_suffix("").as_posix().replace("/", "."),
+                        "function": frame.name,
+                        "line": frame.lineno,
+                    }
+                )
+            fact["source_frames"] = frames[-8:]
+            raise
+        finally:
+            if len(self.reads) < 32:
+                self.reads.append(fact)
+            else:
+                self.truncated = True
 
 
 def _listen_socket() -> socket.socket:
@@ -188,9 +261,10 @@ async def verify_controlled_browser(
                 update={"release_revision": revision}
             )
         )
+    readback = WorkbenchReadbackProbe(api_app, root)
     server = uvicorn.Server(
         uvicorn.Config(
-            api_app,
+            readback,
             log_config=None,
             access_log=False,
         )
@@ -343,6 +417,8 @@ async def verify_controlled_browser(
                 else "completed"
             ),
             "api_started": server.started,
+            "workbench_reads": readback.reads,
+            "workbench_reads_truncated": readback.truncated,
             "error_type": (
                 "TimeoutError"
                 if isinstance(error, TimeoutError)

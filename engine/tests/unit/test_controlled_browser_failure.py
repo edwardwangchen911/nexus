@@ -36,7 +36,12 @@ async def test_failure_archives_pre_cleanup_process_state(
         browser.subprocess, "run", Mock(return_value=SimpleNamespace(stdout="a" * 40))
     )
     monkeypatch.setattr(browser, "heartbeat_agent_paper_loop", AsyncMock())
-    monkeypatch.setattr(browser, "app", Mock(return_value=object()))
+
+    async def application(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"private"})
+
+    monkeypatch.setattr(browser, "app", Mock(return_value=application))
     monkeypatch.setattr(browser.uvicorn, "Config", Mock())
     monkeypatch.setattr(browser, "_web_project_root", lambda root: nullcontext(root))
     monkeypatch.setattr(browser, "_wait_for_web", AsyncMock())
@@ -48,6 +53,17 @@ async def test_failure_archives_pre_cleanup_process_state(
 
         async def serve(self, *, sockets):
             try:
+                application = browser.uvicorn.Config.call_args.args[0]
+                await application(
+                    {
+                        "type": "http",
+                        "method": "GET",
+                        "path": "/internal/v1/workbench",
+                        "headers": [(b"x-request-id", b"018f0000-0000-7000-8000-000000000001")],
+                    },
+                    AsyncMock(),
+                    AsyncMock(),
+                )
                 server_entered.set()
                 if api_done:
                     return
@@ -122,5 +138,107 @@ async def test_failure_archives_pre_cleanup_process_state(
         "api_task_status": "completed" if api_done else "running",
         "api_started": True,
         "error_type": "TimeoutError" if timeout else "AssertionError",
+        "workbench_reads": [
+            {
+                "status": 200,
+                "response_bytes": 7,
+                "request_id": "018f0000-0000-7000-8000-000000000001",
+                "exception_type": None,
+                "source_frames": [],
+            }
+        ],
+        "workbench_reads_truncated": False,
     }
     assert "private" not in files[0].read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [None, ValueError("private SQL and parameters"), asyncio.CancelledError()]
+)
+async def test_workbench_probe_preserves_messages_and_original_failure(tmp_path, failure):
+    messages = []
+    start = {
+        "type": "http.response.start",
+        "status": 500 if failure else 200,
+        "headers": [(b"private-header", b"private-token")],
+    }
+    body = {"type": "http.response.body", "body": b"private", "more_body": False}
+
+    async def application(scope, receive, send):
+        await send(start)
+        await send(body)
+        if failure is not None:
+            raise failure
+
+    async def send(message):
+        messages.append(message)
+
+    probe = browser.WorkbenchReadbackProbe(application, tmp_path)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/internal/v1/workbench",
+        "headers": [(b"x-request-id", b"private-invalid-id")],
+    }
+    if failure is None:
+        await probe(scope, AsyncMock(), send)
+    else:
+        with pytest.raises(type(failure)) as caught:
+            await probe(scope, AsyncMock(), send)
+        assert caught.value is failure
+    assert messages[0] is start and messages[1] is body
+    assert probe.reads == [
+        {
+            "status": 500 if failure else 200,
+            "response_bytes": 7,
+            "request_id": None,
+            "exception_type": None if failure is None else type(failure).__name__,
+            "source_frames": [],
+        }
+    ]
+    assert "private" not in json.dumps(probe.reads)
+
+
+@pytest.mark.asyncio
+async def test_workbench_probe_is_bounded_and_ignores_other_routes(tmp_path):
+    async def application(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ignored private bytes"})
+
+    probe = browser.WorkbenchReadbackProbe(application, tmp_path)
+    scope = {"type": "http", "method": "GET", "path": "/internal/v1/workbench", "headers": []}
+    await probe(scope | {"path": "/internal/v1/paper/orders"}, AsyncMock(), AsyncMock())
+    assert probe.reads == []
+    for _ in range(34):
+        await probe(scope, AsyncMock(), AsyncMock())
+    assert len(probe.reads) == 32 and probe.truncated is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["engine/src/nexus/probe_fixture.py", "outside/private.py"])
+async def test_workbench_probe_keeps_only_repository_source_locations(tmp_path, source):
+    problem = ValueError("private SQL, parameters and response")
+    namespace = {"problem": problem}
+    exec(
+        compile(
+            "async def application(scope, receive, send):\n    raise problem\n",
+            str(tmp_path / source),
+            "exec",
+        ),
+        namespace,
+    )
+    probe = browser.WorkbenchReadbackProbe(namespace["application"], tmp_path)
+    with pytest.raises(ValueError) as caught:
+        await probe(
+            {"type": "http", "method": "GET", "path": "/internal/v1/workbench"},
+            AsyncMock(),
+            AsyncMock(),
+        )
+    assert caught.value is problem
+    assert probe.reads[0]["source_frames"] == (
+        [{"module": "nexus.probe_fixture", "function": "application", "line": 2}]
+        if source.startswith("engine/src/")
+        else []
+    )
+    assert "private" not in json.dumps(probe.reads)
