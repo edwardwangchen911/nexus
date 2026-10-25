@@ -19,7 +19,7 @@ type Evidence = components["schemas"]["EvidenceRef"];
 const stanceLabels = {
   buy_candidate: "买入候选",
   reduce_candidate: "减仓候选",
-  hold: "保持观察",
+  hold: "持有",
   watch: "仅观察",
 } as const;
 

@@ -127,3 +127,32 @@ async def test_reflected_contact_never_enters_archive(tmp_path):
             )
     assert not (out / "directory.json").exists()
     assert "test@example.invalid" not in (out / "result.json").read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [204, 206])
+@pytest.mark.parametrize("stage", ["directory", "submissions"])
+async def test_non_200_success_never_becomes_complete_source_receipt(tmp_path, status, stage):
+    module = importlib.import_module("nexus.ops.research_identity_local")
+    bodies, seen = payloads(), []
+
+    def respond(request):
+        seen.append(request.url.path)
+        current = "directory" if request.url.host == "www.sec.gov" else "submissions"
+        return httpx.Response(status if current == stage else 200, json=bodies[request.url.path])
+
+    out = tmp_path / "rejected"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="IDENTITY_COLLECTION_FAILED"):
+            await module.collect_identity_sources(
+                symbols=("AAPL",), contact="test@example.invalid", output_dir=out, client=client
+            )
+    assert out.is_dir()
+    failure = json.loads((out / "result.json").read_bytes())
+    assert failure["status"] == "unavailable" and failure["stage"] == stage
+    assert failure["requests"] == len(seen) == (1 if stage == "directory" else 2)
+    stem = "directory" if stage == "directory" else "AAPL-submissions"
+    assert not (out / f"{stem}.json").exists()
+    assert not (out / f"{stem}-receipt.json").exists()
+    if stage == "submissions":
+        assert json.loads((out / "directory-receipt.json").read_bytes())["http_status"] == 200

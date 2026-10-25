@@ -13,9 +13,21 @@ function openReviews(): HTMLElement {
 }
 
 describe("saved synthesis self-assessment", () => {
+  it("distinguishes a saved complete hold from watch without changing trading permission", () => {
+    const research = researchData();
+    const original = JSON.stringify(research);
+    render(<DecisionCard research={research} />);
+    const card = screen.getByRole("article", { name: "委员会决策记录" });
+    expect(within(card).getByText("持有")).toBeVisible();
+    expect(within(card).queryByText("仅观察")).not.toBeInTheDocument();
+    expect(card.querySelector(".decision-card__badges")).toHaveTextContent("完整");
+    expect(within(card).queryByRole("button", { name: /下单|买入|卖出/ })).not.toBeInTheDocument();
+    expect(JSON.stringify(research)).toBe(original);
+  });
+
   it.each([
     ["buy_candidate", "买入候选"], ["reduce_candidate", "减仓候选"],
-    ["watch", "仅观察"], ["hold", "保持观察"],
+    ["watch", "仅观察"], ["hold", "持有"],
   ] as const)("shows saved model %s separately from system watch", (stance, label) => {
     const research = synthesisResearchData({ stance });
     const original = JSON.stringify(research);

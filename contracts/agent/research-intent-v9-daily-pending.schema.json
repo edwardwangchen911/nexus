@@ -1,0 +1,1090 @@
+{
+  "$defs": {
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A point-in-time reference to immutable source content.",
+      "properties": {
+        "available_at": {
+          "format": "date-time",
+          "title": "Available At",
+          "type": "string"
+        },
+        "content_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/safeText"
+        },
+        "object_id": {
+          "$ref": "#/$defs/safeText"
+        },
+        "source": {
+          "$ref": "#/$defs/safeText"
+        }
+      },
+      "required": [
+        "source",
+        "object_id",
+        "available_at",
+        "location",
+        "content_hash"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "PriceMonitoringProposal": {
+      "additionalProperties": false,
+      "description": "One proposed review condition; it requires independent bear and audit approval.",
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/PriceReviewCondition"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "rationale": {
+          "allOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Rationale",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/safeText"
+            }
+          ]
+        },
+        "review_due_at": {
+          "format": "date-time",
+          "title": "Review Due At",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "price_monitor_proposal_v1",
+          "default": "price_monitor_proposal_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "condition",
+        "rationale",
+        "evidence_refs",
+        "review_due_at",
+        "valid_until"
+      ],
+      "title": "PriceMonitoringProposal",
+      "type": "object"
+    },
+    "PriceReviewCondition": {
+      "additionalProperties": false,
+      "description": "A price review threshold; neither an order nor proof a thesis is false.",
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "feed": {
+          "const": "l1",
+          "title": "Feed",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "const": 60,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "operator": {
+          "enum": [
+            "gte",
+            "lte"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "price_basis": {
+          "const": "unadjusted_bid_ask_midpoint",
+          "title": "Price Basis",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "review",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "signal": {
+          "const": "schwab.l1.bid_ask_midpoint",
+          "title": "Signal",
+          "type": "string"
+        },
+        "source": {
+          "const": "schwab",
+          "title": "Source",
+          "type": "string"
+        },
+        "threshold": {
+          "maxLength": 40,
+          "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+          "title": "Threshold",
+          "type": "string"
+        },
+        "unit": {
+          "const": "currency",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "signal",
+        "operator",
+        "threshold",
+        "unit",
+        "currency",
+        "purpose",
+        "source",
+        "feed",
+        "price_basis",
+        "max_age_seconds"
+      ],
+      "title": "PriceReviewCondition",
+      "type": "object"
+    },
+    "ResearchClaim": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "text": {
+          "allOf": [
+            {
+              "maxLength": 1000,
+              "minLength": 1,
+              "title": "Text",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/safeText"
+            }
+          ]
+        }
+      },
+      "required": [
+        "text",
+        "evidence_refs"
+      ],
+      "title": "ResearchClaim",
+      "type": "object"
+    },
+    "ResearchCondition": {
+      "additionalProperties": false,
+      "description": "A deterministic signal predicate, never an executable expression.",
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "operator": {
+          "enum": [
+            "lt",
+            "lte",
+            "eq",
+            "gte",
+            "gt",
+            "is_true",
+            "is_false"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "signal": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:-]*$",
+          "title": "Signal",
+          "type": "string"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Threshold"
+        },
+        "unit": {
+          "enum": [
+            "ratio",
+            "basis_points",
+            "days",
+            "currency",
+            "boolean",
+            "count",
+            "state"
+          ],
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "signal",
+        "operator",
+        "threshold",
+        "unit",
+        "evidence_refs"
+      ],
+      "title": "ResearchCondition",
+      "type": "object"
+    },
+    "ResearchConditionEvaluation": {
+      "additionalProperties": false,
+      "description": "A frozen research observation, never an entry/exit or execution grant.",
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/ResearchCondition"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "research_observation",
+          "default": "research_observation",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "const": "frozen_concentration_unavailable",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "result": {
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "research_condition_evaluation_v1",
+          "default": "research_condition_evaluation_v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "condition",
+        "result",
+        "observed_at"
+      ],
+      "title": "ResearchConditionEvaluation",
+      "type": "object"
+    },
+    "RoleVote": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "orchestrator",
+            "fundamental",
+            "market_state",
+            "macro_sector",
+            "bull",
+            "bear",
+            "evidence_audit",
+            "portfolio"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "vote": {
+          "enum": [
+            "support",
+            "oppose",
+            "abstain"
+          ],
+          "title": "Vote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "vote"
+      ],
+      "title": "RoleVote",
+      "type": "object"
+    },
+    "SynthesisAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "claims": {
+          "items": {
+            "$ref": "#/$defs/ResearchClaim"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Claims",
+          "type": "array"
+        },
+        "review_conclusion": {
+          "enum": [
+            "sufficient",
+            "limited",
+            "insufficient"
+          ],
+          "title": "Review Conclusion",
+          "type": "string"
+        },
+        "reviews": {
+          "items": {
+            "$ref": "#/$defs/SynthesisClaimReview"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Reviews",
+          "type": "array"
+        },
+        "stance": {
+          "enum": [
+            "buy_candidate",
+            "reduce_candidate",
+            "hold",
+            "watch"
+          ],
+          "title": "Stance",
+          "type": "string"
+        },
+        "uncertainties": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 5,
+          "title": "Uncertainties",
+          "type": "array"
+        }
+      },
+      "required": [
+        "stance",
+        "claims",
+        "reviews",
+        "review_conclusion",
+        "uncertainties"
+      ],
+      "title": "SynthesisAssessment",
+      "type": "object"
+    },
+    "SynthesisClaimReview": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {
+          "pattern": "^(bear|evidence_audit):[0-9]+$",
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "missing_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Missing Evidence",
+          "type": "array"
+        },
+        "prevented_conclusion": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prevented Conclusion"
+        },
+        "rationale": {
+          "allOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Rationale",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/safeText"
+            }
+          ]
+        },
+        "resolved": {
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "claim_id",
+        "status",
+        "rationale",
+        "evidence_refs",
+        "resolved",
+        "missing_evidence",
+        "prevented_conclusion"
+      ],
+      "title": "SynthesisClaimReview",
+      "type": "object"
+    },
+    "claim": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "text": {
+          "$ref": "#/$defs/safeText"
+        }
+      },
+      "required": [
+        "text",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "condition": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "threshold": {
+                "type": "string"
+              },
+              "unit": {
+                "not": {
+                  "const": "boolean"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "operator": {
+                "enum": [
+                  "is_true",
+                  "is_false"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "threshold": {
+                "type": "boolean"
+              },
+              "unit": {
+                "const": "boolean"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "type": "array"
+        },
+        "operator": {
+          "enum": [
+            "lt",
+            "lte",
+            "eq",
+            "gte",
+            "gt",
+            "is_true",
+            "is_false"
+          ]
+        },
+        "signal": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "threshold": {
+          "oneOf": [
+            {
+              "maxLength": 40,
+              "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        },
+        "unit": {
+          "enum": [
+            "ratio",
+            "basis_points",
+            "days",
+            "currency",
+            "boolean",
+            "count",
+            "state"
+          ]
+        }
+      },
+      "required": [
+        "signal",
+        "operator",
+        "threshold",
+        "unit",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "evidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "available_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "content_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/safeText"
+        },
+        "object_id": {
+          "$ref": "#/$defs/safeText"
+        },
+        "source": {
+          "$ref": "#/$defs/safeText"
+        }
+      },
+      "required": [
+        "source",
+        "object_id",
+        "available_at",
+        "location",
+        "content_hash"
+      ],
+      "type": "object"
+    },
+    "roleVote": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "orchestrator",
+            "fundamental",
+            "market_state",
+            "macro_sector",
+            "bull",
+            "bear",
+            "evidence_audit",
+            "portfolio"
+          ]
+        },
+        "vote": {
+          "enum": [
+            "support",
+            "oppose",
+            "abstain"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "vote"
+      ],
+      "type": "object"
+    },
+    "safeText": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "not": {
+        "pattern": "(?i)(https?://|file://|\\.\\./|\\\\|;|\\||&&|`|\\b(select|insert|update|delete|import|curl|wget|bash|sh)\\b|exec\\(|eval\\()"
+      },
+      "type": "string"
+    },
+    "DailyPendingItem": {
+      "additionalProperties": false,
+      "properties": {
+        "trigger_id": {
+          "format": "uuid",
+          "title": "Trigger Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "addressed",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "trigger_id",
+        "status",
+        "rationale",
+        "evidence_refs"
+      ],
+      "title": "DailyPendingItem",
+      "type": "object"
+    },
+    "DailyPendingProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "context_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Context Hash",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DailyPendingItem"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "context_hash",
+        "items"
+      ],
+      "title": "DailyPendingProposal",
+      "type": "object"
+    }
+  },
+  "$id": "nexus://contracts/agent/research-intent-v8-price-monitor.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "condition_evaluations": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ResearchConditionEvaluation"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Condition Evaluations"
+    },
+    "counter_theses": {
+      "items": {
+        "$ref": "#/$defs/claim"
+      },
+      "maxItems": 5,
+      "type": "array"
+    },
+    "data_snapshot_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "data_version": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "maxLength": 100
+        }
+      ]
+    },
+    "decision_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "decision_time": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "disagreement": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "maxLength": 500
+        }
+      ]
+    },
+    "display_symbol": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[A-Z0-9.\\-]+$",
+      "type": "string"
+    },
+    "entry_conditions": {
+      "items": {
+        "$ref": "#/$defs/condition"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "evidence_audit": {
+      "enum": [
+        "complete",
+        "partial",
+        "failed"
+      ]
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "exit_conditions": {
+      "items": {
+        "$ref": "#/$defs/condition"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "exposure_action": {
+      "enum": [
+        "none",
+        "reduce",
+        "maintain",
+        "eligible_for_increase"
+      ]
+    },
+    "horizon": {
+      "enum": [
+        "short_term",
+        "medium_term",
+        "long_term"
+      ]
+    },
+    "instrument_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "invalidation_conditions": {
+      "items": {
+        "$ref": "#/$defs/condition"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "model_version": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "maxLength": 100
+        }
+      ]
+    },
+    "monitoring_proposal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PriceMonitoringProposal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "prompt_version": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "maxLength": 100
+        }
+      ]
+    },
+    "quality_status": {
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "role_votes": {
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "orchestrator"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "fundamental"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "market_state"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "macro_sector"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "bull"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "bear"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "evidence_audit"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "portfolio"
+              }
+            }
+          },
+          "maxContains": 1,
+          "minContains": 0
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/roleVote"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "research_intent_v1"
+    },
+    "stance": {
+      "enum": [
+        "buy_candidate",
+        "reduce_candidate",
+        "hold",
+        "watch"
+      ]
+    },
+    "strategy_version": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/safeText"
+        },
+        {
+          "maxLength": 100
+        }
+      ]
+    },
+    "synthesis_assessment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SynthesisAssessment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "theses": {
+      "items": {
+        "$ref": "#/$defs/claim"
+      },
+      "maxItems": 5,
+      "type": "array"
+    },
+    "uncertainties": {
+      "items": {
+        "$ref": "#/$defs/safeText"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "valid_until": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "daily_pending_proposal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DailyPendingProposal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "schema_version",
+    "decision_id",
+    "instrument_id",
+    "display_symbol",
+    "decision_time",
+    "data_snapshot_id",
+    "horizon",
+    "stance",
+    "exposure_action",
+    "theses",
+    "counter_theses",
+    "uncertainties",
+    "invalidation_conditions",
+    "entry_conditions",
+    "exit_conditions",
+    "valid_until",
+    "quality_status",
+    "evidence_audit",
+    "role_votes",
+    "disagreement",
+    "strategy_version",
+    "model_version",
+    "prompt_version",
+    "data_version",
+    "evidence_refs"
+  ],
+  "title": "NEXUS ResearchIntent v1 with v8 price monitoring",
+  "type": "object"
+}

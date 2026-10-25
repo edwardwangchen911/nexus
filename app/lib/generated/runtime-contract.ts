@@ -2201,6 +2201,16 @@ export const runtimeContractSchemas = {
     "title": "BacktestEvidenceSummaryResponse",
     "type": "object"
   },
+  "BlockedReason": {
+    "enum": [
+      "budget",
+      "account_occupied",
+      "inputs",
+      "overflow",
+      "unknown"
+    ],
+    "type": "string"
+  },
   "BriefDisagreementSummary": {
     "additionalProperties": false,
     "properties": {
@@ -3323,6 +3333,20 @@ export const runtimeContractSchemas = {
     "title": "ContextDiagnostic",
     "type": "object"
   },
+  "CoverageReason": {
+    "enum": [
+      "audit_rejected",
+      "source_invalid",
+      "no_condition",
+      "run_failed",
+      "usage_unknown",
+      "awaiting_reconciliation",
+      "events_unresolved",
+      "review_unverified",
+      "replacement_rejected"
+    ],
+    "type": "string"
+  },
   "CurrencyCode": {
     "pattern": "^[A-Z]{3}$",
     "type": "string"
@@ -3480,6 +3504,72 @@ export const runtimeContractSchemas = {
     "title": "DailyBriefResponse",
     "type": "object"
   },
+  "DailyPendingItem": {
+    "additionalProperties": false,
+    "properties": {
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 3,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "rationale": {
+        "maxLength": 160,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "addressed",
+          "unresolved"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "trigger_id": {
+        "format": "uuid",
+        "title": "Trigger Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "trigger_id",
+      "status",
+      "rationale",
+      "evidence_refs"
+    ],
+    "title": "DailyPendingItem",
+    "type": "object"
+  },
+  "DailyPendingProposal": {
+    "additionalProperties": false,
+    "properties": {
+      "context_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Context Hash",
+        "type": "string"
+      },
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/DailyPendingItem"
+        },
+        "maxItems": 32,
+        "minItems": 1,
+        "title": "Items",
+        "type": "array"
+      }
+    },
+    "required": [
+      "context_hash",
+      "items"
+    ],
+    "title": "DailyPendingProposal",
+    "type": "object"
+  },
   "DecisionReadiness": {
     "enum": [
       "DECISION_READY",
@@ -3607,6 +3697,146 @@ export const runtimeContractSchemas = {
       "evidence_refs"
     ],
     "title": "DiagnosticItemResponse",
+    "type": "object"
+  },
+  "DisclosureMonitoringProposal": {
+    "additionalProperties": false,
+    "properties": {
+      "baseline_as_of": {
+        "format": "date-time",
+        "title": "Baseline As Of",
+        "type": "string"
+      },
+      "baseline_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Baseline Hash",
+        "type": "string"
+      },
+      "baseline_snapshot_id": {
+        "format": "uuid",
+        "title": "Baseline Snapshot Id",
+        "type": "string"
+      },
+      "condition": {
+        "$ref": "#/components/schemas/DisclosureReviewCondition"
+      },
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 3,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "issuer_cik": {
+        "pattern": "^[0-9]{10}$",
+        "title": "Issuer Cik",
+        "type": "string"
+      },
+      "rationale": {
+        "maxLength": 160,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "review_due_at": {
+        "format": "date-time",
+        "title": "Review Due At",
+        "type": "string"
+      },
+      "valid_until": {
+        "format": "date-time",
+        "title": "Valid Until",
+        "type": "string"
+      }
+    },
+    "required": [
+      "condition",
+      "baseline_snapshot_id",
+      "baseline_hash",
+      "issuer_cik",
+      "baseline_as_of",
+      "rationale",
+      "evidence_refs",
+      "review_due_at",
+      "valid_until"
+    ],
+    "title": "DisclosureMonitoringProposal",
+    "type": "object"
+  },
+  "DisclosureReviewCondition": {
+    "additionalProperties": false,
+    "description": "New locally confirmed index membership, never publication or impact.",
+    "properties": {
+      "forms": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "const": "8-K",
+            "type": "string"
+          },
+          {
+            "const": "8-K/A",
+            "type": "string"
+          }
+        ],
+        "title": "Forms",
+        "type": "array"
+      },
+      "max_age_seconds": {
+        "const": 300,
+        "title": "Max Age Seconds",
+        "type": "integer"
+      },
+      "operator": {
+        "const": "exists_new",
+        "title": "Operator",
+        "type": "string"
+      },
+      "purpose": {
+        "const": "review",
+        "title": "Purpose",
+        "type": "string"
+      },
+      "signal": {
+        "const": "sec.issuer_disclosure_added",
+        "title": "Signal",
+        "type": "string"
+      },
+      "source": {
+        "const": "sec",
+        "title": "Source",
+        "type": "string"
+      },
+      "threshold": {
+        "title": "Threshold",
+        "type": "boolean"
+      },
+      "time_authority": {
+        "const": "frozen_index_vs_local_receipt",
+        "title": "Time Authority",
+        "type": "string"
+      },
+      "unit": {
+        "const": "filing",
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "purpose",
+      "source",
+      "forms",
+      "max_age_seconds",
+      "time_authority"
+    ],
+    "title": "DisclosureReviewCondition",
     "type": "object"
   },
   "DisplayReadiness": {
@@ -6233,6 +6463,17 @@ export const runtimeContractSchemas = {
     ],
     "title": "MetricPairResponse",
     "type": "object"
+  },
+  "MonitoringState": {
+    "enum": [
+      "not_installed",
+      "valid",
+      "expired",
+      "superseded",
+      "withdrawn",
+      "unknown"
+    ],
+    "type": "string"
   },
   "NewsArticle": {
     "additionalProperties": false,
@@ -10953,6 +11194,129 @@ export const runtimeContractSchemas = {
     "title": "PreparationRecoveryView",
     "type": "object"
   },
+  "PriceMonitoringProposal": {
+    "additionalProperties": false,
+    "description": "One proposed review condition; it requires independent bear and audit approval.",
+    "properties": {
+      "condition": {
+        "$ref": "#/components/schemas/PriceReviewCondition"
+      },
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 4,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "rationale": {
+        "maxLength": 500,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "review_due_at": {
+        "format": "date-time",
+        "title": "Review Due At",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "price_monitor_proposal_v1",
+        "default": "price_monitor_proposal_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "valid_until": {
+        "format": "date-time",
+        "title": "Valid Until",
+        "type": "string"
+      }
+    },
+    "required": [
+      "condition",
+      "rationale",
+      "evidence_refs",
+      "review_due_at",
+      "valid_until"
+    ],
+    "title": "PriceMonitoringProposal",
+    "type": "object"
+  },
+  "PriceReviewCondition": {
+    "additionalProperties": false,
+    "description": "A price review threshold; neither an order nor proof a thesis is false.",
+    "properties": {
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "feed": {
+        "const": "l1",
+        "title": "Feed",
+        "type": "string"
+      },
+      "max_age_seconds": {
+        "const": 60,
+        "title": "Max Age Seconds",
+        "type": "integer"
+      },
+      "operator": {
+        "enum": [
+          "gte",
+          "lte"
+        ],
+        "title": "Operator",
+        "type": "string"
+      },
+      "price_basis": {
+        "const": "unadjusted_bid_ask_midpoint",
+        "title": "Price Basis",
+        "type": "string"
+      },
+      "purpose": {
+        "const": "review",
+        "title": "Purpose",
+        "type": "string"
+      },
+      "signal": {
+        "const": "schwab.l1.bid_ask_midpoint",
+        "title": "Signal",
+        "type": "string"
+      },
+      "source": {
+        "const": "schwab",
+        "title": "Source",
+        "type": "string"
+      },
+      "threshold": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Threshold",
+        "type": "string"
+      },
+      "unit": {
+        "const": "currency",
+        "title": "Unit",
+        "type": "string"
+      }
+    },
+    "required": [
+      "signal",
+      "operator",
+      "threshold",
+      "unit",
+      "currency",
+      "purpose",
+      "source",
+      "feed",
+      "price_basis",
+      "max_age_seconds"
+    ],
+    "title": "PriceReviewCondition",
+    "type": "object"
+  },
   "ProposalAdmissionResponse": {
     "additionalProperties": false,
     "properties": {
@@ -11530,6 +11894,295 @@ export const runtimeContractSchemas = {
       "observed_at"
     ],
     "title": "ResearchConditionEvaluation",
+    "type": "object"
+  },
+  "ResearchDisclosureMonitorCheck": {
+    "additionalProperties": false,
+    "properties": {
+      "checked_at": {
+        "format": "date-time",
+        "title": "Checked At",
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "const": "observation_unverified",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "result": {
+        "enum": [
+          "true",
+          "false",
+          "unknown"
+        ],
+        "title": "Result",
+        "type": "string"
+      },
+      "scheduled_at": {
+        "format": "date-time",
+        "title": "Scheduled At",
+        "type": "string"
+      }
+    },
+    "required": [
+      "result",
+      "scheduled_at",
+      "checked_at",
+      "reason"
+    ],
+    "title": "ResearchDisclosureMonitorCheck",
+    "type": "object"
+  },
+  "ResearchDisclosureMonitorTrigger": {
+    "additionalProperties": false,
+    "properties": {
+      "batch_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Batch Id"
+      },
+      "blocked_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BlockedReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "checked_at": {
+        "format": "date-time",
+        "title": "Checked At",
+        "type": "string"
+      },
+      "event_key": {
+        "title": "Event Key",
+        "type": "string"
+      },
+      "event_review": {
+        "enum": [
+          "addressed",
+          "unresolved",
+          "unverified",
+          "not_performed"
+        ],
+        "title": "Event Review",
+        "type": "string"
+      },
+      "notification_status": {
+        "enum": [
+          "queued",
+          "delivering",
+          "published",
+          "dead_letter",
+          "unknown"
+        ],
+        "title": "Notification Status",
+        "type": "string"
+      },
+      "run_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Run Id"
+      },
+      "status": {
+        "enum": [
+          "pending",
+          "blocked",
+          "admitted",
+          "completed",
+          "failed",
+          "unknown",
+          "covered"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "trigger_id": {
+        "format": "uuid",
+        "title": "Trigger Id",
+        "type": "string"
+      },
+      "usage_status": {
+        "$ref": "#/components/schemas/UsageStatus"
+      }
+    },
+    "required": [
+      "trigger_id",
+      "batch_id",
+      "event_key",
+      "checked_at",
+      "status",
+      "blocked_reason",
+      "run_id",
+      "usage_status",
+      "notification_status",
+      "event_review"
+    ],
+    "title": "ResearchDisclosureMonitorTrigger",
+    "type": "object"
+  },
+  "ResearchDisclosureMonitoringView": {
+    "additionalProperties": false,
+    "properties": {
+      "baseline_as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Baseline As Of"
+      },
+      "condition": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DisclosureReviewCondition"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "coverage_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/CoverageReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "latest_check": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchDisclosureMonitorCheck"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "observed_at": {
+        "format": "date-time",
+        "title": "Observed At",
+        "type": "string"
+      },
+      "plan_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Plan Id"
+      },
+      "replacement_run_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Replacement Run Id"
+      },
+      "review_due_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Review Due At"
+      },
+      "state": {
+        "$ref": "#/components/schemas/MonitoringState"
+      },
+      "trigger_count": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Trigger Count",
+        "type": "integer"
+      },
+      "triggers": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchDisclosureMonitorTrigger"
+        },
+        "maxItems": 5,
+        "title": "Triggers",
+        "type": "array"
+      },
+      "valid_until": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Valid Until"
+      }
+    },
+    "required": [
+      "observed_at",
+      "state",
+      "coverage_reason",
+      "plan_id",
+      "condition",
+      "baseline_as_of",
+      "review_due_at",
+      "valid_until",
+      "replacement_run_id",
+      "latest_check",
+      "trigger_count",
+      "triggers",
+      "execution_locked"
+    ],
+    "title": "ResearchDisclosureMonitoringView",
     "type": "object"
   },
   "ResearchInputActionEvent": {
@@ -13630,6 +14283,16 @@ export const runtimeContractSchemas = {
         "title": "Counter Theses",
         "type": "array"
       },
+      "daily_pending_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DailyPendingProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "data_snapshot_id": {
         "format": "uuid",
         "title": "Data Snapshot Id",
@@ -13656,6 +14319,16 @@ export const runtimeContractSchemas = {
         "minLength": 1,
         "title": "Disagreement",
         "type": "string"
+      },
+      "disclosure_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DisclosureMonitoringProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "display_symbol": {
         "maxLength": 32,
@@ -13734,6 +14407,16 @@ export const runtimeContractSchemas = {
         "minLength": 1,
         "title": "Model Version",
         "type": "string"
+      },
+      "monitoring_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PriceMonitoringProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "prompt_version": {
         "maxLength": 100,
@@ -13936,6 +14619,267 @@ export const runtimeContractSchemas = {
     "title": "ResearchMemberView",
     "type": "object"
   },
+  "ResearchMonitorCheck": {
+    "additionalProperties": false,
+    "properties": {
+      "checked_at": {
+        "format": "date-time",
+        "title": "Checked At",
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "observation_missing",
+              "authority_mismatch",
+              "time_unproven",
+              "price_missing"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "result": {
+        "enum": [
+          "true",
+          "false",
+          "unknown"
+        ],
+        "title": "Result",
+        "type": "string"
+      },
+      "scheduled_at": {
+        "format": "date-time",
+        "title": "Scheduled At",
+        "type": "string"
+      }
+    },
+    "required": [
+      "result",
+      "scheduled_at",
+      "checked_at",
+      "reason"
+    ],
+    "title": "ResearchMonitorCheck",
+    "type": "object"
+  },
+  "ResearchMonitorTrigger": {
+    "additionalProperties": false,
+    "properties": {
+      "blocked_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BlockedReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "cause": {
+        "enum": [
+          "initial_match",
+          "crossed"
+        ],
+        "title": "Cause",
+        "type": "string"
+      },
+      "checked_at": {
+        "format": "date-time",
+        "title": "Checked At",
+        "type": "string"
+      },
+      "notification_status": {
+        "enum": [
+          "queued",
+          "delivering",
+          "published",
+          "dead_letter",
+          "unknown"
+        ],
+        "title": "Notification Status",
+        "type": "string"
+      },
+      "run_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Run Id"
+      },
+      "status": {
+        "enum": [
+          "pending",
+          "blocked",
+          "admitted",
+          "completed",
+          "failed",
+          "unknown",
+          "covered"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "trigger_id": {
+        "format": "uuid",
+        "title": "Trigger Id",
+        "type": "string"
+      },
+      "usage_status": {
+        "$ref": "#/components/schemas/UsageStatus"
+      }
+    },
+    "required": [
+      "trigger_id",
+      "cause",
+      "checked_at",
+      "status",
+      "blocked_reason",
+      "run_id",
+      "usage_status",
+      "notification_status"
+    ],
+    "title": "ResearchMonitorTrigger",
+    "type": "object"
+  },
+  "ResearchMonitoringView": {
+    "additionalProperties": false,
+    "properties": {
+      "condition": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PriceReviewCondition"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "coverage_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/CoverageReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "latest_check": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchMonitorCheck"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "observed_at": {
+        "format": "date-time",
+        "title": "Observed At",
+        "type": "string"
+      },
+      "plan_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Plan Id"
+      },
+      "replacement_run_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Replacement Run Id"
+      },
+      "review_due_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Review Due At"
+      },
+      "state": {
+        "$ref": "#/components/schemas/MonitoringState"
+      },
+      "trigger_count": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Trigger Count",
+        "type": "integer"
+      },
+      "triggers": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchMonitorTrigger"
+        },
+        "maxItems": 5,
+        "title": "Triggers",
+        "type": "array"
+      },
+      "valid_until": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Valid Until"
+      }
+    },
+    "required": [
+      "observed_at",
+      "state",
+      "plan_id",
+      "condition",
+      "valid_until",
+      "review_due_at",
+      "replacement_run_id",
+      "coverage_reason",
+      "latest_check",
+      "triggers",
+      "trigger_count",
+      "execution_locked"
+    ],
+    "title": "ResearchMonitoringView",
+    "type": "object"
+  },
   "ResearchRunResponse": {
     "additionalProperties": false,
     "properties": {
@@ -13996,6 +14940,16 @@ export const runtimeContractSchemas = {
           }
         ],
         "title": "Disagreement"
+      },
+      "disclosure_monitoring": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchDisclosureMonitoringView"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "evidence": {
         "items": {
@@ -14059,6 +15013,16 @@ export const runtimeContractSchemas = {
         "maxItems": 10,
         "title": "Invalidation Conditions",
         "type": "array"
+      },
+      "monitoring": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchMonitoringView"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "output_tokens": {
         "anyOf": [
@@ -16286,6 +17250,15 @@ export const runtimeContractSchemas = {
     ],
     "title": "TypedMetric",
     "type": "object"
+  },
+  "UsageStatus": {
+    "enum": [
+      "not_started",
+      "in_progress",
+      "known",
+      "unknown"
+    ],
+    "type": "string"
   },
   "WatchlistMembershipResponse": {
     "additionalProperties": false,

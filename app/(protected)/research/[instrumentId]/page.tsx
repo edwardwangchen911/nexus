@@ -6,6 +6,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
 import { DecisionCard } from "../../../components/decision-card";
+import { ResearchDisclosureMonitoring } from "../../../components/research-disclosure-monitoring";
+import { ResearchMonitoring } from "../../../components/research-monitoring";
 import { DecisionPath } from "../../../components/decision-path";
 import { ResearchInputs } from "../../../components/research-inputs";
 import { Badge } from "../../../components/ui/badge";
@@ -153,6 +155,8 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
+        {research.disclosure_monitoring ? <ResearchDisclosureMonitoring monitoring={research.disclosure_monitoring} instrumentId={research.instrument_id} /> : null}
+        {research.monitoring ? <ResearchMonitoring monitoring={research.monitoring} instrumentId={research.instrument_id} /> : null}
       </>}
     </section>
   );

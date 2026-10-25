@@ -8,6 +8,10 @@ from uuid import UUID
 from nexus.agents.committee import AgentRole, StageInputIdentity
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.api.schemas.integrations import SuccessMetaResponse
+from nexus.api.schemas.research_monitoring import (
+    ResearchDisclosureMonitoringView,
+    ResearchMonitoringView,
+)
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
@@ -115,6 +119,8 @@ class ResearchRunResponse(_StrictAgentSchema):
     abstention_reason: str | None = Field(default=None, max_length=100)
     stage_trace: ResearchStageTrace | None = None
     failed_stage_input: StageInputIdentity | None = None
+    monitoring: ResearchMonitoringView | None = None
+    disclosure_monitoring: ResearchDisclosureMonitoringView | None = None
     inputs: "ResearchInputsSummary | None" = None
 
 

@@ -9,12 +9,28 @@ from enum import StrEnum
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
+from nexus.monitoring.daily_context import DailyMonitorContext, DailyMonitorGap
+from nexus.monitoring.daily_v2_context import DailyEventContext, DailyEventGap
+from nexus.monitoring.disclosure_context import (
+    DisclosureMonitoringContext,
+    freeze_disclosure_baseline,
+    validate_disclosure_baseline,
+)
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -88,6 +104,54 @@ class AgentPaperResearchContext(BaseModel):
     prior_daily: AgentPaperPriorDaily
     paper_portfolio: AgentPaperPortfolioContext
     execution_locked: Literal[True] = True
+    pending_monitoring: DailyMonitorContext | None = None
+    pending_monitoring_gap: DailyMonitorGap | None = None
+    pending_monitoring_v2: DailyEventContext | None = None
+    pending_monitoring_v2_gap: DailyEventGap | None = None
+    disclosure_monitoring: DisclosureMonitoringContext | None = None
+
+    @field_validator("disclosure_monitoring", mode="before")
+    @classmethod
+    def _disclosure_json(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return DisclosureMonitoringContext.model_validate_json(json.dumps(value))
+        return value
+
+    @model_validator(mode="after")
+    def _pending_gap(self) -> "AgentPaperResearchContext":
+        if sum(
+            value is not None
+            for value in (
+                self.pending_monitoring,
+                self.pending_monitoring_gap,
+                self.pending_monitoring_v2,
+                self.pending_monitoring_v2_gap,
+            )
+        ) > 1 or any(
+            gap is not None and gap.observed_at != self.decision_time
+            for gap in (
+                self.pending_monitoring_gap,
+                self.pending_monitoring_v2_gap,
+            )
+        ):
+            raise ValueError("DAILY_MONITOR_GAP_INVALID")
+        return self
+
+    @model_serializer(mode="wrap")
+    # Retain the closed serialization schema as well as historical payload bytes.
+    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
+        value = cast(dict[str, object], handler(self))
+        if self.disclosure_monitoring is None:
+            value.pop("disclosure_monitoring", None)
+        if self.pending_monitoring is None:
+            value.pop("pending_monitoring", None)
+        if self.pending_monitoring_gap is None:
+            value.pop("pending_monitoring_gap", None)
+        if self.pending_monitoring_v2 is None:
+            value.pop("pending_monitoring_v2", None)
+        if self.pending_monitoring_v2_gap is None:
+            value.pop("pending_monitoring_v2_gap", None)
+        return value
 
 
 def _decimal(value: Decimal) -> str:
@@ -109,8 +173,12 @@ async def prepare_agent_paper_research_snapshot(
     decision_time: datetime,
     candidate: CandidateManifestEntry,
     projection: PaperPortfolioProjection,
+    disclosure_scope: bool = False,
+    omit_monitor_event_bundle: bool = False,
 ) -> DataSnapshot:
     """Add exact cycle facts to an existing slow research snapshot without mutating it."""
+    if type(omit_monitor_event_bundle) is not bool:
+        raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
     base = await session.get(DataSnapshot, candidate.research_snapshot_id)
     quote = await session.get(LatestQuote, candidate.decision_quote_id)
     artifact = await session.get(DataArtifact, candidate.decision_artifact_id)
@@ -198,7 +266,44 @@ async def prepare_agent_paper_research_snapshot(
             else position.quantity * position.reference_close / projection.nav
         )
         cash_weight = (projection.available_cash + projection.reserved_cash) / projection.nav
+    from nexus.monitoring.daily_context import freeze_daily_pending
+    from nexus.monitoring.daily_v2_context import DailyEventGap, freeze_daily_events
+    from nexus.monitoring.pending import PendingOverflow
+
+    pending_v2, pending_v2_gap = await freeze_daily_events(
+        session, cycle_id=cycle_id, instrument_id=candidate.instrument_id, as_of=decision_time
+    )
+    if omit_monitor_event_bundle and pending_v2 is not None:
+        pending_v2_gap = DailyEventGap(
+            observed_at=decision_time,
+            pending_count=len(pending_v2.trigger_checks),
+            reason="MONITOR_CONTENT_CAPACITY",
+        )
+        pending_v2 = None
+    pending, pending_gap = None, None
+    if pending_v2 is None and pending_v2_gap is None:
+        try:
+            pending = await freeze_daily_pending(
+                session,
+                cycle_id=cycle_id,
+                instrument_id=candidate.instrument_id,
+                as_of=decision_time,
+            )
+        except PendingOverflow as overflow:
+            pending_gap = DailyMonitorGap(observed_at=decision_time, pending_count=overflow.count)
+    disclosure = (
+        await freeze_disclosure_baseline(
+            session, instrument_id=candidate.instrument_id, as_of=decision_time
+        )
+        if disclosure_scope
+        else None
+    )
     context = AgentPaperResearchContext(
+        disclosure_monitoring=disclosure,
+        pending_monitoring=pending,
+        pending_monitoring_gap=pending_gap,
+        pending_monitoring_v2=pending_v2,
+        pending_monitoring_v2_gap=pending_v2_gap,
         cycle_id=cycle_id,
         instrument_id=candidate.instrument_id,
         decision_time=decision_time,
@@ -337,6 +442,36 @@ async def read_agent_paper_research_context(
         return None
     if context.instrument_id != instrument_id or context.decision_time != as_of:
         return None
+    if context.disclosure_monitoring is not None:
+        disclosure = context.disclosure_monitoring
+        if (
+            disclosure.instrument_id != instrument_id
+            or disclosure.research_as_of != as_of
+            or not await validate_disclosure_baseline(session, disclosure)
+        ):
+            return None
+    if context.pending_monitoring_v2 is not None:
+        from nexus.monitoring.daily_v2_context import validate_daily_events
+
+        pending_v2 = context.pending_monitoring_v2
+        if (
+            pending_v2.cycle_id != context.cycle_id
+            or pending_v2.instrument_id != instrument_id
+            or pending_v2.decision_time != as_of
+            or not await validate_daily_events(session, pending_v2)
+        ):
+            return None
+    if context.pending_monitoring is not None:
+        from nexus.monitoring.daily_context import validate_daily_pending
+
+        pending = context.pending_monitoring
+        if (
+            pending.cycle_id != context.cycle_id
+            or pending.instrument_id != instrument_id
+            or pending.decision_time != as_of
+            or not await validate_daily_pending(session, pending)
+        ):
+            return None
     content = _content(context)
     digest = hashlib.sha256(content).hexdigest()
     evidence = await session.scalar(

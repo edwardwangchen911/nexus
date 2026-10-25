@@ -12,6 +12,20 @@ Agent-version evaluation，不能通过正常组合入口继续创建。周期�
 默认关闭，失败不自动重试。正常组合每个候选各有一个绑定研究 Job，每个 Job 至多执行一次；
 1–5 个结果全部进入同一 synthesis。不得在 10:05 或当天其他五分钟槽创建第二个正常组合周期。
 
+### 日研究可选监控材料的容量检查
+
+正常正式三股准备在 Run 冻结后、Job 发布前，以实际模型、提示和数据库只读工具计算
+各阶段 wire 上界及 research 的输入 allowance。可选 daily v2 整包超限时，回滚本次尚未
+发布的完整候选准备，再以 `MONITOR_CONTENT_CAPACITY` 和完整成员数冻结整包缺口；
+候选数量、原材料、旧 Run/Output 与消费证明不变，不截断成员，不重派已发布 Job。
+缺口后的基础研究仍超限、普通错误或截止超时，保持原准入拒绝并回滚全部新占用。
+
+预览从第一份 v2 材料开始共享原 195 秒绝对截止；整池重建不续期。截止检查位于准备
+保存点内，退出时过期亦回滚 Run、Job、预算预留及幂等认领。它不调用模型、不授予
+单股或整池执行许可；Worker 原有完整候选容量预检、预算及所有正式门禁仍须通过。
+旧 unknown 的费用、预留及审计不受本选择影响。该能力的本地隔离回归不等于部署或
+真实模型验收。
+
 ## 1. Preflight：先查状态，不先发请求
 
 在等待 10:00 正式窗口时，可先运行只读候选预检：
@@ -203,6 +217,139 @@ uv run --project engine nexus-engine-agent-paper-once run-research \
 该命令最多处理一个 Job 后立即退出，不扫描普通研究 Job，不执行 `resume`，也不创建新周期。
 如果 Job 已在运行、已终态、绑定冲突、已有 Output 或调用结果不明，命令返回
 `AGENT_PAPER_RESULT_UNKNOWN`；先查原 Cycle/Job/Run/Output，不再次运行 worker。只有持久化 Output 终态明确后才继续。
+
+### 价格与 SEC 触发的单股增量研究（候选新监控链）
+
+正常入口为 `nexus-engine-research-monitor`（源码运行可用
+`PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.research_monitor`）。
+正常每日研究终结后由 `reconcile` 核验原生终态、已知结算、原件和独立审核，
+分别登记价格与披露覆盖；已有价格回执不会跳过该 Run 尚缺的披露对账。
+`scan --calendar-authority-id <已配置日历>` 会先做同一正常对账，再检查当前正常交易时段的
+五分钟桶；这两个动作不采集行情或调用模型。`inspect --plan-id <计划>` 只读检查。
+正常每日接替无需手工补装；保留的 `install --output-id <原已完成输出>` 仅接受符合原合同的
+单类来源，typed/mixed 仍必须走原子对账。缺条件、否决、安装失败和未知用量分别留明确回执，
+不以安装新披露计划冒充旧事件已消费，也不解除未知预算或启动宿主。
+
+SEC 结构事件使用独立的完整索引来源，入口为 `nexus-engine-sec-index`，也可通过
+`PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.sec_index_local` 运行。
+`collect --identity-snapshot-id <已有基础身份> --archive-dir <新私有目录>` 复用正常 SEC
+身份采集入口，仅发 directory 和该发行人 submissions 两次有界 GET；不下载正文、不调用模型。
+`import` 使用同样两个参数导入已有目录中的原始 directory/submissions 与各自 receipt，
+不重新获取或伪造回执。父目录须符合既有私有目录要求。
+
+`inspect --snapshot-id <索引>` 只读核验原件、发行人绑定和本地入库时间；source_fresh 与
+原件完整性分别返回。提供 `--baseline-id <已冻结索引> --baseline-as-of <真实冻结时点>`
+才比较新增收录 accession；首次收件本身不把全部历史记录认作新增。标识按发行人 CIK 与
+accession 固定，不随重复收件或内容 hash 改变。类别仅 8-K/8-K/A，不解释利空、会计修订或重要性。
+
+来源保留全部 recent 元数据：10000 行/8 MiB 输入硬边界，目标类别最多1000项，超限明确拒绝。
+未读取历史分片时，无新增保持 unknown；明确新项可返回 true，同时保留 partial 历史覆盖。
+同 accession 冲突、来源超过五分钟、未来基线、原件损坏均不产生充分的无新增结论。
+旧网络回执离线入库不回填可见时间，同件导入保持首次本地可见时间。
+此来源入口当前只保存/读取索引，不派发 outbox 或研究；完整事件触发必须另接有版本的条件、
+事件去重及单股冻结上下文，不能套用价格 observation 或价格 latch。
+
+显式 v10 研究的 SEC 条件须经原反方/审计、组合精确采纳及正常来源资格复验后，
+通过同一入口 `install --kind disclosure --output-id <原输出>` 安装；重复安装返回原计划。
+价格入口仍默认 `--kind price`。SEC 基线固定为该研究 T0 的精确原件，不按安装时点重选。
+当前索引仍须实际网络收取五分钟内新鲜，索引新增只证明本地确认新增成员，不证明财务影响。
+
+有 SEC 计划的证券由正常 `scan` 将价格与 SEC 观察封存为一个股票批次，全部新增触发共用
+一份 `research.monitor.batch_triggered` outbox；迟到成员另建批次，不追加原批。超过32项仍
+保存全部事实及一份聚合通知，另列自动复核容量 blocked，不截断或改成 unknown。
+通知失败只重投原 outbox，Bark 原生 message_id 保持该 outbox 身份，不发起研究。
+后续 v8/v9/v10 日研究尚未证明 SEC 保留/接替时，旧 SEC 计划停止观察，不能静默延用。
+
+本地候选当前尚未提供混合批次 v2 的正文证据冻结、单股模型准入、消费和双类型原子接替；
+旧价格 v1 `admit` 对批次成员返回 `MONITOR_TYPED_CONTEXT_REQUIRED`，自动价格队列亦排除它们，
+不能只研究价格而漏掉同批披露。以下 v1 准入说明仅适用于 batch_id 为空的历史价格触发。
+0094 新增不可变批次及 deferred 成员/通知归属围栏，不改历史事实；有批次后禁止降级，
+回滚镜像必须保留0094及其读取支持。当前候选没有在业务库应用此迁移或启动宿主。
+
+`admit --trigger-id <已落盘触发> --calendar-authority-id <已配置日历>`
+使用已正式应用的账户、候选批次、模型与预算配置，只为该证券创建一个原生研究 Job。
+它冻结原父论点、原触发报价和本次新鲜决策报价；原正式时效、风险及账户占用检查仍生效。
+同一触发重复读取只返回原 Run/Job 和当前状态，不再次执行。研究仍须由正常 Worker 消费；
+本增量身份不能直接作为正式组合执行授权。
+
+准入在账户及证券锁内读取该股全部待处理触发，按原检查时间和 ID 固定顺序。
+1–32 条一起冻结为一个 Run/Job 和一份 3 次调用预留；超过 32 条返回
+`MONITOR_PENDING_OVERFLOW`，不截取前 32 条、不丢弃原件、不创建研究。
+任一冻结成员的重复入口都返回同一主成员和原 Run；整组按同一用量结果收尾。
+冻结之后新到的触发保持 pending，不追加到旧 Run，也不因旧研究结束就视为已覆盖。
+
+旧计划触发仅在当前有效覆盖计划沿每一代同条件前代链继承时，才可连同原检查原件
+冻结到新的父论点；不同条件、继承断裂返回 `MONITOR_PENDING_CONDITION_UNRESOLVED`。
+这不修改旧快照，也不把每日较新研究自动解释为已消费旧触发；后者仍须精确消费证据。
+0091 在事务提交时校验完整冻结成员及状态一致性，禁止漏成员、迟到追加和复用快照新建 Run。
+已有多成员或跨计划继承快照时不能降回 0090；回滚版本必须保留 0091 及相应读取能力。
+
+每日正常研究使用显式登记的 v9 监控提示时，将截止点可见的待处理触发及其父论点、
+原始检查和报价嵌入新 `agent_paper_context.pending_monitoring`。截止后到达的触发留待后续，
+不阻断合法旧项的冻结，也不追补旧快照。没有待处理触发时保留旧上下文序列化形状；
+已有 v8 提示、快照和输出继续按原版本读取。
+
+orchestrator 对冻结集合逐项标记 addressed 或 unresolved，bear 与 evidence_audit 分别审核
+精确提案 hash，portfolio 精确采纳。正常 `reconcile` 重新核对原件、三阶段输出及原生 Job
+已知结算后，仅为 addressed 项追加不可变每日消费回执。unresolved、审核否决、未采纳或
+未知用量均不登记覆盖；原触发、通知、费用及预算记录保留。
+后续队列排除已有消费回执的触发；对旧选择再次调用 `admit` 或派发入口只返回
+`covered` 和原每日 Run/Output，不创建增量 Job。回执与新监控计划是否合格分别判断，
+不会因此获得正式执行许可。0092 同时约束消费回执和增量归属互斥；存在此类冻结快照或
+回执后，不能降回 0091，回滚镜像须兼容 0092 及其读取支持。
+
+若这份可选的旧价格待处理集合超过32项，正常日研究不因此被永久阻断：新冻结输入保存
+`pending_monitoring_gap`（`daily_monitor_gap_v1`，scope=`unassigned_price_v1`、实际完整总数、
+原决策截止与固定超限原因），省略`pending_monitoring`。不截取32项、不消费任何旧触发；
+增量入口仍按`MONITOR_PENDING_OVERFLOW`拒绝。模型三阶段不得提出该集合的消费或采纳；
+后到事件不改变已冻结gap。该字段只说明此旧价格集合的容量缺口，不代表typed披露已覆盖。
+其他身份、原件、预算、未知用量和租约拒绝仍按原入口执行，不因gap而豁免。
+此可选字段不新增表或迁移；有gap的新快照须使用支持该字段的读取版本。部署回滚仍需
+保留0096及新冻结输入的读取支持，不把旧镜像能启动当作数据兼容证明。
+
+新typed历史复核使用独立`pending_monitoring_v2`及0097消费回执，不改旧Run/Trigger归属。
+原已分配成员只允许精确原Output中unresolved且known settled的正常终态；known-failed或
+已接受unknown不能借此变为known。原件缺失/容量超限明确`pending_monitoring_v2_gap`，
+两种pending与两种gap互斥。新daily两审/审计支持/精确采纳后仅消费addressed；与当前两kind
+接替原子提交，迟到冲突或第二类失败不留下半份消费。存在v2 context/proof后禁止降级0097，
+兼容回滚镜像须保留其读取及原0096支持。本地候选的wire/token退包与完整页面验收尚待收口，
+不得据正常case通过就开启业务调度或宣称全容量可用。
+
+`NEXUS_MONITOR_DAILY_SDK_CALL_LIMIT` 默认 9，范围 3–90；每笔准入持有 3 次调用额度，
+按账户及交易日累计，同日生效上限不超过此前已冻结上限。此约束独立于美元费用，
+订阅估价为零也不能无限调用，未知或失败不返还调用额度。
+
+`finish --trigger-id <原触发>` 只核对原 Job、租约消费证明、用量和预算结算后登记收尾。
+未终结保持原状态；已知结算可完成，未知保留 unknown、费用及预算占用，禁止自动重试或接受。
+旧结果及原 trigger 不重写，终态回执幂等。完成 watch 研究不解除只能 defer 的正式门禁。
+
+`reconcile` 从当前配置候选批次中核对各股最新已终结研究，将原件资格、覆盖结果和原审计记录
+一并落盘；正常宿主的五分钟 `scan` 已在检查前调用同一入口，不等待下一轮模型研究。
+已结算增量会按冻结前代接替计划，partial 仅在独立价格条件合格时安装，研究质量仍保持 partial。
+相同条件和已冻结触发不会因换版本再次触发；冻结之后的检查状态不被吞掉。
+
+无新批准条件时，只有前次覆盖仍有效、未被撤回、证据精确未变且未过期，才保留旧计划。
+审计否决或原件未验证会停止该股旧监控，其他股票继续检查；未知费用和预算不释放。
+`inspect` 分别返回监控覆盖、研究质量和最新收尾状态，未覆盖不当成“无触发”。
+若较新研究已完成但尚未登记覆盖结果，旧触发不能提前绕过它继续准入；先正常 `reconcile`。
+历史范围不计入当前五股上限，旧计划与回执原样保留。0090 追加不可改覆盖回执，有历史后禁止降级删除。
+
+已配置正式模型的同一正常宿主会在原前台队列空闲时派发已落盘单股触发；后台五分钟检查与心跳不等待模型。
+每日研究、手动请求和到期评估优先；新增量在每日槽前保留既有 preclaim 195 秒、Worker 315 秒
+及收尾/重新检查 90 秒的余量，不增加原 Worker 超时。已有原任务按其持久化身份收尾。
+启动前重读保护配置和当前优先事项，候选范围或模型变化拒绝消费旧队列。
+
+未创建研究的准入失败按同一账户/股票每五分钟桶最多核验一次；同桶新增触发不能绕过该约束，
+其他股票仍可继续。原触发和 outbox 保留。Worker 派发前追加
+原 Job 的不可变审计；派发中断、未认领或结果不明不会自动第二次调用。原生终态完成后
+正常 finish/reconcile 登记结算和监控接替；退出请求只在精确原 Job 已退出、用量已知、
+预算已结算及覆盖回执齐备时确认，不用普通周期状态代替增量收尾证据。
+容量 preclaim 明确超界且原 Job 从未认领、没有用量或输出时，经精确原身份与派发审计核对，
+使用原生取消流程记为零用量失败；只释放可证明未使用的美元预留，原 3 次调用额度不返还。
+普通 skipped、已认领、已有用量及任何未知均不能借此解除占用。
+
+待处理触发的有界合并和实际页面仍待整体集成；这些入口的离线通过
+不能当作已部署的连续业务闭环。启用前须完成最终 CI、兼容迁移回滚和正常页面验收。
 
 ## 4. Resume：消费已持久化研究结果
 
@@ -1000,3 +1147,106 @@ uv run --project engine nexus-engine-manual-paper --repo-root <仓库> --env-fil
 没有迁移或数据回填。回滚前先确认没有执行中或待执行的新版本 Job，再按既有兼容镜像流程
 回滚；保留已落盘提示词和结果。旧代码仍能读取其原有结果结构，但不能证明新范围提示已生效。
 离线 wire、SDK 替身或 CI 通过只证明接线与保护，不证明自然模型质量改善或正式投资决策完成。
+
+
+#### SEC 新增事实与工作容量
+
+`nexus-engine-sec-index inspect` 的 `result=true` 只表示相对于指定冻结基线的新收录身份。
+若新增超过32项，仍返回完整 `event_ids`，并单列 `automatic_review_capacity=blocked`；
+`impact_review=not_performed` 表示没有据此完成正文/附件的影响复核。不得截取前32项、
+把容量不足当成 unknown/false，或用新 baseline 当作全部已研究。历史分片未读且无明确新增仍为 unknown。
+索引入口本身不发送通知、创建研究、释放预算或解除占用。
+
+候选0093将固定price/disclosure的数据库身份分开；当前旧价格入口只处理price，
+新类型尚不代表SEC自动扫描/通知/增量已启用。迁移前按正常备份/恢复程序验证；无disclosure历史才可降至0092，
+已有任何disclosure记录会拒绝降级，不能强行删除事实或保护来回滚。未来部署须保留兼容0093的读取和回滚版本。
+
+### 混合批次的精确正文材料准备
+
+以下是本地候选入口，尚未启用混合v2模型准入或自动精确采集；均不启动宿主、网络采集或模型。
+
+```bash
+nexus-engine-research-monitor import-content --index-snapshot-id <已归档SEC索引UUID> \
+  --accession <该索引内精确accession> --archive-dir <本地原件目录>
+nexus-engine-research-monitor prepare-batch --batch-id <已封口股票批次UUID>
+```
+
+归档目录须包含 `<accession>-index.html`（SEC Document Format Files清单）、清单中全部声明
+文本原文件，以及每个文件同名的 `.receipt.json`。HTTP receipt固定含source_url、received_at、
+sha256、byte_length、http_status=200；只接受该CIK/accession的官方SEC目录URL，不能传当前时钟、
+账户或替代正文。支持primary和EX类型的html/htm/txt，不支持PDF/图片等时返回固定未支持原因；
+不得省略清单行或缺失附件来通过。最多17份文件，每件原始8MiB、完整可见正文32k字符，不截断。
+单文件和清单receipt均不得早于该披露提交时点或晚于实际导入截止。8-K/A仍不推定原件关系和会计修订。
+
+导入逐件归档并在对象存储完成后登记可用时间。重新导入返回精确原身份，读回必须重验原件、
+canonical及首次登记时点。该入口不选“最新一条”来代替指定accession；未来正常采集必须按相同
+身份生成完整归档，不能重复模型试探缺件。
+
+prepare-batch仅冻结材料：原price检查、SEC事件、父论点及原审计、每份披露清单/正文/附件。
+缺正文返回missing_content及排序后的missing_event_ids，冲突/损坏不fallback；容量>32成员或材料包>256KiB明确阻断，原事件
+和通知保留。并发准备只保存一个包及一次审计。旧包按原cutoff读回；当前资格检查与历史事实分开，
+新计划、迟到冲突、有效期等仍可阻断再次准备。prepared不代表可执行，返回admission=not_checked、
+impact_review=not_performed、job_created=false、execution_locked=true；没有预算、Job、消费或
+会计采纳副作用。最终v2准入须重新检查当日身份、时段、新鲜价格、账户/未知占用、预算与有效租约。
+
+### 精确采集与混合单股任务（候选）
+
+```bash
+nexus-engine-research-monitor collect-content --index-snapshot-id <精确索引UUID> \
+  --accession <精确accession> --archive-dir <尚不存在的私有子目录>
+nexus-engine-research-monitor admit-batch --batch-id <原封口批次UUID> \
+  --materials-snapshot-id <原prepared包UUID> --calendar-authority-id <已配置日历UUID>
+```
+
+collect-content仅复用现有SEC_CONTACT，不在参数/回执中回显联系方式。父目录须当前用户拥有且
+0700；目标目录须不存在。最多一次清单+17份声明正文、总60秒，严格HTTP200，不重试、不覆盖
+失败目录。失败后先读取该目录result.json和已保存原件，不能以换目录自动重试。精确材料读回
+必须合格才可准备；行情/身份、时段、预算、未知占用及有效租约仍由随后正式准入重验。
+
+admit-batch只为封存证券创建一个原生三阶段Job和3次call hold，既有9次增量限额与全局USD预算
+不变；每日三股研究不计入该增量call表。旧price-v1不得借该入口混收成员。重复只跟踪原Run/Job，
+不是重新调用模型。SDK读取独立v2上下文中的完整正文、父论点/审计；模型判断不改财务事实。
+
+finish对typed成功仍显示impact_review=not_verified、coverage=unresolved及未解决事件数，
+completed仅表示原生研究已终结。逐事件双审/采纳、按kind消费/原子接替尚待完成，旧reconciler
+返回awaiting_mixed_review；不得因此宣称监控版本已接替或宿主可完成coverage退出确认。
+未知结果保持unknown和原预算hold；只有严格证明零调用的原生capacity拒绝才走既有封口证明，
+不退还3次SDK额度。0095有v2事实后不可降级，回滚需保留该schema及读取支持。
+
+#### 混合批次逐事件采纳及双类收尾（0096，本地候选）
+
+新的v2三阶段输出将逐事件判断保存为aux原文，原ResearchIntent schema不变。正常
+`research-monitor reconcile`同时记录逐事件已复核消费证明及price/disclosure两类coverage；
+`finish`分别返回原生状态/native_reason、当前review原因、impact_review、coverage及本批
+未解决数。scan另返回stock_unresolved_event_count，不混用本批与整股数量。空批次不冒充
+已复核；未解决、缺冻结前代或条件不能批准的类别明确gap，不推进该类baseline。
+
+不要对v2调用单类install；公开入口将拒绝，它必须经过原子reconcile。本类新plan要求本类
+全部精确事件已有双审采纳回执，任何一类写入失败都回滚候选接替与消费，再留下固定gap。
+正常完成及严格零调用拒绝可凭双类持久化回执完成宿主收尾；unknown保留原预留且不重放。
+只读检查使用无行锁的完整批次validator；写入口原锁保留。0096产生新回执或typed coverage
+后禁止降级，部署回滚镜像须保留0096读取能力。自动typed队列、采集准备与新页面尚待后续
+集成；不能手工启动业务宿主或重放历史批次来代替验收。
+
+#### 已登记typed触发的宿主接手（本地候选）
+
+宿主现在可选择完整sealed batch，先经`research-monitor prepare-pending --batch-id`准备
+精确缺件，再准备单股当前风险证明/行情，最后沿`admit-batch`创建一个原生Job。每批只允许
+一次市场读取尝试，每次正文动作只收一份accession；失败/未知不重放。后台scan仍只读落盘
+观测，周期current源捕获尚待接线，不把本入口称作已完成自动行情检测。
+
+同股未准入池>32时停止该股自动复核，不拆小批试探；事实/合并通知与gap保留，不阻断每日
+既定槽。无Run时退出须通过正文与行情两个准备证明；有Run继续原身份及原native结算/租约
+和双kind收尾，不接受未知或退还未知预留。部署仍须最终全部CI及兼容0096的回滚镜像。
+
+#### 五分钟 current 来源与只读D扫描（本地候选）
+
+正常宿主同一桶先走`research-monitor observe --calendar-authority-id`，SEC current后L1，
+再走原只读scan。observe只在当前交易窗口、原候选与有效covered计划范围采集；已有fresh
+原件可复用。SEC必须真实HTTP200，价源必须原Schwab L1，不退回其他来源，不伪造时间。
+同桶失败/unknown不重放，错过桶不补跑；新桶只做新current观察。来源观察不创建研究Job、
+预算hold或执行权限，Model未知预算/租约继续保护。
+
+前置来源240秒与D原8秒独立；失败检查存量事实并明确unknown，不能填false或“无事件”。
+取消后不scan，无脱离宿主的审计清理任务。没有开启新宿主、交易、Bark目的地或改运行配置。
+页面仍只读已落盘事实；本功能须最终CI/终审/部署验证后才称运行生效。

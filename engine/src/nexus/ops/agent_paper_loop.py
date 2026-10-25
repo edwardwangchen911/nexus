@@ -159,7 +159,7 @@ from nexus.research.fred_collection import has_archived_timeout_failure, load_fr
 from nexus.research.fred_observations import FredVintageRequest
 from nexus.research.fred_storage import read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 from nexus.worker import run_agent_worker_once
 
 _RELEASE_REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -227,6 +227,7 @@ class AgentPaperLoopAction(StrEnum):
     RESUME_EVALUATION = "resume_evaluation"
     WAIT_FOR_EVALUATION = "wait_for_evaluation"
     WAIT_FOR_EVALUATION_JOB = "wait_for_evaluation_job"
+    RUN_MONITOR_INCREMENT = "run_monitor_increment"
     TRIGGER = "trigger"
     FINISH_MANUAL = "finish_manual"
     TRIGGER_MANUAL = "trigger_manual"
@@ -288,6 +289,10 @@ class AgentPaperLoopSnapshot:
     manual_pending_request_id: UUID | None = None
     manual_pending_status: str | None = None
     manual_research_only: bool = False
+    monitor_trigger_id: UUID | None = None
+    monitor_trigger_status: str | None = None
+    monitor_batch_id: UUID | None = None
+    host_prepared_market_open_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -1818,6 +1823,45 @@ def choose_loop_action(
     """Choose one safe next action without performing I/O or retrying unknown work."""
     if not snapshot.enabled:
         return AgentPaperLoopAction.STOP_DISABLED
+    if prepared_market_open_at is None:
+        prepared_market_open_at = snapshot.host_prepared_market_open_at
+    if snapshot.monitor_trigger_id is not None:
+        ordinary = choose_loop_action(
+            replace(snapshot, monitor_trigger_id=None, monitor_trigger_status=None),
+            prepared_market_open_at=prepared_market_open_at,
+        )
+        if snapshot.monitor_trigger_status == "unknown":
+            return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+        allowed = {AgentPaperLoopAction.WAIT_FOR_SESSION, AgentPaperLoopAction.WAIT_FOR_SLOT}
+        if snapshot.monitor_trigger_status == "admitted":
+            allowed |= {AgentPaperLoopAction.TRIGGER, AgentPaperLoopAction.PREPARE_INPUTS}
+        if ordinary in allowed:
+            if snapshot.monitor_trigger_status == "pending":
+                from nexus.monitoring.host import (
+                    BATCH_PREPARATION_HEADROOM_SECONDS,
+                    INCREMENT_ACTION_HEADROOM_SECONDS,
+                )
+
+                if snapshot.decision_window_start_at is None or snapshot.market_open_at is None:
+                    return ordinary
+                # Preserve the daily slot: existing bounded preclaim + Worker plus
+                # 90 seconds for admission, persisted closeout and reinspection.
+                headroom = timedelta(
+                    seconds=INCREMENT_ACTION_HEADROOM_SECONDS
+                    + (
+                        BATCH_PREPARATION_HEADROOM_SECONDS
+                        if snapshot.monitor_batch_id is not None
+                        else 0
+                    )
+                )
+                daily_slot = _portfolio_slot(snapshot.decision_window_start_at)
+                if (
+                    snapshot.now < snapshot.market_open_at
+                    or snapshot.now < daily_slot < snapshot.now + headroom
+                ):
+                    return ordinary
+            return AgentPaperLoopAction.RUN_MONITOR_INCREMENT
+        return ordinary
     if snapshot.manual_pending_status in {"preparing", "unknown"}:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     if snapshot.manual_research_only and snapshot.manual_pending_request_id is not None:
@@ -2296,6 +2340,8 @@ async def run_foreground_loop(
             if stopped is not None:
                 return stopped
             continue
+        if action == AgentPaperLoopAction.RUN_MONITOR_INCREMENT:
+            snapshot = replace(snapshot, host_prepared_market_open_at=prepared_market_open_at)
         action_task: asyncio.Future[AgentPaperLoopAction | None] = asyncio.ensure_future(
             execute(action, snapshot)
         )
@@ -2414,6 +2460,18 @@ async def confirm_agent_paper_shutdown(
     action_result: AgentPaperLoopAction | None,
 ) -> bool:
     """Read once and verify the exact action's persisted shutdown postcondition."""
+    if action == AgentPaperLoopAction.RUN_MONITOR_INCREMENT:
+        from nexus.ops.monitor_dispatch import confirm_monitor_shutdown
+
+        if (
+            before_snapshot.monitor_trigger_id is None
+            or before_snapshot.calendar_authority_id != expected_calendar_authority_id
+            or action_result is not None
+        ):
+            return False
+        return await confirm_monitor_shutdown(
+            settings, account_id=account_id, trigger_id=before_snapshot.monitor_trigger_id
+        )
     exact_actions = {
         AgentPaperLoopAction.COLLECT_WINDOW,
         AgentPaperLoopAction.ADVANCE_ORDER,
@@ -2538,6 +2596,20 @@ async def run_local_agent_paper_loop(
         or bool(set(database.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    if settings.formal_budget_protection_enabled:
+        bound_environment, pinned_calendar = await _load_bound_loop_environment(
+            settings, repo_root, {} if env_file is not None else os.environ, env_file=env_file
+        )
+        initial = (
+            _FileEngineSettings.model_validate(bound_environment)
+            if env_file is not None
+            else EngineSettings.model_validate(bound_environment)
+        )
+        if make_url(initial.database_url or "") != database:
+            raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+        settings = initial.model_copy(update={"release_revision": settings.release_revision})
+        if pinned_calendar is not None:
+            account_id = UUID(bound_environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = clock()
     with acquire_agent_paper_lock():
@@ -2578,8 +2650,78 @@ async def run_local_agent_paper_loop(
                     return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
                 raise
 
+            from nexus.monitoring.host import PriceMonitorCoordinator
+            from nexus.ops.research_monitor import refresh_host_observations, scan_host_once
+
+            # The process lock and initial calendar belong to this database. A
+            # later config reload must never silently move the running host.
+            host_database = database
+            monitor_host_scope: (
+                tuple[UUID, UUID, UUID | None, UUID | None, AgentRuntimeMode | None] | None
+            ) = (
+                (
+                    account_id,
+                    calendar_authority_id,
+                    settings.agent_paper_candidate_batch_id,
+                    settings.agent_paper_formal_model_config_id,
+                    settings.agent_runtime_mode,
+                )
+                if settings.agent_paper_formal_model_config_id is not None
+                else None
+            )
+
+            async def scan_monitor() -> object:
+                return await scan_host_once(
+                    settings,
+                    account_id=account_id,
+                    calendar_authority_id=calendar_authority_id,
+                    repo_root=repo_root,
+                    env_file=env_file,
+                )
+
+            async def prepare_monitor(scheduled_at: datetime) -> object:
+                return await refresh_host_observations(
+                    settings,
+                    account_id=account_id,
+                    calendar_authority_id=calendar_authority_id,
+                    scheduled_at=scheduled_at,
+                    repo_root=repo_root,
+                    env_file=env_file,
+                )
+
+            monitor = PriceMonitorCoordinator(scan_monitor, prepare=prepare_monitor)
+            reported_monitor_bucket: datetime | None = None
+
+            def report_monitor_diagnostic() -> None:
+                nonlocal reported_monitor_bucket
+                if (
+                    monitor.busy
+                    or monitor.last_diagnostic is None
+                    or monitor.diagnostic_bucket is None
+                    or monitor.diagnostic_bucket == reported_monitor_bucket
+                ):
+                    return
+                reported_monitor_bucket = monitor.diagnostic_bucket
+                # Fixed monitor diagnostics are distinct from research unknowns.
+                # Never print the scan result, configuration or exception text.
+                try:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "research.monitor.scan_failed",
+                                "error_code": monitor.last_diagnostic,
+                                "scheduled_at": monitor.diagnostic_bucket.isoformat(),
+                            },
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except OSError:
+                    pass
+
             async def inspect() -> AgentPaperLoopSnapshot:
-                nonlocal account_id, calendar_authority_id, settings
+                nonlocal account_id, calendar_authority_id, settings, monitor_host_scope
                 environment = load_agent_paper_service_environment(
                     repo_root,
                     {} if env_file is not None else os.environ,
@@ -2595,10 +2737,17 @@ async def run_local_agent_paper_loop(
                     return AgentPaperLoopSnapshot(now=clock(), enabled=False)
                 from nexus.ops.formal_budget_protection import bind_runtime_environment
 
+                if make_url(environment.get("DATABASE_URL", "")) != host_database:
+                    raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
                 environment, pinned_calendar = await bind_runtime_environment(settings, environment)
-                if pinned_calendar is not None:
-                    account_id = UUID(environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
-                    calendar_authority_id = UUID(pinned_calendar)
+                current_account_id = (
+                    account_id
+                    if pinned_calendar is None
+                    else UUID(environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
+                )
+                current_calendar_id = (
+                    calendar_authority_id if pinned_calendar is None else UUID(pinned_calendar)
+                )
                 current = (
                     _FileEngineSettings.model_validate(environment)
                     if env_file is not None
@@ -2606,6 +2755,28 @@ async def run_local_agent_paper_loop(
                 )
                 if not current.agent_paper_cycle_enabled:
                     return AgentPaperLoopSnapshot(now=clock(), enabled=False)
+                current_scope = (
+                    current_account_id,
+                    current_calendar_id,
+                    current.agent_paper_candidate_batch_id,
+                    current.agent_paper_formal_model_config_id,
+                    current.agent_runtime_mode,
+                )
+                if (
+                    make_url(current.database_url or "") != host_database
+                    or (monitor_host_scope is not None and current_scope != monitor_host_scope)
+                    or (
+                        current.agent_paper_formal_model_config_id is not None
+                        and current.agent_paper_account_id != current_account_id
+                    )
+                ):
+                    raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+                if (
+                    monitor_host_scope is None
+                    and current.agent_paper_formal_model_config_id is not None
+                ):
+                    monitor_host_scope = current_scope
+                account_id, calendar_authority_id = current_account_id, current_calendar_id
                 # Release identity belongs to the running process, not the reloaded
                 # business configuration or its frozen budget binding.
                 current = current.model_copy(update={"release_revision": settings.release_revision})
@@ -2628,6 +2799,16 @@ async def run_local_agent_paper_loop(
 
                 normal = await inspect_manual_close(current, account_id=account_id, snapshot=normal)
                 normal = await inspect_manual_queue(current, account_id=account_id, snapshot=normal)
+                from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+                from nexus.ops.monitor_dispatch import inspect_monitor_queue
+
+                # Upcoming evaluation work also needs its full execution window.
+                if evaluation_wait_at is None or evaluation_wait_at > normal.now + timedelta(
+                    seconds=INCREMENT_ACTION_HEADROOM_SECONDS
+                ):
+                    normal = await inspect_monitor_queue(
+                        current, account_id=account_id, snapshot=normal
+                    )
                 if evaluation is None:
                     return normal
                 assert evaluation_wait_at is not None
@@ -2656,11 +2837,24 @@ async def run_local_agent_paper_loop(
                     started_at=started_at,
                     seen_at=seen_at,
                 )
+                report_monitor_diagnostic()
+                if settings.agent_paper_cycle_enabled and not shutdown.is_set():
+                    monitor.kick(seen_at)
+
+            observed_monitor_bucket: datetime | None = None
 
             async def wake_for_pending_work() -> bool:
+                nonlocal observed_monitor_bucket
                 from nexus.ops.manual_paper_host import manual_work_pending
 
-                return await manual_work_pending(settings, account_id=account_id)
+                if settings.agent_paper_manual_enabled and await manual_work_pending(
+                    settings, account_id=account_id
+                ):
+                    return True
+                if not monitor.busy and monitor.last_bucket != observed_monitor_bucket:
+                    observed_monitor_bucket = monitor.last_bucket
+                    return True
+                return False
 
             async def confirm_shutdown(
                 action: AgentPaperLoopAction,
@@ -2687,9 +2881,7 @@ async def run_local_agent_paper_loop(
                     confirm_shutdown=confirm_shutdown,
                     clock=clock,
                     monotonic=monotonic,
-                    wake_for_pending_work=(
-                        wake_for_pending_work if settings.agent_paper_manual_enabled else None
-                    ),
+                    wake_for_pending_work=wake_for_pending_work,
                 )
             except ValueError as error:
                 if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":
@@ -2697,6 +2889,11 @@ async def run_local_agent_paper_loop(
                 if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
                     return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
                 raise
+            finally:
+                try:
+                    await monitor.close()
+                finally:
+                    report_monitor_diagnostic()
         finally:
             for installed_signal in installed_signals:
                 event_loop.remove_signal_handler(installed_signal)
@@ -2823,6 +3020,29 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
+    if action == AgentPaperLoopAction.RUN_MONITOR_INCREMENT:
+        from nexus.ops.monitor_dispatch import dispatch_host_once
+
+        if (
+            snapshot.monitor_trigger_id is None
+            or snapshot.calendar_authority_id is None
+            or choose_loop_action(snapshot) != action
+        ):
+            raise RuntimeError("MONITOR_HOST_SCOPE_CHANGED")
+        result = await dispatch_host_once(
+            settings,
+            account_id=account_id,
+            trigger_id=snapshot.monitor_trigger_id,
+            calendar_authority_id=snapshot.calendar_authority_id,
+            repo_root=repo_root,
+            env_file=env_file,
+            prepared_market_open_at=snapshot.host_prepared_market_open_at,
+        )
+        return (
+            AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+            if result["status"] in {"unknown", "unconfirmed"}
+            else None
+        )
     if action == AgentPaperLoopAction.TRIGGER_MANUAL:
         from nexus.ops.manual_paper_host import dispatch_manual_request
 

@@ -131,7 +131,7 @@ def load_bark_credentials(settings: BarkWorkerSettings) -> BarkCredentials:
 
 
 def build_bark_registry(publisher: Publisher) -> PublisherRegistry:
-    """Register only notification-safe Paper event contracts."""
+    """Register only notification-safe Paper and research-trigger contracts."""
     return PublisherRegistry(
         PublisherSpec(
             event_type=event_type,

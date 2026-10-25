@@ -3280,6 +3280,20 @@ def test_local_loop_reinspection_uses_service_environment_loader(
     environment = enabled_environment()
     environment["NEXUS_RELEASE_REVISION"] = "b" * 40
     service_loads: list[object] = []
+    monitor_calls: list[object] = []
+
+    async def scan_monitor(settings, **kwargs):
+        # This test isolates ordinary reinspection. The new scan's protected
+        # reload and scope checks are exercised in test_monitor_host_wiring.
+        assert kwargs["account_id"] == UUID(int=1)
+        assert kwargs["calendar_authority_id"] == CALENDAR_AUTHORITY_ID
+        assert kwargs["env_file"] == (tmp_path / "service.env" if explicit_file else None)
+        monitor_calls.append(settings)
+        return {"status": "scanned"}
+
+    from nexus.ops import research_monitor
+
+    monkeypatch.setattr(research_monitor, "scan_host_once", scan_monitor)
 
     @contextmanager
     def isolated_lock():
@@ -3343,6 +3357,7 @@ def test_local_loop_reinspection_uses_service_environment_loader(
         )
     )
 
+    assert len(monitor_calls) == 1
     assert result == A.STOP_SESSION_CLOSED
     assert service_loads == ([{}, {}] if explicit_file else [os.environ, os.environ])
 

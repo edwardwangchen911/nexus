@@ -3,8 +3,9 @@
 import hashlib
 import json
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -22,7 +23,15 @@ from nexus.agents.codex_sdk import (
     codex_request_hash,
     codex_request_wire,
 )
-from nexus.agents.codex_staged import STAGES, StagedCodexCommittee
+from nexus.agents.codex_staged import (
+    STAGES,
+    StagedCodexCommittee,
+    _DailyPendingItem,
+    _DailyPendingProposal,
+    _DailyPendingReview,
+    _MonitoringProposal,
+    _MonitoringReview,
+)
 from nexus.agents.codex_token_budget import INPUT_RESERVE
 from nexus.agents.codex_versions import (
     BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
@@ -31,11 +40,24 @@ from nexus.agents.codex_versions import (
     FULL_INPUT_CAPACITY_MAX_WIRE_BYTES,
     ISOLATED_CAPACITY_CONFIG_VERSIONS,
 )
-from nexus.agents.committee import ROLE_ORDER
+from nexus.agents.committee import (
+    DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
+    DISCLOSURE_SCOPE_PROMPT_VERSION,
+    MONITORING_SCOPE_PROMPT_VERSIONS,
+    ROLE_ORDER,
+    AgentRole,
+    CommitteeRoleOutput,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
+from nexus.monitoring.contracts import (
+    PriceMonitoringProposal,
+    PriceMonitoringReview,
+    PriceReviewCondition,
+)
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job
+from nexus.strategy.intents import ResearchClaim
 
 
 def capacity_config() -> dict[str, str | int | bool]:
@@ -155,6 +177,244 @@ async def capacity_job_qualified(session: AsyncSession, job: Job, *, claimed: bo
     )
 
 
+def _monitoring_capacity_view(
+    committee: StagedCodexCommittee, evidence: tuple[EvidenceRef, ...], inputs: dict[str, object]
+) -> StagedCodexCommittee:
+    if committee._prompts["portfolio"].version not in MONITORING_SCOPE_PROMPT_VERSIONS:
+        return committee
+    for model in (_MonitoringProposal, _MonitoringReview):
+        properties = model.model_json_schema()["properties"]
+        if (
+            properties["rationale"].get("maxLength") != 500
+            or properties["citations"].get("maxItems") != 4
+        ):
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+    if PriceReviewCondition.model_json_schema()["properties"]["threshold"].get("maxLength") != 40:
+        raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+    # Bound normalized domain values, not raw model datetime spellings. Price
+    # allows 38 digits plus a decimal point; Unicode decimal digits can occupy
+    # four UTF-8 bytes each. All rationale characters need at most six JSON bytes.
+    widest_reference = max(evidence, key=evidence.index)
+    proposal = PriceMonitoringProposal(
+        condition=PriceReviewCondition(
+            signal="schwab.l1.bid_ask_midpoint",
+            operator="gte",
+            threshold="9" + "𝟏" * 25 + "." + "𝟏" * 12,
+            unit="currency",
+            currency="USD",
+            purpose="review",
+            source="schwab",
+            feed="l1",
+            price_basis="unadjusted_bid_ask_midpoint",
+            max_age_seconds=60,
+        ),
+        rationale="\x00" * 500,
+        evidence_refs=(widest_reference,) * 4,
+        review_due_at=datetime.max.replace(tzinfo=UTC),
+        valid_until=datetime.max.replace(tzinfo=UTC),
+    )
+    review = PriceMonitoringReview(
+        proposal_hash=proposal.content_hash,
+        decision="accepted",
+        rationale="\x00" * 500,
+        evidence_refs=proposal.evidence_refs,
+    )
+    view = copy(committee)
+    monitor_roles: tuple[AgentRole, ...] = ("market_state", "bear", "evidence_audit")
+    view._outputs = {
+        role: CommitteeRoleOutput(
+            role=role,
+            vote="support",
+            claims=(ResearchClaim(text="capacity boundary", evidence_refs=(evidence[-1],)),),
+            prompt_hash=committee._prompts[role].content_hash,
+            input_tokens=0,
+            output_tokens=0,
+            monitoring_proposal=proposal if role == "market_state" else None,
+            monitoring_review=review if role != "market_state" else None,
+        )
+        for role in monitor_roles
+    }
+    if committee._prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS:
+        from nexus.monitoring.daily_contracts import (
+            DailyPendingItem,
+            DailyPendingProposal,
+            DailyPendingReview,
+            daily_context_from_inputs,
+            daily_context_identity,
+        )
+
+        context = daily_context_from_inputs(inputs)
+        if context is not None:
+            context_hash, trigger_ids = daily_context_identity(context)
+            props = _DailyPendingItem.model_json_schema()["properties"]
+            if (
+                props["rationale"].get("maxLength") != 160
+                or props["citations"].get("maxItems") != 3
+                or _DailyPendingProposal.model_json_schema()["properties"]["items"].get("maxItems")
+                != 32
+                or _DailyPendingReview.model_json_schema()["properties"]["rationale"].get(
+                    "maxLength"
+                )
+                != 500
+                or _DailyPendingReview.model_json_schema()["properties"]["citations"].get(
+                    "maxItems"
+                )
+                != 4
+            ):
+                raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+            daily = DailyPendingProposal(
+                context_hash=context_hash,
+                items=tuple(
+                    DailyPendingItem(
+                        trigger_id=trigger_id,
+                        status="unresolved",
+                        rationale="\x00" * 160,
+                        evidence_refs=(widest_reference,) * 3,
+                    )
+                    for trigger_id in trigger_ids
+                ),
+            )
+            view._outputs["orchestrator"] = CommitteeRoleOutput(
+                role="orchestrator",
+                vote="support",
+                claims=(ResearchClaim(text="capacity boundary", evidence_refs=(evidence[-1],)),),
+                prompt_hash=committee._prompts["orchestrator"].content_hash,
+                input_tokens=0,
+                output_tokens=0,
+                daily_pending_proposal=daily,
+            )
+            daily_review = DailyPendingReview(
+                proposal_hash=daily.content_hash,
+                decision="accepted",
+                rationale="\x00" * 500,
+                evidence_refs=(widest_reference,) * 4,
+            )
+            for reviewer in ("bear", "evidence_audit"):
+                view._outputs[reviewer] = view._outputs[reviewer].model_copy(
+                    update={"daily_pending_review": daily_review}
+                )
+    if committee._prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION:
+        from nexus.monitoring.contracts import DisclosureReviewCondition
+        from nexus.monitoring.disclosure_contracts import (
+            DisclosureMonitoringProposal,
+            DisclosureMonitoringReview,
+        )
+
+        # A schema superset only, never research evidence or a usable baseline.
+        maximal = DisclosureMonitoringProposal(
+            condition=DisclosureReviewCondition(
+                signal="sec.issuer_disclosure_added",
+                operator="exists_new",
+                threshold=True,
+                unit="filing",
+                purpose="review",
+                source="sec",
+                forms=("8-K", "8-K/A"),
+                max_age_seconds=300,
+                time_authority="frozen_index_vs_local_receipt",
+            ),
+            baseline_snapshot_id=UUID(int=(1 << 128) - 1),
+            baseline_hash="f" * 64,
+            issuer_cik="9" * 10,
+            baseline_as_of=datetime.max.replace(tzinfo=UTC),
+            rationale="\x00" * 160,
+            evidence_refs=(widest_reference,) * 3,
+            review_due_at=datetime.max.replace(tzinfo=UTC),
+            valid_until=datetime.max.replace(tzinfo=UTC),
+        )
+        disclosure_review = DisclosureMonitoringReview(
+            proposal_hash=maximal.content_hash,
+            decision="accepted",
+            rationale="\x00" * 160,
+            evidence_refs=maximal.evidence_refs,
+        )
+        view._outputs["market_state"] = view._outputs["market_state"].model_copy(
+            update={"disclosure_proposal": maximal}
+        )
+        for role in ("bear", "evidence_audit"):
+            view._outputs[role] = view._outputs[role].model_copy(
+                update={"disclosure_review": disclosure_review}
+            )
+    from nexus.monitoring.mixed_contracts import (
+        MixedEventItem,
+        MixedEventProposal,
+        MixedEventReview,
+        mixed_context_from_inputs,
+    )
+
+    mixed_context = mixed_context_from_inputs(inputs)
+    if mixed_context is not None:
+        from nexus.agents.codex_staged import (
+            _MixedEventItem,
+            _MixedEventProposal,
+            _MixedEventReview,
+        )
+
+        for domain, wire in (
+            (MixedEventItem, _MixedEventItem),
+            (MixedEventReview, _MixedEventReview),
+        ):
+            domain_props, wire_props = (
+                domain.model_json_schema()["properties"],
+                wire.model_json_schema()["properties"],
+            )
+            if (
+                domain_props["rationale"].get("maxLength") != 160
+                or wire_props["rationale"].get("maxLength") != 160
+                or wire_props["citations"].get("maxItems") != 3
+                or domain_props["evidence_refs"].get("maxItems") != 3
+            ):
+                raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        if _MixedEventProposal.model_json_schema()["properties"]["items"].get("maxItems") != 32:
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        context_ref = next(ref for ref in evidence if ref.source == "nexus_monitor_increment_v2")
+        # Exact immutable identity values; only bounded model prose/citations vary.
+        context_checks = mixed_context.get("trigger_checks")
+        if not isinstance(context_checks, list):
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        materials = mixed_context.get("materials")
+        if not isinstance(materials, dict):
+            raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+        bodies = {
+            f"sec:{row['archive']['issuer_cik']}:"
+            f"{row['archive']['entry']['accession_number']}": UUID(row["snapshot_id"])
+            for row in materials["contents"]
+        }
+        mixed_refs = (context_ref, widest_reference, widest_reference)
+        mixed = MixedEventProposal(
+            context_hash=context_ref.content_hash,
+            items=tuple(
+                MixedEventItem(
+                    trigger_id=row["trigger_id"],
+                    kind=row["kind"],
+                    event_key=row["event_key"],
+                    status="unresolved",
+                    rationale="\x00" * 160,
+                    content_snapshot_id=bodies[row["event_key"]]
+                    if row["kind"] == "disclosure"
+                    else None,
+                    evidence_refs=mixed_refs,
+                )
+                for row in context_checks
+            ),
+        )
+        mixed_review = MixedEventReview(
+            proposal_hash=mixed.content_hash,
+            decision="accepted",
+            rationale="\x00" * 160,
+            evidence_refs=mixed_refs,
+        )
+        view._outputs["market_state"] = view._outputs["market_state"].model_copy(
+            update={"mixed_event_proposal": mixed}
+        )
+        mixed_roles: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+        for role in mixed_roles:
+            view._outputs[role] = view._outputs[role].model_copy(
+                update={"mixed_event_review": mixed_review}
+            )
+    return view
+
+
 def candidate_capacity_envelope(
     committee: StagedCodexCommittee,
     *,
@@ -176,6 +436,7 @@ def candidate_capacity_envelope(
     """
     if not evidence_refs:
         raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
+    committee = _monitoring_capacity_view(committee, evidence_refs, inputs)
     # This proof is for the declared current SDK schema. Schema evolution must
     # explicitly update the envelope rather than silently keeping old maxima.
     claim_properties = _Claim.model_json_schema()["properties"]

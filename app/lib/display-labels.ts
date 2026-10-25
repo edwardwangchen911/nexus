@@ -21,7 +21,7 @@ const statuses: Record<string, string> = {
   matched: "对账一致", mismatched: "对账有差异", locked: "已锁定", not_activated: "未激活",
   pass: "通过", fail: "未通过", offline_fixture: "离线示例", fixture: "离线示例", local_read_only: "本地只读",
   research_required: "需要补充证据", optimization_candidate: "值得比较方案", no_action: "保持现状",
-  buy_candidate: "买入候选", reduce_candidate: "减仓候选", hold: "保持观察", watch: "仅观察",
+  buy_candidate: "买入候选", reduce_candidate: "减仓候选", hold: "持有", watch: "仅观察",
   buy: "买入", sell: "卖出", limit: "限价单", market: "市价单", day: "当日有效", regular: "常规交易时段",
   hold_current: "保持现状", minimum_change: "最小调整", strategy_target: "策略目标",
   read_only: "只读", promote: "晋级", rollback: "回滚",

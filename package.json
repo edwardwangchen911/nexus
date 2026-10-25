@@ -60,5 +60,10 @@
     "vitest": "^4.1.12",
     "wrangler": "4.151.0"
   },
-  "type": "module"
+  "type": "module",
+  "overrides": {
+    "miniflare@5.20261012.0-beta": {
+      "undici": "7.30.1"
+    }
+  }
 }

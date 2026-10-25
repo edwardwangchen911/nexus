@@ -22,6 +22,7 @@ from nexus.agents.committee import AgentRole, CommitteeRoleOutput
 from nexus.agents.concentration import evaluate_frozen_concentration_conditions
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.domain.evidence import EvidenceRef
+from nexus.monitoring.evaluation import compile_proposal
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -206,7 +207,97 @@ def synthesize_intent(
         or portfolio_context.research_as_of > run.decision_time
     ):
         raise ValueError("research observation context does not bind the run")
+    monitoring_proposal = None
+    from nexus.agents.committee import (
+        DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
+        DISCLOSURE_SCOPE_PROMPT_VERSION,
+        MONITORING_SCOPE_PROMPT_VERSIONS,
+    )
+
+    proposal = by_role["market_state"].monitoring_proposal
+    if (
+        prompts["portfolio"].version in MONITORING_SCOPE_PROMPT_VERSIONS
+        and proposal is not None
+        and by_role["evidence_audit"].vote == "support"
+        and by_role["portfolio"].monitoring_adoption_hash == proposal.content_hash
+    ):
+        monitor_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+        reviews = {
+            str(role): review
+            for role in monitor_reviewers
+            if (review := by_role[role].monitoring_review) is not None
+        }
+        try:
+            monitoring_proposal = compile_proposal(
+                proposal, reviews, now=run.decision_time, evidence_refs=evidence_refs
+            )
+        except ValueError:
+            # A rejected or unbound plan leaves research quality and stance unchanged.
+            monitoring_proposal = None
+    disclosure_proposal = None
+    from nexus.monitoring.disclosure_contracts import compile_disclosure_proposal
+
+    proposed = by_role["market_state"].disclosure_proposal
+    if prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION and proposed is not None:
+        paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
+            "monitor_context"
+        )
+        context = paper.get("disclosure_monitoring") if isinstance(paper, dict) else None
+        try:
+            disclosure_proposal = compile_disclosure_proposal(
+                proposed,
+                {
+                    str(role): row.disclosure_review
+                    for role, row in by_role.items()
+                    if role in {"bear", "evidence_audit"} and row.disclosure_review is not None
+                },
+                context=context,
+                instrument_id=run.instrument_id,
+                now=run.decision_time,
+                evidence_refs=evidence_refs,
+                audit_vote=by_role["evidence_audit"].vote,
+                adoption_hash=by_role["portfolio"].disclosure_adoption_hash,
+            )
+        except ValueError:
+            disclosure_proposal = None
+    daily_pending_proposal = None
+    from nexus.monitoring.daily_contracts import (
+        compile_daily_pending_proposal,
+        daily_context_from_paper,
+        daily_context_identity,
+    )
+
+    daily_proposal = by_role["orchestrator"].daily_pending_proposal
+    if (
+        prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS
+        and daily_proposal is not None
+    ):
+        paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
+            "monitor_context"
+        )
+        try:
+            context = daily_context_from_paper(paper)
+            context_hash, trigger_ids = daily_context_identity(context)
+            daily_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+            daily_pending_proposal = compile_daily_pending_proposal(
+                daily_proposal,
+                {
+                    str(role): daily_review
+                    for role in daily_reviewers
+                    if (daily_review := by_role[role].daily_pending_review) is not None
+                },
+                context_hash=context_hash,
+                trigger_ids=trigger_ids,
+                evidence_refs=evidence_refs,
+                audit_vote=by_role["evidence_audit"].vote,
+                adoption_hash=by_role["portfolio"].daily_pending_adoption_hash,
+            )
+        except ValueError:
+            daily_pending_proposal = None
     return ResearchIntent(
+        disclosure_proposal=disclosure_proposal,
+        daily_pending_proposal=daily_pending_proposal,
+        monitoring_proposal=monitoring_proposal,
         synthesis_assessment=assessment,
         condition_evaluations=evaluate_frozen_concentration_conditions(portfolio_context),
         schema_version="research_intent_v1",

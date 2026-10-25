@@ -16,6 +16,13 @@ from pydantic import (
 
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
+from nexus.monitoring.contracts import PriceMonitoringProposal, PriceMonitoringReview
+from nexus.monitoring.daily_contracts import DailyPendingProposal, DailyPendingReview
+from nexus.monitoring.disclosure_contracts import (
+    DisclosureMonitoringProposal,
+    DisclosureMonitoringReview,
+)
+from nexus.monitoring.mixed_contracts import MixedEventProposal, MixedEventReview
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
 type AgentRole = Literal[
@@ -281,6 +288,61 @@ class CommitteeRoleOutput(BaseModel):
     frozen_inputs_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     synthesis_assessment: SynthesisAssessment | None = None
+    mixed_event_proposal: MixedEventProposal | None = None
+    mixed_event_review: MixedEventReview | None = None
+    mixed_event_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    daily_pending_proposal: DailyPendingProposal | None = None
+    daily_pending_review: DailyPendingReview | None = None
+    daily_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    disclosure_proposal: DisclosureMonitoringProposal | None = None
+    disclosure_review: DisclosureMonitoringReview | None = None
+    disclosure_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    monitoring_proposal: PriceMonitoringProposal | None = None
+    monitoring_review: PriceMonitoringReview | None = None
+    monitoring_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _monitoring_role(self) -> "CommitteeRoleOutput":
+        if (
+            self.mixed_event_proposal is not None
+            and self.role != "market_state"
+            or self.mixed_event_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.mixed_event_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.disclosure_proposal is not None
+            and self.role != "market_state"
+            or self.disclosure_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.disclosure_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.daily_pending_proposal is not None
+            and self.role != "orchestrator"
+            or self.daily_pending_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.daily_pending_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.monitoring_proposal is not None
+            and self.role != "market_state"
+            or self.monitoring_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.monitoring_adoption_hash is not None
+            and self.role != "portfolio"
+        ):
+            raise ValueError("MONITOR_ROLE_INVALID")
+        for item in (
+            *(self.mixed_event_proposal.items if self.mixed_event_proposal else ()),
+            self.mixed_event_review,
+            *(self.daily_pending_proposal.items if self.daily_pending_proposal else ()),
+            self.daily_pending_review,
+            self.disclosure_proposal,
+            self.disclosure_review,
+            self.monitoring_proposal,
+            self.monitoring_review,
+        ):
+            if item is not None:
+                ResearchClaim(text=item.rationale, evidence_refs=item.evidence_refs)
+        return self
 
     @model_serializer(mode="wrap")
     # A return annotation would replace the closed model serialization schema.
@@ -288,6 +350,22 @@ class CommitteeRoleOutput(BaseModel):
         payload = cast(dict[str, object], handler(self))
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
+        for name in (
+            "mixed_event_proposal",
+            "mixed_event_review",
+            "mixed_event_adoption_hash",
+            "disclosure_proposal",
+            "disclosure_review",
+            "disclosure_adoption_hash",
+            "monitoring_proposal",
+            "monitoring_review",
+            "monitoring_adoption_hash",
+            "daily_pending_proposal",
+            "daily_pending_review",
+            "daily_pending_adoption_hash",
+        ):
+            if getattr(self, name) is None:
+                payload.pop(name, None)
         return payload
 
 
@@ -365,11 +443,27 @@ CLAIM_REVIEW_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v6-claim-review"
 INFERENCE_REVIEW_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v7-inference-review"
 
 
+MONITORING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v8-price-monitor"
+
+
+DAILY_PENDING_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v9-daily-pending"
+DISCLOSURE_SCOPE_PROMPT_VERSION = "local-portfolio-synthesis-v10-sec-monitor"
+DAILY_PENDING_SCOPE_PROMPT_VERSIONS = frozenset(
+    {DAILY_PENDING_SCOPE_PROMPT_VERSION, DISCLOSURE_SCOPE_PROMPT_VERSION}
+)
+MONITORING_SCOPE_PROMPT_VERSIONS = frozenset(
+    {MONITORING_SCOPE_PROMPT_VERSION, *DAILY_PENDING_SCOPE_PROMPT_VERSIONS}
+)
+
+
 def load_portfolio_synthesis_prompt(
     *,
     security_research_scope: bool = False,
     claim_review_scope: bool = False,
     inference_review_scope: bool = False,
+    monitoring_scope: bool = False,
+    daily_pending_scope: bool = False,
+    disclosure_scope: bool = False,
 ) -> PromptAsset:
     """Load the immutable cross-source final-role prompt used by normal local setup."""
     if type(security_research_scope) is not bool:
@@ -380,8 +474,20 @@ def load_portfolio_synthesis_prompt(
         inference_review_scope and not (security_research_scope and claim_review_scope)
     ):
         raise ValueError("INFERENCE_REVIEW_SCOPE_INVALID")
+    if type(monitoring_scope) is not bool or (monitoring_scope and not inference_review_scope):
+        raise ValueError("MONITORING_SCOPE_INVALID")
+    if type(daily_pending_scope) is not bool or (daily_pending_scope and not monitoring_scope):
+        raise ValueError("DAILY_PENDING_SCOPE_INVALID")
+    if type(disclosure_scope) is not bool or (disclosure_scope and not daily_pending_scope):
+        raise ValueError("DISCLOSURE_SCOPE_INVALID")
     version = (
-        INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
+        DISCLOSURE_SCOPE_PROMPT_VERSION
+        if disclosure_scope
+        else DAILY_PENDING_SCOPE_PROMPT_VERSION
+        if daily_pending_scope
+        else MONITORING_SCOPE_PROMPT_VERSION
+        if monitoring_scope
+        else INFERENCE_REVIEW_SCOPE_PROMPT_VERSION
         if inference_review_scope
         else CLAIM_REVIEW_SCOPE_PROMPT_VERSION
         if claim_review_scope

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 
@@ -69,6 +70,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_history_seal_preparation_scope_pg.py",
     "engine/tests/integration/test_manual_partial_history_seal_pg.py::test_identity_diagnostic_preserves_seal_transaction_rollback",
     "engine/tests/integration/test_sec_exhibit_import.py",
+    "engine/tests/integration/test_sec_index_pg.py",
     "engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_to_result",
     "engine/tests/integration/test_candidate_multistock_path.py::test_v10_manual_entry_failure_preserves_recovery_gates",
     "engine/tests/integration/test_candidate_multistock_path.py::test_v11_manual_entry_to_result",
@@ -87,45 +89,99 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_formal_resume_observation_clock.py",
     "engine/tests/integration/test_accounting_review_intake.py",
     "engine/tests/integration/test_accounting_adoption.py",
+    "engine/tests/integration/test_monitor_image_compat_pg.py",
+    "engine/tests/integration/test_monitor_rollback_compat_pg.py",
     "engine/tests/integration/test_workbench_activity_pg.py",
     "engine/tests/integration/test_workbench_activity_boundaries_pg.py",
     "engine/tests/integration/test_workbench_research_summary_pg.py",
     "engine/tests/integration/test_workbench_read_service.py",
     "engine/tests/integration/test_formal_history_seal_pg.py",
+    "engine/tests/integration/test_research_monitoring_pg.py",
+    "engine/tests/integration/test_monitoring_readview_browser_pg.py",
+    "engine/tests/integration/test_disclosure_monitoring_api_pg.py",
+    "engine/tests/integration/test_research_monitoring_migration.py",
+    "engine/tests/integration/test_monitoring_producer_pg.py",
+    "engine/tests/integration/test_monitor_increment_pg.py",
+    "engine/tests/integration/test_monitor_pending_pg.py",
+    "engine/tests/integration/test_monitor_daily_pending_pg.py",
+    "engine/tests/integration/test_monitor_view_pg.py",
+    "engine/tests/integration/test_monitor_hold_path_pg.py",
+    "engine/tests/integration/test_monitor_kinds_pg.py",
+    "engine/tests/integration/test_disclosure_context_pg.py",
+    "engine/tests/integration/test_disclosure_producer_pg.py",
+    "engine/tests/integration/test_disclosure_observations_pg.py",
+    "engine/tests/integration/test_monitor_batches_pg.py",
+    "engine/tests/integration/test_monitor_filing_content_pg.py",
+    "engine/tests/integration/test_monitor_content_collector_pg.py",
+    "engine/tests/integration/test_monitor_mixed_db_pg.py",
+    "engine/tests/integration/test_monitor_event_receipts_pg.py",
+    "engine/tests/integration/test_monitor_daily_events_pg.py",
+    "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
+    "engine/tests/integration/test_daily_v2_historical_handoff_pg.py",
+    "engine/tests/integration/test_daily_v2_readback_pg.py",
+    "engine/tests/integration/test_daily_v2_capacity_pg.py",
+    "engine/tests/integration/test_monitor_daily_v2_native_pg.py",
+    "engine/tests/integration/test_monitor_mixed_increment_pg.py",
+    "engine/tests/integration/test_monitor_mixed_host_pg.py",
+    "engine/tests/integration/test_monitor_batch_prepare_pg.py",
+    "engine/tests/integration/test_monitor_market_prepare_pg.py",
+    "engine/tests/integration/test_monitor_price_refresh_pg.py",
+    "engine/tests/integration/test_monitor_disclosure_refresh_pg.py",
+    "engine/tests/integration/test_monitor_observation_tick_pg.py",
+    "engine/tests/integration/test_monitor_daily_receipts_pg.py",
+    "engine/tests/integration/test_monitor_frozen_members_pg.py",
+    "engine/tests/integration/test_monitor_dispatch_pg.py",
+    "engine/tests/integration/test_monitor_preclaim_pg.py",
+    "engine/tests/integration/test_monitor_source_qualification_pg.py",
+    "engine/tests/integration/test_monitor_reconciliation_pg.py",
+    "engine/tests/integration/test_monitor_plan_replacement_pg.py",
+    "engine/tests/integration/test_monitor_plan_clock_pg.py",
+    "engine/tests/integration/test_monitor_receipt_competition_pg.py",
+    "engine/tests/integration/test_monitor_validation_work_pg.py",
+    "engine/tests/integration/test_research_monitor_notification_pg.py",
 )
 
-# CI progress timestamps place this boundary near half of PostgreSQL wall time.
-PG_SPLIT = (
-    "engine/tests/integration/test_candidate_multistock_path.py"
-    "::test_v11_formal_synthesis_sdk_lifecycle"
+# 6208's pg-b completed 216 cases in 19m, then advanced through the native
+# studies until the 40m job limit. Keep whole modules and bound each heavy tail.
+PG_SPLITS = (
+    "engine/tests/integration/test_scheduled_unknown_acceptance_pg.py",
+    "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
+    "engine/tests/integration/test_monitor_mixed_increment_pg.py",
 )
 
 
 def selectors_for(group: str) -> tuple[str, ...]:
-    split = MERGE_SELECTORS.index(PG_SPLIT)
+    first, second, third = (MERGE_SELECTORS.index(path) for path in PG_SPLITS)
     return {
         "fast": MERGE_SELECTORS[:5],
-        "pg-a": MERGE_SELECTORS[5:split],
-        "pg-b": MERGE_SELECTORS[split:],
+        "pg-a": MERGE_SELECTORS[5:first],
+        "pg-b": MERGE_SELECTORS[first:second],
+        "pg-c": MERGE_SELECTORS[second:third],
+        "pg-d": MERGE_SELECTORS[third:],
         "full": ("engine/tests",),
     }[group]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("group", choices=("fast", "pg-a", "pg-b", "full"))
+    parser.add_argument("group", choices=("fast", "pg-a", "pg-b", "pg-c", "pg-d", "full"))
     parser.add_argument("--collect-only", action="store_true")
     args = parser.parse_args()
     command = [sys.executable, "-m", "pytest", "-q", "--import-mode=importlib"]
     if args.group != "full":
         command += ["-m", "not performance"]
     command += ["--durations=30", "--durations-min=1"]
+    command += ["-p", "scripts.ci.engine_test_progress"]
+    if args.group.startswith("pg-"):
+        command.append("-vv")
     if args.collect_only:
         command.append("--collect-only")
     else:
         command.append(f"--junitxml=test-results/engine-{args.group}.xml")
     command.extend(selectors_for(args.group))
-    return subprocess.run(command, check=False).returncode
+    return subprocess.run(
+        command, env={**os.environ, "ENGINE_TEST_GROUP": args.group}, check=False
+    ).returncode
 
 
 if __name__ == "__main__":

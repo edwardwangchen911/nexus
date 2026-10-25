@@ -2073,6 +2073,8 @@ export interface components {
              */
             start_session: string;
         };
+        /** @enum {string} */
+        BlockedReason: "budget" | "account_occupied" | "inputs" | "overflow" | "unknown";
         /** BriefDisagreementSummary */
         BriefDisagreementSummary: {
             /**
@@ -2547,6 +2549,8 @@ export interface components {
             /** Unknown Reason */
             unknown_reason: string | null;
         };
+        /** @enum {string} */
+        CoverageReason: "audit_rejected" | "source_invalid" | "no_condition" | "run_failed" | "usage_unknown" | "awaiting_reconciliation" | "events_unresolved" | "review_unverified" | "replacement_rejected";
         CurrencyCode: string;
         /** @enum {string} */
         CycleStatus: "prepared" | "researching" | "decision_recorded" | "risk_evaluated" | "awaiting_market" | "partially_filled" | "completed" | "unavailable" | "failed";
@@ -2601,6 +2605,30 @@ export interface components {
             /** Truncated */
             truncated: boolean;
         };
+        /** DailyPendingItem */
+        DailyPendingItem: {
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Rationale */
+            rationale: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "addressed" | "unresolved";
+            /**
+             * Trigger Id
+             * Format: uuid
+             */
+            trigger_id: string;
+        };
+        /** DailyPendingProposal */
+        DailyPendingProposal: {
+            /** Context Hash */
+            context_hash: string;
+            /** Items */
+            items: components["schemas"]["DailyPendingItem"][];
+        };
         /** DailyResearchContextRequest */
         DailyResearchContextRequest: {
             /**
@@ -2651,6 +2679,86 @@ export interface components {
             unit: string;
             /** Unknown Reason */
             unknown_reason: string | null;
+        };
+        /** DisclosureMonitoringProposal */
+        DisclosureMonitoringProposal: {
+            /**
+             * Baseline As Of
+             * Format: date-time
+             */
+            baseline_as_of: string;
+            /** Baseline Hash */
+            baseline_hash: string;
+            /**
+             * Baseline Snapshot Id
+             * Format: uuid
+             */
+            baseline_snapshot_id: string;
+            condition: components["schemas"]["DisclosureReviewCondition"];
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Issuer Cik */
+            issuer_cik: string;
+            /** Rationale */
+            rationale: string;
+            /**
+             * Review Due At
+             * Format: date-time
+             */
+            review_due_at: string;
+            /**
+             * Valid Until
+             * Format: date-time
+             */
+            valid_until: string;
+        };
+        /**
+         * DisclosureReviewCondition
+         * @description New locally confirmed index membership, never publication or impact.
+         */
+        DisclosureReviewCondition: {
+            /** Forms */
+            forms: [
+                "8-K",
+                "8-K/A"
+            ];
+            /**
+             * Max Age Seconds
+             * @constant
+             */
+            max_age_seconds: 300;
+            /**
+             * Operator
+             * @constant
+             */
+            operator: "exists_new";
+            /**
+             * Purpose
+             * @constant
+             */
+            purpose: "review";
+            /**
+             * Signal
+             * @constant
+             */
+            signal: "sec.issuer_disclosure_added";
+            /**
+             * Source
+             * @constant
+             */
+            source: "sec";
+            /** Threshold */
+            threshold: boolean;
+            /**
+             * Time Authority
+             * @constant
+             */
+            time_authority: "frozen_index_vs_local_receipt";
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "filing";
         };
         /** @enum {string} */
         DisplayReadiness: "DISPLAY_READY" | "DISPLAY_UNAVAILABLE";
@@ -3866,6 +3974,8 @@ export interface components {
             /** Delta */
             delta: string | null;
         };
+        /** @enum {string} */
+        MonitoringState: "not_installed" | "valid" | "expired" | "superseded" | "withdrawn" | "unknown";
         /** NewsArticle */
         NewsArticle: {
             /** Author */
@@ -5815,6 +5925,86 @@ export interface components {
              */
             external_effects: "not_started" | "unknown" | "cycle_recorded";
         };
+        /**
+         * PriceMonitoringProposal
+         * @description One proposed review condition; it requires independent bear and audit approval.
+         */
+        PriceMonitoringProposal: {
+            condition: components["schemas"]["PriceReviewCondition"];
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Rationale */
+            rationale: string;
+            /**
+             * Review Due At
+             * Format: date-time
+             */
+            review_due_at: string;
+            /**
+             * Schema Version
+             * @default price_monitor_proposal_v1
+             * @constant
+             */
+            schema_version: "price_monitor_proposal_v1";
+            /**
+             * Valid Until
+             * Format: date-time
+             */
+            valid_until: string;
+        };
+        /**
+         * PriceReviewCondition
+         * @description A price review threshold; neither an order nor proof a thesis is false.
+         */
+        PriceReviewCondition: {
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Feed
+             * @constant
+             */
+            feed: "l1";
+            /**
+             * Max Age Seconds
+             * @constant
+             */
+            max_age_seconds: 60;
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "gte" | "lte";
+            /**
+             * Price Basis
+             * @constant
+             */
+            price_basis: "unadjusted_bid_ask_midpoint";
+            /**
+             * Purpose
+             * @constant
+             */
+            purpose: "review";
+            /**
+             * Signal
+             * @constant
+             */
+            signal: "schwab.l1.bid_ask_midpoint";
+            /**
+             * Source
+             * @constant
+             */
+            source: "schwab";
+            /** Threshold */
+            threshold: string;
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "currency";
+        };
         /** ProposalAdmissionRequest */
         ProposalAdmissionRequest: {
             /**
@@ -6099,6 +6289,100 @@ export interface components {
              * @constant
              */
             schema_version: "research_condition_evaluation_v1";
+        };
+        /** ResearchDisclosureMonitorCheck */
+        ResearchDisclosureMonitorCheck: {
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Reason */
+            reason: "observation_unverified" | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "true" | "false" | "unknown";
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+        };
+        /** ResearchDisclosureMonitoringView */
+        ResearchDisclosureMonitoringView: {
+            /** Baseline As Of */
+            baseline_as_of: string | null;
+            condition: components["schemas"]["DisclosureReviewCondition"] | null;
+            coverage_reason: components["schemas"]["CoverageReason"] | null;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            latest_check: components["schemas"]["ResearchDisclosureMonitorCheck"] | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Plan Id */
+            plan_id: string | null;
+            /** Replacement Run Id */
+            replacement_run_id: string | null;
+            /** Review Due At */
+            review_due_at: string | null;
+            state: components["schemas"]["MonitoringState"];
+            /**
+             * Trigger Count
+             * @default 0
+             */
+            trigger_count: number;
+            /**
+             * Triggers
+             * @default []
+             */
+            triggers: components["schemas"]["ResearchDisclosureMonitorTrigger"][];
+            /** Valid Until */
+            valid_until: string | null;
+        };
+        /** ResearchDisclosureMonitorTrigger */
+        ResearchDisclosureMonitorTrigger: {
+            /** Batch Id */
+            batch_id: string | null;
+            blocked_reason: components["schemas"]["BlockedReason"] | null;
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Event Key */
+            event_key: string;
+            /**
+             * Event Review
+             * @enum {string}
+             */
+            event_review: "addressed" | "unresolved" | "unverified" | "not_performed";
+            /**
+             * Notification Status
+             * @enum {string}
+             */
+            notification_status: "queued" | "delivering" | "published" | "dead_letter" | "unknown";
+            /** Run Id */
+            run_id: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "blocked" | "admitted" | "completed" | "failed" | "unknown" | "covered";
+            /**
+             * Trigger Id
+             * Format: uuid
+             */
+            trigger_id: string;
+            usage_status: components["schemas"]["UsageStatus"];
         };
         /** ResearchInputActionEvent */
         ResearchInputActionEvent: {
@@ -7043,6 +7327,7 @@ export interface components {
             condition_evaluations?: components["schemas"]["ResearchConditionEvaluation"][] | null;
             /** Counter Theses */
             counter_theses: components["schemas"]["ResearchClaim"][];
+            daily_pending_proposal?: components["schemas"]["DailyPendingProposal"] | null;
             /**
              * Data Snapshot Id
              * Format: uuid
@@ -7062,6 +7347,7 @@ export interface components {
             decision_time: string;
             /** Disagreement */
             disagreement: string;
+            disclosure_proposal?: components["schemas"]["DisclosureMonitoringProposal"] | null;
             /** Display Symbol */
             display_symbol: string;
             /** Entry Conditions */
@@ -7094,6 +7380,7 @@ export interface components {
             invalidation_conditions: components["schemas"]["ResearchCondition"][];
             /** Model Version */
             model_version: string;
+            monitoring_proposal?: components["schemas"]["PriceMonitoringProposal"] | null;
             /** Prompt Version */
             prompt_version: string;
             /**
@@ -7179,6 +7466,94 @@ export interface components {
             /** Usage Known */
             usage_known: boolean;
         };
+        /** ResearchMonitorCheck */
+        ResearchMonitorCheck: {
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Reason */
+            reason: ("observation_missing" | "authority_mismatch" | "time_unproven" | "price_missing") | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "true" | "false" | "unknown";
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+        };
+        /** ResearchMonitoringView */
+        ResearchMonitoringView: {
+            condition: components["schemas"]["PriceReviewCondition"] | null;
+            coverage_reason: components["schemas"]["CoverageReason"] | null;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            latest_check: components["schemas"]["ResearchMonitorCheck"] | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Plan Id */
+            plan_id: string | null;
+            /** Replacement Run Id */
+            replacement_run_id: string | null;
+            /** Review Due At */
+            review_due_at: string | null;
+            state: components["schemas"]["MonitoringState"];
+            /**
+             * Trigger Count
+             * @default 0
+             */
+            trigger_count: number;
+            /**
+             * Triggers
+             * @default []
+             */
+            triggers: components["schemas"]["ResearchMonitorTrigger"][];
+            /** Valid Until */
+            valid_until: string | null;
+        };
+        /** ResearchMonitorTrigger */
+        ResearchMonitorTrigger: {
+            blocked_reason: components["schemas"]["BlockedReason"] | null;
+            /**
+             * Cause
+             * @enum {string}
+             */
+            cause: "initial_match" | "crossed";
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /**
+             * Notification Status
+             * @enum {string}
+             */
+            notification_status: "queued" | "delivering" | "published" | "dead_letter" | "unknown";
+            /** Run Id */
+            run_id: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "blocked" | "admitted" | "completed" | "failed" | "unknown" | "covered";
+            /**
+             * Trigger Id
+             * Format: uuid
+             */
+            trigger_id: string;
+            usage_status: components["schemas"]["UsageStatus"];
+        };
         /** ResearchRunCreateRequest */
         ResearchRunCreateRequest: {
             /**
@@ -7222,6 +7597,7 @@ export interface components {
             decision_time: string;
             /** Disagreement */
             disagreement?: string | null;
+            disclosure_monitoring?: components["schemas"]["ResearchDisclosureMonitoringView"] | null;
             /** Evidence */
             evidence: components["schemas"]["EvidenceRef"][];
             failed_stage_input?: components["schemas"]["StageInputIdentity"] | null;
@@ -7236,6 +7612,7 @@ export interface components {
             intent: components["schemas"]["ResearchIntent"] | null;
             /** Invalidation Conditions */
             invalidation_conditions: components["schemas"]["ResearchCondition"][];
+            monitoring?: components["schemas"]["ResearchMonitoringView"] | null;
             /** Output Tokens */
             output_tokens?: number | null;
             /** Quality Status */
@@ -8087,6 +8464,8 @@ export interface components {
             /** Value */
             value?: string | null;
         };
+        /** @enum {string} */
+        UsageStatus: "not_started" | "in_progress" | "known" | "unknown";
         /** VetoExperimentRequest */
         VetoExperimentRequest: {
             /**

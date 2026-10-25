@@ -14,10 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import (
     ACTIONABLE_CONFIG_VERSIONS,
+    BOUNDED_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
     CANDIDATE_BUDGET_CONFIG_VERSION,
     CANDIDATE_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     CANDIDATE_RESEARCH_JOB_TIMEOUT_SECONDS,
+    CAPACITY_PRECLAIM_TIMEOUT_SECONDS,
     DEADLINE_BUDGET_CONFIG_VERSION,
     FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS,
     FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS,
@@ -381,7 +383,7 @@ async def _prepare_preclaim_capacity_pool(
     from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + 195
+    deadline = loop.time() + CAPACITY_PRECLAIM_TIMEOUT_SECONDS
     if run.pricing_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
         await prepare_cycle_capacity_pool(
             session,
@@ -749,7 +751,7 @@ def _agent_registry(
                 schema_version=_JOB_SCHEMA,
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
-                timeout_seconds=315
+                timeout_seconds=BOUNDED_RESEARCH_HANDLER_TIMEOUT_SECONDS
                 if capacity_profile_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
                 and (formal_full_input_capacity or full_input_capacity)
                 else FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS

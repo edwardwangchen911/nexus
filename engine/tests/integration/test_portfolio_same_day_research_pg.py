@@ -46,6 +46,7 @@ async def seed_normal_path(
     candidate_instruments=INSTRUMENTS[:2],
     decision_time=NOW,
     candidate_symbols=None,
+    risk_bucket_overrides=None,
 ):
     additional = tuple(item for item in candidate_instruments if item not in INSTRUMENTS)
     seed = await seed_paper_batch(
@@ -53,6 +54,7 @@ async def seed_normal_path(
         decision_time=decision_time.replace(hour=21) - timedelta(days=1),
         execution_session=decision_time.date(),
         additional_instruments=additional,
+        risk_bucket_overrides=risk_bucket_overrides,
     )
     engine = create_async_engine(url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)

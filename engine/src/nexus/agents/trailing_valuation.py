@@ -55,10 +55,19 @@ def _decision_quote(
         return None
     candidates: list[tuple[Decimal, Decimal, str, str]] = []
     for item in items:
-        if not isinstance(item, Mapping) or item.get("source") != "nexus_agent_paper_context":
+        if not isinstance(item, Mapping):
+            continue
+        monitor = item.get("source") in {
+            "nexus_price_monitor_increment",
+            "nexus_monitor_increment_v2",
+        } and security_snapshot.get("purpose") in {
+            "price_monitor_increment_v1",
+            "monitor_increment_v2",
+        }
+        if item.get("source") != "nexus_agent_paper_context" and not monitor:
             continue
         evidence_ref_id = item.get("evidence_ref_id")
-        context = item.get("agent_paper_context")
+        context = item.get("monitor_context" if monitor else "agent_paper_context")
         if not isinstance(evidence_ref_id, str) or not isinstance(context, Mapping):
             continue
         quote = context.get("decision_quote")
@@ -68,7 +77,15 @@ def _decision_quote(
             quote.get("source") != "schwab"
             or quote.get("feed") != "l1"
             or quote.get("delivery_mode") != "real_time"
-            or quote.get("delayed") is not False
+            or (not monitor and quote.get("delayed") is not False)
+            or (
+                monitor
+                and (
+                    quote.get("evidence_status") != "verified"
+                    or quote.get("price_basis") != "unadjusted_bid_ask_midpoint"
+                    or quote.get("currency") != "USD"
+                )
+            )
         ):
             continue
         bid = _positive_decimal(quote.get("bid"))

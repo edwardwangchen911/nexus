@@ -19,12 +19,12 @@ RUNNER = ROOT / "scripts/ci/engine_test_groups.py"
 def test_merge_groups_cover_inventory_once_without_manual_suite() -> None:
     selected = [
         selector
-        for group in ("fast", "pg-a", "pg-b")
+        for group in ("fast", "pg-a", "pg-b", "pg-c", "pg-d")
         for selector in selectors_for(group)
     ]
     assert selected == list(MERGE_SELECTORS)
     assert len(selected) == len(set(selected))
-    assert all(selectors_for(group) for group in ("fast", "pg-a", "pg-b"))
+    assert all(selectors_for(group) for group in ("fast", "pg-a", "pg-b", "pg-c", "pg-d"))
     assert "engine/tests" not in selected
 
 
@@ -86,3 +86,111 @@ def test_aggregate_job_fails_closed(result: str) -> None:
         check=False,
     )
     assert (completed.returncode == 0) is (result == "success")
+
+
+def test_postgres_progress_survives_a_failed_test(tmp_path: Path) -> None:
+    case = tmp_path / "test_progress_case.py"
+    case.write_text("def test_passes():\n    assert True\n\ndef test_fails():\n    assert False\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.engine_test_progress", str(case)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": "pg-b"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "test-results/engine-pg-b.jsonl").read_text().splitlines()
+    ]
+    assert [
+        row["outcome"] for row in events if row["event"] == "report" and row["when"] == "call"
+    ] == ["passed", "failed"]
+    assert len([row for row in events if row["event"] == "start"]) == 2
+    assert events[-1]["event"] == "finish" and events[-1]["exitstatus"] == 1
+    assert all("longrepr" not in row and "environment" not in row for row in events)
+
+
+def test_progress_keeps_one_output_when_a_test_changes_directory(tmp_path: Path) -> None:
+    case = tmp_path / "test_directory_case.py"
+    case.write_text(
+        "def test_changes_directory(tmp_path, monkeypatch):\n"
+        "    monkeypatch.chdir(tmp_path)\n"
+        "    assert True\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.engine_test_progress", str(case)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": "fast"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "test-results/engine-fast.jsonl").read_text().splitlines()
+    ]
+    assert [row["when"] for row in events if row["event"] == "report"] == [
+        "setup",
+        "call",
+        "teardown",
+    ]
+    assert events[-1]["event"] == "finish" and events[-1]["exitstatus"] == 0
+
+
+def test_postgres_progress_retains_last_started_case_after_cancellation(tmp_path: Path) -> None:
+    import time
+
+    case = tmp_path / "test_cancel_case.py"
+    case.write_text(
+        "def test_00_completed():\n    assert True\n\n"
+        "def test_01_inflight():\n    import threading\n    threading.Event().wait()\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.engine_test_progress", str(case)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "ENGINE_TEST_GROUP": "pg-c"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    progress = tmp_path / "test-results/engine-pg-c.jsonl"
+    events = []
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if progress.exists():
+                events = [
+                    json.loads(line)
+                    for line in progress.read_text().splitlines(keepends=True)
+                    if line.endswith("\n")
+                ]
+                if any(
+                    row["event"] == "start" and row["nodeid"].endswith("test_01_inflight")
+                    for row in events
+                ):
+                    break
+            assert process.poll() is None, "fixture exited before its in-flight marker"
+            time.sleep(0.02)
+        assert any(
+            row["event"] == "start" and row["nodeid"].endswith("test_01_inflight") for row in events
+        )
+        process.terminate()
+        process.wait(timeout=5)
+        final = [json.loads(line) for line in progress.read_text().splitlines()]
+        assert any(
+            row["event"] == "report" and row["when"] == "call" and row["outcome"] == "passed"
+            for row in final
+        )
+        assert not any(row["event"] == "finish" for row in final)
+        assert not any(
+            row["event"] == "report"
+            and row["when"] == "call"
+            and row["nodeid"].endswith("test_01_inflight")
+            for row in final
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)

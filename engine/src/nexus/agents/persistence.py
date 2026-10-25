@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -621,10 +621,23 @@ async def admit_research_run(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     research_only: bool = False,
+    monitor_increment: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Keep version-inheriting admission failures atomic inside caller transactions."""
 
+    if type(monitor_increment) is not bool or (
+        monitor_increment
+        and (
+            research_only
+            or not formal_stage_capacity
+            or job_type is not JobType.AGENT_PAPER_RESEARCH
+            or model_config_id is None
+            or prompt_version_id is None
+            or version_source_run_id is not None
+        )
+    ):
+        raise ValueError("MONITOR_ADMISSION_ARGUMENT_INVALID")
     if (
         type(research_only) is not bool
         or research_only
@@ -664,6 +677,7 @@ async def admit_research_run(
             formal_stage_capacity=formal_stage_capacity,
             full_input_capacity=full_input_capacity,
             research_only=research_only,
+            monitor_increment=monitor_increment,
             economic_allocation=economic_allocation,
         )
 
@@ -715,6 +729,53 @@ async def _verify_formal_replay_binding(
         raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
 
 
+async def resolve_research_prompt_authority(
+    session: AsyncSession,
+    *,
+    actor_id: str,
+    idempotency_key: str,
+    prompt_version_id: UUID | None = None,
+    version_source_run_id: UUID | None = None,
+    reuse_latest_actor_agent_version: bool = False,
+) -> tuple[
+    AgentResearchRunRecord | None, Mapping[AgentRole, AgentPromptVersionRecord] | None, UUID | None
+]:
+    """One version-resolution contract for snapshot freezing and native admission."""
+    protected_model_id = None
+    if version_source_run_id is not None:
+        prior_run = await session.get(AgentResearchRunRecord, version_source_run_id)
+    elif reuse_latest_actor_agent_version:
+        prior_run = await session.scalar(
+            select(AgentResearchRunRecord)
+            .where(AgentResearchRunRecord.actor_id == actor_id)
+            .order_by(
+                AgentResearchRunRecord.decision_time.desc(),
+                AgentResearchRunRecord.created_at.desc(),
+                AgentResearchRunRecord.id.desc(),
+            )
+            .limit(1)
+        )
+    else:
+        prior_run = None
+    from nexus.paper.formal_budget_protection import pinned_research_authorities
+
+    protected_authority = await pinned_research_authorities(
+        session,
+        actor_id=actor_id,
+        idempotency_key=idempotency_key,
+    )
+    if protected_authority is not None:
+        prior_run = None
+        protected_model_id = protected_authority[1].id
+    if prior_run is not None:
+        prompts = await load_frozen_prompts(session, prior_run)
+    else:
+        prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
+    if protected_authority is not None:
+        prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
+    return prior_run, prompts, protected_model_id
+
+
 async def _admit_research_run(
     session: AsyncSession,
     *,
@@ -736,6 +797,7 @@ async def _admit_research_run(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     research_only: bool = False,
+    monitor_increment: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
@@ -867,6 +929,10 @@ async def _admit_research_run(
         from nexus.agents.research_only import is_research_only, require_research_only_snapshot
 
         replay_snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+        from nexus.monitoring.context import is_monitor_snapshot
+
+        if is_monitor_snapshot(replay_snapshot) != monitor_increment:
+            raise ValueError("MONITOR_ADMISSION_REQUIRED")
         if research_only:
             require_research_only_snapshot(replay_snapshot)
         elif is_research_only(replay_snapshot, run.evidence_manifest):
@@ -899,44 +965,58 @@ async def _admit_research_run(
         require_research_only_snapshot,
         research_only_prompts_valid,
     )
+    from nexus.monitoring.context import is_monitor_snapshot, read_monitor_context
 
+    if is_monitor_snapshot(snapshot) != monitor_increment:
+        raise ValueError("MONITOR_ADMISSION_REQUIRED")
+    if (
+        monitor_increment
+        and await read_monitor_context(
+            session,
+            snapshot_id=request.data_snapshot_id,
+            instrument_id=request.instrument_id,
+            as_of=request.decision_time,
+        )
+        is None
+    ):
+        raise ValueError("MONITOR_CONTEXT_INVALID")
     if research_only:
         require_research_only_snapshot(snapshot)
         if snapshot is None or snapshot.observed_at != request.decision_time:
             raise ValueError("RESEARCH_ONLY_SNAPSHOT_INVALID")
     elif is_research_only(snapshot):
         raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
-    if version_source_run_id is not None:
-        prior_run = await session.get(AgentResearchRunRecord, version_source_run_id)
-    elif reuse_latest_actor_agent_version:
-        prior_run = await session.scalar(
-            select(AgentResearchRunRecord)
-            .where(AgentResearchRunRecord.actor_id == actor_id)
-            .order_by(
-                AgentResearchRunRecord.decision_time.desc(),
-                AgentResearchRunRecord.created_at.desc(),
-                AgentResearchRunRecord.id.desc(),
-            )
-            .limit(1)
-        )
-    else:
-        prior_run = None
-    from nexus.paper.formal_budget_protection import pinned_research_authorities
-
-    protected_authority = await pinned_research_authorities(
+    prior_run, prompts, protected_model_id = await resolve_research_prompt_authority(
         session,
         actor_id=actor_id,
         idempotency_key=idempotency_key,
+        prompt_version_id=prompt_version_id,
+        version_source_run_id=version_source_run_id,
+        reuse_latest_actor_agent_version=reuse_latest_actor_agent_version,
     )
-    if protected_authority is not None:
-        prior_run = None
-        model_config_id = protected_authority[1].id
-    if prior_run is not None:
-        prompts = await load_frozen_prompts(session, prior_run)
-    else:
-        prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
-    if protected_authority is not None:
-        prompts = cast(dict[AgentRole, AgentPromptVersionRecord], protected_authority[0])
+    if protected_model_id is not None:
+        model_config_id = protected_model_id
+    if monitor_increment:
+        binding = await read_monitor_context(
+            session,
+            snapshot_id=request.data_snapshot_id,
+            instrument_id=request.instrument_id,
+            as_of=request.decision_time,
+        )
+        parent = (
+            None
+            if binding is None
+            else await session.get(AgentResearchRunRecord, binding[0].parent_run_id)
+        )
+        if (
+            parent is None
+            or parent.model_config_id != model_config_id
+            or parent.prompt_version_id != prompt_version_id
+        ):
+            raise ValueError("MONITOR_VERSION_BINDING_INVALID")
+        # The original normal bundle may contain independently versioned roles;
+        # an orchestrator ID alone is not a same-version challenger bundle.
+        prompts = await load_frozen_prompts(session, parent)
     if research_only and (
         prompts is None
         or not research_only_prompts_valid(prompts)
@@ -1160,7 +1240,7 @@ async def _admit_research_run(
             "data_snapshot_id": str(request.data_snapshot_id),
             "decision_time": request.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "request_hash": request_hash,
-            "schema_hash": _schema_hash(),
+            "schema_hash": _schema_hash(portfolio_prompt_version=prompts["portfolio"].version),
             "model_hash": model.config_hash,
             "prompt_hash": prompt_manifest_hash,
             "evidence_hash": evidence_manifest_hash,
@@ -1220,7 +1300,7 @@ async def _admit_research_run(
         idempotency_key=idempotency_key,
         status="prepared",
         retry_count=0,
-        schema_hash=_schema_hash(),
+        schema_hash=_schema_hash(portfolio_prompt_version=prompts["portfolio"].version),
         model_hash=model.config_hash,
         prompt_hash=prompt_manifest_hash,
         prompt_manifest=prompt_manifest,
@@ -1236,6 +1316,12 @@ async def _admit_research_run(
     )
     session.add(run)
     await session.flush()
+    if formal_stage_capacity:
+        from nexus.monitoring.daily_v2_capacity import preview_daily_event_capacity
+
+        # The normal frozen authority exists, but no Job can yet be claimed.
+        # A capacity refusal stays inside the caller's complete admission savepoint.
+        await preview_daily_event_capacity(session, run)
     await enqueue_job(
         session,
         key=JobKeyV1(
@@ -1402,11 +1488,24 @@ def _require_nonnegative_decimal(value: Decimal, name: str, *, positive: bool = 
         raise ValueError(f"{name} must be positive")
 
 
-def _schema_hash() -> str:
+def _schema_hash(*, portfolio_prompt_version: str | None = None) -> str:
+    from nexus.agents.committee import (
+        DAILY_PENDING_SCOPE_PROMPT_VERSION,
+        DISCLOSURE_SCOPE_PROMPT_VERSION,
+        MONITORING_SCOPE_PROMPT_VERSION,
+    )
+
+    name = (
+        "research-intent-v10-sec-monitor.schema.json"
+        if portfolio_prompt_version == DISCLOSURE_SCOPE_PROMPT_VERSION
+        else "research-intent-v9-daily-pending.schema.json"
+        if portfolio_prompt_version == DAILY_PENDING_SCOPE_PROMPT_VERSION
+        else "research-intent-v8-price-monitor.schema.json"
+        if portfolio_prompt_version == MONITORING_SCOPE_PROMPT_VERSION
+        else "research-intent-v1.schema.json"
+    )
     return hashlib.sha256(
-        (
-            Path(__file__).resolve().parents[4] / "contracts/agent/research-intent-v1.schema.json"
-        ).read_bytes()
+        (Path(__file__).resolve().parents[4] / "contracts/agent" / name).read_bytes()
     ).hexdigest()
 
 

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+from copy import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -28,7 +29,7 @@ from nexus.agents.codex_versions import (
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
-from nexus.agents.committee import ROLE_ORDER, CommitteeRoleOutput
+from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS, ROLE_ORDER, CommitteeRoleOutput
 from nexus.agents.execution import CommitteeModel
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
@@ -191,7 +192,16 @@ def inspect_critique_request(
             for output in outputs
             for index, claim in enumerate(output.claims)
         ]
-        payload, output_model = committee.build_stage_request(
+        readback_committee = committee
+        if (
+            getattr(committee._prompts["portfolio"], "version", None)
+            in MONITORING_SCOPE_PROMPT_VERSIONS
+        ):
+            # v8 also binds the original proposal and reviews, not just claim text.
+            # Use an isolated view so inspection cannot mutate the producer state.
+            readback_committee = copy(committee)
+            readback_committee._outputs = {output.role: output for output in outputs}
+        payload, output_model = readback_committee.build_stage_request(
             stage=stage,
             request=request,
             evidence_refs=evidence_refs,

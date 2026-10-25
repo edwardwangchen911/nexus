@@ -176,6 +176,8 @@ def test_first_delivery_consumes_terminal_outcomes_and_session_summary() -> None
         ("paper.execution.advance.filled", "paper_execution_v1"),
         ("paper.execution.advance.cancelled", "paper_execution_v1"),
         ("paper.execution.cancelled", "paper_execution_v1"),
+        ("research.monitor.triggered", "research_price_trigger_v1"),
+        ("research.monitor.batch_triggered", "research_monitor_batch_v1"),
     )
 
 

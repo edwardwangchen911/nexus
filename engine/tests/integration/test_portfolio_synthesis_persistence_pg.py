@@ -8,6 +8,7 @@ from hashlib import sha256
 from uuid import UUID, uuid4
 
 import pytest
+from helpers.deferred_monitor_guards import validate_pending_monitor_guards
 from helpers.paper_batch import CALENDAR_ID, DECISION_TIME, INSTRUMENTS, seed_paper_batch
 from integration.test_agent_paper_cycle_pg import (
     _safe_no_trade_intent,
@@ -217,6 +218,7 @@ async def seed_synthesis(
                         content_hash=bound.content_hash,
                     )
                 )
+            await validate_pending_monitor_guards(session, table="agent_research_runs")
             await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             await session.execute(
                 text(

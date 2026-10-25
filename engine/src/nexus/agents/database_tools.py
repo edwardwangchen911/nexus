@@ -14,7 +14,7 @@ from sqlalchemy.orm import aliased
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
 from nexus.agents.paper_context import SOURCE as PAPER_CONTEXT_SOURCE
-from nexus.agents.paper_context import read_agent_paper_research_context
+from nexus.agents.paper_context import AgentPaperResearchContext, read_agent_paper_research_context
 from nexus.agents.portfolio_context import (
     ContextDiagnostic,
     PortfolioResearchContext,
@@ -133,6 +133,18 @@ def _context_payload(context: PortfolioResearchContext, *, exclude: set[str]) ->
     if isinstance(comparison, dict) and context.proposal_comparison is not None:
         comparison["economic_comparison"] = assess_frozen_comparison(context.proposal_comparison)
     return payload
+
+
+def _paper_monitor_model_view(context: AgentPaperResearchContext) -> dict[str, object]:
+    value = context.model_dump(mode="json")
+    if context.pending_monitoring_v2 is not None:
+        from nexus.monitoring.daily_v2_view import daily_context_model_view
+
+        value["pending_monitoring_v2"] = daily_context_model_view(
+            value["pending_monitoring_v2"],
+            frozen_context_hash=context.pending_monitoring_v2.content_hash,
+        )
+    return value
 
 
 class _BoundDatabaseExecutors:
@@ -258,6 +270,33 @@ class _BoundDatabaseExecutors:
         )
         paper_context_value = paper_context[0] if paper_context is not None else None
         paper_context_id = paper_context[1].id if paper_context is not None else None
+        snapshot = await self._session.get(DataSnapshot, self._snapshot_id)
+        monitor_refs = tuple(
+            ref
+            for ref in self._evidence
+            if ref.source in {"nexus_price_monitor_increment", "nexus_monitor_increment_v2"}
+        )
+        monitor_context = None
+        if monitor_refs or (
+            snapshot is not None
+            and snapshot.payload.get("purpose")
+            in {"price_monitor_increment_v1", "monitor_increment_v2"}
+        ):
+            from nexus.monitoring.context import read_monitor_context
+
+            monitor_context = await read_monitor_context(
+                self._session,
+                snapshot_id=self._snapshot_id,
+                instrument_id=self._instrument_id,
+                as_of=self._decision_time,
+            )
+            if (
+                monitor_context is None
+                or len(monitor_refs) != 1
+                or monitor_refs[0].id != monitor_context[1].id
+                or paper_context is not None
+            ):
+                return self._invalid_frozen_evidence_authority("get_security_snapshot")
         result = self._result(
             "get_security_snapshot",
             [
@@ -322,17 +361,42 @@ class _BoundDatabaseExecutors:
                         else {}
                     ),
                     **(
-                        {"agent_paper_context": paper_context_value.model_dump(mode="json")}
+                        {"agent_paper_context": _paper_monitor_model_view(paper_context_value)}
                         if record.source == PAPER_CONTEXT_SOURCE
                         and record.id == paper_context_id
                         and paper_context_value is not None
+                        else {}
+                    ),
+                    **(
+                        {"monitor_context": monitor_context[0].model_dump(mode="json")}
+                        if monitor_context is not None and record.id == monitor_context[1].id
                         else {}
                     ),
                 }
                 for record in self._evidence
             ],
         )
-        snapshot = await self._session.get(DataSnapshot, self._snapshot_id)
+        if monitor_context is not None:
+            from nexus.monitoring.mixed_context import MixedMonitorContext, model_view
+
+            result = {
+                **result,
+                "purpose": "monitor_increment_v2"
+                if isinstance(monitor_context[0], MixedMonitorContext)
+                else "price_monitor_increment_v1",
+            }
+            from nexus.monitoring.mixed_context import MixedMonitorContext
+
+            if isinstance(monitor_context[0], MixedMonitorContext):
+                items = result.get("items")
+                if not isinstance(items, list):
+                    return self._invalid_frozen_evidence_authority("get_security_snapshot")
+                for item in items:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("source") == "nexus_monitor_increment_v2"
+                    ):
+                        item["monitor_context"] = model_view(monitor_context[0])
         if snapshot is not None and snapshot.payload.get("purpose") == "research_only_v2":
             if not observation_bindings:
                 return self._invalid_frozen_evidence_authority("get_security_snapshot")

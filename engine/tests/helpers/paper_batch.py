@@ -107,6 +107,7 @@ async def seed_paper_batch(
     execution_market_close_at: datetime | None = None,
     expired_ticker_instrument_id: UUID | None = None,
     additional_instruments: tuple[tuple[UUID, Decimal, Decimal, str], ...] = (),
+    risk_bucket_overrides: dict[UUID, str] | None = None,
 ) -> PaperBatchSeed:
     decision_session = decision_time.date()
     available_at = decision_time - timedelta(hours=1)
@@ -227,7 +228,7 @@ async def seed_paper_batch(
                         exchange="NASDAQ",
                         currency="USD",
                         tick_size=Decimal("0.01"),
-                        risk_bucket=sector,
+                        risk_bucket=(risk_bucket_overrides or {}).get(instrument_id, sector),
                     )
                 )
                 session.add(

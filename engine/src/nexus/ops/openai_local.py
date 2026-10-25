@@ -188,6 +188,8 @@ async def prepare_database(
     flexible_stage_budget: bool = False,
     formal_flexible_stage_budget: bool = False,
     formal_bounded_stage_budget: bool = False,
+    price_monitoring: bool = False,
+    disclosure_monitoring: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -200,6 +202,12 @@ async def prepare_database(
         or (set(url.query) & {"host", "hostaddr", "port", "dsn", "database", "dbname"})
     ):
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    if type(disclosure_monitoring) is not bool or (disclosure_monitoring and not price_monitoring):
+        raise ValueError("CODEX_DISCLOSURE_MONITORING_SETUP_INVALID")
+    if type(price_monitoring) is not bool or (
+        price_monitoring and formal_bounded_stage_budget is not True
+    ):
+        raise ValueError("CODEX_PRICE_MONITORING_SETUP_INVALID")
     if (
         type(formal_bounded_stage_budget) is not bool
         or formal_bounded_stage_budget
@@ -453,6 +461,9 @@ async def prepare_database(
             security_research_scope=formal_bounded_stage_budget,
             claim_review_scope=formal_bounded_stage_budget,
             inference_review_scope=formal_bounded_stage_budget,
+            monitoring_scope=price_monitoring,
+            daily_pending_scope=price_monitoring,
+            disclosure_scope=disclosure_monitoring,
         )
         prompts.append(
             (
@@ -739,15 +750,30 @@ def main() -> int:
     parser.add_argument(
         "--allow-stage-time-budget-registration",
         action="store_true",
-        help="Explicitly allow v6 or pending v8 registration in the configured local database; "
-        "v6 may change future selection, pending v8 remains inactive; never starts research",
+        help="Allow v6 or pending monitoring registration in the configured local database; "
+        "v6 may change selection, pending monitoring stays inactive; never starts research",
     )
     parser.add_argument(
         "--formal-bounded-stage-budget",
         action="store_true",
         help="Explicit v11 registration only; does not start research",
     )
+    parser.add_argument(
+        "--price-monitoring",
+        action="store_true",
+        help="Register the v9 daily-pending monitor prompt with formal bounded setup; "
+        "no research or monitoring",
+    )
+    parser.add_argument(
+        "--disclosure-monitoring",
+        action="store_true",
+        help="Register explicit v10 SEC baseline monitoring with --price-monitoring",
+    )
     args = parser.parse_args()
+    if args.disclosure_monitoring and (args.action != "setup" or not args.price_monitoring):
+        parser.error("--disclosure-monitoring requires explicit price-monitoring setup")
+    if args.price_monitoring and (args.action != "setup" or not args.formal_bounded_stage_budget):
+        parser.error("--price-monitoring requires explicit formal bounded setup")
     if args.formal_bounded_stage_budget and (
         args.action != "setup"
         or not args.full_input_capacity
@@ -918,6 +944,8 @@ def main() -> int:
                     **({"stage_time_budget": True} if args.stage_time_budget else {}),
                     **({"formal_stage_capacity": True} if args.formal_stage_capacity else {}),
                     **({"full_input_capacity": True} if args.full_input_capacity else {}),
+                    **({"price_monitoring": True} if args.price_monitoring else {}),
+                    **({"disclosure_monitoring": True} if args.disclosure_monitoring else {}),
                     **({"flexible_stage_budget": True} if args.flexible_stage_budget else {}),
                     **(
                         {"formal_bounded_stage_budget": True}

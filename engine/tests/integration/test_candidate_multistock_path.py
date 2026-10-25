@@ -44,6 +44,11 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     recover_unknown=False,
     decision_delay=None,
     sdk_lifecycle_case=None,
+    monitoring=False,
+    monitoring_rejected=False,
+    monitoring_threshold="123.45",
+    disclosure=False,
+    before_research=None,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -64,7 +69,44 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         monkeypatch,
         candidate_instruments=FIVE[:count],
         decision_time=AT,
+        **(
+            {
+                "candidate_symbols": ("AAPL", "AVGO", "NVDA")[:count],
+                "risk_bucket_overrides": {INSTRUMENTS[0][0]: "EQUITY"},
+            }
+            if disclosure
+            else {}
+        ),
     )
+    if monitoring:
+        from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
+
+        # Register a later immutable version, without changing any old prompt.
+        await _set_test_insert_clock(sessions, AT - timedelta(seconds=1))
+        await prepare_database(
+            settings,
+            **V9_OPTIONS,
+            formal_bounded_stage_budget=True,
+            price_monitoring=True,
+            disclosure_monitoring=disclosure,
+        )
+        from nexus.agents.persistence import load_complete_prompt_authority
+        from nexus.persistence.models.agents import AgentPromptVersionRecord
+
+        async with sessions() as session:
+            selected_prompts = await load_complete_prompt_authority(session)
+            prompt_rows = (
+                await session.scalars(
+                    select(AgentPromptVersionRecord).where(
+                        AgentPromptVersionRecord.role == "portfolio"
+                    )
+                )
+            ).all()
+            assert selected_prompts["portfolio"].version == (
+                "local-portfolio-synthesis-v10-sec-monitor"
+                if disclosure
+                else "local-portfolio-synthesis-v9-daily-pending"
+            ), [(row.version, row.created_at.isoformat()) for row in prompt_rows]
     calls = []
 
     clock_at = [AT + timedelta(seconds=1)]
@@ -89,7 +131,14 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
 
         monkeypatch.setattr(AsyncSession, "scalar", database_clock)
 
+    if before_research is not None:
+        await before_research(settings, sessions, authority, manifest, clock_at)
+
     async def invoke(payload, **kwargs):
+        if disclosure:
+            from unit.agents.test_codex_sdk import _restore_view
+
+            payload = _restore_view(payload)
         stage = payload["stage"]
         calls.append(stage)
         assert kwargs["timeout_seconds"] > 0
@@ -130,6 +179,89 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     for prompt in payload["prompts"]
                 ]
             }
+        if monitoring:
+            from unit.agents.test_monitoring_producer import proposal_wire
+
+            if stage == "research":
+                for row in response["roles"]:
+                    row["daily_pending_proposal"] = None
+                    row["monitoring_proposal"] = (
+                        proposal_wire(AT) if row["role"] == "market_state" else None
+                    )
+                    if row["monitoring_proposal"] is not None:
+                        row["monitoring_proposal"]["condition"]["threshold"] = monitoring_threshold
+            elif stage == "critique":
+                for row in response["roles"]:
+                    row["daily_pending_review"] = None
+                    row["monitoring_review"] = (
+                        None
+                        if payload.get("monitoring_proposal") is None
+                        else {
+                            "proposal_hash": payload["monitoring_proposal"]["content_hash"],
+                            "decision": "rejected"
+                            if monitoring_rejected and row["role"] == "evidence_audit"
+                            else "accepted",
+                            "rationale": "核对冻结证据、价格口径和复核时限。",
+                            "citations": [0],
+                        }
+                    )
+            else:
+                response["daily_pending_adoption_hash"] = None
+                response["monitoring_adoption_hash"] = (
+                    None
+                    if payload.get("monitoring_proposal") is None
+                    else payload["monitoring_proposal"]["content_hash"]
+                )
+        if disclosure:
+            from nexus.monitoring.disclosure_contracts import disclosure_from_inputs
+
+            context = disclosure_from_inputs(payload["frozen_inputs"])
+            baseline = context.get("baseline") if isinstance(context, dict) else None
+            reference = next(
+                row["index"]
+                for row in payload["evidence"]
+                if row["source"] in {"nexus_agent_paper_context", "nexus_monitor_increment_v2"}
+            )
+            if stage == "research":
+                for row in response["roles"]:
+                    row["disclosure_proposal"] = None
+                    if row["role"] == "market_state" and baseline is not None:
+                        row["disclosure_proposal"] = {
+                            "condition": {
+                                "signal": "sec.issuer_disclosure_added",
+                                "operator": "exists_new",
+                                "threshold": True,
+                                "unit": "filing",
+                                "purpose": "review",
+                                "source": "sec",
+                                "forms": ["8-K", "8-K/A"],
+                                "max_age_seconds": 300,
+                                "time_authority": "frozen_index_vs_local_receipt",
+                            },
+                            "baseline_hash": baseline["snapshot_hash"],
+                            "rationale": "新收录披露仅触发复核，正文影响仍需核验。",
+                            "citations": [reference],
+                            "review_due_at": (AT + timedelta(days=1)).isoformat(),
+                            "valid_until": (AT + timedelta(days=2)).isoformat(),
+                        }
+            elif stage == "critique":
+                for row in response["roles"]:
+                    row["disclosure_review"] = (
+                        None
+                        if baseline is None or payload.get("disclosure_proposal") is None
+                        else {
+                            "proposal_hash": payload["disclosure_proposal"]["content_hash"],
+                            "decision": "accepted",
+                            "rationale": "复核原件基线、截止和指定类别。",
+                            "citations": [reference],
+                        }
+                    )
+            else:
+                response["disclosure_adoption_hash"] = (
+                    payload["disclosure_proposal"]["content_hash"]
+                    if baseline is not None and payload.get("disclosure_proposal") is not None
+                    else None
+                )
         return json.dumps(response), UsageSnapshot(input_tokens=100, output_tokens=100)
 
     monkeypatch.setattr("nexus.worker._ONCE_STARTED_AT", AT)
@@ -156,21 +288,24 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     config, config_hash = flexible_stage_config(), flexible_stage_config_hash()
                 else:
                     config, config_hash = capacity_config(), capacity_config_hash()
-                session.add(
-                    AgentModelConfigRecord(
-                        model_id=config["model_id"],
-                        version=config["version"],
-                        config_hash=config_hash,
-                        max_input_tokens=96000,
-                        max_output_tokens=8192,
-                        max_tool_calls=0,
-                        input_usd_per_million=Decimal(0),
-                        output_usd_per_million=Decimal(0),
-                        pricing_available_at=datetime.fromisoformat(config["pricing_available_at"]),
-                        pricing_expires_at=datetime.fromisoformat(config["pricing_expires_at"]),
-                        created_at=AT - timedelta(seconds=1),
+                if not monitoring:
+                    session.add(
+                        AgentModelConfigRecord(
+                            model_id=config["model_id"],
+                            version=config["version"],
+                            config_hash=config_hash,
+                            max_input_tokens=96000,
+                            max_output_tokens=8192,
+                            max_tool_calls=0,
+                            input_usd_per_million=Decimal(0),
+                            output_usd_per_million=Decimal(0),
+                            pricing_available_at=datetime.fromisoformat(
+                                config["pricing_available_at"]
+                            ),
+                            pricing_expires_at=datetime.fromisoformat(config["pricing_expires_at"]),
+                            created_at=AT - timedelta(seconds=1),
+                        )
                     )
-                )
                 await session.flush()
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(
@@ -269,6 +404,16 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             assert len(runs) == len(jobs) == count
             assert {run.instrument_id for run in runs} == set(batch.instrument_ids)
             assert all(run.model_config_id == model.id for run in runs)
+            if monitoring:
+                assert all(
+                    run.prompt_manifest["portfolio"]["version"]
+                    == (
+                        "local-portfolio-synthesis-v10-sec-monitor"
+                        if disclosure
+                        else "local-portfolio-synthesis-v9-daily-pending"
+                    )
+                    for run in runs
+                ), [run.prompt_manifest["portfolio"] for run in runs]
             assert all(
                 job.job_type == "agent.paper.research" and job.attempt_count == 0 for job in jobs
             )
@@ -286,6 +431,24 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert state.research_job_id == job.id
             else:
                 assert await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
+            if monitoring:
+                from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                async with sessions() as session:
+                    observed_run = await session.get(
+                        AgentResearchRunRecord, UUID(job.payload["run_id"])
+                    )
+                    observed_outputs = (
+                        await session.scalars(
+                            select(AgentResearchOutputRecord).where(
+                                AgentResearchOutputRecord.run_id == observed_run.id
+                            )
+                        )
+                    ).all()
+                    assert observed_run.status == "completed", [
+                        (output.status, output.payload.get("diagnostic"))
+                        for output in observed_outputs
+                    ]
             assert not await run_agent_worker_once(settings, job_ids=(job.id,), **research_mode)
             if fault == "research_unknown":
                 from nexus.ops.manual_paper_host import finish_configured_manual_request
