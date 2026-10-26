@@ -2584,6 +2584,7 @@ async def run_local_agent_paper_loop(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], datetime] = _utc_now,
     monotonic: Callable[[], float] = monotonic_clock,
+    recovery_guard: Callable[[EngineSettings], Awaitable[None]] | None = None,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
 
@@ -2613,6 +2614,8 @@ async def run_local_agent_paper_loop(
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = clock()
     with acquire_agent_paper_lock():
+        if recovery_guard is not None:
+            await recovery_guard(settings)
         shutdown = asyncio.Event()
 
         async def wait_sleep(seconds: float) -> None:
@@ -5013,13 +5016,19 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics = parser.add_mutually_exclusive_group()
     diagnostics.add_argument("--service-preflight", action="store_true")
     diagnostics.add_argument("--service-startup-preflight", action="store_true")
+    diagnostics.add_argument("--service-recovery-check", action="store_true")
     diagnostics.add_argument("--service-status", action="store_true")
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--env-file", type=Path)
     args = parser.parse_args(argv)
     root = args.repo_root.resolve() if args.repo_root is not None else Path.cwd()
     env_file = None
-    if args.repo_root is not None or args.env_file is not None or args.service_status:
+    if (
+        args.repo_root is not None
+        or args.env_file is not None
+        or args.service_status
+        or args.service_recovery_check
+    ):
         try:
             if args.repo_root is None or args.env_file is None:
                 raise LocalStackConfigurationError("AGENT_PAPER_SERVICE_CONFIG_REQUIRED")
@@ -5048,6 +5057,35 @@ def main(argv: list[str] | None = None) -> int:
             process_environment,
             env_file=env_file,
         )
+        if args.service_recovery_check:
+            from nexus.ops.agent_paper_recovery import (
+                inspect_recovery_readiness,
+                require_recovery_process_quiescence,
+            )
+
+            failure_code = "AGENT_PAPER_RECOVERY_SCOPE_INVALID"
+            try:
+                recovery_settings = _FileEngineSettings.model_validate(environment)
+                failure_code = "AGENT_PAPER_RECOVERY_PROCESS_UNCONFIRMED"
+                with acquire_agent_paper_lock():
+                    require_recovery_process_quiescence()
+                    failure_code = "AGENT_PAPER_RECOVERY_UNAVAILABLE"
+                    result = asyncio.run(inspect_recovery_readiness(recovery_settings))
+            except Exception as error:
+                if (
+                    isinstance(error, RuntimeError)
+                    and str(error) == "AGENT_PAPER_LOOP_ALREADY_RUNNING"
+                ):
+                    failure_code = "AGENT_PAPER_RECOVERY_HOST_PRESENT"
+                result = {
+                    "status": "blocked",
+                    "blocking_codes": [failure_code],
+                    "checked_at": _utc_now().isoformat(),
+                    "execution_locked": True,
+                    "external_requests": 0,
+                }
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result["status"] == "ready" else 1
         if args.service_startup_preflight:
             try:
                 result = agent_paper_service_startup_preflight(environment, repo_root=root)

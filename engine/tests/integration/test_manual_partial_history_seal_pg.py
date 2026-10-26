@@ -31,6 +31,20 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 
 
 @pytest.mark.asyncio
+async def test_accepted_unknown_history_is_inspectable_without_business_writes(
+    migrated_database_url, monkeypatch
+):
+    await test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs(
+        migrated_database_url,
+        monkeypatch,
+        failed_stage="research",
+        same_day=True,
+        bounded=True,
+        read_only_probe=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_maintenance_holds_real_schema_version_until_transaction_end(
     migrated_database_url, monkeypatch
 ):
@@ -86,6 +100,7 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
     same_day,
     prior_preparation=None,
     bounded=False,
+    read_only_probe=False,
 ):
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     engine, sessions, authority, manifest = await seed_normal_path(
@@ -252,9 +267,28 @@ async def test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_
             )
             if rejected:
                 return
+        if read_only_probe:
+            from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
+
+            before_acceptance = await inspect_recovery_readiness(runtime)
+            assert before_acceptance["status"] == "blocked"
+            assert before_acceptance["blocking_codes"] == ["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"]
         receipt = await manual_paper.run(runtime, args)
         assert receipt.sealed_research == 1 and not receipt.replayed
         assert (await manual_paper.run(runtime, args)).replayed
+        if read_only_probe:
+            from sqlalchemy import text
+
+            async with sessions.begin() as inspection:
+                await inspection.execute(text("SET TRANSACTION READ ONLY"))
+                await manual_request.require_manual_account_available(
+                    inspection,
+                    account_id=authority.account_id,
+                    now=clock[0],
+                    read_only=True,
+                )
+            recovery = await inspect_recovery_readiness(runtime)
+            assert recovery["status"] == "ready" and recovery["blocking_codes"] == []
         async with sessions.begin() as session:
             row = await session.get(ManualPaperRequest, request.request_id)
             assert (await manual_request.read_manual_request(session, row)).status == "unavailable"
