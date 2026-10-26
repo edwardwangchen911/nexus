@@ -866,6 +866,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     two_candidates: bool,
     max_symbols: int,
     window_case: str,
+    historical_target: bool = False,
 ) -> None:
     account_id = UUID(int=1)
     portfolio_id = UUID(int=2)
@@ -873,7 +874,13 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
     instrument_id = UUID(int=4)
     bindings = {"AAPL": instrument_id, **({"MSFT": UUID(int=14)} if two_candidates else {})}
     inherited_position_id = UUID(int=24)
-    execution_bindings = {**bindings, "GOOGL": inherited_position_id}
+    target_instrument_id = UUID(int=25)
+    target = SimpleNamespace(strategy_decision_id=UUID(int=26))
+    execution_bindings = {
+        **bindings,
+        "GOOGL": inherited_position_id,
+        **({"AMZN": target_instrument_id} if historical_target else {}),
+    }
     artifact_id = UUID(int=5)
     quote_id = UUID(int=6)
     cycle_id = UUID(int=7)
@@ -920,7 +927,7 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             if self.calls == 1:
                 return initial
             if self.calls == 2:
-                return None
+                return target if historical_target else None
             return frozen
 
         async def get(self, model, _identifier):
@@ -1074,6 +1081,16 @@ def test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
             positions=(SimpleNamespace(instrument_id=inherited_position_id),), open_orders=()
         )
 
+    async def historical_baseline(_session, **kwargs):
+        assert kwargs["target"] is target
+        assert kwargs["account_id"] == account_id
+        assert kwargs["candidate_stage_capacity"] is False
+        assert kwargs["formal_stage_capacity"] is manual
+        return SimpleNamespace(proposal=SimpleNamespace(weights={target_instrument_id: 1}))
+
+    monkeypatch.setattr(
+        "nexus.paper.agent_decision_store._load_portfolio_target_baseline", historical_baseline
+    )
     monkeypatch.setattr("nexus.paper.projection.load_paper_projection", projection)
     monkeypatch.setattr(cli, "load_quasi_realtime_cycle_authority", root)
     monkeypatch.setattr(
@@ -1879,9 +1896,43 @@ def test_pure_dispatch_primary_survives_outer_cleanup(monkeypatch, cancelled, cl
     with pytest.raises(type(primary)) as caught:
         asyncio.run(
             host.dispatch_manual_request(
-                settings, trigger_settings, request_id=UUID(int=3),
-                repo_root=Path("/unused"), calendar_authority_id=None, process_environment={},
+                settings,
+                trigger_settings,
+                request_id=UUID(int=3),
+                repo_root=Path("/unused"),
+                calendar_authority_id=None,
+                process_environment={},
             )
         )
     assert caught.value is primary
     assert calls == [True]
+
+
+@pytest.mark.parametrize(("two_candidates", "max_symbols"), [(False, 12), (True, 12), (True, 2)])
+@pytest.mark.parametrize("window_case", ["scheduled", "manual", "preopen", "close_during_collect"])
+def test_trigger_includes_historical_target_scope_with_its_own_profile(
+    tmp_path, monkeypatch, two_candidates, max_symbols, window_case
+):
+    test_trigger_orders_provider_facts_before_database_freeze_and_cycle(
+        tmp_path, monkeypatch, two_candidates, max_symbols, window_case, historical_target=True
+    )
+
+
+@pytest.mark.parametrize("invalid_profile", [None, 0, 1, "true"])
+def test_market_preparation_rejects_non_boolean_formal_profile_before_io(invalid_profile):
+    with pytest.raises(ValueError, match="^CODEX_FORMAL_CYCLE_PROFILE_INVALID$"):
+        asyncio.run(
+            cli.prepare_schwab_decision_authority(
+                object(),
+                object(),
+                object(),
+                account_id=UUID(int=1),
+                decision_session=datetime(2026, 10, 9).date(),
+                decision_slot_at=datetime(2026, 10, 9, 14, tzinfo=UTC),
+                idempotency_key="invalid-profile",
+                identities=(),
+                repo_root=Path.cwd(),
+                client=object(),
+                formal_stage_capacity=invalid_profile,
+            )
+        )

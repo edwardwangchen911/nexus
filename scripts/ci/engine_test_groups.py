@@ -59,6 +59,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_synthesis_sdk_lifecycle_pg.py",
     "engine/tests/integration/test_synthesis_failure_facts_pg.py",
     "engine/tests/integration/test_observation_readback_pg.py",
+    "engine/tests/integration/test_formal_cycle_admission.py",
     "engine/tests/integration/test_formal_synthesis_orphan_pg.py",
     "engine/tests/integration/test_formal_research_orphan_pg.py",
     "engine/tests/integration/test_research_orphan_seal_pg.py",

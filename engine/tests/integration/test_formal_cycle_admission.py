@@ -1,6 +1,7 @@
 """Explicit formal cycles freeze native batch admission, without model or provider calls."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -17,8 +18,17 @@ from nexus.paper.agent_cycle import (
     start_schwab_agent_paper_cycle,
 )
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
-from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
+from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
+    AgentPortfolioSynthesisRunRecord,
+    AgentResearchRunRecord,
+)
+from nexus.persistence.models.paper import (
+    AgentPaperCycleEventRecord,
+    AgentPaperCycleRecord,
+    PaperTargetVersionRecord,
+    StrategyDecisionRecord,
+)
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
@@ -245,5 +255,109 @@ async def test_formal_cycle_freezes_complete_native_batch_and_exact_replay(
             assert (
                 await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 1
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("historical_formal", [False, True], ids=["legacy", "formal"])
+@pytest.mark.parametrize("invalid_risk", [False, True], ids=["valid-risk", "invalid-risk"])
+async def test_formal_start_reads_historical_target_without_inheriting_new_profile(
+    migrated_database_url, monkeypatch, historical_formal, invalid_risk
+):
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    await prepare_database(settings, **OPTIONS)
+    engine, sessions, authority, manifest = await seed_normal_path(
+        migrated_database_url, monkeypatch, candidate_instruments=FIVE[:3], decision_time=AT
+    )
+    decision_id = UUID(int=987)
+    target_reads = []
+
+    async def historical_proposal(session, **kwargs):
+        target_reads.append(kwargs)
+        assert kwargs["account_id"] == authority.account_id
+        assert kwargs["decision_id"] == decision_id
+        if kwargs.get("formal_stage_capacity", False) is not historical_formal:
+            raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
+        return SimpleNamespace(proposal=SimpleNamespace(weights={}))
+
+    monkeypatch.setattr(
+        "nexus.paper.agent_decision_store.load_portfolio_proposal", historical_proposal
+    )
+    if invalid_risk:
+
+        async def reject_risk(*args, **kwargs):
+            raise ValueError("risk query authority is invalid")
+
+        monkeypatch.setattr(
+            "nexus.paper.agent_cycle.prepare_schwab_realtime_risk_snapshot", reject_risk
+        )
+    try:
+        await _set_test_insert_clock(sessions, AT)
+        async with sessions.begin() as session:
+            original_scalar = session.scalar
+            original_get = session.get
+
+            async def with_historical_decision(model_type, identifier, *args, **kwargs):
+                if model_type is StrategyDecisionRecord and identifier == decision_id:
+                    return SimpleNamespace(
+                        account_id=authority.account_id, agent_paper_cycle_id=UUID(int=988)
+                    )
+                return await original_get(model_type, identifier, *args, **kwargs)
+
+            monkeypatch.setattr(session, "get", with_historical_decision)
+
+            async def with_historical_target(statement, *args, **kwargs):
+                if any(
+                    item.get("entity") is PaperTargetVersionRecord
+                    for item in getattr(statement, "column_descriptions", ())
+                ):
+                    return SimpleNamespace(strategy_decision_id=decision_id)
+                if any(
+                    item.get("entity") is AgentPortfolioSynthesisRunRecord
+                    for item in getattr(statement, "column_descriptions", ())
+                ):
+                    return SimpleNamespace(
+                        pricing_version=(
+                            FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+                            if historical_formal
+                            else "codex-sdk-portfolio-decision-v1"
+                        )
+                    )
+                return await original_scalar(statement, *args, **kwargs)
+
+            monkeypatch.setattr(session, "scalar", with_historical_target)
+            model = await session.scalar(
+                select(AgentModelConfigRecord).where(
+                    AgentModelConfigRecord.version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION
+                )
+            )
+            batch = await create_agent_paper_candidate_batch(
+                session,
+                account_id=authority.account_id,
+                universe_snapshot_id=authority.universe_snapshot_id,
+                instrument_ids=tuple(item.instrument_id for item in manifest),
+                idempotency_key="historical-target-batch",
+                created_at=AT,
+            )
+            result = await start_schwab_agent_paper_cycle(
+                session,
+                authority=authority,
+                decision_slot_at=AT,
+                idempotency_key="historical-target-formal-start",
+                requested_instrument_ids=batch.instrument_ids,
+                candidate_batch_id=batch.batch_id,
+                formal_stage_capacity=True,
+                formal_model_config_id=model.id,
+            )
+            assert result.result_code == (
+                "RISK_INPUT_REQUIRED" if invalid_risk else "RESEARCH_JOBS_PREPARED"
+            )
+            assert len(target_reads) == 1
+            runs = tuple(await session.scalars(select(AgentResearchRunRecord)))
+            jobs = tuple(await session.scalars(select(Job)))
+            assert len(runs) == len(jobs) == (0 if invalid_risk else 3)
+            assert all(run.model_config_id == model.id for run in runs)
+            assert all(run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION for run in runs)
     finally:
         await engine.dispose()
