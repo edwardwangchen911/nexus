@@ -467,3 +467,52 @@ def test_process_inspection_preserves_safe_failure_boundary(monkeypatch, boundar
     if boundary == "identity":
         expected["diagnostic_reason"] = "EXECUTABLE_MISMATCH"
     assert failure.value.safe_diagnostics() == expected
+
+
+@pytest.mark.parametrize(
+    "case", ["ready", "missing", "not_executable", "daemon_error", "sdk_alive", "linux", "on_path"]
+)
+def test_login_process_guard_resolves_installed_docker_without_shell_path(
+    tmp_path, monkeypatch, case
+):
+    from nexus.paper import history_seal as seal
+
+    docker = tmp_path / "Docker.app/Contents/Resources/bin/docker"
+    docker.parent.mkdir(parents=True)
+    if case != "missing":
+        docker.write_text("#!/bin/sh\nexit 0\n")
+        docker.chmod(0o600 if case == "not_executable" else 0o700)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setattr(seal, "_MACOS_DOCKER_CLI", docker, raising=False)
+    monkeypatch.setattr("sys.platform", "linux" if case == "linux" else "darwin")
+    monkeypatch.setattr(
+        seal.shutil, "which", lambda _: "/existing/docker" if case == "on_path" else None
+    )
+    commands = []
+
+    def execute(command, **kwargs):
+        commands.append(command)
+        if command[0] == "/bin/ps":
+            return subprocess.CompletedProcess(
+                command, 0, f"1 0 {os.getuid()} {_BIRTH} /usr/bin/python\n"
+            )
+        expected_command = "docker" if case == "on_path" else str(docker)
+        if command[0] != expected_command or not docker.exists() or not os.access(docker, os.X_OK):
+            raise FileNotFoundError("unavailable executable")
+        if case == "daemon_error":
+            return subprocess.CompletedProcess(command, 1, "")
+        if command[1] == "ps":
+            return subprocess.CompletedProcess(command, 0, "abc123\n")
+        return subprocess.CompletedProcess(
+            command, 0, "PID COMMAND\n1 " + ("codex" if case == "sdk_alive" else "python") + "\n"
+        )
+
+    monkeypatch.setattr(seal.subprocess, "run", execute)
+    if case in {"ready", "on_path"}:
+        seal.require_research_processes_quiescent()
+        expected_command = "docker" if case == "on_path" else str(docker)
+        assert [c[1] for c in commands if c[0] == expected_command] == ["ps", "top"]
+    else:
+        with pytest.raises(seal.ResearchProcessDiagnosticError):
+            seal.require_research_processes_quiescent()
+    assert os.environ["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
