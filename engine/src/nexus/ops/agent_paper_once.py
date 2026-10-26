@@ -672,8 +672,11 @@ async def prepare_schwab_decision_authority(
     process_environment: Mapping[str, str] | None = None,
     expand_execution_scope: bool = False,
     manual_market_window: bool = False,
+    formal_stage_capacity: bool = False,
 ) -> CycleAuthority:
     """Freeze one exact shared provider pass for portfolio or registered evaluation."""
+    if type(formal_stage_capacity) is not bool:
+        raise ValueError("CODEX_FORMAL_CYCLE_PROFILE_INVALID")
     if initial_time is None:
         initial_time = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(initial_time, datetime):
@@ -723,7 +726,7 @@ async def prepare_schwab_decision_authority(
         raise ValueError("CANDIDATE_BATCH_INVALID")
     execution_identities = identities
     if expand_execution_scope:
-        from nexus.paper.agent_decision_store import load_portfolio_proposal
+        from nexus.paper.agent_decision_store import _load_portfolio_target_baseline
         from nexus.paper.projection import load_paper_projection
 
         projection = await load_paper_projection(session, account_id=account_id, as_of=initial_time)
@@ -739,10 +742,12 @@ async def prepare_schwab_decision_authority(
         )
         target_ids: set[UUID] = set()
         if current_target is not None:
-            current_proposal = await load_portfolio_proposal(
+            current_proposal = await _load_portfolio_target_baseline(
                 session,
+                target=current_target,
                 account_id=account_id,
-                decision_id=current_target.strategy_decision_id,
+                candidate_stage_capacity=False,
+                formal_stage_capacity=formal_stage_capacity,
             )
             if current_proposal is None:
                 raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
@@ -984,6 +989,7 @@ async def trigger_in_session(
         process_environment=process_environment,
         expand_execution_scope=True,
         manual_market_window=request.trigger_mode == "manual",
+        formal_stage_capacity=request.formal_stage_capacity,
     )
     return await start_schwab_agent_paper_cycle(
         session,

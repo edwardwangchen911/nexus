@@ -1680,7 +1680,7 @@ async def _start_cycle(
                 *(order.instrument_id for order in projection.open_orders),
             }
             if candidate_batch_id is not None:
-                from nexus.paper.agent_decision_store import load_portfolio_proposal
+                from nexus.paper.agent_decision_store import _load_portfolio_target_baseline
 
                 current_target = await session.scalar(
                     select(PaperTargetVersionRecord)
@@ -1693,10 +1693,10 @@ async def _start_cycle(
                     .limit(1)
                 )
                 if current_target is not None:
-                    current_proposal = await load_portfolio_proposal(
+                    current_proposal = await _load_portfolio_target_baseline(
                         session,
+                        target=current_target,
                         account_id=cycle.account_id,
-                        decision_id=current_target.strategy_decision_id,
                         candidate_stage_capacity=candidate_stage_capacity,
                         formal_stage_capacity=formal_stage_capacity,
                     )
