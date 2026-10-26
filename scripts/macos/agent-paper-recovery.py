@@ -75,6 +75,11 @@ def read(root):
         and result["active_attempt"] not in result["attempts"]
     ):
         raise ValueError("AGENT_PAPER_RECOVERY_STATE_INVALID")
+    if (
+        result.get("rejected_start") is not None
+        and result["rejected_start"] not in result["attempts"]
+    ):
+        raise ValueError("AGENT_PAPER_RECOVERY_STATE_INVALID")
     UUID(result["boot"])
     instance = result.get("instance")
     if instance is not None and (
@@ -272,9 +277,12 @@ def enable(service, root, env_file, project, *, report=True):
     previous = read(root)
     if previous is not None and previous.get("attempt") is not None:
         raise ValueError("AGENT_PAPER_RECOVERY_START_UNCONFIRMED")
-    status, _ = service._launchctl_inspection("launchctl", root, env_file, project)
+    status, last_exit = service._launchctl_inspection("launchctl", root, env_file, project)
     if status != "running":
-        if previous is None or not previous.get("stopped_confirmed"):
+        rejected = previous is not None and rejected_start_proven(
+            root, previous, previous.get("rejected_start"), boot_id(), status, last_exit
+        )
+        if previous is None or not (previous.get("stopped_confirmed") or rejected):
             raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
         if any(
             previous.get(key) != value
@@ -330,6 +338,7 @@ def enrolled_state(service, root, env_file, project, owner, health, previous):
         "boot": boot_id(),
         "instance": owner,
         "attempts": [] if previous is None else previous["attempts"],
+        "attempt_resolutions": [] if previous is None else previous.get("attempt_resolutions", []),
         "checked_at": now,
         "healthy_since": now,
         "failure_streak": 0 if previous is None else previous["failure_streak"],
@@ -447,9 +456,68 @@ def activation_receipt(root, state, attempt):
     return receipt
 
 
+def rejected_start_proven(root, state, attempt, current_boot, status, last_exit):
+    """A current revoked start can prove non-activation, never business settlement."""
+    if (
+        attempt is None
+        or attempt not in state["attempts"]
+        or attempt.get("generation") == state["generation"]
+        or attempt.get("boot") != current_boot
+        or status != "inactive"
+        or type(last_exit) is not int
+        or last_exit == 75
+        or state.get("unconfirmed_exit") is not None
+    ):
+        return False
+    receipt = activation_receipt(root, state, attempt)
+    return (
+        receipt is not None
+        and receipt.get("phase") == "rejected"
+        and receipt.get("reason") == "PRE_ACTIVATION_REJECTED"
+        and type(receipt.get("pid")) is int
+        and isinstance(receipt.get("process_started"), str)
+        and bool(receipt["process_started"])
+        and process(receipt["pid"]) is None
+        and (state.get("instance") is None or process(state["instance"]["pid"]) is None)
+    )
+
+
 def recover(service, root, env_file, project, *, report=True):
     state = read(root)
     if state is None or state["desired"] != "enabled":
+        if state is not None and state.get("attempt") is not None:
+            bound(service, root, env_file, project, state)
+            status, last_exit = service._launchctl_inspection("launchctl", root, env_file, project)
+            now = time.time()
+            if now < state["checked_at"]:
+                raise ValueError("AGENT_PAPER_RECOVERY_CLOCK_REVERSED")
+            if last_exit == 75:
+                state["unconfirmed_exit"] = {
+                    "boot": boot_id(),
+                    "instance": state.get("instance"),
+                    "exit": 75,
+                }
+                write(root, state)
+            if rejected_start_proven(root, state, state["attempt"], boot_id(), status, last_exit):
+                pending = state["attempt"]
+                state.setdefault("attempt_resolutions", []).append(
+                    {
+                        "attempt_id": pending["id"],
+                        "generation": state["generation"],
+                        "at": now,
+                        "reason": "REVOKED_BEFORE_ACTIVATION",
+                        "exit": last_exit,
+                    }
+                )
+                state.update(
+                    attempt=None,
+                    rejected_start=pending,
+                    last_resolved_attempt=pending,
+                    last_attempt_resolution="REVOKED_BEFORE_ACTIVATION",
+                    reason="REVOKED_BEFORE_ACTIVATION",
+                    checked_at=now,
+                )
+                write(root, state)
         if report:
             service._emit({"status": "disabled", "label": LABEL})
         return 0
@@ -545,6 +613,10 @@ def recover(service, root, env_file, project, *, report=True):
         )
         and process(exit_receipt["pid"]) is None
     )
+    if pending is None and state.get("rejected_start") is not None:
+        qualified_exit = rejected_start_proven(
+            root, state, state["rejected_start"], current_boot, status, last_exit
+        )
     if pending is not None and not qualified_exit and not pending_prior_boot:
         return finish("START_RESULT_UNKNOWN")
     if current_boot == state["boot"]:
@@ -588,6 +660,7 @@ def recover(service, root, env_file, project, *, report=True):
     }
     state["attempts"].append(attempt)
     state["attempt"] = attempt
+    state.pop("rejected_start", None)
     streak = min(state["failure_streak"], 2)
     state.update(
         failure_streak=streak + 1,

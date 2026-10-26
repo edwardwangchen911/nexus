@@ -582,6 +582,12 @@ macOS 登录用户的 `com.nexus.agent-paper-recovery` 每60秒进行一次只�
 `maintenance` 表示维护；两者不自动杀业务宿主。`recover` 是监督器自身使用的单次检查，
 只更新私有管理记录，不创建心跳、Job、研究或通知。
 
+待确认启动被停用后，若子进程留下精确的 `rejected/PRE_ACTIVATION_REJECTED` 回执且已退出，
+正常 `recover` 可结案这一笔被撤销的启动尝试，仍保持停用。原回执、尝试历史及真实非零退出
+保持，另追加本地生命周期审计；这不是接受未知业务影响，也不释放预算。缺回执、checking、
+身份不符、进程仍活或75仍拒绝。随后只有显式 `enable-recovery` 经完整当前只读准入、原退避
+和限额检查后才创建一个新启动尝试；业务unknown仍阻断，不需手工修改管理文件。
+
 受保护的 `.secrets/nexus-agent-paper/recovery.json` 保存配置代次、版本/schema、精确进程、
 启动尝试和退避；每次启动另有不可复用的 `recovery-activation-<id>.json` 回执。不得删除或
 手工修改这些文件来恢复额度或清除未知。启动前重验归属、旧进程/SDK子进程、进程锁、schema

@@ -642,3 +642,177 @@ def test_pending_confirmation_requires_exact_activation_and_fresh_health(tmp_pat
     finally:
         child.terminate()
         child.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "ready",
+        "unknown",
+        "missing",
+        "checking",
+        "wrong_attempt",
+        "wrong_boot",
+        "wrong_generation",
+        "wrong_revision",
+        "live",
+        "exit75",
+    ],
+)
+def test_revoked_pending_guard_exit_settles_disabled_then_reenables_once(tmp_path, case):
+    """Real child guard, manager subprocesses and process exit; only launchd/DB are isolated."""
+    root, env = recovery_root(tmp_path)
+    clock = tmp_path / "clock"
+    clock.write_text("2000000000")
+    helper = root / "scripts/macos/agent-paper-recovery.py"
+    helper.write_text(
+        helper.read_text().replace(
+            'LABEL = "com.nexus.agent-paper-recovery"',
+            f"time.time = lambda: float(Path({str(clock)!r}).read_text())\n"
+            'LABEL = "com.nexus.agent-paper-recovery"',
+        )
+    )
+    previous = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, previous.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+    finally:
+        previous.terminate()
+        previous.wait(timeout=10)
+    _register(root, state="inactive", exit_code=0)
+    options(root, kickstart_state="inactive", exit=1)
+    assert _invoke(root, env, "recover").returncode == 0
+    target = root / ".secrets/nexus-agent-paper/recovery.json"
+    before = json.loads(target.read_text())
+    original = before["attempt"]
+    assert original is not None and len(starts(root)) == 1
+    # Pause immediately before the actual guard's final locked validation.
+    source = """
+import asyncio, json, sys
+from pathlib import Path
+from nexus.ops import agent_paper_recovery as readiness
+from nexus.ops.agent_paper_recovery_activation import make_recovery_guard
+from nexus.settings import EngineSettings
+root = Path(sys.argv[1])
+state = json.loads((root / ".secrets/nexus-agent-paper/recovery.json").read_text())
+settings = EngineSettings(release_revision=state["revision"])
+async def ready(_): return {"status": "ready"}
+checks = []
+def quiescent():
+    checks.append(True)
+    if len(checks) == 2:
+        print("at-final-guard", flush=True)
+        assert sys.stdin.readline().strip() == "continue"
+readiness.inspect_recovery_readiness = ready
+readiness.require_recovery_process_quiescence = quiescent
+guard = make_recovery_guard(settings, repo_root=root,
+    env_file=root / "infra/.env.test", generation=state["generation"],
+    attempt_id=state["attempt"]["id"])
+try:
+    asyncio.run(guard(settings))
+except ValueError:
+    print("rejected", flush=True)
+    assert sys.stdin.readline().strip() == "exit"
+    sys.exit(1)
+raise AssertionError("revoked child activated")
+"""
+    child_env = {**env, "PYTHONPATH": str(ROOT / "engine/src")}
+    child = subprocess.Popen(
+        [sys.executable, "-u", "-c", source, str(root)],
+        env=child_env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "at-final-guard"
+        assert _invoke(root, env, "disable-recovery").returncode == 0
+        disabled = json.loads(target.read_text())
+        assert disabled["generation"] != original["generation"]
+        assert disabled["attempt"] == original
+        child.stdin.write("continue\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "rejected"
+        receipt = target.with_name(f"recovery-activation-{original['id']}.json")
+        saved = receipt.read_bytes()
+        evidence = json.loads(saved)
+        assert evidence["phase"] == "rejected"
+        assert evidence["reason"] == "PRE_ACTIVATION_REJECTED"
+        if case != "live":
+            child.stdin.write("exit\n")
+            child.stdin.flush()
+            assert child.wait(timeout=10) == 1
+        if case == "missing":
+            receipt.unlink()
+        elif case in {
+            "checking",
+            "wrong_attempt",
+            "wrong_boot",
+            "wrong_generation",
+            "wrong_revision",
+        }:
+            field, value = {
+                "checking": ("phase", "checking"),
+                "wrong_attempt": ("attempt_id", "22222222-2222-2222-2222-222222222222"),
+                "wrong_boot": ("boot", "22222222-2222-2222-2222-222222222222"),
+                "wrong_generation": ("generation", "22222222-2222-2222-2222-222222222222"),
+                "wrong_revision": ("revision", "b" * 40),
+            }[case]
+            evidence[field] = value
+            receipt.write_text(json.dumps(evidence))
+        _register(root, state="inactive", exit_code=75 if case == "exit75" else 1)
+        preserved = receipt.read_bytes() if receipt.exists() else None
+        _invoke(root, env, "recover")
+        settled = json.loads(target.read_text())
+        assert settled["desired"] == "disabled"
+        assert settled["attempts"] == before["attempts"]
+        assert len(starts(root)) == 1
+        assert (receipt.read_bytes() if receipt.exists() else None) == preserved
+        if case in {"ready", "unknown"}:
+            assert settled["attempt"] is None
+            assert settled["last_attempt_resolution"] == "REVOKED_BEFORE_ACTIVATION"
+            assert settled["attempt_resolutions"][-1]["exit"] == 1
+            assert settled["rejected_start"] == original
+        else:
+            assert settled["attempt"] == original
+        if case == "unknown":
+            options(
+                root, recovery_status="blocked", blocking_codes=["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"]
+            )
+        clock.write_text("2000000061")
+        result = _invoke(root, env, "enable-recovery")
+        after = json.loads(target.read_text())
+        if case == "ready":
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert len(starts(root)) == 2
+            assert after["attempt"]["id"] != original["id"]
+            assert after["attempts"][:-1] == before["attempts"]
+            assert after["desired"] == "enabled"
+            assert any(c[0] == "engine" and "--service-recovery-check" in c for c in _calls(root))
+            _invoke(root, env, "recover")
+            assert len(starts(root)) == 2
+        else:
+            assert result.returncode == 1
+            assert after["desired"] == "disabled"
+            assert len(starts(root)) == 1
+        assert (receipt.read_bytes() if receipt.exists() else None) == preserved
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.communicate(timeout=10)
+
+
+def test_healthy_reenrollment_keeps_local_resolution_audit(tmp_path):
+    root, env = recovery_root(tmp_path)
+    register_pid(root, os.getpid())
+    assert _invoke(root, env, "enable-recovery").returncode == 0
+    target = root / ".secrets/nexus-agent-paper/recovery.json"
+    before = json.loads(target.read_text())
+    audit = [{"reason": "REVOKED_BEFORE_ACTIVATION", "exit": 1, "at": before["checked_at"]}]
+    before["attempt_resolutions"] = audit
+    target.write_text(json.dumps(before))
+    assert _invoke(root, env, "disable-recovery").returncode == 0
+    assert _invoke(root, env, "enable-recovery").returncode == 0
+    assert json.loads(target.read_text())["attempt_resolutions"] == audit
+    assert starts(root) == []
