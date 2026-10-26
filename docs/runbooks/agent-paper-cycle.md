@@ -555,6 +555,56 @@ uv run --project engine nexus-local-stack down \
   --repo-root "$PWD" --env-file infra/.env.local --project-name nexus-fosun-live
 ```
 
+### 常驻宿主的有界安全恢复
+
+常驻宿主自行执行日准备、自然研究槽及五分钟监控；Codex 的验收跟进不是业务启动源。
+macOS 登录用户的 `com.nexus.agent-paper-recovery` 每60秒进行一次只读监督，业务宿主不设置
+`KeepAlive`。仅承诺该用户已登录且依赖恢复后的有条件恢复，不承诺未登录或断电时运行。
+
+管理动作沿同一正常服务入口，使用实际批准的 repo/env/project：
+
+```bash
+.venv/bin/python scripts/macos/agent-paper-loop-service.py enable-recovery \
+  --repo-root "$PWD" --env-file "$PWD/infra/.env.local" --project-name nexus-fosun-live
+.venv/bin/python scripts/macos/agent-paper-loop-service.py status \
+  --repo-root "$PWD" --env-file "$PWD/infra/.env.local" --project-name nexus-fosun-live
+```
+
+`enable-recovery` 对已确认同版健康宿主仅登记管理意愿，零重启；此类旧实例没有新激活回执，
+未分类非零退出仍拒绝自动恢复。正常部署可先用候选管理入口 `maintenance` 对正在运行的
+旧版精确归属进行维护登记（不安装监督器、不重启），再正常 `stop` 取得退出0且PID消失的
+证明，完成版本切换后用正常 `start` 绑定新版本并启动一次受保护实例。禁止先普通启动再为
+验收额外重启。没有正常退出证明、尚有启动结果未知或业务占用时，不能借重新启用消除阻塞。
+正常start在进程已出现但激活尚未确认时仍返回非成功；若管理状态为START_PENDING，只观察
+同一个attempt的激活回执和新鲜心跳，不重复start或kickstart。精确activated且健康才算确认。
+
+`stop` 先持久化停用意愿；停止失败也不自动拉起。`disable-recovery` 只关闭监督意愿，
+`maintenance` 表示维护；两者不自动杀业务宿主。`recover` 是监督器自身使用的单次检查，
+只更新私有管理记录，不创建心跳、Job、研究或通知。
+
+待确认启动被停用后，若子进程留下精确的 `rejected/PRE_ACTIVATION_REJECTED` 回执且已退出，
+正常 `recover` 可结案这一笔被撤销的启动尝试，仍保持停用。原回执、尝试历史及真实非零退出
+保持，另追加本地生命周期审计；这不是接受未知业务影响，也不释放预算。缺回执、checking、
+身份不符、进程仍活或75仍拒绝。随后只有显式 `enable-recovery` 经完整当前只读准入、原退避
+和限额检查后才创建一个新启动尝试；业务unknown仍阻断，不需手工修改管理文件。
+
+受保护的 `.secrets/nexus-agent-paper/recovery.json` 保存配置代次、版本/schema、精确进程、
+启动尝试和退避；每次启动另有不可复用的 `recovery-activation-<id>.json` 回执。不得删除或
+手工修改这些文件来恢复额度或清除未知。启动前重验归属、旧进程/SDK子进程、进程锁、schema
+及原账户全部历史占用；新进程在持有原生命周期锁后、首次业务心跳前再次核验配置代次、
+boot、SDK进程及数据库准入。旧槽、旧请求、未知费用和预算保护都按原合同保留。
+
+仅明确正常退出、新boot且无未解除占用，或有精确本次回执的依赖断连/日历暂不可用可重验。
+代码或数据异常不当作数据库断连；75/退出未确认跨boot仍保留，启动结果丢失不再次kickstart。
+1/5/15分钟启动退避与每小时最多3次尝试持久化；连续同实例健康10分钟才重置阶梯，滚动次数
+不清空。时钟回退、状态损坏、归属/版本变化及未知占用均拒绝。正常status在退出75或查询
+失败时仍显示可安全读取的管理诊断；数据库不可用不能沿用旧HEALTHY作为当前结论。
+
+无新依赖或迁移。回滚先maintenance/正常stop并保留全部私有管理与业务事实，确认当前及旧版
+消费者兼容后换回已验证镜像/代码；旧版不支持受保护启动时保持停用，不删除管理文件绕过。
+只有具备兼容恢复入口的版本才能重新启用。受控测试/健康读回不能代替自然跨日、真实触发与
+设备送达验收；21:30跟进不额外创建研究，22:00仍由既有自然槽执行。
+
 ## 9. Stop：默认关闭并保留现场
 
 1. 将 `NEXUS_AGENT_PAPER_CYCLE_ENABLED=false`，再运行统一 `nexus-local-stack down`。它仍会检查并

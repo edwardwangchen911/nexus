@@ -67,6 +67,8 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_agent_paper_identity_preparation.py",
     "engine/tests/integration/test_manual_paper_cycle_pg.py",
     "engine/tests/integration/test_manual_partial_history_seal_pg.py::test_explicit_manual_seal_retains_known_lower_bound_and_closes_unused_jobs",
+    "engine/tests/integration/test_manual_partial_history_seal_pg.py::test_accepted_unknown_history_is_inspectable_without_business_writes",
+    "engine/tests/integration/test_agent_paper_recovery_pg.py",
     "engine/tests/integration/test_manual_partial_history_seal_pg.py::test_v11_failed_research_seal_keeps_unknown_budget_and_allows_new_request",
     "engine/tests/integration/test_history_seal_preparation_scope_pg.py",
     "engine/tests/integration/test_manual_partial_history_seal_pg.py::test_identity_diagnostic_preserves_seal_transaction_rollback",

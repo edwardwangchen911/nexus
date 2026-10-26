@@ -282,6 +282,7 @@ async def require_manual_account_available(
     now: datetime,
     excluding_request_id: UUID | None = None,
     allow_scheduled_completion: bool = False,
+    read_only: bool = False,
 ) -> None:
     from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
 
@@ -295,6 +296,7 @@ async def require_manual_account_available(
         now=now,
         excluding_request_id=excluding_request_id,
         allow_scheduled_completion=allow_scheduled_completion,
+        read_only=read_only,
     )
     await require_acknowledged_native_claims(
         session, account_id=account_id, now=now, excluding_request_id=excluding_request_id
@@ -308,6 +310,7 @@ async def require_manual_account_state_available(
     now: datetime,
     excluding_request_id: UUID | None = None,
     allow_scheduled_completion: bool = False,
+    read_only: bool = False,
 ) -> None:
     """Account state gates independent of native claim acceptance checks."""
     await lock_portfolio_account(session, account_id)
@@ -322,6 +325,7 @@ async def require_manual_account_state_available(
         account_id=account_id,
         now=now,
         allow_scheduled_completion=allow_scheduled_completion,
+        read_only=read_only,
     )
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
@@ -372,6 +376,7 @@ async def require_settled_account_cycle_history(
     account_id: UUID,
     now: datetime | None = None,
     allow_scheduled_completion: bool = False,
+    read_only: bool = False,
 ) -> None:
     """Share historical research safety without changing entry scheduling priority."""
     await lock_portfolio_account(session, account_id)
@@ -409,7 +414,11 @@ async def require_settled_account_cycle_history(
             ):
                 raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
         await _require_cycle_jobs_settled(
-            session, cycle_id=cycle_id, now=now, allow_accepted_synthesis=True
+            session,
+            cycle_id=cycle_id,
+            now=now,
+            allow_accepted_synthesis=True,
+            read_only=read_only,
         )
 
 
