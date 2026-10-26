@@ -575,6 +575,8 @@ macOS 登录用户的 `com.nexus.agent-paper-recovery` 每60秒进行一次只�
 旧版精确归属进行维护登记（不安装监督器、不重启），再正常 `stop` 取得退出0且PID消失的
 证明，完成版本切换后用正常 `start` 绑定新版本并启动一次受保护实例。禁止先普通启动再为
 验收额外重启。没有正常退出证明、尚有启动结果未知或业务占用时，不能借重新启用消除阻塞。
+正常start在进程已出现但激活尚未确认时仍返回非成功；若管理状态为START_PENDING，只观察
+同一个attempt的激活回执和新鲜心跳，不重复start或kickstart。精确activated且健康才算确认。
 
 `stop` 先持久化停用意愿；停止失败也不自动拉起。`disable-recovery` 只关闭监督意愿，
 `maintenance` 表示维护；两者不自动杀业务宿主。`recover` 是监督器自身使用的单次检查，

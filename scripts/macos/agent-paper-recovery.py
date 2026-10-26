@@ -70,6 +70,11 @@ def read(root):
         result.get("attempt") is not None and result["attempt"] not in result["attempts"]
     ):
         raise ValueError("AGENT_PAPER_RECOVERY_STATE_INVALID")
+    if (
+        result.get("active_attempt") is not None
+        and result["active_attempt"] not in result["attempts"]
+    ):
+        raise ValueError("AGENT_PAPER_RECOVERY_STATE_INVALID")
     UUID(result["boot"])
     instance = result.get("instance")
     if instance is not None and (
@@ -332,6 +337,11 @@ def enrolled_state(service, root, env_file, project, owner, health, previous):
         "reason": "HEALTHY",
         "attempt": None,
     }
+    if previous is not None and all(
+        previous.get(key) == state.get(key)
+        for key in ("instance", "boot", "revision", "config_hash", "schema")
+    ):
+        state["active_attempt"] = previous.get("active_attempt")
     if previous is not None and previous.get("unconfirmed_exit") is not None:
         state["unconfirmed_exit"] = previous["unconfirmed_exit"]
     return state
@@ -479,6 +489,9 @@ def recover(service, root, env_file, project, *, report=True):
             return finish("RUNNING_UNVERIFIED")
         if state.get("instance") != owner or state["boot"] != current_boot:
             state["healthy_since"] = now
+            state["active_attempt"] = None
+        if state.get("attempt") is not None:
+            state["active_attempt"] = state["attempt"]
         state.update(instance=owner, boot=current_boot, attempt=None)
         since = state.get("healthy_since")
         if since is None:
@@ -494,14 +507,18 @@ def recover(service, root, env_file, project, *, report=True):
         }
     if state.get("unconfirmed_exit") is not None:
         return finish("EXIT_UNCONFIRMED")
-    attempt_to_inspect = state.get("attempt")
-    if attempt_to_inspect is None and state["attempts"]:
-        attempt_to_inspect = state["attempts"][-1]
-    # Historical attempts remain audit facts, never permission for a new generation.
+    pending = state.get("attempt")
+    pending_prior_boot = pending is not None and pending["boot"] != current_boot
+    attempt_to_inspect = pending or state.get("active_attempt")
+    # A current instance retains its activation identity across management toggles.
+    # Arbitrary historical attempts never classify another instance's exit.
     exit_receipt = (
         activation_receipt(root, state, attempt_to_inspect)
         if attempt_to_inspect is not None
-        and attempt_to_inspect.get("generation") == state["generation"]
+        and (
+            (pending is not None and attempt_to_inspect.get("generation") == state["generation"])
+            or (pending is None and attempt_to_inspect == state.get("active_attempt"))
+        )
         and attempt_to_inspect.get("boot") == current_boot
         else None
     )
@@ -528,11 +545,8 @@ def recover(service, root, env_file, project, *, report=True):
         )
         and process(exit_receipt["pid"]) is None
     )
-    if state.get("attempt") is not None:
-        if not qualified_exit:
-            return finish("START_RESULT_UNKNOWN")
-        state["last_resolved_attempt"] = state["attempt"]
-        state["attempt"] = None
+    if pending is not None and not qualified_exit and not pending_prior_boot:
+        return finish("START_RESULT_UNKNOWN")
     if current_boot == state["boot"]:
         old = state.get("instance")
         if old is None or process(old["pid"]) is not None:
@@ -554,6 +568,14 @@ def recover(service, root, env_file, project, *, report=True):
         return finish("INSPECTION_UNAVAILABLE")
     if check.get("status") != "ready" or check.get("migration_head") != state["schema"]:
         return finish("BUSINESS_OR_DEPENDENCY_BLOCKED")
+    # A changed boot ends a local process lifetime, never its unknown business effects.
+    # Only the successful full read-only admission above permits a new attempt.
+    if pending is not None:
+        state["last_resolved_attempt"] = pending
+        state["last_attempt_resolution"] = (
+            "PRIOR_BOOT_ENDED" if pending_prior_boot else "EXIT_CONFIRMED"
+        )
+        state["attempt"] = None
     # No engine lock is held across launchctl: child obtains it and rechecks.
     attempt = {
         "id": str(uuid4()),

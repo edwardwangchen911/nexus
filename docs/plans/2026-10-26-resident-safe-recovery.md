@@ -31,10 +31,10 @@
 - [x] 核实直接用户恢复授权、现行源/运行事实、隔离工作区；正常adapter基线80项通过。
 - [x] 向既有Chat评审发送候选C及约束，保存原请求；没有重复发送。
 - [x] 取回完成设计评审，冻结最小恢复分类、退出证明和退避规则；实际实现仍需终审。
-- [ ] `manual_request.py`只读参数完整传递；新增 `ops/agent_paper_recovery.py` 的正常只读入口。复用账户全历史/claim/monitor/租约资格，真实READ ONLY事务、短锁等待与固定原因；先增加旧未知封存只读回归RED，再实现GREEN。
-- [ ] 在 `agent_paper_loop.py` 恢复启动路径中，于原进程锁之后、首次heartbeat之前重验；新增TOCTOU隔离回归，保留旧普通启动行为。
-- [ ] 在现有 `scripts/macos/agent-paper-loop-service.py` 管理入口增加受保护的启用/停用/单次恢复检查，必要私有状态辅助模块；先写真实adapter+隔离launchctl进程测试，再实现。原start非零退出拒绝保持，recover不得伪造exit0。
-- [ ] 增加正常/异常/登录/人工stop/维护/依赖恢复/限频/双启动/迟到进程测试，复用真实PG跨日、租约消费、历史unknown、下一自然槽测试；不调用真实模型或来源。
+- [x] `manual_request.py`只读参数完整传递；新增 `ops/agent_paper_recovery.py` 的正常只读入口。复用账户全历史/claim/monitor/租约资格，真实READ ONLY事务、短锁等待与固定原因；先增加旧未知封存只读回归RED，再实现GREEN。
+- [x] 在 `agent_paper_loop.py` 恢复启动路径中，于原进程锁之后、首次heartbeat之前重验；新增TOCTOU隔离回归，保留旧普通启动行为。
+- [x] 在现有 `scripts/macos/agent-paper-loop-service.py` 管理入口增加受保护的启用/停用/单次恢复检查，必要私有状态辅助模块；先写真实adapter+隔离launchctl进程测试，再实现。原start非零退出拒绝保持，recover不得伪造exit0。
+- [x] 增加正常/异常/登录/人工stop/维护/依赖恢复/限频/双启动/迟到进程测试，复用真实PG跨日、租约消费、历史unknown、下一自然槽测试；不调用真实模型或来源。
 - [ ] 集中独立代码复核、按要求返回Chat终审、相关Ruff/Mypy/测试，最终同head全部必需CI通过；安全合并。
 - [ ] 构建/部署及兼容回滚核对；无活跃工作时正常切换一次，启用监督检查，核对实际注册参数/健康/只读诊断。不能通过故意杀健康服务制造真实恢复证据。
 - [ ] 更新运行手册和现有handoff，明确受控恢复验证与自然业务验收边界。
@@ -69,3 +69,14 @@
 - 独立定向代码复核已收口。Chat实际代码终审marker `nexus-resident-safe-recovery-final-20261026-02` 已向原会话发送一次，尚待完成回复；原设计marker保留。
 - 部署首次接管使用maintenance只登记原健康精确实例，不安装监督器/不重启；随后正常stop→版本切换→一次managed start。无活跃业务/完整CI/兼容回滚仍是硬门槛。
 - 当前没有生产服务变更、模型或资料请求、未知接受/释放；21:30仅跟进、22:00自然槽。
+
+## 2026-10-26 终审02后定向修复
+
+PR #43首候选bbcb4a64已提交草稿并启动完整CI，候选镜像795文件精确核对通过；仍未合入或部署。
+Chat终审02指出1处激活提交竞态及4处状态/错误传播缺口，均回到源码确认并实施：最终_validate与activated提交复用原非阻塞控制锁；pending进程出现不算启动成功；active_attempt独立保存同实例激活来源；旧boot pending只有完整当前准入成功后登记生命周期终止并创建新attempt，业务unknown不变；退出回执写失败只给原异常附固定说明，传播原对象。
+
+引擎独立修复3eef86cf已整合为f7efdad1，325相关测试通过；控制35项通过，新增缺失/checking/rejected/错误健康/正确activated确认矩阵另行验证。完整663源文件Mypy、Ruff通过；主线集成管理回归仍以review-integrated-tests.log最终结果为准。定向独立复核无新增P1/P2，Chat复核marker为nexus-resident-safe-recovery-final-20261026-03，已发送一次，待完成答复。首候选CI和镜像不能替代修复后最终head的CI与镜像。
+
+部署前只读基线确认现有9b1ed2ed宿主正常wait_for_session、无在途业务及兼容回滚镜像；主工作区运行手册已有未提交改动，已在私有副本验证三方合并无冲突，尚未改动主文件。隔离PG容器55439已确认零临时库/零其他连接后停止，未碰业务库55433。所有真实服务、业务事实、未知费用/预算和用户files/index仍保持。
+
+最新集成验证：管理器/控制/激活135项通过（144.28秒），随后5项精确激活确认矩阵全部通过；完整663源文件Mypy、Ruff、format及diff检查通过。引擎独立325项与原9项PG证据已核验归档，未改变PG资格实现，无需重放业务。终审03仍待完成回复，最终修复候选的全量CI尚待完成，当前不能发布。

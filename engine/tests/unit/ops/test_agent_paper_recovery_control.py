@@ -537,3 +537,108 @@ def test_missing_registration_does_not_become_a_clean_exit_through_stop(tmp_path
     assert value.get("stopped_confirmed") is not True
     _invoke(root, env, "start")
     assert starts(root) == []
+
+
+def test_new_running_process_without_activation_receipt_is_still_pending(tmp_path):
+    root, env = recovery_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    assert _invoke(root, env, "stop").returncode == 0
+    options(root, kickstart_state="running", kickstart_exit=0, exit=0)
+    result = _invoke(root, env, "start")
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_START_FAILED"
+    value = json.loads((root / ".secrets/nexus-agent-paper/recovery.json").read_text())
+    assert value["attempt"] is not None and len(starts(root)) == 1
+
+
+def test_reenrolling_same_healthy_instance_keeps_its_activation_exit_authority(tmp_path):
+    root, env = recovery_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        target, receipt = add_activation(root)
+        value = json.loads(target.read_text())
+        value["active_attempt"] = value["attempts"][-1]
+        target.write_text(json.dumps(value))
+        original = receipt.read_bytes()
+        assert _invoke(root, env, "disable-recovery").returncode == 0
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        assert starts(root) == []
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    _register(root, state="inactive", exit_code=1)
+    _invoke(root, env, "recover")
+    assert len(starts(root)) == 1
+    assert receipt.read_bytes() == original
+
+
+@pytest.mark.parametrize("eligible", [False, True])
+def test_old_boot_pending_keeps_history_and_requires_current_business_eligibility(
+    tmp_path, eligible
+):
+    from uuid import uuid4
+
+    root, env = recovery_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        target, receipt = add_activation(root, pending=True)
+        value = json.loads(target.read_text())
+        original_attempt = value["attempt"]
+        content = json.loads(receipt.read_text())
+        content["phase"] = "activated"
+        receipt.write_text(json.dumps(content))
+        original_receipt = receipt.read_bytes()
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    _executable(tmp_path / "bin/sysctl", "print(" + repr(str(uuid4())) + ")\n")
+    (root.parent / "state").write_text("{}")
+    options(root, recovery_status="ready" if eligible else "blocked")
+    _invoke(root, env, "recover")
+    assert len(starts(root)) == int(eligible)
+    assert receipt.read_bytes() == original_receipt
+    current = json.loads(target.read_text())
+    assert current["attempts"][0] == original_attempt
+    assert (current["attempt"]["id"] != original_attempt["id"]) is eligible
+
+
+@pytest.mark.parametrize("phase", ["missing", "checking", "rejected", "wrong_health", "activated"])
+def test_pending_confirmation_requires_exact_activation_and_fresh_health(tmp_path, phase):
+    root, env = recovery_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        target, receipt = add_activation(root, pending=True)
+        pending = json.loads(target.read_text())["attempt"]
+        if phase == "missing":
+            receipt.unlink()
+        else:
+            value = json.loads(receipt.read_text())
+            value["phase"] = "activated" if phase == "wrong_health" else phase
+            receipt.write_text(json.dumps(value))
+        if phase == "wrong_health":
+            options(root, health_revision="b" * 40)
+        _invoke(root, env, "recover")
+        state = json.loads(target.read_text())
+        if phase == "activated":
+            assert state["attempt"] is None
+            assert state["active_attempt"] == pending
+            result = _invoke(root, env, "start")
+            assert result.returncode == 0 and json.loads(result.stdout)["status"] == "running"
+        else:
+            assert state["attempt"] == pending
+        assert starts(root) == []
+    finally:
+        child.terminate()
+        child.wait(timeout=10)

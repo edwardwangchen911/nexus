@@ -682,7 +682,8 @@ def main(argv: list[str] | None = None) -> int:
                     after, last_exit = _launchctl_inspection(
                         "launchctl", root, env_file, args.project_name
                     )
-                    if after != "running" or last_exit == 75:
+                    managed = _recovery_module().read(root)
+                    if after != "running" or last_exit == 75 or managed.get("attempt") is not None:
                         _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
                         return 1
                     _emit(
