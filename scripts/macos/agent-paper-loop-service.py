@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import importlib.util
 import json
 import os
 import plistlib
@@ -22,6 +23,21 @@ from tempfile import NamedTemporaryFile
 
 LABEL = "com.nexus.agent-paper-loop"
 _RELEASE_REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def _recovery_module():
+    source = Path(__file__).with_name("agent-paper-recovery.py")
+    spec = importlib.util.spec_from_file_location("nexus_recovery_control", source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("AGENT_PAPER_RECOVERY_RUNTIME_MISSING")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _has_recovery(root: Path) -> bool:
+    path = root / ".secrets/nexus-agent-paper/recovery.json"
+    return path.exists() or path.is_symlink()
 
 
 @contextmanager
@@ -427,19 +443,31 @@ def _run(root: Path, env_file: Path) -> int:
         return 1
     os.chdir(root)
     runtime = _runtime_executable()
+    recovery_arguments = (
+        _recovery_module().activation_arguments(sys.modules[__name__], root, env_file)
+        if _has_recovery(root)
+        else []
+    )
     os.execve(
         runtime,
-        [runtime, str(engine), *_engine_arguments(root, env_file)],
+        [runtime, str(engine), *_engine_arguments(root, env_file), *recovery_arguments],
         environment,
     )
     return 1
 
 
 def _launchctl_inspection(
-    launchctl: str, root: Path, env_file: Path, project: str, *, allow_legacy: bool = False
+    launchctl: str,
+    root: Path,
+    env_file: Path,
+    project: str,
+    *,
+    allow_legacy: bool = False,
+    label: str = LABEL,
+    expected_arguments: list[str] | None = None,
 ) -> tuple[str, int | None]:
     inspected = subprocess.run(
-        [launchctl, "print", f"gui/{os.getuid()}/{LABEL}"],
+        [launchctl, "print", f"gui/{os.getuid()}/{label}"],
         check=False,
         capture_output=True,
     )
@@ -466,7 +494,7 @@ def _launchctl_inspection(
         registered.append(line[len(argument_prefix) :])
     else:
         raise RuntimeError("AGENT_PAPER_SERVICE_OWNER_MISMATCH")
-    expected = _program_arguments(root, env_file, project)
+    expected = expected_arguments or _program_arguments(root, env_file, project)
     current = working_directories[0] == _service_working_directory() and registered == expected
     legacy_arguments = len(registered) == 3 and registered[1:] == expected[1:3]
     legacy = (
@@ -491,25 +519,33 @@ def _launchctl_inspection(
 
 
 def _status(root: Path, env_file: Path, project: str) -> int:
+    result: dict[str, object] = {}
+    if _has_recovery(root):
+        try:
+            result["recovery"] = _recovery_module().summary(root)
+        except (OSError, ValueError, KeyError, TypeError):
+            result["recovery"] = {"desired": "unknown", "reason": "STATE_UNAVAILABLE"}
+            result["error_code"] = "AGENT_PAPER_RECOVERY_STATE_INVALID"
     launchctl = shutil.which("launchctl")
     if launchctl is None:
-        _emit({"error_code": "AGENT_PAPER_SERVICE_RUNTIME_MISSING"})
-        return 1
-    try:
-        status, last_exit_code = _launchctl_inspection(
-            launchctl, root, env_file, project, allow_legacy=True
-        )
-    except RuntimeError as error:
-        _emit({"error_code": str(error)})
-        return 1
-    if last_exit_code == 75:
-        _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
-        return 1
-    _emit({"label": LABEL, "status": status})
-    return 0
+        result["error_code"] = "AGENT_PAPER_SERVICE_RUNTIME_MISSING"
+    else:
+        try:
+            status, last_exit_code = _launchctl_inspection(
+                launchctl, root, env_file, project, allow_legacy=True
+            )
+            result.update(label=LABEL, status=status)
+            if last_exit_code == 75:
+                result["error_code"] = "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"
+        except RuntimeError as error:
+            result["error_code"] = str(error)
+    _emit(result)
+    return 1 if "error_code" in result else 0
 
 
 def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False) -> int:
+    if _has_recovery(root):
+        _recovery_module().disable(root)
     launchctl = shutil.which("launchctl")
     if launchctl is None:
         _emit({"error_code": "AGENT_PAPER_SERVICE_RUNTIME_MISSING"})
@@ -560,6 +596,10 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
     if not acknowledge and state != "stopped" and (state != "inactive" or last_exit_code != 0):
         _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
         return 1
+    if not acknowledge and _has_recovery(root):
+        _recovery_module().record_stop(
+            root, observed_clean_exit=state == "inactive" and last_exit_code == 0
+        )
     if state != "stopped":
         removed = subprocess.run(
             [launchctl, "bootout", domain_label],
@@ -578,7 +618,19 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("start", "status", "stop", "run"))
+    parser.add_argument(
+        "action",
+        choices=(
+            "start",
+            "status",
+            "stop",
+            "run",
+            "enable-recovery",
+            "disable-recovery",
+            "maintenance",
+            "recover",
+        ),
+    )
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--project-name", required=True)
@@ -595,15 +647,65 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         _emit({"error_code": "LOCAL_ENV_UNSAFE"})
         return 1
+    if args.action in {"enable-recovery", "disable-recovery", "maintenance", "recover"}:
+        try:
+            with _service_control_lock():
+                recovery = _recovery_module()
+                if args.action == "enable-recovery":
+                    return recovery.enable(sys.modules[__name__], root, env_file, args.project_name)
+                if args.action == "recover":
+                    return recovery.recover(
+                        sys.modules[__name__], root, env_file, args.project_name
+                    )
+                if args.action == "maintenance":
+                    recovery.maintenance(sys.modules[__name__], root, env_file, args.project_name)
+                else:
+                    recovery.disable(root)
+                _emit({"status": "disabled", "label": recovery.LABEL})
+                return 0
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            code = str(error)
+            if re.fullmatch(r"AGENT_PAPER_[A-Z_]+", code) is None:
+                code = "AGENT_PAPER_RECOVERY_INSPECTION_FAILED"
+            _emit({"error_code": code})
+            return 1
     if args.action == "start":
         try:
             with _service_control_lock():
+                if _has_recovery(root):
+                    before, _ = _launchctl_inspection(
+                        "launchctl", root, env_file, args.project_name
+                    )
+                    _recovery_module().enable(
+                        sys.modules[__name__], root, env_file, args.project_name, report=False
+                    )
+                    after, last_exit = _launchctl_inspection(
+                        "launchctl", root, env_file, args.project_name
+                    )
+                    if after != "running" or last_exit == 75:
+                        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
+                        return 1
+                    _emit(
+                        {"label": LABEL, "status": "running" if before == "running" else "started"}
+                    )
+                    return 0
                 return _start(root, env_file, args.project_name)
-        except RuntimeError as error:
-            _emit({"error_code": str(error)})
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            code = str(error)
+            _emit(
+                {
+                    "error_code": code
+                    if re.fullmatch(r"AGENT_PAPER_[A-Z_]+", code)
+                    else "AGENT_PAPER_RECOVERY_INSPECTION_FAILED"
+                }
+            )
             return 1
     if args.action == "run":
-        return _run(root, env_file)
+        try:
+            return _run(root, env_file)
+        except (OSError, ValueError, RuntimeError):
+            _emit({"error_code": "AGENT_PAPER_RECOVERY_ACTIVATION_BLOCKED"})
+            return 1
     if args.action == "status":
         return _status(root, env_file, args.project_name)
     try:
@@ -614,8 +716,15 @@ def main(argv: list[str] | None = None) -> int:
                 args.project_name,
                 acknowledge=args.acknowledge_unconfirmed,
             )
-    except RuntimeError as error:
-        _emit({"error_code": str(error)})
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        code = str(error)
+        _emit(
+            {
+                "error_code": code
+                if re.fullmatch(r"AGENT_PAPER_[A-Z_]+", code)
+                else "AGENT_PAPER_RECOVERY_STATE_INVALID"
+            }
+        )
         return 1
 
 

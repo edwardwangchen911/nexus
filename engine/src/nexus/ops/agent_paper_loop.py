@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic as monotonic_clock
+from typing import TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -161,6 +162,11 @@ from nexus.research.fred_storage import read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import AgentRuntimeMode, EngineSettings
 from nexus.worker import run_agent_worker_once
+
+
+class _RecoveryLoopArguments(TypedDict, total=False):
+    recovery_guard: Callable[[EngineSettings], Awaitable[None]]
+
 
 _RELEASE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 
@@ -5020,7 +5026,22 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics.add_argument("--service-status", action="store_true")
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--recovery-generation")
+    parser.add_argument("--recovery-attempt")
     args = parser.parse_args(argv)
+    if (bool(args.recovery_generation) != bool(args.recovery_attempt)) or (
+        args.recovery_generation
+        and (
+            args.repo_root is None
+            or args.env_file is None
+            or args.service_preflight
+            or args.service_startup_preflight
+            or args.service_recovery_check
+            or args.service_status
+        )
+    ):
+        print(json.dumps({"error_code": "AGENT_PAPER_RECOVERY_ACTIVATION_BLOCKED"}))
+        return 1
     root = args.repo_root.resolve() if args.repo_root is not None else Path.cwd()
     env_file = None
     if (
@@ -5160,11 +5181,28 @@ def main(argv: list[str] | None = None) -> int:
         if not settings.agent_paper_cycle_enabled:
             print(json.dumps({"error_code": "AGENT_PAPER_CYCLE_DISABLED"}))
             return 1
+        from nexus.ops.agent_paper_recovery_activation import make_recovery_guard
+
+        recovery = (
+            make_recovery_guard(
+                settings,
+                repo_root=root,
+                env_file=env_file,
+                generation=args.recovery_generation,
+                attempt_id=args.recovery_attempt,
+            )
+            if args.recovery_generation is not None and env_file is not None
+            else None
+        )
+        recovery_arguments: _RecoveryLoopArguments = {}
+        if recovery is not None:
+            recovery_arguments["recovery_guard"] = recovery
         if env_file is None:
             loop_result = run_local_agent_paper_loop(
                 settings,
                 account_id=account_id,
                 repo_root=root,
+                **recovery_arguments,
             )
         else:
             loop_result = run_local_agent_paper_loop(
@@ -5172,8 +5210,16 @@ def main(argv: list[str] | None = None) -> int:
                 account_id=account_id,
                 repo_root=root,
                 env_file=env_file,
+                **recovery_arguments,
             )
-        reason = asyncio.run(loop_result)
+        try:
+            reason = asyncio.run(loop_result)
+        except SQLAlchemyError as error:
+            if recovery is not None and recovery.receipt is not None:
+                recovery.finish_database_error(error)
+            raise
+        if recovery is not None and recovery.receipt is not None:
+            recovery.finish(reason.value)
         if reason == AgentPaperLoopAction.STOP_UNCONFIRMED:
             print(json.dumps({"error_code": "AGENT_PAPER_LOOP_STOP_UNCONFIRMED"}))
             return 75
