@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -52,6 +54,7 @@ _DESKTOP_CHILD = (
 _DESKTOP_PARENT = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 _DESKTOP_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
 _DESKTOP_NODE = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
+_MACOS_DOCKER_CLI = Path("/Applications/Docker.app/Contents/Resources/bin/docker")
 
 
 class ResearchProcessDiagnosticError(ValueError):
@@ -202,9 +205,20 @@ def require_research_processes_quiescent() -> None:
         after = snapshot()
         if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):
             raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
+    docker = "docker"
+    # launchd's default PATH excludes Docker Desktop's installed CLI. Resolve
+    # this existing dependency without inheriting a shell environment or
+    # skipping any container inspection when it is unavailable.
+    if (
+        shutil.which(docker) is None
+        and sys.platform == "darwin"
+        and _MACOS_DOCKER_CLI.is_file()
+        and os.access(_MACOS_DOCKER_CLI, os.X_OK)
+    ):
+        docker = str(_MACOS_DOCKER_CLI)
     containers = output(
         [
-            "docker",
+            docker,
             "ps",
             "--filter",
             "label=com.docker.compose.project=nexus-fosun-live",
@@ -215,7 +229,7 @@ def require_research_processes_quiescent() -> None:
     if not containers or any(re.fullmatch(r"[0-9a-f]{6,64}", row) is None for row in containers):
         raise ResearchProcessDiagnosticError("CONTAINER_LIST_UNCONFIRMED")
     for identity in containers:
-        names = output(["docker", "top", identity, "-eo", "pid,comm"]).splitlines()
+        names = output([docker, "top", identity, "-eo", "pid,comm"]).splitlines()
         if len(names) < 2 or names[0].split() != ["PID", "COMMAND"]:
             raise ResearchProcessDiagnosticError("CONTAINER_PROCESSES_UNCONFIRMED")
         for line in names[1:]:
