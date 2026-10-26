@@ -5216,7 +5216,12 @@ def main(argv: list[str] | None = None) -> int:
             reason = asyncio.run(loop_result)
         except SQLAlchemyError as error:
             if recovery is not None and recovery.receipt is not None:
-                recovery.finish_database_error(error)
+                try:
+                    recovery.finish_database_error(error)
+                except Exception:
+                    # Keep the original database failure; an unwritten receipt
+                    # must never become proof of a confirmed service exit.
+                    error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")
             raise
         if recovery is not None and recovery.receipt is not None:
             recovery.finish(reason.value)

@@ -1,13 +1,15 @@
 """Single-use, generation-bound activation after the host process lock."""
 
 import hashlib
+import importlib.util
 import json
 import os
 import stat
 import subprocess
+from contextlib import AbstractContextManager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -34,6 +36,17 @@ def _read(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(_BLOCKED)
     return value
+
+
+def _service_control_lock(root: Path) -> AbstractContextManager[None]:
+    """Share the manager's nonblocking lock only for the activation commit."""
+    source = root / "scripts/macos/agent-paper-loop-service.py"
+    spec = importlib.util.spec_from_file_location("nexus_activation_service_control", source)
+    if spec is None or spec.loader is None:
+        raise ValueError(_BLOCKED)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return cast(AbstractContextManager[None], module._service_control_lock())
 
 
 def _boot_id() -> str:
@@ -153,8 +166,16 @@ class RecoveryActivation:
             if result.get("status") != "ready":
                 self._save("rejected", "PRE_ACTIVATION_REJECTED")
                 raise ValueError(_BLOCKED)
-            self._save("activated", "READY")
-        except (OSError, ValueError, TypeError, KeyError):
+            try:
+                # The engine lifetime lock is already held. Never wait for the
+                # manager, which can hold its lock while dispatching this child.
+                with _service_control_lock(self.root):
+                    self._validate(effective)
+                    self._save("activated", "READY")
+            except (OSError, RuntimeError, ValueError):
+                self._save("rejected", "PRE_ACTIVATION_REJECTED")
+                raise ValueError(_BLOCKED) from None
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError):
             raise ValueError(_BLOCKED) from None
 
     def finish_database_error(self, error: SQLAlchemyError) -> None:
