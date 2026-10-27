@@ -309,3 +309,286 @@ async def test_bark_delivers_only_frozen_rejected_and_filled_paper_outcomes(
         )
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_one_identity_one_encrypted_delivery_no_business(
+    migrated_database_url: str,
+) -> None:
+    from nexus.notifications.diagnostic import (
+        enqueue_diagnostic_notification,
+        read_diagnostic_notification,
+    )
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        AgentResearchRunRecord,
+    )
+    from nexus.persistence.models.monitoring import MonitorTrigger
+    from nexus.persistence.models.runtime import AuditEvent, Job
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    test_id = new_uuid7()
+    activation = datetime(2020, 1, 1, tzinfo=UTC)
+    try:
+        async with factory.begin() as session:
+            first = await enqueue_diagnostic_notification(
+                session, test_id=test_id, activated_at=activation
+            )
+        async with factory.begin() as session:
+            second = await enqueue_diagnostic_notification(
+                session, test_id=test_id, activated_at=activation
+            )
+        assert first == second and first["status"] == "queued"
+        settings = load_bark_worker_settings(
+            {
+                "NEXUS_BARK_ENABLED": "true",
+                "DATABASE_URL": migrated_database_url,
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+                "NEXUS_BARK_ACTIVATED_AT": activation.isoformat(),
+            }
+        )
+        notices = []
+
+        async def accepted(request: httpx.Request) -> httpx.Response:
+            notices.append(_decrypted_bark_notification(request))
+            return httpx.Response(200, json={"code": 200})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(accepted)) as client:
+            assert await run_bark_worker(settings, run_forever=False, client=client) == 1
+            assert await run_bark_worker(settings, run_forever=False, client=client) == 0
+        async with factory.begin() as session:
+            receipt = await read_diagnostic_notification(session, test_id=test_id)
+            assert receipt["status"] == "provider_accepted"
+            assert receipt["device_delivery"] == "unverified"
+            assert receipt["attempt_count"] == 1
+            assert await session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
+            assert (
+                await session.scalar(select(func.count()).select_from(OutboxDeliveryAttempt)) == 1
+            )
+            assert await session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+            for model in (
+                Job,
+                AgentResearchRunRecord,
+                AgentDailyBudgetReservationRecord,
+                MonitorTrigger,
+                PaperOrderBatchRecord,
+            ):
+                assert await session.scalar(select(func.count()).select_from(model)) == 0
+        assert len(notices) == 1
+        assert notices[0]["title"] == "NEXUS 测试通知｜非投资预警"
+        assert notices[0]["body"].startswith("NEXUS 测试通知｜非投资预警")
+        assert "url" not in notices[0]
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_timeout_is_unknown_and_never_redelivered(
+    migrated_database_url: str,
+) -> None:
+    from nexus.notifications.diagnostic import (
+        enqueue_diagnostic_notification,
+        read_diagnostic_notification,
+    )
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    test_id = new_uuid7()
+    activation = datetime(2020, 1, 1, tzinfo=UTC)
+    calls = []
+    try:
+        async with factory.begin() as session:
+            await enqueue_diagnostic_notification(session, test_id=test_id, activated_at=activation)
+        settings = load_bark_worker_settings(
+            {
+                "NEXUS_BARK_ENABLED": "true",
+                "DATABASE_URL": migrated_database_url,
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+                "NEXUS_BARK_ACTIVATED_AT": activation.isoformat(),
+            }
+        )
+
+        async def timeout(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            raise httpx.ReadTimeout("private upstream", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
+            assert await run_bark_worker(settings, run_forever=False, client=client) == 1
+            assert await run_bark_worker(settings, run_forever=False, client=client) == 0
+        async with factory.begin() as session:
+            receipt = await read_diagnostic_notification(session, test_id=test_id)
+            assert receipt["status"] == "unknown"
+            assert receipt["attempt_count"] == 1
+            assert (
+                await enqueue_diagnostic_notification(
+                    session, test_id=test_id, activated_at=activation
+                )
+                == receipt
+            )
+            row = await session.get(OutboxEvent, test_id)
+            assert row is not None and row.max_attempts == 1 and row.status == "dead_letter"
+        assert len(calls) == 1
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_normal_entry_concurrent_id_and_disabled_read(
+    migrated_database_url: str,
+) -> None:
+    import asyncio
+
+    from nexus.ops.notification_test import run
+    from nexus.persistence.models.runtime import AuditEvent
+
+    test_id = new_uuid7()
+    env = {
+        "DATABASE_URL": migrated_database_url,
+        "NEXUS_BARK_ENABLED": "true",
+        "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+        "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+        "NEXUS_BARK_ACTIVATED_AT": "2020-01-01T00:00:00Z",
+    }
+    first, second = await asyncio.gather(
+        run(env, action="enqueue", test_id=test_id), run(env, action="enqueue", test_id=test_id)
+    )
+    assert first == second and first["status"] == "queued"
+    disabled = {"DATABASE_URL": migrated_database_url}
+    assert await run(disabled, action="read", test_id=test_id) == first
+    assert await run(disabled, action="enqueue", test_id=test_id) == first
+    with pytest.raises(ValueError, match="DIAGNOSTIC_NOTIFICATION_DISABLED"):
+        await run(disabled, action="enqueue", test_id=new_uuid7())
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    try:
+        async with factory.begin() as session:
+            assert await session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
+            assert await session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_enqueue_rollback_preserves_no_partial_audit(
+    migrated_database_url: str,
+) -> None:
+    from nexus.notifications.diagnostic import (
+        enqueue_diagnostic_notification,
+        read_diagnostic_notification,
+    )
+    from nexus.persistence.models.runtime import AuditEvent
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    test_id = new_uuid7()
+    try:
+        with pytest.raises(RuntimeError, match="abort"):
+            async with factory.begin() as session:
+                await enqueue_diagnostic_notification(
+                    session, test_id=test_id, activated_at=datetime(2020, 1, 1, tzinfo=UTC)
+                )
+                raise RuntimeError("abort")
+        async with factory.begin() as session:
+            assert (await read_diagnostic_notification(session, test_id=test_id))[
+                "status"
+            ] == "not_found"
+            assert await session.scalar(select(func.count()).select_from(OutboxEvent)) == 0
+            assert await session.scalar(select(func.count()).select_from(AuditEvent)) == 0
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lose_ack", [False, True])
+async def test_diagnostic_claim_before_send_and_expired_lease_never_retries(
+    migrated_database_url: str, lose_ack: bool
+) -> None:
+    import asyncio
+    from datetime import timedelta
+
+    from nexus.notifications.bark import BarkPublisher
+    from nexus.notifications.diagnostic import (
+        enqueue_diagnostic_notification,
+        read_diagnostic_notification,
+    )
+    from nexus.notifications.worker import build_bark_registry
+    from nexus.outbox.dispatcher import dispatch_outbox_once
+    from nexus.outbox.models import OutboxMessage
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    test_id = new_uuid7()
+    calls = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    try:
+        async with factory.begin() as session:
+            await enqueue_diagnostic_notification(
+                session, test_id=test_id, activated_at=datetime(2020, 1, 1, tzinfo=UTC)
+            )
+        start = datetime.now(UTC)
+
+        async def accepted(request: httpx.Request) -> httpx.Response:
+            async with factory.begin() as session:
+                row = await session.get(OutboxEvent, test_id)
+                attempt = await session.scalar(
+                    select(OutboxDeliveryAttempt).where(
+                        OutboxDeliveryAttempt.outbox_event_id == test_id
+                    )
+                )
+                assert row is not None and row.attempt_count == 1 and row.status == "delivering"
+                assert attempt is not None and attempt.outcome == "delivering"
+            calls.append(_decrypted_bark_notification(request))
+            entered.set()
+            await release.wait()
+            return httpx.Response(200, json={"code": 200})
+
+        async def lost_ack(message: OutboxMessage) -> None:
+            raise RuntimeError("lost persistence after accepted")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(accepted)) as client:
+            registry = build_bark_registry(
+                BarkPublisher(
+                    client=client,
+                    server_url="http://127.0.0.1:8080",
+                    device_key="test-device-key",
+                    encryption_key=_BARK_ENCRYPTION_KEY,
+                )
+            )
+            first = asyncio.create_task(
+                dispatch_outbox_once(
+                    factory,
+                    registry=registry,
+                    worker_id="first",
+                    clock=lambda: start,
+                    after_publish=lost_ack if lose_ack else None,
+                    claim_registered_only=True,
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            assert not await dispatch_outbox_once(
+                factory,
+                registry=registry,
+                worker_id="second",
+                clock=lambda: start,
+                claim_registered_only=True,
+            )
+            release.set()
+            if lose_ack:
+                with pytest.raises(RuntimeError, match="lost persistence"):
+                    await first
+            else:
+                assert await first
+            assert not await dispatch_outbox_once(
+                factory,
+                registry=registry,
+                worker_id="after-restart",
+                clock=lambda: start + timedelta(seconds=61),
+                claim_registered_only=True,
+            )
+        async with factory.begin() as session:
+            receipt = await read_diagnostic_notification(session, test_id=test_id)
+            assert receipt["status"] == ("unknown" if lose_ack else "provider_accepted")
+            assert receipt["attempt_count"] == 1
+        assert len(calls) == 1
+    finally:
+        release.set()
+        await factory.kw["bind"].dispose()

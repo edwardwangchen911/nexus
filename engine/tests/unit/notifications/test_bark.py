@@ -178,6 +178,7 @@ def test_first_delivery_consumes_terminal_outcomes_and_session_summary() -> None
         ("paper.execution.cancelled", "paper_execution_v1"),
         ("research.monitor.triggered", "research_price_trigger_v1"),
         ("research.monitor.batch_triggered", "research_monitor_batch_v1"),
+        ("diagnostic.notification.test", "diagnostic_notification_v1"),
     )
 
 
@@ -395,3 +396,71 @@ async def test_publisher_converts_timeout_to_value_free_error() -> None:
             await publisher.publish(_message())
 
     assert "private" not in str(caught.value)
+
+
+def _diagnostic_message() -> OutboxMessage:
+    return OutboxMessage(
+        event_id=_EVENT_ID,
+        aggregate_id=_EVENT_ID,
+        event_type="diagnostic.notification.test",
+        schema_version="diagnostic_notification_v1",
+        payload={
+            "schema_version": "diagnostic_notification_v1",
+            "test_id": str(_EVENT_ID),
+            "occurred_at": "2026-10-27T01:00:00Z",
+        },
+    )
+
+
+def test_diagnostic_notice_is_fixed_non_business_and_registered() -> None:
+    notice = map_bark_notification(_diagnostic_message(), read_only_url="http://nexus.local/paper")
+    assert notice["title"] == "NEXUS 测试通知｜非投资预警"
+    assert notice["body"].startswith("NEXUS 测试通知｜非投资预警")
+    assert "url" not in notice
+    assert notice["id"] == f"diagnostic-test:{_EVENT_ID}"
+    assert notice["message_id"] == str(_EVENT_ID)
+    assert ("diagnostic.notification.test", "diagnostic_notification_v1") in BARK_EVENT_SCHEMAS
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"body": "free-form content"},
+        {"test_id": str(_ORDER_ID)},
+        {"occurred_at": "2026-10-27T01:00:00"},
+        {"occurred_at": 1793062800},
+        {"schema_version": "paper_event_v1"},
+    ],
+)
+def test_diagnostic_notice_rejects_payload_drift(change: dict[str, object]) -> None:
+    original = _diagnostic_message()
+    message = replace(original, payload={**original.payload, **change})
+    with pytest.raises(BarkPublishError, match="BARK_NOTIFICATION_INVALID"):
+        map_bark_notification(message, read_only_url=None)
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_uses_encrypted_publisher_without_paper_snapshot() -> None:
+    calls = []
+
+    async def accepted(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 200})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(accepted)) as client:
+        publisher = BarkPublisher(
+            client=client,
+            server_url="http://127.0.0.1:8080",
+            device_key="test-device",
+            encryption_key=_KEY,
+            iv_factory=lambda: _IV,
+        )
+        await publisher.publish(_diagnostic_message())
+    assert len(calls) == 1
+    assert set(calls[0]) == {"device_key", "ciphertext", "iv"}
+    decryptor = Cipher(algorithms.AES(_KEY), modes.CBC(_IV)).decryptor()
+    padded = decryptor.update(base64.b64decode(calls[0]["ciphertext"])) + decryptor.finalize()
+    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+    rendered = json.loads(unpadder.update(padded) + unpadder.finalize())
+    assert rendered["title"] == "NEXUS 测试通知｜非投资预警"
+    assert rendered["id"] == f"diagnostic-test:{_EVENT_ID}"
