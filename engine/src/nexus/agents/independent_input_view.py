@@ -184,7 +184,9 @@ def project_independent_payload(payload: dict[str, object]) -> dict[str, object]
     """
     _wire(payload)  # Preserve rejection of non-JSON/nonfinite/isolated surrogate input.
     collision_view = deepcopy(payload)
-    for field in _DYNAMIC:
+    # Unencoded mixed prose is never interpreted as a v2 marker either.
+    # Ignore only its free-text values for collisions; leave its wire bytes intact.
+    for field in (*_DYNAMIC, "mixed_event_proposal", "mixed_event_reviews"):
         if field in collision_view:
             collision_view[field] = _dynamic(
                 collision_view[field],

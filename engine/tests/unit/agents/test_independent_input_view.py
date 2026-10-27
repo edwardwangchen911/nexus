@@ -165,3 +165,14 @@ def test_nested_mixed_arrays_keep_original_types_values_and_key_order(depth):
     restored = restore_independent_input(project_independent_payload(original))
     assert restored == original
     assert json.dumps(restored, ensure_ascii=False) == json.dumps(original, ensure_ascii=False)
+
+
+def test_unencoded_mixed_prose_markers_remain_literal_and_do_not_disable_v2():
+    payload = sample()
+    payload["mixed_event_proposal"] = {"items": [{"rationale": "$v:0\0~00"}]}
+    payload["mixed_event_reviews"] = {"bear": {"rationale": "$v:1\x1f~~"}}
+    projected = project_independent_payload(payload)
+    assert "$iv2" in projected
+    assert projected["mixed_event_proposal"] == payload["mixed_event_proposal"]
+    assert projected["mixed_event_reviews"] == payload["mixed_event_reviews"]
+    assert restore_independent_input(projected) == payload

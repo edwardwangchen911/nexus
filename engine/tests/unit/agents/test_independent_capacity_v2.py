@@ -92,9 +92,10 @@ def test_v2_mixed_unencoded_reasons_keep_six_byte_upper_bound(monkeypatch):
 
     from nexus.agents.codex_capacity import _monitoring_capacity_view
 
-    _, evidence, _ = _authority()
+    request, evidence, _ = _authority()
     evidence = (evidence[0].model_copy(update={"source": "nexus_monitor_increment_v2"}),)
     context = {
+        "purpose": "monitor_increment_v2",
         "trigger_checks": [
             {"trigger_id": str(UUID(int=i + 1)), "kind": "price", "event_key": ""}
             for i in range(32)
@@ -104,6 +105,7 @@ def test_v2_mixed_unencoded_reasons_keep_six_byte_upper_bound(monkeypatch):
     monkeypatch.setattr(
         "nexus.monitoring.mixed_contracts.mixed_context_from_inputs", lambda _: context
     )
+    monkeypatch.setattr("nexus.agents.codex_staged.mixed_context_from_inputs", lambda _: context)
     view = _monitoring_capacity_view(model(), evidence, {})
     proposal = view._outputs["market_state"].mixed_event_proposal
     assert proposal is not None and len(proposal.items) == 32
@@ -111,3 +113,37 @@ def test_v2_mixed_unencoded_reasons_keep_six_byte_upper_bound(monkeypatch):
     for role in ("bear", "evidence_audit"):
         review = view._outputs[role].mixed_event_review
         assert review is not None and review.rationale == "\x00" * 160
+
+    # The same real stage builder must retain literal markers in unencoded
+    # auxiliary model prose rather than rejecting it after a prior SDK stage.
+    from unit.agents.test_codex_sdk import _restore_view
+
+    proposal = proposal.model_copy(
+        update={
+            "items": tuple(
+                item.model_copy(update={"rationale": "$v:0\x00~00"}) for item in proposal.items
+            )
+        }
+    )
+    view._outputs["market_state"] = view._outputs["market_state"].model_copy(
+        update={"mixed_event_proposal": proposal}
+    )
+    for role in ("bear", "evidence_audit"):
+        review = view._outputs[role].mixed_event_review.model_copy(
+            update={"proposal_hash": proposal.content_hash, "rationale": "$v:1\x1f~~"}
+        )
+        view._outputs[role] = view._outputs[role].model_copy(update={"mixed_event_review": review})
+    for stage in ("critique", "synthesis"):
+        payload, _ = view.build_stage_request(
+            stage=stage,
+            request=request,
+            evidence_refs=evidence,
+            frozen_inputs={"security_snapshot": {"items": []}, "financial_facts": {"items": []}},
+            previous=[],
+        )
+        assert "$iv2" in payload
+        restored = _restore_view(payload)
+        assert restored["mixed_event_proposal"]["items"][0]["rationale"] == "$v:0\x00~00"
+        if stage == "synthesis":
+            assert restored["mixed_event_reviews"]["bear"]["rationale"] == "$v:1\x1f~~"
+    assert view.usage.provider_calls == 0
