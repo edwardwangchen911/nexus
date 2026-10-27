@@ -57,6 +57,13 @@ def disclosure_from_inputs(inputs: dict[str, object]) -> object | None:
         )
         and paper.get("disclosure_monitoring") is not None
     ]
+    if security.get("purpose") == "independent_monitor_research_v1":
+        from nexus.monitoring.independent_context import IndependentMonitorContext
+
+        independent = IndependentMonitorContext.model_validate_json(
+            json.dumps(security.get("independent_monitor_context"))
+        )
+        contexts.append(independent.disclosure_monitoring.model_dump(mode="json"))
     if len(contexts) > 1:
         raise ValueError("DISCLOSURE_CONTEXT_INVALID")
     return contexts[0] if contexts else None
@@ -101,7 +108,12 @@ def compile_disclosure_proposal(
     contexts = tuple(
         ref
         for ref in evidence_refs
-        if ref.source in {"nexus_agent_paper_context", "nexus_monitor_increment_v2"}
+        if ref.source
+        in {
+            "nexus_agent_paper_context",
+            "nexus_monitor_increment_v2",
+            "nexus_independent_monitor_research",
+        }
     )
     now = require_utc(now)
     if (

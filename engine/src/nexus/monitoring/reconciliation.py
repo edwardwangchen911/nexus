@@ -103,6 +103,8 @@ async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetim
             or_(
                 AgentPaperCycleRecord.account_id == plan.account_id,
                 MonitorIncrement.account_id == plan.account_id,
+                DataSnapshot.payload["independent_monitor_context"]["account_id"].astext
+                == str(plan.account_id),
             ),
             AgentResearchRunRecord.instrument_id == plan.instrument_id,
             AgentResearchRunRecord.status.in_(("completed", "failed", "abstained")),
@@ -177,8 +179,15 @@ async def _scope_evidence(
 
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     rows = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+    from nexus.monitoring.independent_context import is_independent_snapshot
+    from nexus.monitoring.independent_storage import require_independent_run
+
     member = None
-    if is_monitor_snapshot(snapshot):
+    if is_independent_snapshot(snapshot):
+        independent = await require_independent_run(session, run)
+        if independent.account_id != account_id:
+            raise ValueError("MONITOR_SOURCE_INVALID")
+    elif is_monitor_snapshot(snapshot):
         member = await require_increment_binding(session, run)
         if member.account_id != account_id:
             raise ValueError("MONITOR_SOURCE_INVALID")
@@ -227,6 +236,8 @@ async def reconcile_account_results(
                 or_(
                     AgentPaperCycleRecord.account_id == account_id,
                     MonitorIncrement.account_id == account_id,
+                    DataSnapshot.payload["independent_monitor_context"]["account_id"].astext
+                    == str(account_id),
                 ),
                 AgentResearchRunRecord.instrument_id.in_(instrument_ids),
                 AgentResearchRunRecord.status.in_(("completed", "failed", "abstained")),
@@ -258,7 +269,14 @@ async def reconcile_account_results(
     }
     for run in candidates:
         snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
-        paper = None if snapshot is None else snapshot.payload.get("agent_paper_context")
+        paper = (
+            None
+            if snapshot is None
+            else (
+                snapshot.payload.get("agent_paper_context")
+                or snapshot.payload.get("independent_monitor_context")
+            )
+        )
         if isinstance(paper, dict) and paper.get("pending_monitoring_v2") is not None:
             from nexus.monitoring.daily_v2_reconciliation import (
                 DailyEventReplacementRejected,

@@ -13,12 +13,13 @@ from nexus.persistence.models.data import DataSnapshot
 from sqlalchemy import select
 
 
-async def prepared_materials(database_url, monkeypatch, root, *, sec_only=False):
+async def prepared_materials(database_url, monkeypatch, root, *, sec_only=False, independent=False):
     factory, settings, store, captured, pointer = await installed(
         database_url,
         monkeypatch,
         root,
         kinds=("disclosure",) if sec_only else ("price", "disclosure"),
+        independent=independent,
     )
     monkeypatch.setattr(
         "nexus.monitoring.filing_archive.configured_exhibit_store", lambda session: store
@@ -28,7 +29,8 @@ async def prepared_materials(database_url, monkeypatch, root, *, sec_only=False)
         assert uri == "s3://synthetic/" + key
         return store.objects[key]
 
-    monkeypatch.setattr(store, "read_evidence", read_evidence, raising=False)
+    if not independent:
+        monkeypatch.setattr(store, "read_evidence", read_evidence, raising=False)
     async with factory() as session, session.begin():
         observed = await scan_stock_batch(
             session,

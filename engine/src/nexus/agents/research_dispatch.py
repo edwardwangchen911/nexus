@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import monotonic_ns
+from typing import cast as type_cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.codex_sdk import CodexInvocationError
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.jobs.repository import ClaimedJob
-from nexus.paper.manual_request import ResearchManifestView
+from nexus.paper.manual_request import ManualMode, ResearchManifestView
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 
 
@@ -197,12 +198,12 @@ async def require_dispatch_pool(
         or state.request_id != request.id
         or state.manifest.manifest_hash != manifest.manifest_hash
         or receipt.status != "active"
-        or request.mode != "research_only"
+        or request.mode not in {"research_only", "research_and_monitor"}
         or request.request_hash
         != manual_request_hash(
             account_id=request.account_id,
             batch_id=request.candidate_batch_id,
-            mode="research_only",
+            mode=type_cast(ManualMode, request.mode),
             contract_version=request.contract_version,
             research_profile=request.research_profile,
         )

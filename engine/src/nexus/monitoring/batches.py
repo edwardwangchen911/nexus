@@ -127,6 +127,8 @@ async def disclosure_source_current(
             or_(
                 AgentPaperCycleRecord.account_id == plan.account_id,
                 MonitorIncrement.account_id == plan.account_id,
+                DataSnapshot.payload["independent_monitor_context"]["account_id"].astext
+                == str(plan.account_id),
             ),
             AgentResearchRunRecord.instrument_id == plan.instrument_id,
             AgentResearchRunRecord.decision_time <= now,

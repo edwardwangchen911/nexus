@@ -80,3 +80,13 @@ it("rejects mixed contracts, fake cycles and malformed or leaking research bindi
     expect(rebuildAllowedEngineResponse(200, { data: invalid, meta }, undefined, path, undefined, "GET")).toBeNull();
   }
 });
+
+it("accepts the independent lineage only with its exact mode and no formal cycle", () => {
+  const independent = { ...researchReceipt, mode: "research_and_monitor", research_contract: "independent_monitor_research_v1" };
+  expect(rebuildAllowedEngineResponse(200, { data: independent, meta }, undefined, path, undefined, "GET")).not.toBeNull();
+  for (const invalid of [
+    { ...independent, mode: "research_only" }, { ...independent, mode: "research_and_paper" },
+    { ...independent, research_contract: "research_only_v2" }, { ...independent, research_contract: null },
+    { ...independent, cycle_id: id }, { ...independent, execution_locked: false },
+  ]) expect(rebuildAllowedEngineResponse(200, { data: invalid, meta }, undefined, path, undefined, "GET")).toBeNull();
+});

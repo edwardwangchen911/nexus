@@ -210,7 +210,8 @@ def synthesize_intent(
     monitoring_proposal = None
     from nexus.agents.committee import (
         DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
-        DISCLOSURE_SCOPE_PROMPT_VERSION,
+        DISCLOSURE_SCOPE_PROMPT_VERSIONS,
+        INDEPENDENT_MONITOR_PROMPT_VERSION,
         MONITORING_SCOPE_PROMPT_VERSIONS,
     )
 
@@ -218,6 +219,12 @@ def synthesize_intent(
     if (
         prompts["portfolio"].version in MONITORING_SCOPE_PROMPT_VERSIONS
         and proposal is not None
+        # Historical adjusted observations cannot authorize raw live thresholds.
+        # Drop only this optional kind; independently audited SEC remains usable.
+        and (
+            prompts["portfolio"].version != INDEPENDENT_MONITOR_PROMPT_VERSION
+            or price_authority_valid
+        )
         and by_role["evidence_audit"].vote == "support"
         and by_role["portfolio"].monitoring_adoption_hash == proposal.content_hash
     ):
@@ -238,9 +245,11 @@ def synthesize_intent(
     from nexus.monitoring.disclosure_contracts import compile_disclosure_proposal
 
     proposed = by_role["market_state"].disclosure_proposal
-    if prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION and proposed is not None:
-        paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
-            "monitor_context"
+    if prompts["portfolio"].version in DISCLOSURE_SCOPE_PROMPT_VERSIONS and proposed is not None:
+        paper = (
+            (snapshot.payload or {}).get("agent_paper_context")
+            or (snapshot.payload or {}).get("monitor_context")
+            or (snapshot.payload or {}).get("independent_monitor_context")
         )
         context = paper.get("disclosure_monitoring") if isinstance(paper, dict) else None
         try:
@@ -272,8 +281,10 @@ def synthesize_intent(
         prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS
         and daily_proposal is not None
     ):
-        paper = (snapshot.payload or {}).get("agent_paper_context") or (snapshot.payload or {}).get(
-            "monitor_context"
+        paper = (
+            (snapshot.payload or {}).get("agent_paper_context")
+            or (snapshot.payload or {}).get("monitor_context")
+            or (snapshot.payload or {}).get("independent_monitor_context")
         )
         try:
             context = daily_context_from_paper(paper)

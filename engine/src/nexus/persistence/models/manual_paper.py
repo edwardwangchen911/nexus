@@ -15,7 +15,10 @@ class ManualPaperRequest(ImmutableCreatedAt, Base):
     __tablename__ = "manual_paper_requests"
     __table_args__ = (
         UniqueConstraint("account_id", "key_hash", name="uq_manual_paper_request_key"),
-        CheckConstraint("mode IN ('research_only','research_and_paper')", name="mode_valid"),
+        CheckConstraint(
+            "mode IN ('research_only','research_and_paper','research_and_monitor')",
+            name="mode_valid",
+        ),
         CheckConstraint(
             "key_hash ~ '^[0-9a-f]{64}$' AND request_hash ~ '^[0-9a-f]{64}$' "
             "AND batch_hash ~ '^[0-9a-f]{64}$' AND model_hash ~ '^[0-9a-f]{64}$'",

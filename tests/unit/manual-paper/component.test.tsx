@@ -193,3 +193,20 @@ it("renders unrecognized member state and quality as unknown without exposing ra
   expect(screen.queryByText(/private/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
 });
+
+it("starts independent research once and retains unknown identity across refresh", async () => {
+  const independent = { ...researchReceipt, mode: "research_and_monitor", research_contract: "independent_monitor_research_v1", status: "unknown", code: "MANUAL_RESULT_UNKNOWN" };
+  fetchMock.mockResolvedValue(Response.json({ data: independent }));
+  const view = render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "研究并持续监控" })).toBeEnabled());
+  expect(fetchMock).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "研究并持续监控" }));
+  await screen.findByText(/通过审计的条件可进入持续监控/);
+  expect(fetchMock.mock.calls[0][1].body).toBe('{"mode":"research_and_monitor"}');
+  expect(screen.queryByRole("button", { name: "开始新的请求" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "查看周期决策" })).not.toBeInTheDocument();
+  view.unmount(); render(<ManualPaperStart />);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  expect(fetchMock.mock.calls[1][1].method).toBe("GET");
+  expect(screen.getByRole("button", { name: "研究并持续监控" })).toBeDisabled();
+});

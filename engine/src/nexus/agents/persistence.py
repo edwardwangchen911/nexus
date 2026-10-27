@@ -621,6 +621,7 @@ async def admit_research_run(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     research_only: bool = False,
+    independent_monitor: bool = False,
     monitor_increment: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
@@ -630,6 +631,7 @@ async def admit_research_run(
         monitor_increment
         and (
             research_only
+            or independent_monitor
             or not formal_stage_capacity
             or job_type is not JobType.AGENT_PAPER_RESEARCH
             or model_config_id is None
@@ -640,7 +642,9 @@ async def admit_research_run(
         raise ValueError("MONITOR_ADMISSION_ARGUMENT_INVALID")
     if (
         type(research_only) is not bool
-        or research_only
+        or type(independent_monitor) is not bool
+        or (research_only and independent_monitor)
+        or (research_only or independent_monitor)
         and (
             not formal_stage_capacity
             or job_type is not JobType.AGENT_PAPER_RESEARCH
@@ -677,6 +681,7 @@ async def admit_research_run(
             formal_stage_capacity=formal_stage_capacity,
             full_input_capacity=full_input_capacity,
             research_only=research_only,
+            independent_monitor=independent_monitor,
             monitor_increment=monitor_increment,
             economic_allocation=economic_allocation,
         )
@@ -797,6 +802,7 @@ async def _admit_research_run(
     formal_stage_capacity: bool = False,
     full_input_capacity: bool = False,
     research_only: bool = False,
+    independent_monitor: bool = False,
     monitor_increment: bool = False,
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
@@ -933,7 +939,11 @@ async def _admit_research_run(
 
         if is_monitor_snapshot(replay_snapshot) != monitor_increment:
             raise ValueError("MONITOR_ADMISSION_REQUIRED")
-        if research_only:
+        if independent_monitor:
+            from nexus.monitoring.independent_context import require_independent_snapshot
+
+            require_independent_snapshot(replay_snapshot)
+        elif research_only:
             require_research_only_snapshot(replay_snapshot)
         elif is_research_only(replay_snapshot, run.evidence_manifest):
             raise ValueError("RESEARCH_ONLY_ADMISSION_REQUIRED")
@@ -980,6 +990,22 @@ async def _admit_research_run(
         is None
     ):
         raise ValueError("MONITOR_CONTEXT_INVALID")
+    from nexus.monitoring.independent_context import is_independent_snapshot
+    from nexus.monitoring.independent_storage import read_independent_context
+
+    if is_independent_snapshot(snapshot) != independent_monitor:
+        raise ValueError("INDEPENDENT_MONITOR_ADMISSION_REQUIRED")
+    if (
+        independent_monitor
+        and await read_independent_context(
+            session,
+            snapshot_id=request.data_snapshot_id,
+            instrument_id=request.instrument_id,
+            as_of=request.decision_time,
+        )
+        is None
+    ):
+        raise ValueError("INDEPENDENT_MONITOR_CONTEXT_INVALID")
     if research_only:
         require_research_only_snapshot(snapshot)
         if snapshot is None or snapshot.observed_at != request.decision_time:
@@ -1017,6 +1043,22 @@ async def _admit_research_run(
         # The original normal bundle may contain independently versioned roles;
         # an orchestrator ID alone is not a same-version challenger bundle.
         prompts = await load_frozen_prompts(session, parent)
+    from nexus.agents.independent_monitor import PROMPT_VERSION as INDEPENDENT_PROMPT
+    from nexus.agents.independent_monitor import prompts_valid as independent_prompts_valid
+
+    if independent_monitor and (
+        prompts is None
+        or not independent_prompts_valid(prompts)
+        or any(row.created_at > request.decision_time for row in prompts.values())
+    ):
+        raise ValueError("INDEPENDENT_MONITOR_PROMPT_INVALID")
+    if (
+        not independent_monitor
+        and not monitor_increment
+        and prompts is not None
+        and any(p.version == INDEPENDENT_PROMPT for p in prompts.values())
+    ):
+        raise ValueError("INDEPENDENT_MONITOR_ADMISSION_REQUIRED")
     if research_only and (
         prompts is None
         or not research_only_prompts_valid(prompts)
@@ -1138,7 +1180,7 @@ async def _admit_research_run(
         or model.pricing_expires_at <= now
     ):
         raise ValueError("point-in-time data authority is invalid")
-    if research_only:
+    if research_only or independent_monitor:
         from nexus.research.observation_identity_storage import read_observation_identity_bindings
 
         ids = tuple(
@@ -1492,11 +1534,14 @@ def _schema_hash(*, portfolio_prompt_version: str | None = None) -> str:
     from nexus.agents.committee import (
         DAILY_PENDING_SCOPE_PROMPT_VERSION,
         DISCLOSURE_SCOPE_PROMPT_VERSION,
+        INDEPENDENT_MONITOR_PROMPT_VERSION,
         MONITORING_SCOPE_PROMPT_VERSION,
     )
 
     name = (
-        "research-intent-v10-sec-monitor.schema.json"
+        "research-intent-v11-independent-monitor.schema.json"
+        if portfolio_prompt_version == INDEPENDENT_MONITOR_PROMPT_VERSION
+        else "research-intent-v10-sec-monitor.schema.json"
         if portfolio_prompt_version == DISCLOSURE_SCOPE_PROMPT_VERSION
         else "research-intent-v9-daily-pending.schema.json"
         if portfolio_prompt_version == DAILY_PENDING_SCOPE_PROMPT_VERSION

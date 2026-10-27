@@ -11,7 +11,7 @@ from nexus.workbench.research_summary import WorkbenchCandidateResponse
 
 class WorkbenchActivityScopeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["research_and_paper", "research_only"]
+    mode: Literal["research_and_paper", "research_only", "research_and_monitor"]
     today_registered: int | None = Field(default=None, ge=0)
     today_started: int | None = Field(default=None, ge=0)
     registration_date: date
@@ -49,4 +49,4 @@ class WorkbenchActivityResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     read_at: AwareDatetime
     read_status: Literal["complete", "partial"]
-    scopes: tuple[WorkbenchActivityScopeResponse, ...] = Field(min_length=2, max_length=2)
+    scopes: tuple[WorkbenchActivityScopeResponse, ...] = Field(min_length=2, max_length=3)

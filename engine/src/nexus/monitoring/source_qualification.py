@@ -41,6 +41,8 @@ from nexus.monitoring.context import (
     is_monitor_snapshot,
     read_monitor_context,
 )
+from nexus.monitoring.independent_context import IndependentMonitorContext, is_independent_snapshot
+from nexus.monitoring.independent_storage import require_independent_run
 from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -65,14 +67,22 @@ async def _qualify_source(
     account_id: UUID,
     now: datetime,
 ) -> tuple[
-    AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext,
+    AgentPaperResearchContext
+    | MonitorResearchContext
+    | MixedMonitorContext
+    | IndependentMonitorContext,
     tuple[EvidenceRef, ...],
 ]:
     invalid = "MONITOR_SOURCE_INVALID"
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     if snapshot is None:
         raise ValueError(invalid)
-    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext
+    context: (
+        AgentPaperResearchContext
+        | MonitorResearchContext
+        | MixedMonitorContext
+        | IndependentMonitorContext
+    )
     if is_monitor_snapshot(snapshot):
         member = await require_increment_binding(session, run)
         monitor = await read_monitor_context(
@@ -91,6 +101,10 @@ async def _qualify_source(
         ):
             raise ValueError(invalid)
         context = monitor[0]
+    elif is_independent_snapshot(snapshot):
+        context = await require_independent_run(session, run)
+        if context.account_id != account_id:
+            raise ValueError(invalid)
     else:
         await require_formal_research(session, run)
         if not await formal_stage_output_qualified(session, run.id, decision_time=now):
@@ -202,7 +216,7 @@ async def _qualify_source(
             is not FrozenMonitorContextStatus.VALID
         ):
             raise ValueError(invalid)
-    elif (
+    elif not isinstance(context, IndependentMonitorContext) and (
         await revalidate_frozen_agent_paper_context(session, run=run, evidence_records=records)
         is not FrozenAgentPaperContextStatus.VALID
     ):
@@ -273,7 +287,12 @@ async def _qualify_source(
 class QualifiedSource:
     run: AgentResearchRunRecord
     output: AgentResearchOutputRecord
-    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext
+    context: (
+        AgentPaperResearchContext
+        | MonitorResearchContext
+        | MixedMonitorContext
+        | IndependentMonitorContext
+    )
     intent: ResearchIntent
     evidence: tuple[EvidenceRef, ...]
     role_outputs: tuple[CommitteeRoleOutput, ...]
@@ -339,7 +358,10 @@ async def load_qualified_source(
         model,
         evidence,
         outputs,
-        price_authority_valid=True,
+        price_authority_valid=(
+            not isinstance(context, IndependentMonitorContext)
+            or await _independent_price_valid(session, run, evidence)
+        ),
         portfolio_context=await read_portfolio_context(
             session, run.data_snapshot_id, run.instrument_id, run.decision_time
         ),
@@ -347,3 +369,20 @@ async def load_qualified_source(
     if reconstructed.model_dump(mode="json") != output.intent:
         raise ValueError(invalid)
     return QualifiedSource(run, output, context, intent, evidence, outputs)
+
+
+async def _independent_price_valid(
+    session: AsyncSession, run: AgentResearchRunRecord, evidence: tuple[EvidenceRef, ...]
+) -> bool:
+    from nexus.agents.price_authority import (
+        FrozenPriceAuthorityStatus,
+        revalidate_frozen_price_authority,
+    )
+
+    records = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+    return (
+        await revalidate_frozen_price_authority(
+            session, run=run, evidence_records=records, allow_fixture=False
+        )
+        is FrozenPriceAuthorityStatus.VALID
+    )

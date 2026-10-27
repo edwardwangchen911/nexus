@@ -3832,7 +3832,7 @@ export interface components {
              * Mode
              * @enum {string}
              */
-            mode: "research_only" | "research_and_paper";
+            mode: "research_only" | "research_and_paper" | "research_and_monitor";
         };
         /** ManualRequestView */
         ManualRequestView: {
@@ -3850,7 +3850,7 @@ export interface components {
              * Mode
              * @enum {string}
              */
-            mode: "research_only" | "research_and_paper";
+            mode: "research_only" | "research_and_paper" | "research_and_monitor";
             /** Preparation Disposition */
             preparation_disposition?: "unknown_acknowledged" | null;
             preparation_recovery?: components["schemas"]["PreparationRecoveryView"] | null;
@@ -3866,7 +3866,7 @@ export interface components {
             requested_at: string;
             research?: components["schemas"]["ResearchManifestView"] | null;
             /** Research Contract */
-            research_contract?: "research_only_v2" | null;
+            research_contract?: ("research_only_v2" | "independent_monitor_research_v1") | null;
             /**
              * Status
              * @enum {string}
@@ -8646,7 +8646,7 @@ export interface components {
              * Mode
              * @enum {string}
              */
-            mode: "research_and_paper" | "research_only";
+            mode: "research_and_paper" | "research_only" | "research_and_monitor";
             /**
              * Occupancy
              * @default not_indicated

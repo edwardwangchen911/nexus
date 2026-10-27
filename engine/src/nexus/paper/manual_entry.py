@@ -104,7 +104,7 @@ async def _read_presented_manual_request(
     # Keep the canonical event reader independent: acknowledgement validation
     # uses it to verify the original unknown facts and must never recurse.
     view = await read_manual_request(session, row)
-    if row.contract_version == 2:
+    if row.contract_version in {2, 3}:
         return view
     from nexus.paper.current_preparation_acceptance import current_unknown_accepted
 
@@ -210,7 +210,7 @@ async def start_configured_manual_request(
         release_revision=settings.release_revision,
         scope_hash=manual_host_scope(settings),
     )
-    if mode != "research_only":
+    if mode not in {"research_only", "research_and_monitor"}:
         try:
             calendar = await select_agent_paper_service_calendar_authority(session, now=now)
         except ValueError:
@@ -232,13 +232,17 @@ async def start_configured_manual_request(
         model_config_id=model_id,
         mode=mode,
         idempotency_key=idempotency_key,
-        contract_version=2 if mode == "research_only" else 1,
+        contract_version=3
+        if mode == "research_and_monitor"
+        else 2
+        if mode == "research_only"
+        else 1,
         runtime_mode=""
         if settings.agent_runtime_mode is None
         else settings.agent_runtime_mode.value,
         daily_limit_usd=settings.agent_daily_budget_usd,
         two_flight=(
-            mode == "research_only"
+            mode in {"research_only", "research_and_monitor"}
             and model is not None
             and model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
         ),

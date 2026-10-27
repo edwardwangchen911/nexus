@@ -39,6 +39,17 @@ from unit.market.test_object_store import FakeS3Client
 from unit.ops.test_formal_stage_registration import OPTIONS
 
 
+@pytest.fixture(autouse=True)
+def isolated_host_lock(monkeypatch, tmp_path):
+    # Keep the actual process lock checks; never share the resident app's lock.
+    from nexus.ops.agent_paper_loop import acquire_agent_paper_lock
+
+    monkeypatch.setattr(
+        "nexus.ops.agent_paper_loop.acquire_agent_paper_lock",
+        lambda: acquire_agent_paper_lock(runtime_root=tmp_path / "host-runtime"),
+    )
+
+
 async def prepare_scope(url, tmp_path, *, bounded=False):
     account = await seed_paper_batch(url)
     settings = EngineSettings(database_url=url, agent_runtime_mode="codex_sdk").model_copy(
@@ -251,8 +262,11 @@ async def test_three_stock_atomic_manifest_readback_cancel_and_next_admission(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,contract_version", [("research_only", 2), ("research_and_monitor", 3)]
+)
 async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_scheduling(
-    migrated_database_url, tmp_path, monkeypatch
+    migrated_database_url, tmp_path, monkeypatch, mode, contract_version
 ):
     import subprocess
     import sys
@@ -266,6 +280,20 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
     factory, settings, store, ids = await prepare_scope(
         migrated_database_url, tmp_path, bounded=True
     )
+    if mode == "research_and_monitor":
+        await prepare_database(
+            settings,
+            **(
+                OPTIONS
+                | {
+                    "max_wire_bytes": 100479,
+                    "full_input_capacity": True,
+                    "formal_bounded_stage_budget": True,
+                    "price_monitoring": True,
+                    "disclosure_monitoring": True,
+                }
+            ),
+        )
     settings = settings.model_copy(update={"release_revision": "a" * 40})
     calls = []
     reuse_states = []
@@ -306,11 +334,33 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
         assert reuse is not None and reuse.active
         reuse_states.append(reuse)
         calls.append(payload["stage"])
-        result.final_response = json.dumps(
+        response = (
             _assessment_payload(payload["previous_claims"])
             if payload["stage"] == "synthesis"
             else _staged_batch(payload["stage"], payload["requested_roles"])
         )
+        if mode == "research_and_monitor":
+            if payload["stage"] == "synthesis":
+                # This synthetic model acknowledges missing inputs: it cannot
+                # claim a buy conclusion and still qualify as a safe watch.
+                response["synthesis_assessment"]["stance"] = "watch"
+                response.update(
+                    monitoring_adoption_hash=None,
+                    disclosure_adoption_hash=None,
+                    daily_pending_adoption_hash=None,
+                )
+            else:
+                suffix = "proposal" if payload["stage"] == "research" else "review"
+                for role in response["roles"]:
+                    role.update(
+                        {
+                            f"monitoring_{suffix}": None,
+                            f"disclosure_{suffix}": None,
+                            f"daily_pending_{suffix}": None,
+                        }
+                    )
+            options["output_model"].model_validate(response)
+        result.final_response = json.dumps(response)
         return await real_invoke(payload, **options)
 
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
@@ -336,11 +386,11 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
                 account_id=settings.agent_paper_account_id,
                 batch_id=settings.agent_paper_candidate_batch_id,
                 model_config_id=settings.agent_paper_formal_model_config_id,
-                mode="research_only",
+                mode=mode,
                 idempotency_key="normal-v11",
-                contract_version=2,
+                contract_version=contract_version,
             )
-        view = await run_pure_research_once(settings, idempotency_key="normal-v11")
+        view = await run_pure_research_once(settings, idempotency_key="normal-v11", mode=mode)
         from nexus.agents.preparation_reuse import current_reuse
 
         assert current_reuse() is None
@@ -354,6 +404,43 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
         assert calls == ["research", "critique", "synthesis"] * 3
         assert len(processes) == 9 and all(p.poll() == 0 for p in processes)
         assert client.close.await_count == 9
+        if mode == "research_and_monitor":
+            from nexus.agents.research_only import require_formal_research
+            from nexus.monitoring.batches import disclosure_source_current
+            from nexus.monitoring.source_qualification import load_qualified_source
+            from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+            async with factory.begin() as session:
+                session.info["sec_exhibit_store"] = store
+                now = await session.scalar(select(func.clock_timestamp()))
+                for member in view.research.members:
+                    terminal = await session.scalar(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == member.run_id,
+                            AgentResearchOutputRecord.role.is_(None),
+                            AgentResearchOutputRecord.status == "completed",
+                        )
+                    )
+                    qualified = await load_qualified_source(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        output_id=terminal.id,
+                        now=now,
+                    )
+                    assert qualified.context.request_id == view.request_id
+                    with pytest.raises(
+                        ValueError, match="INDEPENDENT_MONITOR_FORMAL_CONSUMPTION_FORBIDDEN"
+                    ):
+                        await require_formal_research(session, qualified.run)
+                    # The source-current query must discover native independent roots,
+                    # even without a fabricated PaperCycle or MonitorIncrement parent.
+                    pointer = SimpleNamespace(
+                        id=member.run_id,
+                        account_id=settings.agent_paper_account_id,
+                        instrument_id=member.instrument_id,
+                        source_run_id=member.run_id,
+                    )
+                    assert await disclosure_source_current(session, pointer, now)
         async with factory.begin() as session:
             assert await session.scalar(select(func.count()).select_from(ManualHostExit)) == 1
         import httpx
@@ -380,7 +467,7 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
                     mode="json"
                 )
                 path = "/internal/v1/paper/manual-requests"
-                body = b'{"mode":"research_only"}'
+                body = json.dumps({"mode": mode}).encode()
                 response = await client.post(
                     path,
                     content=body,
@@ -544,8 +631,11 @@ async def test_interrupted_atomic_preparation_closes_without_replay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,contract_version", [("research_only", 2), ("research_and_monitor", 3)]
+)
 async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_next(
-    migrated_database_url, tmp_path, monkeypatch
+    migrated_database_url, tmp_path, monkeypatch, mode, contract_version
 ):
     from datetime import timedelta
 
@@ -554,7 +644,33 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
     from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
     from nexus.persistence.models.runtime import JobLease
 
-    factory, settings, store, ids = await prepare_scope(migrated_database_url, tmp_path)
+    factory, settings, store, ids = await prepare_scope(
+        migrated_database_url, tmp_path, bounded=mode == "research_and_monitor"
+    )
+    if mode == "research_and_monitor":
+        await prepare_database(
+            settings,
+            **(
+                OPTIONS
+                | {
+                    "max_wire_bytes": 100479,
+                    "full_input_capacity": True,
+                    "formal_bounded_stage_budget": True,
+                    "price_monitoring": True,
+                    "disclosure_monitoring": True,
+                }
+            ),
+        )
+        async with factory.begin() as session:
+            await admit_manual_request(
+                session,
+                account_id=settings.agent_paper_account_id,
+                batch_id=settings.agent_paper_candidate_batch_id,
+                model_config_id=settings.agent_paper_formal_model_config_id,
+                mode=mode,
+                contract_version=contract_version,
+                idempotency_key="unknown-new",
+            )
     settings = settings.model_copy(update={"release_revision": "a" * 40})
     calls = []
 
@@ -571,7 +687,7 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
     )
     try:
         with pytest.raises(Vanished):
-            await run_pure_research_once(settings, idempotency_key="unknown-new")
+            await run_pure_research_once(settings, idempotency_key="unknown-new", mode=mode)
         assert len(calls) == 1
         async with factory.begin() as session:
             row = await session.scalar(select(ManualPaperRequest))
@@ -622,9 +738,9 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
                     account_id=settings.agent_paper_account_id,
                     batch_id=settings.agent_paper_candidate_batch_id,
                     model_config_id=settings.agent_paper_formal_model_config_id,
-                    mode="research_only",
+                    mode=mode,
                     idempotency_key="blocked-after-unknown",
-                    contract_version=2,
+                    contract_version=contract_version,
                 )
         assert len(calls) == 1
     finally:

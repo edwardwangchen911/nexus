@@ -39,9 +39,14 @@ async def installed(
     added=2,
     kinds=("price", "disclosure"),
     monitoring_lifetime_days=None,
+    independent=False,
 ):
     factory, settings, store, captured, pointer = await reader_source(
-        database_url, monkeypatch, root, monitoring_lifetime_days=monitoring_lifetime_days
+        database_url,
+        monkeypatch,
+        root,
+        monitoring_lifetime_days=monitoring_lifetime_days,
+        independent=independent,
     )
     monkeypatch.setattr(
         "nexus.monitoring.disclosure_observations.configured_exhibit_store", lambda session: store
@@ -49,9 +54,18 @@ async def installed(
     await append_capture(settings, store, captured, factory, root, "current", added=added)
     async with factory() as session:
         snapshot = await session.get(DataSnapshot, pointer.data_snapshot_id)
-        cycle = await session.get(
-            AgentPaperCycleRecord, UUID(snapshot.payload["agent_paper_context"]["cycle_id"])
-        )
+        if independent:
+            from types import SimpleNamespace
+
+            cycle = SimpleNamespace(
+                candidate_batch_id=UUID(
+                    snapshot.payload["independent_monitor_context"]["candidate_batch_id"]
+                )
+            )
+        else:
+            cycle = await session.get(
+                AgentPaperCycleRecord, UUID(snapshot.payload["agent_paper_context"]["cycle_id"])
+            )
     settings = settings.model_copy(
         update={
             "agent_paper_account_id": captured["account_id"],

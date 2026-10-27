@@ -282,7 +282,7 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0097_monitor_daily_events"
+            == "0098_independent_monitor"
         )
         assert (await session.get(MonitorTrigger, scope[1])).kind == "disclosure"
     await factory.kw["bind"].dispose()

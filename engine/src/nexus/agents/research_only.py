@@ -65,7 +65,10 @@ def require_research_only_snapshot(snapshot: DataSnapshot | None) -> None:
 async def require_formal_research(session: AsyncSession, run: AgentResearchRunRecord) -> None:
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     from nexus.monitoring.context import is_monitor_snapshot
+    from nexus.monitoring.independent_context import is_independent_snapshot
 
+    if is_independent_snapshot(snapshot, run.evidence_manifest):
+        raise ValueError("INDEPENDENT_MONITOR_FORMAL_CONSUMPTION_FORBIDDEN")
     if is_monitor_snapshot(snapshot):
         raise ValueError("MONITOR_FORMAL_CONSUMPTION_FORBIDDEN")
     if is_research_only(snapshot, run.evidence_manifest):
@@ -122,3 +125,16 @@ def research_only_prompts_valid(prompts: Mapping[AgentRole, AgentPromptVersionRe
         and sha256(row.content.encode()).hexdigest() == row.content_hash
         for row in prompts.values()
     )
+
+
+def require_observation_snapshot(snapshot: DataSnapshot | None) -> None:
+    """Dispatch by exact non-trading purpose; the v2 validator stays unchanged."""
+    from nexus.monitoring.independent_context import (
+        is_independent_snapshot,
+        require_independent_snapshot,
+    )
+
+    if is_independent_snapshot(snapshot):
+        require_independent_snapshot(snapshot)
+    else:
+        require_research_only_snapshot(snapshot)

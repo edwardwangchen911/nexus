@@ -28,7 +28,7 @@ from nexus.agents.committee import AgentRole
 from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.portfolio_context import read_portfolio_context
-from nexus.agents.research_only import require_research_only_snapshot
+from nexus.agents.research_only import require_observation_snapshot
 from nexus.agents.synthesis import domain_evidence, staged_intent_semantics_valid
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -181,7 +181,7 @@ class ObservationReadback:
         snapshot = await self.session.get(DataSnapshot, run.data_snapshot_id)
         if sufficient_observation:
             try:
-                require_research_only_snapshot(snapshot)
+                require_observation_snapshot(snapshot)
             except ValueError:
                 return False
             if (

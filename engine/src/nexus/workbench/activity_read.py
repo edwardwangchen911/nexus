@@ -107,7 +107,7 @@ async def _read_activity(
     paper = PaperReadService(session, read_at)
     account, _ = await paper.account()
     scopes = []
-    for mode in ("research_and_paper", "research_only"):
+    for mode in ("research_and_paper", "research_only", "research_and_monitor"):
         try:
             scopes.append(
                 await _scope(
@@ -219,7 +219,7 @@ async def _scope(
         registration_date=day,
         decision_session=decision_session if mode == "research_and_paper" else None,
         selection="none",
-        portfolio_status="not_applicable" if mode == "research_only" else None,
+        portfolio_status="not_applicable" if mode != "research_and_paper" else None,
     )
     if len(pending) > _LIMIT:
         return result.model_copy(

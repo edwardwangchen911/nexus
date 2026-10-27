@@ -224,7 +224,7 @@ async def test_images_read_partial_daily_proof_and_fence_old_schema_writer(
             migrated_database_url,
             {
                 "mode": "schema",
-                "expected_image_schema": "0097_monitor_daily_events",
+                "expected_image_schema": "0098_independent_monitor",
                 "expect_mismatch": False,
             },
             tmp_path / "image-current-schema",

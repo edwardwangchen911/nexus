@@ -31,7 +31,15 @@ async def import_baseline_identity(
 
 
 async def import_baseline_capture(
-    settings, store, root, *, identity, symbol="AAPL", exchange="NYSE", received=None
+    settings,
+    store,
+    root,
+    *,
+    identity,
+    symbol="AAPL",
+    exchange="NYSE",
+    received=None,
+    sibling_symbols=(),
 ):
     """No collector/HTTP: import complete synthetic archives and preserve local custody times."""
     received = received or datetime.now(UTC) - timedelta(hours=1)
@@ -40,12 +48,15 @@ async def import_baseline_capture(
     root.mkdir(parents=True)
     directory = {
         "fields": ["cik", "name", "ticker", "exchange"],
-        "data": [[int(CIK), "Synthetic", symbol, source_exchange]],
+        "data": [
+            [int(CIK), "Synthetic", ticker, source_exchange]
+            for ticker in (symbol, *sibling_symbols)
+        ],
     }
     submissions = {
         "cik": int(CIK),
-        "tickers": [symbol],
-        "exchanges": [source_exchange],
+        "tickers": [symbol, *sibling_symbols],
+        "exchanges": [source_exchange] * (1 + len(sibling_symbols)),
         "filings": {
             "files": [],
             "recent": {

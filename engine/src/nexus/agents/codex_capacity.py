@@ -42,7 +42,7 @@ from nexus.agents.codex_versions import (
 )
 from nexus.agents.committee import (
     DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
-    DISCLOSURE_SCOPE_PROMPT_VERSION,
+    DISCLOSURE_SCOPE_PROMPT_VERSIONS,
     MONITORING_SCOPE_PROMPT_VERSIONS,
     ROLE_ORDER,
     AgentRole,
@@ -293,7 +293,7 @@ def _monitoring_capacity_view(
                 view._outputs[reviewer] = view._outputs[reviewer].model_copy(
                     update={"daily_pending_review": daily_review}
                 )
-    if committee._prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION:
+    if committee._prompts["portfolio"].version in DISCLOSURE_SCOPE_PROMPT_VERSIONS:
         from nexus.monitoring.contracts import DisclosureReviewCondition
         from nexus.monitoring.disclosure_contracts import (
             DisclosureMonitoringProposal,

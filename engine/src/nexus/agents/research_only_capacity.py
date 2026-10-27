@@ -7,7 +7,7 @@ from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_p
 from nexus.agents.codex_staged import StructuredStagedCodexCommittee
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
-from nexus.agents.research_only import require_research_only_snapshot
+from nexus.agents.research_only import require_observation_snapshot
 from nexus.agents.synthesis import domain_evidence
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
@@ -23,7 +23,7 @@ async def prepare_research_only_capacity_pool(
 ) -> StructuredStagedCodexCommittee:
     invalid = "RESEARCH_ONLY_POOL_BINDING_INVALID"
     try:
-        require_research_only_snapshot(await session.get(DataSnapshot, run.data_snapshot_id))
+        require_observation_snapshot(await session.get(DataSnapshot, run.data_snapshot_id))
     except (ValueError, AttributeError) as error:
         raise ValueError(invalid) from error
     from nexus.paper.research_request import read_research_manifest
@@ -75,7 +75,7 @@ async def prepare_research_only_capacity_pool(
             or member.decision_time != manifest.research_as_of
         ):
             raise ValueError(invalid)
-        require_research_only_snapshot(await session.get(DataSnapshot, member.data_snapshot_id))
+        require_observation_snapshot(await session.get(DataSnapshot, member.data_snapshot_id))
         evidence = await load_frozen_evidence(session, member, allow_fixture_evidence=False)
         if not evidence:
             raise ValueError(invalid)

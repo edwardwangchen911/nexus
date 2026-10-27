@@ -84,7 +84,10 @@ async def test_activity_preparing_without_cycle_and_cross_day_unknown(
             result = await read_activity(
                 session, read_at=AT + timedelta(seconds=2), decision_session=AT.date()
             )
-            formal, pure = result.scopes
+            formal, pure, independent = result.scopes
+            assert independent.mode == "research_and_monitor"
+            assert independent.today_registered == 0 and independent.selection == "none"
+            assert independent.portfolio_status == "not_applicable"
             assert result.read_status == "complete"
             assert formal.request_id == request_id and formal.cycle_id is None
             assert formal.status == "preparing" and formal.selection == "active"

@@ -14,6 +14,7 @@ from nexus.domain.time import require_utc
 from nexus.monitoring.context import MonitorResearchContext
 from nexus.monitoring.contracts import PriceMonitoringProposal, PriceReviewCondition
 from nexus.monitoring.evaluation import EpisodeState, Result, advance_episode, compile_proposal
+from nexus.monitoring.independent_context import IndependentMonitorContext
 from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.monitoring.source_qualification import load_qualified_source
 from nexus.monitoring.storage import lock_security, plan_recorded_at
@@ -29,7 +30,12 @@ class ApprovedSource:
     run: AgentResearchRunRecord
     output: AgentResearchOutputRecord
     proposal: PriceMonitoringProposal
-    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext
+    context: (
+        AgentPaperResearchContext
+        | MonitorResearchContext
+        | MixedMonitorContext
+        | IndependentMonitorContext
+    )
 
 
 def consume_episode_baseline(
@@ -47,9 +53,16 @@ def consume_episode_baseline(
 
 def consumed_baseline(
     condition: PriceReviewCondition,
-    context: AgentPaperResearchContext | MonitorResearchContext | MixedMonitorContext,
+    context: AgentPaperResearchContext
+    | MonitorResearchContext
+    | MixedMonitorContext
+    | IndependentMonitorContext,
 ) -> Result:
     """Only evidence actually frozen into this research can seed a replacement latch."""
+    from nexus.monitoring.independent_context import IndependentMonitorContext
+
+    if isinstance(context, IndependentMonitorContext):
+        return "unknown"
     quote = context.decision_quote
     try:
         observed = require_utc(quote.observed_at)
@@ -87,6 +100,11 @@ async def load_approved_source(
     source = await load_qualified_source(
         session, account_id=account_id, output_id=output_id, now=now
     )
+    if isinstance(source.context, IndependentMonitorContext):
+        from nexus.monitoring.source_qualification import _independent_price_valid
+
+        if not await _independent_price_valid(session, source.run, source.evidence):
+            raise ValueError("MONITOR_PRICE_BASIS_UNAVAILABLE")
     by_role = {row.role: row for row in source.role_outputs}
     proposal = by_role["market_state"].monitoring_proposal
     if (
@@ -131,6 +149,11 @@ async def _install_mixed_or_legacy_plan(
 
         if expected_predecessor_id != frozen_predecessor(source.context, "price"):
             raise ValueError("MONITOR_PLAN_CONFLICT")
+    if (
+        isinstance(source.context, IndependentMonitorContext)
+        and expected_predecessor_id != source.context.predecessor("price").plan_id
+    ):
+        raise ValueError("MONITOR_PLAN_CONFLICT")
     await lock_security(session, account_id=account_id, instrument_id=source.run.instrument_id)
     existing = await session.scalar(
         select(MonitorPlan).where(
@@ -201,7 +224,9 @@ async def _install_mixed_or_legacy_plan(
             previous,
             baseline,
             last_checked_at=None if state is None else state.checked_at,
-            observed_at=source.context.decision_quote.observed_at,
+            observed_at=source.context.decision_time
+            if isinstance(source.context, IndependentMonitorContext)
+            else source.context.decision_quote.observed_at,
         )
         if baseline_applied:
             if state is None:

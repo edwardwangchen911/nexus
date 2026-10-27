@@ -28,7 +28,7 @@ from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPape
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobLease
 
-ManualMode = Literal["research_only", "research_and_paper"]
+ManualMode = Literal["research_only", "research_and_paper", "research_and_monitor"]
 ManualStatus = Literal["queued", "preparing", "active", "completed", "unavailable", "unknown"]
 _TERMINAL = {"completed", "unavailable", "unknown"}
 _TRANSITIONS = {
@@ -84,8 +84,8 @@ class ManualRequestView(BaseModel):
     code: str
     cycle_id: UUID | None
     execution_locked: Literal[True] = True
-    research_contract: Literal["research_only_v2"] | None = Field(
-        default=None, exclude_if=lambda value: value is None
+    research_contract: Literal["research_only_v2", "independent_monitor_research_v1"] | None = (
+        Field(default=None, exclude_if=lambda value: value is None)
     )
     research: ResearchManifestView | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -116,15 +116,24 @@ def manual_request_hash(
     contract_version: int = 1,
     research_profile: dict[str, object] | None = None,
 ) -> str:
-    if contract_version not in {1, 2} or contract_version == 2 and mode != "research_only":
+    if (
+        contract_version not in {1, 2, 3}
+        or (contract_version == 3) != (mode == "research_and_monitor")
+        or contract_version == 2
+        and mode != "research_only"
+    ):
         raise ValueError("MANUAL_REQUEST_INVALID")
     return job_input_hash(
         {
-            "contract": "manual_paper_v1" if contract_version == 1 else "research_only_v2",
+            "contract": {
+                1: "manual_paper_v1",
+                2: "research_only_v2",
+                3: "independent_monitor_research_v1",
+            }[contract_version],
             "account_id": str(account_id),
             "candidate_batch_id": str(batch_id),
             "mode": mode,
-            **({"research_profile": research_profile} if contract_version == 2 else {}),
+            **({"research_profile": research_profile} if contract_version in {2, 3} else {}),
         }
     )
 
@@ -137,7 +146,7 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
             .order_by(ManualPaperRequestEvent.sequence)
         )
     ).all()
-    if row.mode not in {"research_only", "research_and_paper"}:
+    if row.mode not in {"research_only", "research_and_paper", "research_and_monitor"}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     if row.request_hash != manual_request_hash(
         account_id=row.account_id,
@@ -160,14 +169,20 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
     if events[-1].cycle_id is not None:
         await _require_manual_cycle_binding(session, row, events[-1].cycle_id)
     research = None
-    if row.contract_version == 2:
+    if row.contract_version in {2, 3}:
         from nexus.paper.research_request import read_research_manifest
 
         research = await read_research_manifest(session, row)
         if events[-1].status in {"active", "completed"} and research is None:
             raise ValueError("MANUAL_RESULT_UNKNOWN")
     return ManualRequestView(
-        research_contract="research_only_v2" if row.contract_version == 2 else None,
+        research_contract=(
+            "research_only_v2"
+            if row.contract_version == 2
+            else "independent_monitor_research_v1"
+            if row.contract_version == 3
+            else None
+        ),
         research=research,
         request_id=row.id,
         mode=cast(ManualMode, row.mode),
@@ -183,8 +198,8 @@ def _validate_event(
     event: ManualPaperRequestEvent,
     prior: ManualPaperRequestEvent | None,
 ) -> None:
-    pure = getattr(row, "contract_version", 1) == 2
-    if pure and row.mode != "research_only":
+    pure = getattr(row, "contract_version", 1) in {2, 3}
+    if pure and row.mode != {2: "research_only", 3: "research_and_monitor"}[row.contract_version]:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     codes = {
         "queued": {"MANUAL_REQUEST_QUEUED"},
@@ -351,7 +366,7 @@ async def require_manual_request_history(
         if request.id == excluding_request_id:
             continue
         view = await read_manual_request(session, request)
-        if request.contract_version == 2 and view.research is not None:
+        if request.contract_version in {2, 3} and view.research is not None:
             from nexus.paper.research_request import require_research_jobs_settled
 
             await require_research_jobs_settled(session, row=request, view=view.research, now=now)
@@ -439,7 +454,9 @@ async def admit_manual_request(
     if (
         type(two_flight) is not bool
         or two_flight
-        and (contract_version != 2 or mode != "research_only")
+        and (
+            contract_version not in {2, 3} or mode not in {"research_only", "research_and_monitor"}
+        )
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
     if not idempotency_key.strip() or len(idempotency_key) > 255:
@@ -484,12 +501,17 @@ async def admit_manual_request(
         if model.version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
             raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     profile: dict[str, object] | None = None
-    if contract_version == 2:
+    if contract_version in {2, 3}:
+        from nexus.agents.independent_monitor import ensure_prompts
         from nexus.agents.research_only import ensure_research_only_prompts
 
         if runtime_mode != "codex_sdk":
             raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
-        prompts = await ensure_research_only_prompts(session)
+        prompts = await (
+            ensure_prompts(session)
+            if contract_version == 3
+            else ensure_research_only_prompts(session)
+        )
         profile = {
             "runtime_mode": runtime_mode,
             "daily_limit_usd": format(daily_limit_usd.normalize(), "f"),

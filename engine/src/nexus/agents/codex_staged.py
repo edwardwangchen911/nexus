@@ -40,6 +40,8 @@ from nexus.agents.committee import (
     DAILY_PENDING_SCOPE_PROMPT_VERSION,
     DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
     DISCLOSURE_SCOPE_PROMPT_VERSION,
+    DISCLOSURE_SCOPE_PROMPT_VERSIONS,
+    INDEPENDENT_MONITOR_PROMPT_VERSION,
     MONITORING_SCOPE_PROMPT_VERSION,
     MONITORING_SCOPE_PROMPT_VERSIONS,
     ROLE_ORDER,
@@ -250,6 +252,22 @@ class _MixedEventProposal(BaseModel):
     items: tuple[_MixedEventItem, ...] = Field(min_length=1, max_length=32)
 
 
+class _IndependentDisclosureResearchRole(_DisclosureResearchRole):
+    daily_pending_proposal: None
+
+
+class _IndependentDisclosureCritiqueRole(_DisclosureCritiqueRole):
+    daily_pending_review: None
+
+
+class _IndependentDisclosureResearchBatch(_DisclosureResearchBatch):
+    roles: tuple[_IndependentDisclosureResearchRole, ...] = Field(min_length=5, max_length=5)
+
+
+class _IndependentDisclosureCritiqueBatch(_DisclosureCritiqueBatch):
+    roles: tuple[_IndependentDisclosureCritiqueRole, ...] = Field(min_length=2, max_length=2)
+
+
 class _MixedEventReview(_DisclosureReview):
     pass
 
@@ -396,6 +414,10 @@ class _DisclosureAssessmentBatch(_DailyAssessmentBatch):
     disclosure_adoption_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class _IndependentDisclosureAssessmentBatch(_DisclosureAssessmentBatch):
+    daily_pending_adoption_hash: None
+
+
 class _MixedAssessmentBatch(_DisclosureAssessmentBatch):
     mixed_event_adoption_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -425,6 +447,8 @@ def _assessment_model(
         "FrozenSynthesisAssessmentBatch",
         __base__=_MixedAssessmentBatch
         if mixed
+        else _IndependentDisclosureAssessmentBatch
+        if disclosure and not daily
         else _DisclosureAssessmentBatch
         if disclosure
         else _DailyAssessmentBatch
@@ -489,6 +513,12 @@ def _stage_model_for_prior_claims(
         base = _DailyResearchBatch if stage == "research" else _DailyCritiqueBatch
     if disclosure:
         base = _DisclosureResearchBatch if stage == "research" else _DisclosureCritiqueBatch
+    if disclosure and not daily:
+        base = (
+            _IndependentDisclosureResearchBatch
+            if stage == "research"
+            else _IndependentDisclosureCritiqueBatch
+        )
     if mixed:
         base = _MixedResearchBatch if stage == "research" else _MixedCritiqueBatch
     if stage == "research":
@@ -502,6 +532,8 @@ def _stage_model_for_prior_claims(
         (
             _MixedCritiqueRole
             if mixed
+            else _IndependentDisclosureCritiqueRole
+            if disclosure and not daily
             else _DisclosureCritiqueRole
             if disclosure
             else _DailyCritiqueRole
@@ -701,6 +733,25 @@ class StagedCodexCommittee(CodexCommittee):
             SECURITY_RESEARCH_SCOPE_PROMPT_VERSION,
         )
 
+        independent_context_present = (
+            isinstance(security, dict)
+            and security.get("purpose") == "independent_monitor_research_v1"
+        )
+        if independent_context_present and isinstance(security, dict):
+            from nexus.monitoring.independent_context import IndependentMonitorContext
+
+            bound_independent = IndependentMonitorContext.model_validate_json(
+                json.dumps(security.get("independent_monitor_context"))
+            )
+            if (
+                self._prompts["portfolio"].version != INDEPENDENT_MONITOR_PROMPT_VERSION
+                or not self._paper_stage_scope
+                or bound_independent.instrument_id != request.instrument_id
+                or bound_independent.decision_time != request.decision_time
+                or paper_context_present
+                or monitor_context_present
+            ):
+                raise ValueError("INDEPENDENT_MONITOR_CONTEXT_SCOPE_INVALID")
         # The frozen prompt version owns this wire revision. Old manifests keep
         # byte-identical instructions; registration never rewrites existing Runs.
         security_research_scope = (
@@ -712,9 +763,10 @@ class StagedCodexCommittee(CodexCommittee):
                 MONITORING_SCOPE_PROMPT_VERSION,
                 DAILY_PENDING_SCOPE_PROMPT_VERSION,
                 DISCLOSURE_SCOPE_PROMPT_VERSION,
+                INDEPENDENT_MONITOR_PROMPT_VERSION,
             }
             and self._paper_stage_scope
-            and (paper_context_present or monitor_context_present)
+            and (paper_context_present or monitor_context_present or independent_context_present)
             and isinstance(security, dict)
             and security.get("purpose") != "research_only_v2"
             and "diagnostic_synthetic_paper_load" not in security
@@ -777,7 +829,7 @@ class StagedCodexCommittee(CodexCommittee):
             monitoring and self._prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS
         )
         disclosure = (
-            monitoring and self._prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION
+            monitoring and self._prompts["portfolio"].version in DISCLOSURE_SCOPE_PROMPT_VERSIONS
         )
         output_model = _stage_model_for_prior_claims(
             stage,
@@ -841,6 +893,7 @@ class StagedCodexCommittee(CodexCommittee):
                 MONITORING_SCOPE_PROMPT_VERSION,
                 DAILY_PENDING_SCOPE_PROMPT_VERSION,
                 DISCLOSURE_SCOPE_PROMPT_VERSION,
+                INDEPENDENT_MONITOR_PROMPT_VERSION,
             }
         ):
             # The initial claims and audit vote need the new frozen guidance too.
@@ -1079,6 +1132,10 @@ class StagedCodexCommittee(CodexCommittee):
                     "conflict; name exactly which conclusion each unresolved issue prevents. "
                     "Do not infer missing portfolio facts, assign weights or grant execution."
                 )
+        if independent_context_present:
+            from nexus.agents.independent_monitor import INSTRUCTIONS
+
+            payload["instructions"] = cast(str, payload["instructions"]) + " " + INSTRUCTIONS
         if isinstance(security, dict) and security.get("purpose") == "research_only_v2":
             from nexus.agents.research_only import RESEARCH_ONLY_INSTRUCTIONS
 

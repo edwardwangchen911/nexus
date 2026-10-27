@@ -199,7 +199,9 @@ async def prepare_cycle_capacity_pool(
         from nexus.monitoring.capacity import prepare_monitor_capacity_pool
 
         return await prepare_monitor_capacity_pool(session, settings, run, deadline=deadline)
-    if is_research_only(snapshot):
+    from nexus.monitoring.independent_context import is_independent_snapshot
+
+    if is_research_only(snapshot) or is_independent_snapshot(snapshot):
         if not formal_stage_capacity:
             raise ValueError(invalid)
         from nexus.agents.research_only_capacity import prepare_research_only_capacity_pool
