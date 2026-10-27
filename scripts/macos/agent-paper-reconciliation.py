@@ -460,14 +460,22 @@ def _archive_pointer(state, pointer, reason, observed_at, **facts):
     del state["exit_reconciliation"]
 
 
-def archive_unused_prior_boot(root, state, current_boot, *, observed_at):
-    """Old boot retirement is audit only and never consumes a restart permission."""
+def validate_unused_prior_boot(root, state, current_boot):
+    """Read-only verification leaves authority intact until enable commits."""
     pointer = state.get("exit_reconciliation")
     if pointer is None or pointer.get("consumed_by") is not None:
         return
     if current_boot == state["boot"] or state.get("attempt") is not None:
         _reject("STATE_INVALID")
     _validate_original(root, state, pointer)
+    return pointer
+
+
+def archive_unused_prior_boot(root, state, current_boot, *, observed_at):
+    """Old boot retirement is audit only and never consumes a restart permission."""
+    pointer = validate_unused_prior_boot(root, state, current_boot)
+    if pointer is None:
+        return
     _archive_pointer(
         state,
         pointer,

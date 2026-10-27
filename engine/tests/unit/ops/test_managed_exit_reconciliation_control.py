@@ -801,3 +801,72 @@ def test_normal_stop_before_first_healthy_archives_consumer_and_allows_next_exit
     assert json.loads(result.stdout)["proof_id"] == pending["id"]
     assert (proof.read_bytes(), old_receipt.read_bytes()) == frozen
     assert len(starts(root)) == 2
+
+
+def test_cross_boot_install_failure_keeps_unused_proof_for_explicit_reentry(tmp_path):
+    from unit.ops.test_agent_paper_host_service import _executable
+    from unit.ops.test_agent_paper_recovery_control import options
+
+    root, env, state_path, receipt_path = ended_activated_host(tmp_path)
+    assert _invoke(root, env, "reconcile-exit").returncode == 0
+    pointer = json.loads(state_path.read_text())["exit_reconciliation"]
+    proof = next(receipt_path.parent.glob("recovery-reconciliation-*.json"))
+    frozen = proof.read_bytes(), receipt_path.read_bytes()
+    _executable(root.parent / "bin/sysctl", "print('22222222-2222-2222-2222-222222222222')\n")
+    launchctl = root.parent / "bin/launchctl"
+    launchctl.write_text(
+        launchctl.read_text().replace(
+            "action = sys.argv[1]",
+            "if options.get('install_failure') and any('com.nexus.agent-paper-recovery' in a "
+            "for a in sys.argv): sys.exit(1)\naction = sys.argv[1]",
+        )
+    )
+    options(root, install_failure=True)
+    assert _invoke(root, env, "enable-recovery").returncode != 0
+    state = json.loads(state_path.read_text())
+    assert state["desired"] == "disabled" and state["attempt"] is None
+    assert state.get("exit_reconciliation") == pointer
+    assert state.get("exit_reconciliation_history", []) == []
+    assert starts(root) == [] and (proof.read_bytes(), receipt_path.read_bytes()) == frozen
+    options(root, kickstart_state="inactive", exit=1)
+    result = _invoke(root, env, "enable-recovery")
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads(state_path.read_text())
+    assert state.get("exit_reconciliation") is None
+    assert len(state["exit_reconciliation_history"]) == 1
+    assert state["exit_reconciliation_history"][0]["consumed_by"] is None
+    assert "exit_reconciliation_sha256" not in state["attempt"]
+    assert len(starts(root)) == 1 and (proof.read_bytes(), receipt_path.read_bytes()) == frozen
+
+
+def test_cross_boot_rate_limit_then_disable_keeps_explicit_enable_reentry(tmp_path):
+    import time
+
+    from unit.ops.test_agent_paper_host_service import _executable
+    from unit.ops.test_agent_paper_recovery_control import options
+
+    root, env, state_path, receipt_path = ended_activated_host(tmp_path)
+    assert _invoke(root, env, "reconcile-exit").returncode == 0
+    _executable(root.parent / "bin/sysctl", "print('22222222-2222-2222-2222-222222222222')\n")
+    state = json.loads(state_path.read_text())
+    pointer = state["exit_reconciliation"]
+    state["next_start_at"] = time.time() + 600
+    state_path.write_text(json.dumps(state))
+    options(root, kickstart_state="inactive", exit=1)
+    assert _invoke(root, env, "enable-recovery").returncode == 0
+    assert json.loads(state_path.read_text())["reason"] == "RATE_LIMITED"
+    assert starts(root) == []
+    assert _invoke(root, env, "disable-recovery").returncode == 0
+    state = json.loads(state_path.read_text())
+    assert state.get("exit_reconciliation") == pointer
+    assert state.get("exit_reconciliation_history", []) == []
+    state["next_start_at"] = 0
+    state_path.write_text(json.dumps(state))
+    result = _invoke(root, env, "enable-recovery")
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads(state_path.read_text())
+    assert state.get("exit_reconciliation") is None
+    assert len(state["exit_reconciliation_history"]) == 1
+    assert state["exit_reconciliation_history"][0]["consumed_by"] is None
+    assert "exit_reconciliation_sha256" not in state["attempt"]
+    assert len(starts(root)) == 1

@@ -331,8 +331,8 @@ def enable(service, root, env_file, project, *, report=True):
                 or checked["migration_head"] != previous["schema"]
             ):
                 raise ValueError("AGENT_PAPER_RECOVERY_BINDING_CHANGED")
-            service._reconciliation_module().archive_unused_prior_boot(
-                root, previous, current_boot, observed_at=time.time()
+            service._reconciliation_module().validate_unused_prior_boot(
+                root, previous, current_boot
             )
         previous.update(binding(service, root, env_file, project))
         previous.update(
@@ -342,6 +342,12 @@ def enable(service, root, env_file, project, *, report=True):
             previous["exit_reconciliation"]["enable_generation"] = previous["generation"]
         write(root, previous)
         install(service, root, env_file, project)
+        if prior_boot_unused:
+            # Preserve reentry through installation, backoff and dependency failures.
+            # recover archives only with the first new attempt, after full admission.
+            service._reconciliation_module().validate_unused_prior_boot(
+                root, previous, current_boot
+            )
         previous["desired"] = "enabled"
         write(root, previous)
         return recover(service, root, env_file, project, report=report)
