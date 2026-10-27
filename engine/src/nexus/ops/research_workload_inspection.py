@@ -259,6 +259,17 @@ async def _inspection_committee(
         from nexus.agents.capacity_cycle import capacity_output_mode_qualified
 
         formal = await capacity_output_mode_qualified(session, run, formal=True)
+        if not formal:
+            from nexus.monitoring.independent_context import is_independent_snapshot
+            from nexus.monitoring.independent_storage import require_independent_run
+            from nexus.persistence.models.data import DataSnapshot
+
+            snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+            if is_independent_snapshot(snapshot):
+                # This reads the exact immutable request membership; it does not
+                # grant a Job claim, retry, current admission or formal decision.
+                await require_independent_run(session, run)
+                formal = True
     # The factory needs the exact frozen profile and a construction deadline.
     # This observation-only deadline is never used to invoke or resume a model.
     return await _committee(

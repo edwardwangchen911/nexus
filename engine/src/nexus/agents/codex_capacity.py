@@ -43,6 +43,7 @@ from nexus.agents.codex_versions import (
 from nexus.agents.committee import (
     DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
     DISCLOSURE_SCOPE_PROMPT_VERSIONS,
+    INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION,
     MONITORING_SCOPE_PROMPT_VERSIONS,
     ROLE_ORDER,
     AgentRole,
@@ -182,6 +183,10 @@ def _monitoring_capacity_view(
 ) -> StagedCodexCommittee:
     if committee._prompts["portfolio"].version not in MONITORING_SCOPE_PROMPT_VERSIONS:
         return committee
+    compact = committee._prompts["portfolio"].version == INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION
+    # Only the v2 input codec has a four-byte bound for every accepted prose scalar.
+    # Static deduplication never observes these variable prior/model strings.
+    widest_text = "𠀀" if compact else "\x00"
     for model in (_MonitoringProposal, _MonitoringReview):
         properties = model.model_json_schema()["properties"]
         if (
@@ -208,7 +213,7 @@ def _monitoring_capacity_view(
             price_basis="unadjusted_bid_ask_midpoint",
             max_age_seconds=60,
         ),
-        rationale="\x00" * 500,
+        rationale=widest_text * 500,
         evidence_refs=(widest_reference,) * 4,
         review_due_at=datetime.max.replace(tzinfo=UTC),
         valid_until=datetime.max.replace(tzinfo=UTC),
@@ -216,7 +221,7 @@ def _monitoring_capacity_view(
     review = PriceMonitoringReview(
         proposal_hash=proposal.content_hash,
         decision="accepted",
-        rationale="\x00" * 500,
+        rationale=widest_text * 500,
         evidence_refs=proposal.evidence_refs,
     )
     view = copy(committee)
@@ -268,7 +273,7 @@ def _monitoring_capacity_view(
                     DailyPendingItem(
                         trigger_id=trigger_id,
                         status="unresolved",
-                        rationale="\x00" * 160,
+                        rationale=widest_text * 160,
                         evidence_refs=(widest_reference,) * 3,
                     )
                     for trigger_id in trigger_ids
@@ -286,7 +291,7 @@ def _monitoring_capacity_view(
             daily_review = DailyPendingReview(
                 proposal_hash=daily.content_hash,
                 decision="accepted",
-                rationale="\x00" * 500,
+                rationale=widest_text * 500,
                 evidence_refs=(widest_reference,) * 4,
             )
             for reviewer in ("bear", "evidence_audit"):
@@ -317,7 +322,7 @@ def _monitoring_capacity_view(
             baseline_hash="f" * 64,
             issuer_cik="9" * 10,
             baseline_as_of=datetime.max.replace(tzinfo=UTC),
-            rationale="\x00" * 160,
+            rationale=widest_text * 160,
             evidence_refs=(widest_reference,) * 3,
             review_due_at=datetime.max.replace(tzinfo=UTC),
             valid_until=datetime.max.replace(tzinfo=UTC),
@@ -325,11 +330,24 @@ def _monitoring_capacity_view(
         disclosure_review = DisclosureMonitoringReview(
             proposal_hash=maximal.content_hash,
             decision="accepted",
-            rationale="\x00" * 160,
+            rationale=widest_text * 160,
             evidence_refs=maximal.evidence_refs,
         )
+        proposal_possible = True
+        if compact:
+            from nexus.monitoring.disclosure_contracts import (
+                baseline_fields,
+                disclosure_from_inputs,
+            )
+
+            try:
+                baseline_fields(disclosure_from_inputs(inputs))
+            except ValueError:
+                # The real research output receiver rejects non-null proposals
+                # without this frozen baseline before a later stage can see them.
+                proposal_possible = False
         view._outputs["market_state"] = view._outputs["market_state"].model_copy(
-            update={"disclosure_proposal": maximal}
+            update={"disclosure_proposal": maximal if proposal_possible else None}
         )
         for role in ("bear", "evidence_audit"):
             view._outputs[role] = view._outputs[role].model_copy(
@@ -381,6 +399,7 @@ def _monitoring_capacity_view(
             for row in materials["contents"]
         }
         mixed_refs = (context_ref, widest_reference, widest_reference)
+        # Mixed-event prose is not encoded by input v2: retain six-byte JSON bounds.
         mixed = MixedEventProposal(
             context_hash=context_ref.content_hash,
             items=tuple(
@@ -455,6 +474,11 @@ def candidate_capacity_envelope(
     ):
         raise ValueError("WORKLOAD_RUN_AUTHORITY_INVALID")
     stages = []
+    widest_text = (
+        "𠀀"
+        if committee._prompts["portfolio"].version == INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION
+        else "\x00"
+    )
     for stage, roles in STAGES:
         prior_roles = ROLE_ORDER[: ROLE_ORDER.index(roles[0])]
         previous: list[dict[str, object]] = [
@@ -462,7 +486,7 @@ def candidate_capacity_envelope(
                 "claim_id": f"{role}:{index}",
                 "role": role,
                 "vote": "abstain",
-                "text": "\x00" * 400,
+                "text": widest_text * 400,
                 "citations": [len(evidence_refs) - 1] * 3,
             }
             for role in prior_roles

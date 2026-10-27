@@ -151,6 +151,10 @@ def _restore_view(value, strings=()):
         return strings[int(value.removeprefix("$nexus:"))]
     if not isinstance(value, dict):
         return value
+    if "$iv2" in value:
+        from nexus.agents.independent_input_view import restore_independent_input
+
+        return _restore_view(restore_independent_input(value), strings)
     if "$nexus_view" in value:
         strings = value.get("$nexus_strings", ())
         common = _restore_view(value["common_scope"], strings)

@@ -474,6 +474,8 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
 
     factory = session_factory(settings)
     primary: BaseException | None = None
+    failure_recorded = False
+    close_error: BaseException | None = None
     try:
         async with factory.begin() as session:
             row = await session.get(ManualPaperRequest, request_id)
@@ -496,6 +498,16 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
             # This transaction has no external calls, so its rollback proves no model started.
             # A secondary receipt write must not replace the preparation failure.
             primary = error
+            from nexus.paper.research_failure import record_research_failure
+
+            try:
+                async with factory.begin() as session:
+                    await record_research_failure(
+                        session, request_id=request_id, error=error, preparation=True
+                    )
+            except BaseException as audit_error:
+                error.add_note("RESEARCH_FAILURE_AUDIT_UNCONFIRMED")
+                close_error = audit_error
             try:
                 async with factory.begin() as session:
                     row = await session.get(ManualPaperRequest, request_id)
@@ -503,8 +515,10 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
                     await record_manual_request_event(
                         session, row, status="unavailable", code="MANUAL_INPUTS_UNAVAILABLE"
                     )
-            except BaseException:
-                pass
+            except BaseException as receipt_error:
+                raise error from receipt_error
+            if close_error is not None:
+                raise error from close_error
             raise
         assert view.research is not None
         try:
@@ -529,7 +543,15 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
                         break
         except BaseException as error:
             primary = error
-            raise
+            from nexus.paper.research_failure import record_research_failure
+
+            try:
+                async with factory.begin() as session:
+                    await record_research_failure(session, request_id=request_id, error=error)
+                failure_recorded = True
+            except BaseException as persistence_error:
+                error.add_note("RESEARCH_FAILURE_AUDIT_UNCONFIRMED")
+                close_error = persistence_error
         finally:
             # Safe local cancellations commit independently of a still-live worker's close.
             try:
@@ -551,9 +573,41 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
                     row = await session.get(ManualPaperRequest, request_id)
                     assert row is not None
                     await finish_research_request(session, row=row)
-            except BaseException:
+            except BaseException as error:
+                close_error = error
+                from nexus.paper.research_failure import record_research_failure
+
+                try:
+                    async with factory.begin() as session:
+                        await record_research_failure(
+                            session, request_id=request_id, error=error, cleanup=True
+                        )
+                except BaseException:
+                    error.add_note("RESEARCH_FAILURE_AUDIT_UNCONFIRMED")
                 if primary is None:
                     raise
+        if primary is not None:
+            from nexus.paper.research_failure import (
+                PRECLAIM_CODES,
+                CapacityPreclaimRejected,
+                require_unused_request_closed,
+            )
+
+            if close_error is not None:
+                raise primary from close_error
+            if (
+                not failure_recorded
+                or not isinstance(primary, CapacityPreclaimRejected)
+                or primary.code not in PRECLAIM_CODES
+            ):
+                raise primary
+            try:
+                async with factory.begin() as session:
+                    await require_unused_request_closed(session, request_id=request_id)
+            except BaseException as error:
+                raise primary from error
+            # A proved unused refusal is a finished request, not an unknown host failure.
+            primary = None
         return True
     except BaseException as error:
         primary = error

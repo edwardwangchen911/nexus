@@ -13,7 +13,9 @@ from nexus.persistence.models.data import DataSnapshot
 from sqlalchemy import select
 
 
-async def prepared_materials(database_url, monkeypatch, root, *, sec_only=False, independent=False):
+async def prepared_materials(
+    database_url, monkeypatch, root, *, sec_only=False, independent=False, exhibit_text=""
+):
     factory, settings, store, captured, pointer = await installed(
         database_url,
         monkeypatch,
@@ -58,7 +60,12 @@ async def prepared_materials(database_url, monkeypatch, root, *, sec_only=False,
                 action="import-content",
                 index_snapshot_id=current.id,
                 accession=entry["accession_number"],
-                archive_dir=archive(root / f"original-{number}", entry, extra=number == 1),
+                archive_dir=archive(
+                    root / f"original-{number}",
+                    entry,
+                    extra=number == 1,
+                    exhibit_text=exhibit_text if number == 0 else "",
+                ),
             ),
         )
     prepared = await run(

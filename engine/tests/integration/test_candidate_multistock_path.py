@@ -463,7 +463,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert all(
                     run.prompt_manifest["portfolio"]["version"]
                     == (
-                        "independent-monitor-research-v1"
+                        "independent-monitor-research-v2"
                         if independent
                         else "local-portfolio-synthesis-v10-sec-monitor"
                         if disclosure

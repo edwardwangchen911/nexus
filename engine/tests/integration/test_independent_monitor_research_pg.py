@@ -88,6 +88,14 @@ async def test_independent_three_stock_preparation_freezes_identity_scope_and_bu
             assert context[0].predecessor("price").plan_id is None
             assert context[0].predecessor("disclosure").plan_id is None
             assert context[0].disclosure_monitoring.gap_reason == "SEC_BASELINE_MISSING"
+            from nexus.agents.codex_staged import StructuredStagedCodexCommittee
+            from nexus.ops.research_workload_inspection import _inspection_committee
+            from nexus.persistence.models.agents import AgentModelConfigRecord
+
+            profile = await session.get(AgentModelConfigRecord, run.model_config_id)
+            inspection = await _inspection_committee(session, settings, run, model=profile)
+            assert isinstance(inspection, StructuredStagedCodexCommittee)
+            assert inspection.usage.provider_calls == 0
         assert await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord)) == 0
         assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
         assert (
