@@ -293,6 +293,36 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         return json.dumps(body), usage
 
     monkeypatch.setattr(codex_staged, "invoke_codex", tracked)
+    if unknown == "tokenizer_missing":
+        from nexus.agents import codex_token_budget
+
+        monkeypatch.setattr(
+            codex_token_budget, "tokenizer_cache_path", lambda: tmp_path / "missing-vocabulary"
+        )
+        assert codex_token_budget.local_vocabulary() is None
+        with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_INPUT_EXCEEDED$"):
+            await run_agent_worker_once(
+                settings, job_ids=(member.job_id,), formal_stage_capacity=True
+            )
+        assert stages == []
+        async with factory() as session:
+            child = await session.get(AgentResearchRunRecord, member.run_id)
+            job = await session.get(Job, member.job_id)
+            hold = await session.scalar(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id == member.run_id
+                )
+            )
+            assert child.status == "prepared" and job.status == "queued"
+            assert hold.state == "reserved" and child.settled_cost_usd is None
+            assert tuple(
+                [
+                    await session.scalar(select(func.count()).select_from(model))
+                    for model in (AgentResearchRunRecord, Job, AgentDailyBudgetReservationRecord)
+                ]
+            ) == tuple(count + 1 for count in before)
+        await factory.kw["bind"].dispose()
+        return
     assert await run_agent_worker_once(
         settings, job_ids=(member.job_id,), formal_stage_capacity=True
     )

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.actionable_research import (
@@ -127,6 +127,15 @@ async def _qualify_source(
             raise ValueError(invalid)
         context = paper[0]
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    if isinstance(context, IndependentMonitorContext):
+        checked_at = await session.scalar(select(func.clock_timestamp()))
+        if (
+            model is None
+            or not isinstance(checked_at, datetime)
+            or now > checked_at
+            or not model.pricing_available_at <= checked_at < model.pricing_expires_at
+        ):
+            raise ValueError(invalid)
     jobs = tuple(
         await session.scalars(
             select(Job).where(Job.payload["run_id"].astext == str(run.id)).limit(2)

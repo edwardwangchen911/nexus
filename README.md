@@ -251,7 +251,12 @@ npm run build
 
 Python Engine：
 
+独立研究到单股接替的完整回归需要先按[本地计量准备](docs/runbooks/local-development.md)登记
+固定哈希的公开分词词表；CI 的 `pg-a` / `full` 在测试前显式完成该步骤。
+测试和业务请求本身不下载词表；缺失词表仍走保守字节预检，超限拒绝和预算保护不变。
+
 ```bash
+uv run --package nexus-engine nexus-openai-local prepare-tokenizer --backend codex_sdk
 uv run pytest engine/tests -q --import-mode=importlib
 uv run ruff check engine
 uv run mypy engine/src

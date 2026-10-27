@@ -372,6 +372,9 @@ async def reconcile_account_results(
             # proposal is a per-kind gap; a failed declared installation rolls
             # back this operation's plans, coverage and legacy consumption.
             async with session.begin_nested():
+                await _require_independent_predecessor_pair(
+                    session, account_id=account_id, run=run, now=now
+                )
                 for kind in kinds:
                     if (
                         await session.scalar(
@@ -474,6 +477,59 @@ async def reconcile_account_results(
 
 class _OrdinaryReplacementRejected(ValueError):
     """Roll back a new ordinary daily replacement before recording its refusal."""
+
+
+async def _require_independent_predecessor_pair(
+    session: AsyncSession, *, account_id: UUID, run: AgentResearchRunRecord, now: datetime
+) -> None:
+    from nexus.monitoring.independent_context import is_independent_snapshot
+    from nexus.monitoring.independent_storage import require_independent_run
+    from nexus.monitoring.source_qualification import load_qualified_source
+
+    snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    if not is_independent_snapshot(snapshot):
+        return
+    await lock_security(session, account_id=account_id, instrument_id=run.instrument_id)
+    context = await require_independent_run(session, run)
+    if context.account_id != account_id:
+        raise ValueError("MONITOR_SOURCE_INVALID")
+    for frozen in context.predecessors:
+        current = await session.scalar(
+            select(MonitorPlan)
+            .where(
+                MonitorPlan.account_id == account_id,
+                MonitorPlan.instrument_id == run.instrument_id,
+                MonitorPlan.kind == frozen.kind,
+            )
+            .order_by(MonitorPlan.generation.desc())
+            .limit(1)
+        )
+        if current is not None and current.source_run_id == run.id:
+            # A previously installed result from this exact run is idempotent,
+            # but its original proposal and predecessor still need proof.
+            source = await load_qualified_source(
+                session, account_id=account_id, output_id=current.source_output_id, now=now
+            )
+            proposal = (
+                source.intent.monitoring_proposal
+                if frozen.kind == "price"
+                else source.intent.disclosure_proposal
+            )
+            if (
+                source.run.id != run.id
+                or proposal is None
+                or current.predecessor_id != frozen.plan_id
+                or current.generation != (frozen.generation or 0) + 1
+                or current.data_snapshot_id != run.data_snapshot_id
+                or current.source_hash != source.output.content_hash
+                or current.condition != proposal.condition.model_dump(mode="json")
+            ):
+                raise ValueError("MONITOR_SOURCE_INVALID")
+            continue
+        if (None if current is None else current.id) != frozen.plan_id or (
+            None if current is None else current.generation
+        ) != frozen.generation:
+            raise _OrdinaryReplacementRejected("MONITOR_SOURCE_SUPERSEDED")
 
 
 async def _reconcile_run(

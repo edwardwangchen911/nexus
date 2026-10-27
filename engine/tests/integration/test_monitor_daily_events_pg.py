@@ -24,16 +24,6 @@ async def test_daily_v2_rejects_unbound_snapshot(migrated_database_url, monkeypa
     await factory.kw["bind"].dispose()
 
 
-@pytest.fixture(autouse=True)
-def pending_migration_head(monkeypatch):
-    monkeypatch.setattr(
-        "nexus.persistence.migrations.CURRENT_MIGRATION_HEAD", "0097_monitor_daily_events"
-    )
-    monkeypatch.setattr(
-        "nexus.ops.research_monitor.CURRENT_MIGRATION_HEAD", "0097_monitor_daily_events"
-    )
-
-
 async def v2_receipt_source(url, monkeypatch, *, fault=None):
     """Structural DB fixture, using native claim/finalize and budget settlement.
 
@@ -572,7 +562,6 @@ async def test_daily_v2_original_mixed_terminal_binding(
     from nexus.persistence.models.paper import AgentPaperCycleRecord
     from sqlalchemy import select, text, update
 
-    monkeypatch.setattr(mixed_fixture, "HEAD", "0097_monitor_daily_events")
     factory, member, mixed, _, _, clock = await mixed_fixture.native_result(
         migrated_database_url, monkeypatch, tmp_path, mode
     )
