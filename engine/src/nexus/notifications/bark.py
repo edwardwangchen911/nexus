@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from pydantic import ValidationError
 
+from nexus.notifications.diagnostic import DIAGNOSTIC_EVENT, DiagnosticNotification
 from nexus.notifications.research_monitor import (
     RESEARCH_MONITOR_EVENT,
     ResearchPriceTriggerNotification,
@@ -39,6 +40,7 @@ BARK_EVENT_SCHEMAS: tuple[tuple[str, str], ...] = (
     ("paper.execution.cancelled", "paper_execution_v1"),
     RESEARCH_MONITOR_EVENT,
     RESEARCH_MONITOR_BATCH_EVENT,
+    DIAGNOSTIC_EVENT,
 )
 
 _EVENT_STATUS: dict[tuple[str, str], str] = {
@@ -94,6 +96,14 @@ def map_bark_notification(
     read_only_url: str | None,
 ) -> dict[str, str]:
     """Render one validated frozen notification without later data lookups."""
+    if (message.event_type, message.schema_version) == DIAGNOSTIC_EVENT:
+        try:
+            diagnostic = DiagnosticNotification.model_validate(message.payload)
+        except (ValueError, TypeError, ValidationError):
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID") from None
+        if diagnostic.test_id != message.aggregate_id or diagnostic.test_id != message.event_id:
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID")
+        return diagnostic.render()
     if (message.event_type, message.schema_version) == RESEARCH_MONITOR_BATCH_EVENT:
         try:
             batch = ResearchMonitorBatchNotification.model_validate(message.payload)
@@ -365,6 +375,7 @@ class BarkPublisher:
         if (message.event_type, message.schema_version) not in {
             RESEARCH_MONITOR_EVENT,
             RESEARCH_MONITOR_BATCH_EVENT,
+            DIAGNOSTIC_EVENT,
         }:
             if (
                 "notification_snapshot" not in message.payload

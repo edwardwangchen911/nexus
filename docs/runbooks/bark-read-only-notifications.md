@@ -145,3 +145,24 @@ docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.
 这不会删除 Paper 事实、outbox、attempt 或 Bark 注册数据。重新启用时设置新的 UTC
 `NEXUS_BARK_ACTIVATED_AT`，避免发送停用期间的历史队列。`docker compose down -v` 会删除卷，
 不属于普通回滚；没有用户另行确认不得执行。
+
+## 明确测试通知
+
+独立通信测试只在用户明确授权后执行。先保存一个新的测试UUID，随后通过正常入口提交一次：
+
+```bash
+.venv/bin/python -m nexus.ops.notification_test --repo-root "$PWD" \
+  --env-file infra/.env.local enqueue --test-id "$TEST_NOTIFICATION_ID"
+.venv/bin/python -m nexus.ops.notification_test --repo-root "$PWD" \
+  --env-file infra/.env.local read --test-id "$TEST_NOTIFICATION_ID"
+```
+
+`diagnostic.notification.test@diagnostic_notification_v1` 只使用既有受保护Bark配置，
+不接受目的地、自由正文、业务时间或重试参数。标题及正文固定标注“NEXUS 测试通知｜非投资预警”。
+只登记一条outbox及审计，不生成市场触发、研究或订单；原领取起点及业务通知策略不变。
+正常消费者在外部发送前持久化attempt，本事件上限为一次；超时、崩溃及确认丢失均不自动重发。
+调用结果不明时只read原UUID，不换键、直接调用provider或重建事件。
+
+`queued` 只代表登记；`provider_accepted` 只代表本地Bark服务接受；发送中或无法确认结果为
+`unknown`，即使outbox已经dead_letter也不证明设备未收到。设备实收单独确认。
+回滚保留outbox/审计；旧消费者忽略新类型，不能修改旧领取起点或补发历史通知。
