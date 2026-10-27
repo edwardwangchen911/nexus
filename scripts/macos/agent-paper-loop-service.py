@@ -35,6 +35,16 @@ def _recovery_module():
     return module
 
 
+def _reconciliation_module():
+    source = Path(__file__).with_name("agent-paper-reconciliation.py")
+    spec = importlib.util.spec_from_file_location("nexus_exit_reconciliation", source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("AGENT_PAPER_EXIT_RECONCILIATION_UNAVAILABLE")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _has_recovery(root: Path) -> bool:
     path = root / ".secrets/nexus-agent-paper/recovery.json"
     return path.exists() or path.is_symlink()
@@ -593,12 +603,30 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
         if state == "running" or last_exit_code == 75:
             _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
             return 1
-    if not acknowledge and state != "stopped" and (state != "inactive" or last_exit_code != 0):
+    reconciled = False
+    if not acknowledge and _has_recovery(root):
+        recovery = _recovery_module()
+        managed = recovery.read(root)
+        if managed.get("exit_reconciliation") is not None and (
+            (state == "inactive" and last_exit_code not in {None, 0, 75})
+            or (state == "stopped" and managed["exit_reconciliation"].get("retirement_requested"))
+        ):
+            reconciled = _reconciliation_module().authorize_retirement(
+                sys.modules[__name__], recovery, root, env_file, project, state, last_exit_code
+            )
+    if (
+        not acknowledge
+        and not reconciled
+        and state != "stopped"
+        and (state != "inactive" or last_exit_code != 0)
+    ):
         _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_UNCONFIRMED"})
         return 1
-    if not acknowledge and _has_recovery(root):
+    if not acknowledge and not reconciled and _has_recovery(root):
         _recovery_module().record_stop(
-            root, observed_clean_exit=state == "inactive" and last_exit_code == 0
+            sys.modules[__name__],
+            root,
+            observed_clean_exit=state == "inactive" and last_exit_code == 0,
         )
     if state != "stopped":
         removed = subprocess.run(
@@ -610,6 +638,10 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
         if removed.returncode != 0:
             _emit({"error_code": "AGENT_PAPER_SERVICE_STOP_FAILED"})
             return 1
+    if reconciled:
+        _reconciliation_module().confirm_retirement(
+            sys.modules[__name__], _recovery_module(), root, env_file, project
+        )
     if not acknowledge:
         (root / ".secrets/nexus-agent-paper/service.plist").unlink(missing_ok=True)
     _emit({"label": LABEL, "status": "stopped"})
@@ -629,14 +661,18 @@ def main(argv: list[str] | None = None) -> int:
             "disable-recovery",
             "maintenance",
             "recover",
+            "reconcile-exit",
         ),
     )
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--acknowledge-unconfirmed", action="store_true")
+    parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args(argv)
-    if args.acknowledge_unconfirmed and args.action != "stop":
+    if (args.check_only and args.action != "reconcile-exit") or (
+        args.acknowledge_unconfirmed and args.action != "stop"
+    ):
         _emit({"error_code": "AGENT_PAPER_SERVICE_ACTION_INVALID"})
         return 2
     try:
@@ -647,6 +683,47 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         _emit({"error_code": "LOCAL_ENV_UNSAFE"})
         return 1
+    if args.action == "reconcile-exit":
+        # The engine owns both locks continuously through evidence publication.
+        try:
+            result = subprocess.run(
+                [
+                    _runtime_executable(),
+                    str(root / ".venv/bin/nexus-engine-agent-paper-loop"),
+                    "--service-exit-reconciliation",
+                    "check" if args.check_only else "apply",
+                    "--service-project-name",
+                    args.project_name,
+                    *_engine_arguments(root, env_file),
+                ],
+                cwd=root,
+                env=_engine_environment(root),
+                timeout=45,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            # Publication may have committed before observation timed out. Never retry.
+            _emit(
+                {
+                    "status": "result_unknown",
+                    "error_code": "AGENT_PAPER_EXIT_RECONCILIATION_TIMEOUT",
+                    "execution_locked": True,
+                }
+            )
+            return 1
+        except OSError:
+            _emit(
+                {
+                    "status": "blocked",
+                    "error_code": "AGENT_PAPER_EXIT_RECONCILIATION_UNAVAILABLE",
+                    "execution_locked": True,
+                }
+            )
+            return 1
+        print(result.stdout, end="")
+        return result.returncode
     if args.action in {"enable-recovery", "disable-recovery", "maintenance", "recover"}:
         try:
             with _service_control_lock():

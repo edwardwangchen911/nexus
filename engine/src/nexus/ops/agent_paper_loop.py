@@ -5024,23 +5024,38 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics.add_argument("--service-startup-preflight", action="store_true")
     diagnostics.add_argument("--service-recovery-check", action="store_true")
     diagnostics.add_argument("--service-status", action="store_true")
+    diagnostics.add_argument("--service-exit-reconciliation", choices=("check", "apply"))
+    parser.add_argument("--service-project-name")
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--recovery-generation")
     parser.add_argument("--recovery-attempt")
     args = parser.parse_args(argv)
-    if (bool(args.recovery_generation) != bool(args.recovery_attempt)) or (
-        args.recovery_generation
-        and (
-            args.repo_root is None
-            or args.env_file is None
-            or args.service_preflight
-            or args.service_startup_preflight
-            or args.service_recovery_check
-            or args.service_status
+    if (
+        (
+            args.service_exit_reconciliation is not None
+            and (args.recovery_generation is not None or args.recovery_attempt is not None)
+        )
+        or (bool(args.recovery_generation) != bool(args.recovery_attempt))
+        or (
+            args.recovery_generation
+            and (
+                args.repo_root is None
+                or args.env_file is None
+                or args.service_preflight
+                or args.service_startup_preflight
+                or args.service_recovery_check
+                or args.service_status
+                or args.service_exit_reconciliation
+            )
         )
     ):
         print(json.dumps({"error_code": "AGENT_PAPER_RECOVERY_ACTIVATION_BLOCKED"}))
+        return 1
+    if (bool(args.service_project_name) != bool(args.service_exit_reconciliation)) or (
+        args.service_exit_reconciliation and args.account_id is not None
+    ):
+        print(json.dumps({"error_code": "AGENT_PAPER_EXIT_RECONCILIATION_SCOPE_INVALID"}))
         return 1
     root = args.repo_root.resolve() if args.repo_root is not None else Path.cwd()
     env_file = None
@@ -5049,6 +5064,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.env_file is not None
         or args.service_status
         or args.service_recovery_check
+        or args.service_exit_reconciliation
     ):
         try:
             if args.repo_root is None or args.env_file is None:
@@ -5078,6 +5094,34 @@ def main(argv: list[str] | None = None) -> int:
             process_environment,
             env_file=env_file,
         )
+        if args.service_exit_reconciliation:
+            from nexus.ops.managed_exit_reconciliation import reconcile_managed_exit
+
+            try:
+                reconciliation_settings = _FileEngineSettings.model_validate(environment)
+                assert env_file is not None
+                result = reconcile_managed_exit(
+                    reconciliation_settings,
+                    repo_root=root,
+                    env_file=env_file,
+                    project=args.service_project_name,
+                    check_only=args.service_exit_reconciliation == "check",
+                )
+            except Exception:
+                result = {
+                    "status": "blocked",
+                    "blocking_codes": ["AGENT_PAPER_EXIT_RECONCILIATION_SCOPE_INVALID"],
+                    "execution_locked": True,
+                    "external_requests": 0,
+                    "check_only": args.service_exit_reconciliation == "check",
+                    "current_eligible": False,
+                }
+            print(json.dumps(result, sort_keys=True))
+            return (
+                0
+                if result["status"] in {"eligible_at_check", "reconciled", "already_reconciled"}
+                else 1
+            )
         if args.service_recovery_check:
             from nexus.ops.agent_paper_recovery import (
                 inspect_recovery_readiness,
