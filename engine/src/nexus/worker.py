@@ -410,6 +410,12 @@ async def _prepare_preclaim_capacity_pool(
         if allowance.expired():
             raise CapacityPreclaimTimeout("CODEX_CAPACITY_PRECLAIM_TIMEOUT") from error
         raise
+    except ValueError as error:
+        from nexus.paper.research_failure import PRECLAIM_CODES, CapacityPreclaimRejected
+
+        if type(error) is ValueError and str(error) in PRECLAIM_CODES:
+            raise CapacityPreclaimRejected(str(error)) from error
+        raise
 
 
 def _openai_portfolio_responses_client(

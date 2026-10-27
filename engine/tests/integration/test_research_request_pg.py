@@ -3,7 +3,7 @@
 import asyncio
 import importlib
 import json
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -48,6 +48,30 @@ def isolated_host_lock(monkeypatch, tmp_path):
         "nexus.ops.agent_paper_loop.acquire_agent_paper_lock",
         lambda: acquire_agent_paper_lock(runtime_root=tmp_path / "host-runtime"),
     )
+
+
+@pytest.fixture(autouse=True)
+def research_snapshot_uses_database_clock(monkeypatch):
+    # The producer's authoritative clock is PostgreSQL. Use that same clock for
+    # the snapshot guard in isolated Docker tests, instead of depending on host/VM
+    # subsecond synchronization. Future timestamps still fail the original guard.
+    import nexus.agents.snapshots as snapshots
+
+    original = snapshots.prepare_research_snapshot
+
+    async def prepare(session, *args, **kwargs):
+        now = await session.scalar(select(func.clock_timestamp()))
+
+        class DatabaseClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(snapshots, "datetime", DatabaseClock)
+            return await original(session, *args, **kwargs)
+
+    monkeypatch.setattr(snapshots, "prepare_research_snapshot", prepare)
 
 
 async def prepare_scope(url, tmp_path, *, bounded=False):
@@ -634,8 +658,9 @@ async def test_interrupted_atomic_preparation_closes_without_replay(
 @pytest.mark.parametrize(
     "mode,contract_version", [("research_only", 2), ("research_and_monitor", 3)]
 )
+@pytest.mark.parametrize("typed_after_claim", [False, True])
 async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_next(
-    migrated_database_url, tmp_path, monkeypatch, mode, contract_version
+    migrated_database_url, tmp_path, monkeypatch, mode, contract_version, typed_after_claim
 ):
     from datetime import timedelta
 
@@ -677,17 +702,38 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
     class Vanished(BaseException):
         pass
 
+    from nexus.paper.research_failure import CapacityPreclaimRejected
+
+    failure = (
+        CapacityPreclaimRejected("CODEX_CAPACITY_POOL_WIRE_EXCEEDED")
+        if typed_after_claim
+        else Vanished()
+    )
+
     async def disappear(session, **kwargs):
         calls.append(kwargs["claim"].job_id)
-        raise Vanished
+        raise Vanished() if typed_after_claim else failure
 
+    if typed_after_claim:
+        from nexus.ops.agent_paper_once import run_cycle_job_once as native_worker
+
+        async def reject_after_claim(*args, **kwargs):
+            try:
+                return await native_worker(*args, **kwargs)
+            except Vanished:
+                # Model a faulty boundary classifying an already-owned attempt as preclaim.
+                # Native claim/lease remain intact, so the host must reject the classification.
+                raise failure
+
+        monkeypatch.setattr("nexus.ops.agent_paper_once.run_cycle_job_once", reject_after_claim)
     monkeypatch.setattr(worker, "execute_and_finalize_job", disappear)
     monkeypatch.setattr(
         "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
     )
     try:
-        with pytest.raises(Vanished):
+        with pytest.raises(type(failure)) as captured:
             await run_pure_research_once(settings, idempotency_key="unknown-new", mode=mode)
+        assert captured.value is failure
         assert len(calls) == 1
         async with factory.begin() as session:
             row = await session.scalar(select(ManualPaperRequest))
@@ -782,5 +828,163 @@ async def test_preparation_failure_is_not_replaced_by_cleanup_failure(
         with pytest.raises(RuntimeError) as captured:
             await host.dispatch_pure_research_request(settings, request_id=view.request_id)
         assert captured.value is primary
+        assert captured.value.__cause__.args == ("cleanup-test-canary",)
+        from nexus.persistence.models.runtime import AuditEvent
+
+        async with factory() as session:
+            failure = await session.scalar(
+                select(AuditEvent).where(AuditEvent.action == "research.request_failure")
+            )
+            assert failure.payload["failure_phase"] == "research_preparation"
+            assert failure.payload["failure_code"] == "RESEARCH_FAILURE_UNCLASSIFIED"
+            assert "canary" not in str(failure.payload)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed,close_fails",
+    [(True, None), (False, None), (True, "finish"), (True, "cancel"), (True, "audit")],
+)
+@pytest.mark.parametrize(
+    "mode,contract_version", [("research_only", 2), ("research_and_monitor", 3)]
+)
+async def test_preclaim_refusal_records_safe_reason_and_only_continues_after_native_close(
+    migrated_database_url, tmp_path, monkeypatch, typed, close_fails, mode, contract_version
+):
+    from nexus.ops.manual_paper_host import dispatch_pure_research_request
+    from nexus.persistence.models.runtime import AuditEvent
+
+    factory, settings, store, ids = await prepare_scope(
+        migrated_database_url, tmp_path, bounded=True
+    )
+    if mode == "research_and_monitor":
+        await prepare_database(
+            settings,
+            **(
+                OPTIONS
+                | {
+                    "max_wire_bytes": 100479,
+                    "full_input_capacity": True,
+                    "formal_bounded_stage_budget": True,
+                    "price_monitoring": True,
+                    "disclosure_monitoring": True,
+                }
+            ),
+        )
+    async with factory.begin() as session:
+        receipt = await admit_manual_request(
+            session,
+            account_id=settings.agent_paper_account_id,
+            batch_id=settings.agent_paper_candidate_batch_id,
+            model_config_id=settings.agent_paper_formal_model_config_id,
+            mode=mode,
+            contract_version=contract_version,
+            idempotency_key="preclaim-failure",
+            two_flight=True,
+        )
+    calls = []
+
+    async def reject(*a, **kw):
+        calls.append("preclaim")
+        raise ValueError("CODEX_CAPACITY_POOL_WIRE_EXCEEDED")
+
+    async def untyped(*a, **kw):
+        calls.append("untyped")
+        raise ValueError("CODEX_CAPACITY_POOL_WIRE_EXCEEDED")
+
+    async def failed_close(*a, **kw):
+        raise ValueError("private-close-canary")
+
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    monkeypatch.setattr("nexus.agents.capacity_cycle.prepare_cycle_capacity_pool", reject)
+    if not typed:
+        monkeypatch.setattr("nexus.ops.agent_paper_once.run_cycle_job_once", untyped)
+    if close_fails:
+        target = (
+            "nexus.paper.research_request.finish_research_request"
+            if close_fails == "finish"
+            else "nexus.paper.manual_cancel.cancel_unused_manual_research"
+            if close_fails == "cancel"
+            else "nexus.paper.research_failure.record_research_failure"
+        )
+        monkeypatch.setattr(target, failed_close)
+    try:
+        if typed and not close_fails:
+            assert await dispatch_pure_research_request(settings, request_id=receipt.request_id)
+        else:
+            with pytest.raises(ValueError, match="CODEX_CAPACITY_POOL_WIRE_EXCEEDED") as captured:
+                await dispatch_pure_research_request(settings, request_id=receipt.request_id)
+            if close_fails:
+                assert captured.value.__cause__.args == ("private-close-canary",)
+        assert len(calls) == 1
+        async with factory.begin() as session:
+            audit = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.action == "research.request_failure",
+                    AuditEvent.payload["failure_phase"].as_string() != "research_cleanup",
+                )
+            )
+            if close_fails == "audit":
+                assert audit is None
+            else:
+                assert audit is not None
+                assert audit.payload["failure_code"] == (
+                    "CODEX_CAPACITY_POOL_WIRE_EXCEEDED"
+                    if typed
+                    else "RESEARCH_FAILURE_UNCLASSIFIED"
+                )
+                assert audit.payload["failure_phase"] == (
+                    "research_preclaim" if typed else "research_dispatch"
+                )
+                assert "private" not in str(audit.payload)
+            if close_fails in {"finish", "cancel"}:
+                cleanup_audit = await session.scalar(
+                    select(AuditEvent).where(
+                        AuditEvent.action == "research.request_failure",
+                        AuditEvent.payload["failure_phase"].as_string() == "research_cleanup",
+                    )
+                )
+                assert cleanup_audit is not None
+                assert cleanup_audit.payload["failure_code"] == "RESEARCH_FAILURE_UNCLASSIFIED"
+                assert "private" not in str(cleanup_audit.payload)
+            row = await session.get(ManualPaperRequest, receipt.request_id)
+            view = await read_manual_request(session, row)
+            assert view.status == (
+                "active" if close_fails in {"finish", "cancel"} else "unavailable"
+            )
+            if typed and close_fails is None:
+                next_view = await admit_manual_request(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    batch_id=settings.agent_paper_candidate_batch_id,
+                    model_config_id=settings.agent_paper_formal_model_config_id,
+                    mode=mode,
+                    contract_version=contract_version,
+                    idempotency_key="fresh-after-known-preclaim-rejection",
+                    two_flight=True,
+                )
+                assert next_view.status == "queued"
+                assert next_view.request_id != receipt.request_id
+
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_shared_clock_snapshot_guard_still_rejects_future(migrated_database_url):
+    from nexus.agents import snapshots
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    try:
+        async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            with pytest.raises(ValueError, match="OPENAI_RESEARCH_TIME_IN_FUTURE"):
+                await snapshots.prepare_research_snapshot(
+                    session, uuid4(), as_of=now + timedelta(minutes=1), research_only=True
+                )
     finally:
         await factory.kw["bind"].dispose()
