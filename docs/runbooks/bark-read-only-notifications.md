@@ -166,3 +166,18 @@ docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.
 `queued` 只代表登记；`provider_accepted` 只代表本地Bark服务接受；发送中或无法确认结果为
 `unknown`，即使outbox已经dead_letter也不证明设备未收到。设备实收单独确认。
 回滚保留outbox/审计；旧消费者忽略新类型，不能修改旧领取起点或补发历史通知。
+
+### 投递失败的安全诊断
+
+新失败保留原 `PUBLISHER_FAILED`、尝试上限、退避和送达状态，在持有当前有效租约的失败结案事务内，
+追加 `outbox.delivery.failure@outbox_delivery_failure_v1` 审计。只保存事件身份、尝试序号、固定阶段
+（payload / encryption / transport / response / unknown）及白名单原因，不保存异常文本、响应正文、
+地址、凭据或设备标识。连接、读取、写入和连接池超时分别记录；HTTP 拒绝、响应解码失败与服务商拒绝
+分别记录。诊断不改变重试资格，也不能证明消息未被远端接受。
+
+正常诊断通知 `read` 回执增加 `failure`。无原始细分审计的历史记录返回 `null`；冲突或不合约的审计
+只显示 unknown，不推断或回填旧错误。一次测试通知即使发生超时、确认丢失或租约过期，仍保持未知且
+最多一次尝试。审计写入失败时结案同事务回滚，后续原租约按既有规则处理，不生成新的投递许可。
+
+本变更不新增数据库迁移、依赖、通知目的地或事件领取范围。回滚应用可继续读取原 outbox/attempt，
+新增审计保留；旧应用忽略新增诊断事实，不应删除审计或重新排队以“恢复”通知。

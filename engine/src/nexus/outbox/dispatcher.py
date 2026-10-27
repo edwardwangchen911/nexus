@@ -10,7 +10,9 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
+from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure
 from nexus.outbox.models import OutboxMessage
 from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
@@ -214,6 +216,7 @@ async def _fail(
     now: datetime,
     error_code: str,
     retryable: bool,
+    failure: PublisherFailure | None = None,
 ) -> None:
     event, attempt = await _lock_claim(session, claim=claim, now=now)
     attempt.outcome = "failed"
@@ -227,6 +230,20 @@ async def _fail(
         event.status = "dead_letter"
         event.dead_lettered_at = now
     await session.flush()
+
+    if failure is not None:
+        await append_audit_event(
+            session,
+            actor_id="outbox-dispatcher",
+            action=FAILURE_ACTION,
+            schema_version=FAILURE_SCHEMA,
+            occurred_at=now,
+            payload={
+                "event_id": str(claim.event_id),
+                "attempt_no": claim.attempt_no,
+                **PublisherFailure.failure_details(failure),
+            },
+        )
 
 
 async def dispatch_outbox_once(
@@ -292,6 +309,7 @@ async def dispatch_outbox_once(
                     now=_utc(clock(), field="clock"),
                     error_code="PUBLISHER_FAILED",
                     retryable=True,
+                    failure=error if isinstance(error, PublisherFailure) else None,
                 )
         except OutboxLeaseLostError:
             pass

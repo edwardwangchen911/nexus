@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
+from nexus.outbox.failure import read_delivery_failure
 from nexus.persistence.models.runtime import OutboxEvent
 
 DIAGNOSTIC_EVENT = ("diagnostic.notification.test", "diagnostic_notification_v1")
@@ -76,6 +77,7 @@ def _receipt(row: OutboxEvent) -> dict[str, object]:
         "provider_accepted_at": None if row.published_at is None else row.published_at.isoformat(),
         "device_delivery": "unverified",
         "execution_locked": True,
+        "failure": None,
     }
 
 
@@ -85,7 +87,11 @@ async def read_diagnostic_notification(
     row = await session.get(OutboxEvent, test_id, populate_existing=True)
     if row is None:
         return {"test_id": str(test_id), "status": "not_found", "device_delivery": "unverified"}
-    return _receipt(row)
+    receipt = _receipt(row)
+    receipt["failure"] = await read_delivery_failure(
+        session, event_id=row.id, attempt_no=row.attempt_count
+    )
+    return receipt
 
 
 async def enqueue_diagnostic_notification(
@@ -99,7 +105,7 @@ async def enqueue_diagnostic_notification(
     )
     previous = await session.get(OutboxEvent, test_id, populate_existing=True)
     if previous is not None:
-        return _receipt(previous)
+        return await read_diagnostic_notification(session, test_id=test_id)
     now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(now, datetime) or now < activated_at:
         raise DiagnosticNotificationRejected("DIAGNOSTIC_NOTIFICATION_NOT_ACTIVE")

@@ -24,6 +24,7 @@ from nexus.notifications.research_monitor_batch import (
     RESEARCH_MONITOR_BATCH_EVENT,
     ResearchMonitorBatchNotification,
 )
+from nexus.outbox.failure import FailureReason, PublisherFailure
 from nexus.outbox.models import OutboxMessage
 from nexus.paper.notification import (
     PaperNotificationError,
@@ -51,8 +52,16 @@ _EVENT_STATUS: dict[tuple[str, str], str] = {
 }
 
 
-class BarkPublishError(RuntimeError):
+class BarkPublishError(PublisherFailure):
     """A value-free Bark delivery failure suitable for bounded outbox recording."""
+
+    def __init__(self, message: str, *, reason: FailureReason | None = None) -> None:
+        known = {
+            "BARK_NOTIFICATION_INVALID": FailureReason.PAYLOAD_INVALID,
+            "BARK_EVENT_UNSUPPORTED": FailureReason.EVENT_UNSUPPORTED,
+            "BARK_ENCRYPTION_CONFIGURATION_INVALID": FailureReason.ENCRYPTION_INVALID,
+        }
+        super().__init__(message, reason=reason or known.get(message, FailureReason.UNKNOWN))
 
 
 def validate_local_bark_server_url(value: str) -> None:
@@ -386,26 +395,53 @@ class BarkPublisher:
                 if "notification_snapshot" in message.payload:
                     raise BarkPublishError("BARK_NOTIFICATION_INVALID")
                 return
-        notification = map_bark_notification(
-            message,
-            read_only_url=self.read_only_url,
-        )
-        iv = self.iv_factory()
-        request = {
-            "device_key": self.device_key,
-            "ciphertext": _encrypt(notification, key=self.encryption_key, iv=iv),
-            "iv": iv.decode("ascii"),
-        }
+        try:
+            notification = map_bark_notification(message, read_only_url=self.read_only_url)
+        except BarkPublishError:
+            raise
+        except Exception:
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID") from None
+        try:
+            iv = self.iv_factory()
+            request = {
+                "device_key": self.device_key,
+                "ciphertext": _encrypt(notification, key=self.encryption_key, iv=iv),
+                "iv": iv.decode("ascii"),
+            }
+        except BarkPublishError:
+            raise
+        except Exception:
+            raise BarkPublishError(
+                "BARK_ENCRYPTION_FAILED", reason=FailureReason.ENCRYPTION_FAILED
+            ) from None
         try:
             response = await self.client.post(
                 f"{self.server_url.rstrip('/')}/push",
                 json=request,
             )
         except httpx.HTTPError as error:
-            raise BarkPublishError("BARK_TRANSPORT_FAILED") from error
+            reasons = {
+                httpx.ConnectTimeout: FailureReason.CONNECT_TIMEOUT,
+                httpx.ReadTimeout: FailureReason.READ_TIMEOUT,
+                httpx.WriteTimeout: FailureReason.WRITE_TIMEOUT,
+                httpx.PoolTimeout: FailureReason.POOL_TIMEOUT,
+            }
+            reason = next(
+                (value for kind, value in reasons.items() if isinstance(error, kind)),
+                FailureReason.TRANSPORT_ERROR,
+            )
+            raise BarkPublishError("BARK_TRANSPORT_FAILED", reason=reason) from None
+        except Exception:
+            raise BarkPublishError(
+                "BARK_TRANSPORT_FAILED", reason=FailureReason.TRANSPORT_ERROR
+            ) from None
+        if not response.is_success:
+            raise BarkPublishError("BARK_RESPONSE_INVALID", reason=FailureReason.HTTP_REJECTED)
         try:
             document = response.json()
         except ValueError:
-            raise BarkPublishError("BARK_RESPONSE_INVALID") from None
-        if not response.is_success or not isinstance(document, dict) or document.get("code") != 200:
-            raise BarkPublishError("BARK_RESPONSE_INVALID")
+            raise BarkPublishError(
+                "BARK_RESPONSE_INVALID", reason=FailureReason.RESPONSE_DECODE
+            ) from None
+        if not isinstance(document, dict) or document.get("code") != 200:
+            raise BarkPublishError("BARK_RESPONSE_INVALID", reason=FailureReason.PROVIDER_REJECTED)

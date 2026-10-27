@@ -398,6 +398,45 @@ async def test_publisher_converts_timeout_to_value_free_error() -> None:
     assert "private" not in str(caught.value)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "reason", "stage"),
+    [
+        (httpx.ConnectTimeout("private"), "CONNECT_TIMEOUT", "transport"),
+        (httpx.ReadTimeout("private"), "READ_TIMEOUT", "transport"),
+        (httpx.WriteTimeout("private"), "WRITE_TIMEOUT", "transport"),
+        (httpx.PoolTimeout("private"), "POOL_TIMEOUT", "transport"),
+        (httpx.ConnectError("private"), "TRANSPORT_ERROR", "transport"),
+        (httpx.Response(503, text="private"), "HTTP_REJECTED", "response"),
+        (httpx.Response(200, text="private"), "RESPONSE_DECODE", "response"),
+        (
+            httpx.Response(200, json={"code": 500, "message": "private"}),
+            "PROVIDER_REJECTED",
+            "response",
+        ),
+    ],
+)
+async def test_publisher_retains_only_fixed_failure_stage_and_reason(
+    failure: httpx.HTTPError | httpx.Response, reason: str, stage: str
+) -> None:
+    def transport(request: httpx.Request) -> httpx.Response:
+        if isinstance(failure, httpx.HTTPError):
+            raise failure
+        return failure
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        publisher = BarkPublisher(
+            client=client,
+            server_url="http://127.0.0.1:8080",
+            device_key="private-key",
+            encryption_key=_KEY,
+        )
+        with pytest.raises(BarkPublishError) as caught:
+            await publisher.publish(_diagnostic_message())
+    assert caught.value.failure_details() == {"stage": stage, "reason": reason}
+    assert "private" not in json.dumps(caught.value.failure_details())
+
+
 def _diagnostic_message() -> OutboxMessage:
     return OutboxMessage(
         event_id=_EVENT_ID,
@@ -464,3 +503,47 @@ async def test_diagnostic_uses_encrypted_publisher_without_paper_snapshot() -> N
     rendered = json.loads(unpadder.update(padded) + unpadder.finalize())
     assert rendered["title"] == "NEXUS 测试通知｜非投资预警"
     assert rendered["id"] == f"diagnostic-test:{_EVENT_ID}"
+
+
+def test_failure_diagnostics_never_trust_exception_text_or_untyped_reason() -> None:
+    from typing import cast
+
+    from nexus.outbox.failure import FailureReason, PublisherFailure
+
+    error = PublisherFailure("private token response", reason=cast(FailureReason, "private data"))
+    assert error.failure_details() == {"stage": "unknown", "reason": "UNKNOWN"}
+    assert BarkPublishError("READ_TIMEOUT private").failure_details() == {
+        "stage": "unknown",
+        "reason": "UNKNOWN",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["payload", "encryption"])
+async def test_pretransport_failure_records_phase_without_http(phase: str) -> None:
+    from dataclasses import replace
+
+    calls = []
+
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"code": 200})
+
+    message = _diagnostic_message()
+    if phase == "payload":
+        message = replace(message, payload={**message.payload, "private": "not allowed"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+        publisher = BarkPublisher(
+            client=client,
+            server_url="http://127.0.0.1:8080",
+            device_key="private-key",
+            encryption_key=_KEY,
+            iv_factory=lambda: _IV if phase == "payload" else b"bad",
+        )
+        with pytest.raises(BarkPublishError) as caught:
+            await publisher.publish(message)
+    assert caught.value.failure_details() == {
+        "stage": phase,
+        "reason": "PAYLOAD_INVALID" if phase == "payload" else "ENCRYPTION_INVALID",
+    }
+    assert calls == []
