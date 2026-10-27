@@ -244,3 +244,9 @@ def test_postgres_progress_retains_last_started_case_after_cancellation(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_diagnostic_notification_delivery_regressions_are_in_merge_gate() -> None:
+    path = "engine/tests/integration/test_bark_outbox_pg.py"
+    selected = [selector for group in MERGE_GROUPS[1:] for selector in selectors_for(group)]
+    assert selected.count(path) == 1
