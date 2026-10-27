@@ -624,7 +624,9 @@ def _stop(root: Path, env_file: Path, project: str, *, acknowledge: bool = False
         return 1
     if not acknowledge and not reconciled and _has_recovery(root):
         _recovery_module().record_stop(
-            root, observed_clean_exit=state == "inactive" and last_exit_code == 0
+            sys.modules[__name__],
+            root,
+            observed_clean_exit=state == "inactive" and last_exit_code == 0,
         )
     if state != "stopped":
         removed = subprocess.run(

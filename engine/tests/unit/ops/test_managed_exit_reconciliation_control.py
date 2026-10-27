@@ -500,6 +500,7 @@ def test_interrupted_link_publication_reenters_without_replacing_proof(tmp_path,
     proof = next(receipt_path.parent.glob("recovery-reconciliation-*.json"))
     frozen, inode = proof.read_bytes(), proof.stat().st_ino
     assert proof.stat().st_nlink == 2
+    os.utime(proof, (1, proof.stat().st_mtime))
     temporary = list(proof.parent.glob("reconciliation.*"))
     assert len(temporary) == 1
     assert (state_path.read_bytes(), receipt_path.read_bytes()) == original
@@ -688,3 +689,115 @@ def test_consumed_proof_archives_with_its_confirmed_pending_end(tmp_path, ending
         assert "exit_reconciliation_sha256" not in after["attempt"]
         assert len(starts(root)) == 2
     assert (proof.read_bytes(), receipt_path.read_bytes()) == frozen
+
+
+@pytest.mark.parametrize("field", ["evidence_sha256", "attempt_id", "consumed_by"])
+def test_check_and_apply_both_reject_inconsistent_pointer(tmp_path, field):
+    root, env, state_path, receipt_path = ended_activated_host(tmp_path)
+    assert _invoke(root, env, "reconcile-exit").returncode == 0
+    state = json.loads(state_path.read_text())
+    state["exit_reconciliation"][field] = "incorrect"
+    state_path.write_text(json.dumps(state))
+    before = state_path.read_bytes(), receipt_path.read_bytes()
+    for flags in (("--check-only",), ()):
+        result = _invoke(root, env, "reconcile-exit", *flags)
+        assert result.returncode != 0
+        assert json.loads(result.stdout)["current_eligible"] is False
+        assert (state_path.read_bytes(), receipt_path.read_bytes()) == before
+    assert starts(root) == []
+
+
+@pytest.mark.parametrize("fault", [None, "unknown", "exit75", "receipt", "config"])
+def test_maintenance_across_boot_explicit_enable_archives_unused_proof(tmp_path, fault):
+    from unit.ops.test_agent_paper_host_service import _executable
+    from unit.ops.test_agent_paper_recovery_control import options
+
+    root, env, state_path, receipt_path = ended_activated_host(tmp_path)
+    assert _invoke(root, env, "reconcile-exit").returncode == 0
+    before = json.loads(state_path.read_text())
+    assert before["desired"] == "maintenance"
+    proof = next(receipt_path.parent.glob("recovery-reconciliation-*.json"))
+    frozen = proof.read_bytes(), receipt_path.read_bytes()
+    _executable(root.parent / "bin/sysctl", "print('22222222-2222-2222-2222-222222222222')\n")
+    options(root, kickstart_state="inactive", exit=1)
+    if fault == "unknown":
+        options(root, recovery_status="blocked")
+    elif fault == "exit75":
+        _register(root, state="inactive", exit_code=75)
+    elif fault == "receipt":
+        value = json.loads(receipt_path.read_text())
+        value["late_change"] = True
+        receipt_path.write_text(json.dumps(value))
+    elif fault == "config":
+        config = root / "infra/.env.test"
+        config.write_text(config.read_text() + "# changed config fingerprint\n")
+    state_before = state_path.read_bytes()
+    result = _invoke(root, env, "enable-recovery")
+    if fault is not None:
+        assert result.returncode != 0
+        assert state_path.read_bytes() == state_before
+        assert proof.read_bytes() == frozen[0] and starts(root) == []
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads(state_path.read_text())
+    assert state.get("exit_reconciliation") is None
+    assert state["exit_reconciliation_history"][0]["consumed_by"] is None
+    assert "exit_reconciliation_sha256" not in state["attempt"]
+    assert (proof.read_bytes(), receipt_path.read_bytes()) == frozen
+    assert len(starts(root)) == 1
+
+
+def test_normal_stop_before_first_healthy_archives_consumer_and_allows_next_exit(tmp_path):
+    from unit.ops.test_agent_paper_recovery_control import options
+
+    root, env, state_path, old_receipt = ended_activated_host(tmp_path)
+    assert _invoke(root, env, "reconcile-exit").returncode == 0
+    proof = next(old_receipt.parent.glob("recovery-reconciliation-*.json"))
+    frozen = proof.read_bytes(), old_receipt.read_bytes()
+    for iteration in (0, 1):
+        options(root, kickstart_state="inactive", exit=1)
+        state = json.loads(state_path.read_text())
+        state["next_start_at"] = 0
+        state_path.write_text(json.dumps(state))
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        state = json.loads(state_path.read_text())
+        pending = state["attempt"]
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            register_pid(root, child.pid)
+            started = subprocess.check_output(
+                ["/bin/ps", "-p", str(child.pid), "-o", "lstart="], text=True
+            ).strip()
+            receipt = json.loads(old_receipt.read_text())
+            receipt.update(
+                attempt_id=pending["id"],
+                generation=pending["generation"],
+                revision=pending["revision"],
+                boot=pending["boot"],
+                pid=child.pid,
+                process_started=started,
+            )
+            target = old_receipt.with_name("recovery-activation-" + pending["id"] + ".json")
+            target.write_text(json.dumps(receipt))
+            target.chmod(0o600)
+            if iteration:
+                options(root)
+                assert _invoke(root, env, "recover").returncode == 0
+                assert json.loads(state_path.read_text())["reason"] == "HEALTHY"
+        finally:
+            child.terminate()
+            child.wait(timeout=10)
+        _register(root, state="inactive", exit_code=0 if iteration == 0 else 1)
+        if iteration == 0:
+            result = _invoke(root, env, "stop")
+            assert result.returncode == 0, result.stdout + result.stderr
+            stopped = json.loads(state_path.read_text())
+            assert stopped.get("exit_reconciliation") is None
+            assert stopped["exit_reconciliation_history"][0]["consumed_by"] == pending["id"]
+            assert stopped["stop_proof"]["instance"]["pid"] == child.pid
+    assert _invoke(root, env, "maintenance").returncode == 0
+    result = _invoke(root, env, "reconcile-exit")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["proof_id"] == pending["id"]
+    assert (proof.read_bytes(), old_receipt.read_bytes()) == frozen
+    assert len(starts(root)) == 2

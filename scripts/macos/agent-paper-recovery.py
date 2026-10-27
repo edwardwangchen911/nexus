@@ -279,11 +279,21 @@ def enable(service, root, env_file, project, *, report=True):
         raise ValueError("AGENT_PAPER_RECOVERY_START_UNCONFIRMED")
     status, last_exit = service._launchctl_inspection("launchctl", root, env_file, project)
     if status != "running":
+        current_boot = boot_id()
+        prior_boot_unused = (
+            previous is not None
+            and previous.get("boot") != current_boot
+            and previous.get("unconfirmed_exit") is None
+            and last_exit != 75
+            and isinstance(previous.get("exit_reconciliation"), dict)
+            and previous["exit_reconciliation"].get("consumed_by") is None
+        )
         rejected = previous is not None and rejected_start_proven(
             root, previous, previous.get("rejected_start"), boot_id(), status, last_exit
         )
         reconciled = (
             previous is not None
+            and not prior_boot_unused
             and previous.get("exit_reconciliation") is not None
             and service._reconciliation_module().qualified_exit(
                 service,
@@ -296,7 +306,9 @@ def enable(service, root, env_file, project, *, report=True):
                 last_exit,
             )
         )
-        if previous is None or not (previous.get("stopped_confirmed") or rejected or reconciled):
+        if previous is None or not (
+            previous.get("stopped_confirmed") or rejected or reconciled or prior_boot_unused
+        ):
             raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
         if any(
             previous.get(key) != value
@@ -312,6 +324,16 @@ def enable(service, root, env_file, project, *, report=True):
             raise ValueError("AGENT_PAPER_RECOVERY_DEPENDENCY_BLOCKED")
         if not isinstance(checked.get("migration_head"), str):
             raise ValueError("AGENT_PAPER_RECOVERY_DEPENDENCY_BLOCKED")
+        if prior_boot_unused:
+            current_binding = binding(service, root, env_file, project)
+            if (
+                previous.get("config_hash") != current_binding["config_hash"]
+                or checked["migration_head"] != previous["schema"]
+            ):
+                raise ValueError("AGENT_PAPER_RECOVERY_BINDING_CHANGED")
+            service._reconciliation_module().archive_unused_prior_boot(
+                root, previous, current_boot, observed_at=time.time()
+            )
         previous.update(binding(service, root, env_file, project))
         previous.update(
             desired="disabled", generation=str(uuid4()), schema=checked["migration_head"]
@@ -398,7 +420,7 @@ def disable(root, *, maintenance=False):
         write(root, state)
 
 
-def record_stop(root, *, observed_clean_exit):
+def record_stop(service, root, *, observed_clean_exit):
     state = read(root)
     if state is None:
         return
@@ -422,6 +444,18 @@ def record_stop(root, *, observed_clean_exit):
             and receipt["process_started"]
             and process(receipt["pid"]) is None
         ):
+            if state.get("exit_reconciliation") is not None:
+                service._reconciliation_module().archive_consumed(
+                    root,
+                    state,
+                    pending,
+                    reason="SUCCESSOR_STOPPED",
+                    observed_at=time.time(),
+                    confirmed_instance={
+                        "pid": receipt["pid"],
+                        "started": receipt["process_started"],
+                    },
+                )
             state["instance"] = {"pid": receipt["pid"], "started": receipt["process_started"]}
             state["last_resolved_attempt"] = pending
             state["attempt"] = None

@@ -154,6 +154,34 @@ def _check_published_evidence(evidence, capture):
         _reject("PROOF_INVALID")
 
 
+def _stable_stat(info):
+    return tuple(
+        getattr(info, key)
+        for key in (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+    )
+
+
+def _matching_pointer(state, attempt_id, digest):
+    expected = {"attempt_id": attempt_id, "evidence_sha256": digest, "consumed_by": None}
+    previous = state.get("exit_reconciliation")
+    if previous is not None and (
+        not isinstance(previous, dict)
+        or any(previous.get(key) != value for key, value in expected.items())
+    ):
+        _reject("PROOF_INVALID")
+    return expected if previous is None else previous
+
+
 def _read_publication(target, capture, *, repair):
     """Only complete this publisher's exact interrupted link; general reads stay strict."""
     info = target.lstat()
@@ -180,7 +208,7 @@ def _read_publication(target, capture, *, repair):
     temporary = matching[0]
     with os.fdopen(os.open(target, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
         opened = os.fstat(stream.fileno())
-        if opened != info:
+        if _stable_stat(opened) != _stable_stat(info):
             _reject("PROOF_INVALID")
         raw = stream.read()
         evidence = json.loads(raw)
@@ -195,7 +223,7 @@ def _read_publication(target, capture, *, repair):
             or current.st_nlink != 2
             or current.st_uid != os.getuid()
             or stat.S_IMODE(current.st_mode) != 0o600
-            or target.lstat() != opened
+            or _stable_stat(target.lstat()) != _stable_stat(opened)
         ):
             _reject("PROOF_INVALID")
         if repair:
@@ -234,10 +262,12 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
     if state.get("exit_reconciliation") is not None and not existing:
         _reject("PROOF_INVALID")
     if existing:
-        evidence, digest = _read_publication(target, capture, repair=not check_only)
+        evidence, digest = _read_publication(target, capture, repair=False)
+        _matching_pointer(state, attempt_id, digest)
     if check_only:
         return result
     if existing:
+        _read_publication(target, capture, repair=True)
         # A previous interrupted publication is not trusted merely because it exists.
         _sync(target)
         _sync(target.parent)
@@ -256,15 +286,7 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
     if capture_exit(service, recovery, root, env_file, project) != capture:
         _reject("BINDING_CHANGED")
     state = recovery.read(root)
-    pointer = {"attempt_id": attempt_id, "evidence_sha256": digest, "consumed_by": None}
-    previous = state.get("exit_reconciliation")
-    if previous is not None:
-        if not isinstance(previous, dict) or any(
-            previous.get(key) != value for key, value in pointer.items()
-        ):
-            _reject("PROOF_INVALID")
-        # Management generations may change; the immutable old producer does not.
-        pointer = previous
+    pointer = _matching_pointer(state, attempt_id, digest)
     state["exit_reconciliation"] = pointer
     recovery.write(root, state)
     _sync(recovery.path(root).parent)
