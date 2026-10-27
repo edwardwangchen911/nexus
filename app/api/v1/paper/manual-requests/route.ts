@@ -14,7 +14,7 @@ export const POST = withNexusBff(async (request, actor) => {
   if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json"
     || !body || typeof body !== "object" || Array.isArray(body)
     || Object.keys(body).length !== 1 || !("mode" in body)
-    || !["research_only", "research_and_paper"].includes(String(body.mode))) {
+    || !["research_only", "research_and_paper", "research_and_monitor"].includes(String(body.mode))) {
     throw new NexusBffError(400, "VALIDATION_ERROR", "The manual request is invalid.");
   }
   return engineFetch("/internal/v1/paper/manual-requests", { method: "POST", actor,

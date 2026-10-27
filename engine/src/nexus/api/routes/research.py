@@ -18,7 +18,7 @@ from nexus.agents.codex_versions import (
     STAGED_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import (
-    DISCLOSURE_SCOPE_PROMPT_VERSION,
+    DISCLOSURE_SCOPE_PROMPT_VERSIONS,
     MONITORING_SCOPE_PROMPT_VERSIONS,
     StageInputIdentity,
 )
@@ -378,7 +378,7 @@ def _declares_disclosure_monitoring(run: AgentResearchRunRecord) -> bool:
     manifest = run.prompt_manifest
     portfolio = manifest.get("portfolio") if isinstance(manifest, dict) else None
     return (
-        isinstance(portfolio, dict) and portfolio.get("version") == DISCLOSURE_SCOPE_PROMPT_VERSION
+        isinstance(portfolio, dict) and portfolio.get("version") in DISCLOSURE_SCOPE_PROMPT_VERSIONS
     )
 
 

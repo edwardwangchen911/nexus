@@ -70,7 +70,9 @@ def member_hash(run: AgentResearchRunRecord, job: Job) -> str:
 def manifest_hash(row: ManualPaperRequest, at: datetime, hashes: list[str]) -> str:
     return job_input_hash(
         {
-            "contract": "research_only_v2",
+            "contract": "independent_monitor_research_v1"
+            if row.contract_version == 3
+            else "research_only_v2",
             "request_id": str(row.id),
             "request_hash": row.request_hash,
             "batch_hash": row.batch_hash,
@@ -98,8 +100,8 @@ async def read_research_manifest(
     )
     batch = await load_agent_paper_candidate_batch(session, batch_id=row.candidate_batch_id)
     if (
-        row.contract_version != 2
-        or row.mode != "research_only"
+        row.contract_version not in {2, 3}
+        or row.mode != {2: "research_only", 3: "research_and_monitor"}.get(row.contract_version)
         or batch is None
         or batch.batch_hash != row.batch_hash
         or batch.account_id != row.account_id
@@ -125,9 +127,23 @@ async def read_research_manifest(
             or run.decision_time != manifest.research_as_of
             or run.model_config_id != row.model_config_id
             or run.model_hash != row.model_hash
-            or run.actor_id != "local-research-only-v2"
-            or run.idempotency_key != f"research-only:{row.id}:{member.instrument_id}"
-            or snapshot.payload.get("purpose") != "research_only_v2"
+            or run.actor_id
+            != (
+                "local-independent-monitor-research-v1"
+                if row.contract_version == 3
+                else "local-research-only-v2"
+            )
+            or run.idempotency_key
+            != (
+                f"{'independent-monitor' if row.contract_version == 3 else 'research-only'}"
+                f":{row.id}:{member.instrument_id}"
+            )
+            or snapshot.payload.get("purpose")
+            != (
+                "independent_monitor_research_v1"
+                if row.contract_version == 3
+                else "research_only_v2"
+            )
             or job.payload != {"run_id": str(run.id)}
             or job.job_type != "agent.paper.research"
             or job.scope_id != str(run.instrument_id)
@@ -176,7 +192,7 @@ async def prepare_research_request(
     if (
         row is None
         or row.account_id != settings.agent_paper_account_id
-        or row.contract_version != 2
+        or row.contract_version not in {2, 3}
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
     await lock_portfolio_account(session, row.account_id)
@@ -207,14 +223,25 @@ async def prepare_research_request(
         )
         if snapshot is None:
             raise ValueError("RESEARCH_SNAPSHOT_MISSING")
+        if row.contract_version == 3:
+            from nexus.monitoring.independent_storage import freeze_independent_snapshot
+
+            snapshot = await freeze_independent_snapshot(session, request=row, base=snapshot)
         request = ResearchRequest(
             instrument_id=instrument_id, data_snapshot_id=snapshot.id, decision_time=at
         )
         admission = await admit_research_run(
             session,
-            actor_id="local-research-only-v2",
-            route="research-only-v2",
-            idempotency_key=f"research-only:{row.id}:{instrument_id}",
+            actor_id="local-independent-monitor-research-v1"
+            if row.contract_version == 3
+            else "local-research-only-v2",
+            route="independent-monitor-research-v1"
+            if row.contract_version == 3
+            else "research-only-v2",
+            idempotency_key=(
+                f"{'independent-monitor' if row.contract_version == 3 else 'research-only'}"
+                f":{row.id}:{instrument_id}"
+            ),
             request_hash=job_input_hash(request.model_dump(mode="json")),
             request=request,
             prompt_version_id=prompts["orchestrator"].id,
@@ -223,7 +250,8 @@ async def prepare_research_request(
             now=at,
             job_type=JobType.AGENT_PAPER_RESEARCH,
             formal_stage_capacity=True,
-            research_only=True,
+            research_only=row.contract_version == 2,
+            independent_monitor=row.contract_version == 3,
         )
         run = await session.get(AgentResearchRunRecord, admission.run_id)
         job = await session.scalar(
@@ -274,7 +302,12 @@ async def finish_research_request(
         # The caller holds the host lock; a preparing receipt alone never grants replay.
         orphan = await session.scalar(
             select(AgentResearchRunRecord.id)
-            .where(AgentResearchRunRecord.idempotency_key.startswith(f"research-only:{row.id}:"))
+            .where(
+                AgentResearchRunRecord.idempotency_key.startswith(
+                    f"{'independent-monitor' if row.contract_version == 3 else 'research-only'}"
+                    f":{row.id}:"
+                )
+            )
             .limit(1)
         )
         if orphan is not None:
@@ -409,6 +442,7 @@ async def require_research_profile(
     from nexus.agents.research_only import RESEARCH_ONLY_INSTRUCTIONS, research_only_prompts_valid
 
     profile = row.research_profile
+    from nexus.agents.independent_monitor import INSTRUCTIONS, prompts_valid
     from nexus.agents.research_dispatch import uses_two_flight
 
     parallel = uses_two_flight(profile)
@@ -432,10 +466,17 @@ async def require_research_profile(
     if (
         prompts is None
         or base is None
-        or not research_only_prompts_valid(prompts)
+        or not (
+            prompts_valid(prompts)
+            if row.contract_version == 3
+            else research_only_prompts_valid(prompts)
+        )
         or {role: p.content_hash for role, p in prompts.items()} != profile["prompt_hashes"]
         or any(
-            prompts[role].content != base[role].content + "\n\n" + RESEARCH_ONLY_INSTRUCTIONS
+            prompts[role].content
+            != base[role].content
+            + "\n\n"
+            + (INSTRUCTIONS if row.contract_version == 3 else RESEARCH_ONLY_INSTRUCTIONS)
             for role in prompts
         )
     ):

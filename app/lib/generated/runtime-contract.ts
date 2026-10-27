@@ -6074,7 +6074,8 @@ export const runtimeContractSchemas = {
       "mode": {
         "enum": [
           "research_only",
-          "research_and_paper"
+          "research_and_paper",
+          "research_and_monitor"
         ],
         "title": "Mode",
         "type": "string"
@@ -6124,7 +6125,10 @@ export const runtimeContractSchemas = {
       "research_contract": {
         "anyOf": [
           {
-            "const": "research_only_v2",
+            "enum": [
+              "research_only_v2",
+              "independent_monitor_research_v1"
+            ],
             "type": "string"
           },
           {
@@ -17574,7 +17578,7 @@ export const runtimeContractSchemas = {
         "items": {
           "$ref": "#/components/schemas/WorkbenchActivityScopeResponse"
         },
-        "maxItems": 2,
+        "maxItems": 3,
         "minItems": 2,
         "title": "Scopes",
         "type": "array"
@@ -17643,7 +17647,8 @@ export const runtimeContractSchemas = {
       "mode": {
         "enum": [
           "research_and_paper",
-          "research_only"
+          "research_only",
+          "research_and_monitor"
         ],
         "title": "Mode",
         "type": "string"

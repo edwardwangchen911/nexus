@@ -92,6 +92,20 @@ test("normal BFF and page retain independent saved price and SEC monitoring", as
     await expect(sec).toHaveCount(0);
     await expect(page.getByRole("region", { name: "价格监控记录" })).toHaveCount(0);
   }
+  if (ready.independent) {
+    const summaryResponse = page.waitForResponse(response => response.url().includes("/api/v1/workbench"));
+    await page.goto("/workspace");
+    const summary = await (await summaryResponse).json();
+    const independent = summary.data.activity.scopes.find((scope: { mode: string }) => scope.mode === "research_and_monitor");
+    expect(independent.status).toBe("completed");
+    expect(independent.portfolio_status).toBe("not_applicable");
+    expect(independent.candidates).toHaveLength(3);
+    expect(independent.candidates.map((candidate: { symbol: string }) => candidate.symbol).sort()).toEqual(["AAPL", "AVGO", "NVDA"]);
+    expect(independent.candidates.every((candidate: { read_status: string }) => candidate.read_status === "verified")).toBe(true);
+    await expect(page.getByRole("button", { name: "研究并持续监控", exact: true })).toBeVisible();
+    await expect(page.getByText("实盘执行保持锁定。浏览和刷新不会开始新请求。", { exact: true })).toBeVisible();
+    await page.screenshot({ path: path.join(directory!, "workspace-entry.png"), fullPage: true });
+  }
   expect(writes).toEqual([]);
   fs.writeFileSync(path.join(directory!, "browser-proof.json"), JSON.stringify({ passed: true, writes, errors, status: response.status() }));
 });

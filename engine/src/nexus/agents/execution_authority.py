@@ -108,12 +108,12 @@ async def load_frozen_evidence(
         ref.id for ref in ordered if ref.source == "research_observation_identity"
     )
     if observation_ids:
-        from nexus.agents.research_only import require_research_only_snapshot
+        from nexus.agents.research_only import require_observation_snapshot
         from nexus.persistence.models.data import DataSnapshot
 
         snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
         try:
-            require_research_only_snapshot(snapshot)
+            require_observation_snapshot(snapshot)
         except ValueError:
             return ()
         from nexus.research.observation_identity_storage import read_observation_identity_bindings
@@ -131,6 +131,19 @@ async def load_frozen_evidence(
             )
             != set(observation_ids)
         ):
+            return ()
+    if any(ref.source == "nexus_independent_monitor_research" for ref in ordered):
+        from nexus.monitoring.independent_storage import read_independent_context
+
+        independent = await read_independent_context(
+            session,
+            snapshot_id=run.data_snapshot_id,
+            instrument_id=run.instrument_id,
+            as_of=run.decision_time,
+        )
+        if independent is None or {
+            r.id for r in ordered if r.source == "nexus_independent_monitor_research"
+        } != {independent[1].id}:
             return ()
     if any(
         ref.source in {"nexus_price_monitor_increment", "nexus_monitor_increment_v2"}

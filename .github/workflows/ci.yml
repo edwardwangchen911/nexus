@@ -108,6 +108,9 @@ jobs:
         run: uv run ruff check engine scripts/ci/engine_test_groups.py scripts/ci/engine_test_progress.py tests/policy/test_engine_test_groups.py
       - if: matrix.group == 'fast' || matrix.group == 'full'
         run: uv run mypy engine/src
+      - name: Prepare pinned public tokenizer for independent monitor chain
+        if: matrix.group == 'pg-a' || matrix.group == 'full'
+        run: uv run --package nexus-engine nexus-openai-local prepare-tokenizer --backend codex_sdk
       - run: uv run alembic -c engine/alembic.ini upgrade head
       - name: Run Engine test group
         env:

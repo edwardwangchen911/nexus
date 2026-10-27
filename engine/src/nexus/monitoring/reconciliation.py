@@ -103,6 +103,8 @@ async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetim
             or_(
                 AgentPaperCycleRecord.account_id == plan.account_id,
                 MonitorIncrement.account_id == plan.account_id,
+                DataSnapshot.payload["independent_monitor_context"]["account_id"].astext
+                == str(plan.account_id),
             ),
             AgentResearchRunRecord.instrument_id == plan.instrument_id,
             AgentResearchRunRecord.status.in_(("completed", "failed", "abstained")),
@@ -177,8 +179,15 @@ async def _scope_evidence(
 
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     rows = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+    from nexus.monitoring.independent_context import is_independent_snapshot
+    from nexus.monitoring.independent_storage import require_independent_run
+
     member = None
-    if is_monitor_snapshot(snapshot):
+    if is_independent_snapshot(snapshot):
+        independent = await require_independent_run(session, run)
+        if independent.account_id != account_id:
+            raise ValueError("MONITOR_SOURCE_INVALID")
+    elif is_monitor_snapshot(snapshot):
         member = await require_increment_binding(session, run)
         if member.account_id != account_id:
             raise ValueError("MONITOR_SOURCE_INVALID")
@@ -227,6 +236,8 @@ async def reconcile_account_results(
                 or_(
                     AgentPaperCycleRecord.account_id == account_id,
                     MonitorIncrement.account_id == account_id,
+                    DataSnapshot.payload["independent_monitor_context"]["account_id"].astext
+                    == str(account_id),
                 ),
                 AgentResearchRunRecord.instrument_id.in_(instrument_ids),
                 AgentResearchRunRecord.status.in_(("completed", "failed", "abstained")),
@@ -258,7 +269,14 @@ async def reconcile_account_results(
     }
     for run in candidates:
         snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
-        paper = None if snapshot is None else snapshot.payload.get("agent_paper_context")
+        paper = (
+            None
+            if snapshot is None
+            else (
+                snapshot.payload.get("agent_paper_context")
+                or snapshot.payload.get("independent_monitor_context")
+            )
+        )
         if isinstance(paper, dict) and paper.get("pending_monitoring_v2") is not None:
             from nexus.monitoring.daily_v2_reconciliation import (
                 DailyEventReplacementRejected,
@@ -354,6 +372,9 @@ async def reconcile_account_results(
             # proposal is a per-kind gap; a failed declared installation rolls
             # back this operation's plans, coverage and legacy consumption.
             async with session.begin_nested():
+                await _require_independent_predecessor_pair(
+                    session, account_id=account_id, run=run, now=now
+                )
                 for kind in kinds:
                     if (
                         await session.scalar(
@@ -456,6 +477,59 @@ async def reconcile_account_results(
 
 class _OrdinaryReplacementRejected(ValueError):
     """Roll back a new ordinary daily replacement before recording its refusal."""
+
+
+async def _require_independent_predecessor_pair(
+    session: AsyncSession, *, account_id: UUID, run: AgentResearchRunRecord, now: datetime
+) -> None:
+    from nexus.monitoring.independent_context import is_independent_snapshot
+    from nexus.monitoring.independent_storage import require_independent_run
+    from nexus.monitoring.source_qualification import load_qualified_source
+
+    snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    if not is_independent_snapshot(snapshot):
+        return
+    await lock_security(session, account_id=account_id, instrument_id=run.instrument_id)
+    context = await require_independent_run(session, run)
+    if context.account_id != account_id:
+        raise ValueError("MONITOR_SOURCE_INVALID")
+    for frozen in context.predecessors:
+        current = await session.scalar(
+            select(MonitorPlan)
+            .where(
+                MonitorPlan.account_id == account_id,
+                MonitorPlan.instrument_id == run.instrument_id,
+                MonitorPlan.kind == frozen.kind,
+            )
+            .order_by(MonitorPlan.generation.desc())
+            .limit(1)
+        )
+        if current is not None and current.source_run_id == run.id:
+            # A previously installed result from this exact run is idempotent,
+            # but its original proposal and predecessor still need proof.
+            source = await load_qualified_source(
+                session, account_id=account_id, output_id=current.source_output_id, now=now
+            )
+            proposal = (
+                source.intent.monitoring_proposal
+                if frozen.kind == "price"
+                else source.intent.disclosure_proposal
+            )
+            if (
+                source.run.id != run.id
+                or proposal is None
+                or current.predecessor_id != frozen.plan_id
+                or current.generation != (frozen.generation or 0) + 1
+                or current.data_snapshot_id != run.data_snapshot_id
+                or current.source_hash != source.output.content_hash
+                or current.condition != proposal.condition.model_dump(mode="json")
+            ):
+                raise ValueError("MONITOR_SOURCE_INVALID")
+            continue
+        if (None if current is None else current.id) != frozen.plan_id or (
+            None if current is None else current.generation
+        ) != frozen.generation:
+            raise _OrdinaryReplacementRejected("MONITOR_SOURCE_SUPERSEDED")
 
 
 async def _reconcile_run(

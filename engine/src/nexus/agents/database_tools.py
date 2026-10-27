@@ -297,6 +297,23 @@ class _BoundDatabaseExecutors:
                 or paper_context is not None
             ):
                 return self._invalid_frozen_evidence_authority("get_security_snapshot")
+        from nexus.monitoring.independent_storage import read_independent_context
+
+        independent = (
+            await read_independent_context(
+                self._session,
+                snapshot_id=self._snapshot_id,
+                instrument_id=self._instrument_id,
+                as_of=self._decision_time,
+            )
+            if any(r.source == "nexus_independent_monitor_research" for r in self._evidence)
+            else None
+        )
+        if (
+            any(r.source == "nexus_independent_monitor_research" for r in self._evidence)
+            and independent is None
+        ):
+            return self._invalid_frozen_evidence_authority("get_security_snapshot")
         result = self._result(
             "get_security_snapshot",
             [
@@ -397,6 +414,13 @@ class _BoundDatabaseExecutors:
                         and item.get("source") == "nexus_monitor_increment_v2"
                     ):
                         item["monitor_context"] = model_view(monitor_context[0])
+        if independent is not None:
+            result = {
+                **result,
+                "purpose": "independent_monitor_research_v1",
+                "portfolio_context_status": "not_applicable",
+                "independent_monitor_context": independent[0].model_dump(mode="json"),
+            }
         if snapshot is not None and snapshot.payload.get("purpose") == "research_only_v2":
             if not observation_bindings:
                 return self._invalid_frozen_evidence_authority("get_security_snapshot")

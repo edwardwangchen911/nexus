@@ -10,6 +10,7 @@ from nexus.agents.paper_context import AgentPaperResearchContext
 from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
 from nexus.monitoring.disclosure_contracts import compile_disclosure_proposal
+from nexus.monitoring.independent_context import IndependentMonitorContext
 from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.monitoring.source_qualification import load_qualified_source
 from nexus.monitoring.storage import lock_security, plan_recorded_at
@@ -33,7 +34,9 @@ async def _install_mixed_or_legacy_disclosure(
     by_role = {row.role: row for row in source.role_outputs}
     proposal = by_role["market_state"].disclosure_proposal
     if (
-        not isinstance(context, AgentPaperResearchContext | MixedMonitorContext)
+        not isinstance(
+            context, AgentPaperResearchContext | MixedMonitorContext | IndependentMonitorContext
+        )
         or context.disclosure_monitoring is None
         or proposal is None
         or source.intent.disclosure_proposal != proposal
@@ -59,6 +62,11 @@ async def _install_mixed_or_legacy_disclosure(
 
         if expected_predecessor_id != frozen_predecessor(context, "disclosure"):
             raise ValueError("MONITOR_PLAN_CONFLICT")
+    if (
+        isinstance(source.context, IndependentMonitorContext)
+        and expected_predecessor_id != source.context.predecessor("disclosure").plan_id
+    ):
+        raise ValueError("MONITOR_PLAN_CONFLICT")
     await lock_security(session, account_id=account_id, instrument_id=source.run.instrument_id)
     existing = await session.scalar(
         select(MonitorPlan).where(

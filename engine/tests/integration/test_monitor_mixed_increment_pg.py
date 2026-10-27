@@ -39,13 +39,17 @@ from sqlalchemy import func, select
     ],
 )
 async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three_calls(
-    migrated_database_url, monkeypatch, tmp_path, unknown
+    migrated_database_url, monkeypatch, tmp_path, unknown, independent=False
 ):
     frozen_without_price = unknown == "superseded_unfrozen_price"
     if frozen_without_price:
         unknown = "sec_only"
     factory, settings, store, captured, pointer, batch_id, materials_id = await prepared_materials(
-        migrated_database_url, monkeypatch, tmp_path, sec_only=unknown in ("capacity", "sec_only")
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        sec_only=unknown in ("capacity", "sec_only"),
+        independent=independent,
     )
     expected_count = 2 if unknown in ("capacity", "sec_only") else 3
     from nexus.monitoring.mixed_readback import mixed_batch_readback
@@ -69,6 +73,40 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     captured["clock"][0] = later
     await _set_test_insert_clock(factory, later)
     await append_fresh_inputs(factory, pointer.instrument_id, later)
+    if independent:
+        from nexus.monitoring.batches import scan_stock_batch
+        from nexus.persistence.models.monitoring import MonitorCheck
+        from nexus.persistence.models.runtime import OutboxEvent
+
+        async with factory.begin() as session:
+            notification_ids = set(await session.scalars(select(OutboxEvent.id)))
+            scanned = await scan_stock_batch(
+                session,
+                account_id=pointer.account_id,
+                instrument_id=pointer.instrument_id,
+                now=later,
+            )
+            repeated_scan = await scan_stock_batch(
+                session,
+                account_id=pointer.account_id,
+                instrument_id=pointer.instrument_id,
+                now=later,
+            )
+            assert scanned["checks"] == (1 if unknown in ("capacity", "sec_only") else 2)
+            assert scanned["new_triggers"] == scanned["notifications"] == 0
+            assert scanned["model_requests"] == scanned["provider_requests"] == 0
+            assert repeated_scan["batch_id"] == scanned["batch_id"]
+            assert repeated_scan["new_triggers"] == repeated_scan["notifications"] == 0
+            assert set(await session.scalars(select(OutboxEvent.id))) == notification_ids
+            checks = tuple(
+                await session.scalars(
+                    select(MonitorCheck).where(MonitorCheck.instrument_id == pointer.instrument_id)
+                )
+            )
+            assert len({c.scheduled_at for c in checks}) == 2
+            assert all(
+                c.scheduled_at.minute % 5 == 0 and c.scheduled_at.second == 0 for c in checks
+            )
     async with factory() as session, session.begin():
         monday = later + timedelta(days=3)
         session.add(
@@ -255,6 +293,36 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         return json.dumps(body), usage
 
     monkeypatch.setattr(codex_staged, "invoke_codex", tracked)
+    if unknown == "tokenizer_missing":
+        from nexus.agents import codex_token_budget
+
+        monkeypatch.setattr(
+            codex_token_budget, "tokenizer_cache_path", lambda: tmp_path / "missing-vocabulary"
+        )
+        assert codex_token_budget.local_vocabulary() is None
+        with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_INPUT_EXCEEDED$"):
+            await run_agent_worker_once(
+                settings, job_ids=(member.job_id,), formal_stage_capacity=True
+            )
+        assert stages == []
+        async with factory() as session:
+            child = await session.get(AgentResearchRunRecord, member.run_id)
+            job = await session.get(Job, member.job_id)
+            hold = await session.scalar(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id == member.run_id
+                )
+            )
+            assert child.status == "prepared" and job.status == "queued"
+            assert hold.state == "reserved" and child.settled_cost_usd is None
+            assert tuple(
+                [
+                    await session.scalar(select(func.count()).select_from(model))
+                    for model in (AgentResearchRunRecord, Job, AgentDailyBudgetReservationRecord)
+                ]
+            ) == tuple(count + 1 for count in before)
+        await factory.kw["bind"].dispose()
+        return
     assert await run_agent_worker_once(
         settings, job_ids=(member.job_id,), formal_stage_capacity=True
     )
@@ -281,6 +349,15 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         )
         assert (child.settled_cost_usd is None) == (unknown is True)
         assert reservation.state == ("reserved" if unknown is True else "settled")
+        if independent:
+            from nexus.agents.research_only import require_formal_research
+
+            for frozen_run, code in (
+                (parent, "INDEPENDENT_MONITOR_FORMAL_CONSUMPTION_FORBIDDEN"),
+                (child, "MONITOR_FORMAL_CONSUMPTION_FORBIDDEN"),
+            ):
+                with pytest.raises(ValueError, match=code):
+                    await require_formal_research(session, frozen_run)
         members = tuple(
             await session.scalars(select(MonitorTrigger).where(MonitorTrigger.batch_id == batch_id))
         )
@@ -437,4 +514,16 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     assert followed["unresolved_event_count"] == replay["unresolved_event_count"]
     assert followed["impact_review"] == replay["impact_review"]
     assert len(stages) == (2 if unknown is True else 3)
+    if independent and unknown is False:
+        from helpers.independent_monitor_readview import verify_readview
+
+        await verify_readview(
+            migrated_database_url,
+            factory,
+            monkeypatch,
+            pointer,
+            member.run_id,
+            batch_id,
+            captured["clock"][0],
+        )
     await factory.kw["bind"].dispose()

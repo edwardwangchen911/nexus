@@ -50,6 +50,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     disclosure=False,
     before_research=None,
     monitoring_lifetime_days=None,
+    independent=False,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -74,7 +75,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         **(
             {
                 "candidate_symbols": ("AAPL", "AVGO", "NVDA")[:count],
-                "risk_bucket_overrides": {INSTRUMENTS[0][0]: "EQUITY"},
+                "risk_bucket_overrides": {item[0]: "EQUITY" for item in INSTRUMENTS[:count]}
+                if independent
+                else {INSTRUMENTS[0][0]: "EQUITY"},
             }
             if disclosure
             else {}
@@ -229,7 +232,12 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             reference = next(
                 row["index"]
                 for row in payload["evidence"]
-                if row["source"] in {"nexus_agent_paper_context", "nexus_monitor_increment_v2"}
+                if row["source"]
+                in {
+                    "nexus_agent_paper_context",
+                    "nexus_monitor_increment_v2",
+                    "nexus_independent_monitor_research",
+                }
             )
             if stage == "research":
                 for row in response["roles"]:
@@ -357,7 +365,43 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 idempotency_key="controlled-initial-baseline",
             )
         manual = None
-        if manual_entry:
+        independent_request_id = None
+        if independent:
+            from types import SimpleNamespace
+
+            from nexus.paper.manual_request import admit_manual_request, claim_manual_request
+            from nexus.paper.research_request import prepare_research_request
+
+            settings = settings.model_copy(
+                update={
+                    "object_store_endpoint": "http://127.0.0.1:9000",
+                    "agent_paper_account_id": authority.account_id,
+                    "agent_paper_candidate_batch_id": batch.batch_id,
+                    "agent_paper_formal_model_config_id": model.id,
+                }
+            )
+            async with sessions.begin() as session:
+                registered = await admit_manual_request(
+                    session,
+                    account_id=authority.account_id,
+                    batch_id=batch.batch_id,
+                    model_config_id=model.id,
+                    mode="research_and_monitor",
+                    contract_version=3,
+                    idempotency_key="independent-normal-root",
+                )
+                independent_request_id = registered.request_id
+                await claim_manual_request(session, request_id=registered.request_id)
+            async with sessions.begin() as session:
+                prepared = await prepare_research_request(
+                    session, settings, request_id=registered.request_id
+                )
+                assert prepared.status == "active" and prepared.cycle_id is None
+                result = SimpleNamespace(
+                    result_code="RESEARCH_JOBS_PREPARED",
+                    research_run_ids=tuple(m.run_id for m in prepared.research.members),
+                )
+        elif manual_entry:
             assert profile in {"formal_v10", "formal_v11"} and tmp_path is not None
             manual = await _start_manual_http_request(
                 settings,
@@ -419,7 +463,9 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert all(
                     run.prompt_manifest["portfolio"]["version"]
                     == (
-                        "local-portfolio-synthesis-v10-sec-monitor"
+                        "independent-monitor-research-v1"
+                        if independent
+                        else "local-portfolio-synthesis-v10-sec-monitor"
                         if disclosure
                         else "local-portfolio-synthesis-v9-daily-pending"
                     )
@@ -489,6 +535,23 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert calls == ["research", "critique"]
                 return
         assert calls == ["research", "critique", "synthesis"] * count
+        if independent:
+            from nexus.paper.research_request import finish_research_request
+            from nexus.persistence.models.manual_paper import ManualPaperRequest
+            from nexus.persistence.models.paper import AgentPaperCycleRecord, PaperOrderRecord
+            from sqlalchemy import func
+
+            async with sessions.begin() as session:
+                row = await session.get(ManualPaperRequest, independent_request_id)
+                finished = await finish_research_request(session, row=row)
+                assert finished.status == "completed" and finished.cycle_id is None
+                assert all(m.usage_known for m in finished.research.members)
+                assert (
+                    await session.scalar(select(func.count()).select_from(AgentPaperCycleRecord))
+                    == 0
+                )
+                assert await session.scalar(select(func.count()).select_from(PaperOrderRecord)) == 0
+            return
         if decision_delay is not None:
             # Source snapshots stay frozen at AT. Move only the decision observer,
             # after all research jobs have already reached their terminal states.

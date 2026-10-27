@@ -503,7 +503,8 @@ async def research_candidates(
 ) -> tuple[WorkbenchCandidateResponse, ...]:
     if (
         request.id != view.request_id
-        or request.mode != "research_only"
+        or (request.mode, request.contract_version)
+        not in {("research_only", 2), ("research_and_monitor", 3)}
         or request.requested_at > read_at
     ):
         raise ValueError("WORKBENCH_CANDIDATE_BINDING_INVALID")

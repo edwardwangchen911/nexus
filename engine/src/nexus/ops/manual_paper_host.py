@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from sqlalchemy import func, select, text
@@ -129,7 +129,7 @@ async def dispatch_manual_request(
             # Route under the same safe failure and cleanup boundary as the claim.
             async with factory.begin() as session:
                 row = await session.get(ManualPaperRequest, request_id)
-                is_pure = row is not None and row.contract_version == 2
+                is_pure = row is not None and row.contract_version in {2, 3}
             if is_pure:
                 pure = True
                 await dispatch_pure_research_request(settings, request_id=request_id)
@@ -222,7 +222,7 @@ async def dispatch_manual_request(
 def bind_manual_queue(
     snapshot: "AgentPaperLoopSnapshot", request: ManualRequestView
 ) -> "AgentPaperLoopSnapshot":
-    if request.research_contract == "research_only_v2":
+    if request.research_contract in {"research_only_v2", "independent_monitor_research_v1"}:
         return replace(
             snapshot,
             manual_pending_request_id=request.request_id,
@@ -386,16 +386,16 @@ async def claim_configured_manual_request(
         and not settings.formal_budget_protection_enabled
         and row.candidate_batch_id == settings.agent_paper_candidate_batch_id
         and row.model_config_id == settings.agent_paper_formal_model_config_id
-        and (row.contract_version == 2 or row.requested_at.date() == now.date())
+        and (row.contract_version in {2, 3} or row.requested_at.date() == now.date())
     )
-    if available and row.contract_version == 2:
+    if available and row.contract_version in {2, 3}:
         from nexus.paper.research_request import require_research_profile
 
         try:
             await require_research_profile(session, row=row, settings=settings)
         except ValueError:
             available = False
-    if available and row.contract_version != 2:
+    if available and row.contract_version not in {2, 3}:
         try:
             calendar = await select_agent_paper_service_calendar_authority(session, now=now)
         except ValueError:
@@ -429,7 +429,7 @@ async def finish_configured_manual_request(
     row = await session.get(ManualPaperRequest, request_id)
     if row is None or row.account_id != account_id:
         raise ValueError("MANUAL_NOT_FOUND")
-    if row.contract_version == 2:
+    if row.contract_version in {2, 3}:
         from nexus.paper.research_request import finish_research_request
 
         return await finish_research_request(session, row=row, cancel_unused=cancel_unused)
@@ -477,7 +477,7 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
     try:
         async with factory.begin() as session:
             row = await session.get(ManualPaperRequest, request_id)
-            if row is None or row.contract_version != 2:
+            if row is None or row.contract_version not in {2, 3}:
                 return False
             view, claimed = await claim_configured_manual_request(
                 session, settings, request_id=request_id
@@ -655,7 +655,10 @@ async def _dispatch_two_flight_members(
 
 
 async def run_pure_research_once(
-    settings: EngineSettings, *, idempotency_key: str
+    settings: EngineSettings,
+    *,
+    idempotency_key: str,
+    mode: Literal["research_only", "research_and_monitor"] = "research_only",
 ) -> ManualRequestView:
     """Normal bounded foreground entry; same admission/host lock, no calendar or scheduler."""
     import asyncio
@@ -700,7 +703,7 @@ async def run_pure_research_once(
             try:
                 async with factory.begin() as session:
                     view = await start_configured_manual_request(
-                        session, settings, mode="research_only", idempotency_key=idempotency_key
+                        session, settings, mode=mode, idempotency_key=idempotency_key
                     )
                 await dispatch_pure_research_request(settings, request_id=view.request_id)
                 async with factory.begin() as session:

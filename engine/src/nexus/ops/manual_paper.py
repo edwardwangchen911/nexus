@@ -203,7 +203,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--env-file", type=Path, default=Path("infra/.env.local"))
     commands = result.add_subparsers(dest="action", required=True)
     start = commands.add_parser("start")
-    start.add_argument("--mode", choices=("research_only", "research_and_paper"), required=True)
+    start.add_argument(
+        "--mode",
+        choices=("research_only", "research_and_paper", "research_and_monitor"),
+        required=True,
+    )
     start.add_argument("--idempotency-key", required=True)
     bounded = commands.add_parser(
         "run-research", help="Run one complete pure-research request without scheduling"

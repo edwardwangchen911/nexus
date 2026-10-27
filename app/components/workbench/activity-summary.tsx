@@ -10,7 +10,7 @@ export type ActivityCandidate = {
   limitations: ActivityLimitation[]; has_more: boolean;
 };
 export type ActivityScope = {
-  mode: "research_and_paper" | "research_only"; today_registered: number | null; today_started: number | null;
+  mode: "research_and_paper" | "research_only" | "research_and_monitor"; today_registered: number | null; today_started: number | null;
   registration_date: string; decision_session: string | null; selected_decision_session?: string | null;
   selection: "active" | "historical_unresolved" | "today" | "historical" | "none" | "ambiguous" | "unavailable";
   request_id: string | null; cycle_id: string | null; requested_at: string | null; status: string | null;
@@ -63,13 +63,13 @@ export function ActivitySummary({ activity }: { activity: unknown }): React.Reac
 }
 
 function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
-  const title = scope.mode === "research_only" ? "纯研究" : "正式研究与内部模拟";
+  const title = scope.mode === "research_only" ? "纯研究" : scope.mode === "research_and_monitor" ? "独立研究与持续监控" : "正式研究与内部模拟";
   const scopeHref = safeDetailHref(scope.href);
   const uncertain = ["ambiguous", "unavailable"].includes(scope.selection);
   return <section aria-label={title} className="workbench-activity__scope">
     <h3>{title}</h3>
-    <p>手动登记统计日期（纽约）：{scope.registration_date} · {countCopy(scope.today_registered, "今日手动", "登记", "请求")} · {countCopy(scope.today_started, scope.mode === "research_only" ? "今日" : "本交易日", "启动", scope.mode === "research_only" ? "研究请求" : "周期")}</p>
-    <p>启动计数交易日：{scope.mode === "research_only" ? "本模式不适用，按纽约登记日期统计" : scope.decision_session ?? "尚未确定"}</p>
+    <p>手动登记统计日期（纽约）：{scope.registration_date} · {countCopy(scope.today_registered, "今日手动", "登记", "请求")} · {countCopy(scope.today_started, scope.mode !== "research_and_paper" ? "今日" : "本交易日", "启动", scope.mode !== "research_and_paper" ? "研究请求" : "周期")}</p>
+    <p>启动计数交易日：{scope.mode !== "research_and_paper" ? "本模式不适用，按纽约登记日期统计" : scope.decision_session ?? "尚未确定"}</p>
     <p><strong>{selections[scope.selection]}</strong>{scope.historical && scope.selection !== "historical_unresolved" ? "（历史记录）" : ""}
       {scope.selection !== "none" && <> · {uncertain ? "当前状态待核对" : statuses[scope.status ?? ""] ?? "运行状态待核对"}
         {!uncertain && scope.status === "preparing" && scope.cycle_id === null ? "；尚未创建周期" : ""}</>}</p>
@@ -77,10 +77,10 @@ function ScopeSummary({ scope }: { scope: ActivityScope }): React.ReactElement {
       <dl className="workbench-readiness-facts">
         <div><dt>触发来源</dt><dd>{scope.trigger === "manual" ? "手动登记" : scope.trigger === "scheduled" ? "定时调度" : "尚未核验"}</dd></div>
         <div><dt>请求登记时间</dt><dd>{formatDisplayTime(scope.requested_at)}</dd></div>
-        <div><dt>选中周期交易日</dt><dd>{scope.mode === "research_only" ? "本模式不适用" : scope.selected_decision_session ?? "尚未提供"}</dd></div>
+        <div><dt>选中周期交易日</dt><dd>{scope.mode !== "research_and_paper" ? "本模式不适用" : scope.selected_decision_session ?? "尚未提供"}</dd></div>
         <div><dt>历史占用</dt><dd>{occupancyCopy[scope.occupancy]}</dd></div>
       </dl>
-      <p>{scope.mode === "research_only" ? "组合决策与执行：本模式不适用" : uncertain ? "组合结论尚未核验" : portfolioStatuses[scope.portfolio_status ?? ""] ?? "组合结论尚未核验"}</p>
+      <p>{scope.mode !== "research_and_paper" ? "组合决策与执行：本模式不适用" : uncertain ? "组合结论尚未核验" : portfolioStatuses[scope.portfolio_status ?? ""] ?? "组合结论尚未核验"}</p>
       {scope.reason_code && <Reason code={scope.reason_code} />}
       {scope.portfolio_reason_code && scope.portfolio_reason_code !== scope.reason_code && <Reason code={scope.portfolio_reason_code} />}
       {scope.candidates.length > 0 ? <div className="workbench-activity__candidates">
@@ -152,8 +152,8 @@ function nullableString(value: unknown): boolean { return value === null || type
 function nullableCount(value: unknown): boolean { return value === null || (Number.isSafeInteger(value) && Number(value) >= 0); }
 export function validActivity(value: unknown): value is WorkbenchActivity {
   return plain(value) && typeof value.read_at === "string" && ["complete", "partial"].includes(String(value.read_status))
-    && Array.isArray(value.scopes) && value.scopes.length <= 2 && new Set(value.scopes.map((scope) => plain(scope) ? scope.mode : null)).size === value.scopes.length
-    && value.scopes.every((scope) => plain(scope) && ["research_and_paper", "research_only"].includes(String(scope.mode))
+    && Array.isArray(value.scopes) && value.scopes.length <= 3 && new Set(value.scopes.map((scope) => plain(scope) ? scope.mode : null)).size === value.scopes.length
+    && value.scopes.every((scope) => plain(scope) && ["research_and_paper", "research_only", "research_and_monitor"].includes(String(scope.mode))
       && (scope.selected_decision_session === undefined || nullableString(scope.selected_decision_session))
       && nullableCount(scope.today_registered) && nullableCount(scope.today_started) && typeof scope.registration_date === "string"
       && ["active", "historical_unresolved", "today", "historical", "none", "ambiguous", "unavailable"].includes(String(scope.selection))

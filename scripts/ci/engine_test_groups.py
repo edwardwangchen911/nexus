@@ -49,6 +49,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_portfolio_decision_admission_pg.py",
     "engine/tests/integration/test_manual_paper_api_pg.py",
     "engine/tests/integration/test_research_request_pg.py",
+    "engine/tests/integration/test_independent_monitor_research_pg.py",
     "engine/tests/integration/test_research_two_flight_pg.py",
     "engine/tests/integration/test_manual_host_exit_pg.py",
     "engine/tests/integration/test_research_only_runtime.py",

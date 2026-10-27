@@ -80,6 +80,14 @@ async def _account(
     )
     if member is not None:
         return member.account_id
+    from nexus.monitoring.independent_context import is_independent_snapshot
+    from nexus.monitoring.independent_storage import require_independent_run
+
+    if is_independent_snapshot(snapshot):
+        try:
+            return (await require_independent_run(session, run)).account_id
+        except ValueError:
+            return None
     paper = snapshot.payload.get("agent_paper_context")
     if not isinstance(paper, dict) or paper.get("instrument_id") != str(run.instrument_id):
         return None

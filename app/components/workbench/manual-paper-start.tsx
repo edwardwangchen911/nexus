@@ -79,7 +79,7 @@ export function ManualPaperStart(): React.ReactElement {
         if (stored) {
           const parsed = JSON.parse(stored) as Attempt;
           if (typeof parsed.key !== "string" || !/^[a-zA-Z0-9-]{1,255}$/.test(parsed.key)
-            || !["research_only", "research_and_paper"].includes(parsed.mode)) throw new Error("invalid attempt");
+            || !["research_only", "research_and_paper", "research_and_monitor"].includes(parsed.mode)) throw new Error("invalid attempt");
           setAttempt(parsed);
           void send(parsed, "GET");
         }
@@ -110,13 +110,14 @@ export function ManualPaperStart(): React.ReactElement {
     <div className="pm-panel__body">
       <div className="actions">
         <button type="button" className="button button--quiet" disabled={!restored || !!attempt || busy} onClick={() => start("research_only")}>仅研究</button>
+        <button type="button" className="button button--quiet" disabled={!restored || !!attempt || busy} onClick={() => start("research_and_monitor")}>研究并持续监控</button>
         <button type="button" className="button" disabled={!restored || !!attempt || busy} onClick={() => start("research_and_paper")}>研究并内部模拟</button>
       </div>
       <p>实盘执行保持锁定。浏览和刷新不会开始新请求。</p>
-      {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : "研究并内部模拟"} · <strong>{receipt.code === "MANUAL_PREPARATION_CANCELLED" ? "准备已安全取消" : (receipt.research_contract === "research_only_v2" ? researchLabels : labels)[receipt.status]}</strong></p>
+      {receipt && <div><p>{receipt.mode === "research_only" ? "仅研究" : receipt.mode === "research_and_monitor" ? "研究并持续监控" : "研究并内部模拟"} · <strong>{receipt.code === "MANUAL_PREPARATION_CANCELLED" ? "准备已安全取消" : (receipt.research_contract ? researchLabels : labels)[receipt.status]}</strong></p>
         <p>请求时间：<time dateTime={receipt.requested_at}>{receipt.requested_at}</time></p>
-        {receipt.research_contract === "research_only_v2" && <>
-          <p>基于历史观察资料开展研究，远端最新状态未核实。结果不构成正式决策，不产生组合目标、计划或订单。</p>
+        {receipt.research_contract && <>
+          {receipt.research_contract === "independent_monitor_research_v1" ? <p>通过审计的条件可进入持续监控，命中后仅复核受影响证券。历史观察价不等于实时行情；研究及后续复核不构成正式决策，不产生组合目标或订单。</p> : <p>基于历史观察资料开展研究，远端最新状态未核实。结果不构成正式决策，不产生组合目标、计划或订单。</p>}
           {receipt.research ? <>
             <p>研究资料冻结时间：<time dateTime={receipt.research.research_as_of}>{receipt.research.research_as_of}</time>（UTC）</p>
             <p>处理完成仅表示流程结束，内容质量须逐只核对；正式决策仍须重新核验当时资料与风控。</p>

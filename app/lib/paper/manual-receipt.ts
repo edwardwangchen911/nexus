@@ -23,10 +23,11 @@ export function isManualReceipt(value: unknown): value is ManualReceipt {
   const keys = ["request_id", "mode", "requested_at", "status", "code", "cycle_id", "execution_locked"];
   if (Object.keys(v).some((k) => ![...keys, "preparation_disposition", "preparation_recovery", "research_contract", "research"].includes(k)) || keys.some((k) => !(k in v))
     || typeof v.request_id !== "string" || !validateUuid(v.request_id)
-    || !["research_only", "research_and_paper"].includes(String(v.mode)) || v.execution_locked !== true
+    || !["research_only", "research_and_paper", "research_and_monitor"].includes(String(v.mode)) || v.execution_locked !== true
     || typeof v.requested_at !== "string" || !/(Z|\+00:00)$/.test(v.requested_at) || !Number.isFinite(Date.parse(v.requested_at))
     || v.cycle_id !== null && (typeof v.cycle_id !== "string" || !validateUuid(v.cycle_id))) return false;
-  if (v.research_contract === "research_only_v2") return isPureResearchReceipt(v);
+  if (v.research_contract === "research_only_v2" || v.research_contract === "independent_monitor_research_v1") return isPureResearchReceipt(v);
+  if (v.mode === "research_and_monitor") return false;
   if (v.research_contract !== undefined && v.research_contract !== null || v.research !== undefined && v.research !== null) return false;
   if ("preparation_disposition" in v && v.preparation_disposition !== null
     && (v.preparation_disposition !== "unknown_acknowledged" || v.status !== "unknown" || v.cycle_id !== null)) return false;
@@ -56,7 +57,7 @@ export function isManualReceipt(value: unknown): value is ManualReceipt {
 }
 
 function isPureResearchReceipt(value: Record<string, unknown>): boolean {
-  if (value.mode !== "research_only" || value.cycle_id !== null
+  if (value.mode !== (value.research_contract === "independent_monitor_research_v1" ? "research_and_monitor" : "research_only") || value.cycle_id !== null
     || value.preparation_disposition !== undefined && value.preparation_disposition !== null
     || value.preparation_recovery !== undefined && value.preparation_recovery !== null) return false;
   const codes: Record<string, string> = {
