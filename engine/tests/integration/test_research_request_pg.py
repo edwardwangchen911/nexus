@@ -845,7 +845,15 @@ async def test_preparation_failure_is_not_replaced_by_cleanup_failure(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "typed,close_fails",
-    [(True, None), (False, None), (True, "finish"), (True, "cancel"), (True, "audit")],
+    [
+        (True, None),
+        (False, None),
+        (True, "finish"),
+        (True, "cancel"),
+        (True, "audit"),
+        (True, "audit_commit"),
+        (True, "postcondition_commit"),
+    ],
 )
 @pytest.mark.parametrize(
     "mode,contract_version", [("research_only", 2), ("research_and_monitor", 3)]
@@ -903,7 +911,34 @@ async def test_preclaim_refusal_records_safe_reason_and_only_continues_after_nat
     monkeypatch.setattr("nexus.agents.capacity_cycle.prepare_cycle_capacity_pool", reject)
     if not typed:
         monkeypatch.setattr("nexus.ops.agent_paper_once.run_cycle_job_once", untyped)
-    if close_fails:
+    commit_body_completed = []
+    if close_fails in {"audit_commit", "postcondition_commit"}:
+        import nexus.paper.research_failure as failure_module
+        from sqlalchemy import text
+
+        target_name = (
+            "record_research_failure"
+            if close_fails == "audit_commit"
+            else "require_unused_request_closed"
+        )
+        original_boundary = getattr(failure_module, target_name)
+
+        async def deferred_commit_failure(session, **kwargs):
+            result = await original_boundary(session, **kwargs)
+            # Both statements succeed; PostgreSQL rejects the deferred uniqueness
+            # constraint only when the real session context attempts COMMIT.
+            await session.execute(
+                text(
+                    "CREATE TEMP TABLE preclaim_commit_probe "
+                    "(value integer UNIQUE DEFERRABLE INITIALLY DEFERRED) ON COMMIT DROP"
+                )
+            )
+            await session.execute(text("INSERT INTO preclaim_commit_probe VALUES (1), (1)"))
+            commit_body_completed.append(target_name)
+            return result
+
+        monkeypatch.setattr(failure_module, target_name, deferred_commit_failure)
+    elif close_fails:
         target = (
             "nexus.paper.research_request.finish_research_request"
             if close_fails == "finish"
@@ -914,11 +949,61 @@ async def test_preclaim_refusal_records_safe_reason_and_only_continues_after_nat
         monkeypatch.setattr(target, failed_close)
     try:
         if typed and not close_fails:
-            assert await dispatch_pure_research_request(settings, request_id=receipt.request_id)
+            from dataclasses import replace
+
+            from nexus.ops import agent_paper_loop as loop
+            from nexus.ops.manual_paper_host import dispatch_manual_request, inspect_manual_queue
+
+            inspections, heartbeats, dispatched = [], [], []
+            host_task = asyncio.current_task()
+
+            async def inspect_queue():
+                assert asyncio.current_task() is host_task
+                snapshot = await inspect_manual_queue(
+                    settings,
+                    account_id=settings.agent_paper_account_id,
+                    snapshot=loop.AgentPaperLoopSnapshot(now=datetime.now(UTC)),
+                )
+                inspections.append(snapshot.manual_pending_request_id)
+                # Stop this controlled host only after it has actually reinspected
+                # the persisted queue; never manufacture an empty queue or retry.
+                return replace(snapshot, enabled=len(inspections) == 1)
+
+            async def execute(action, snapshot):
+                assert action == loop.AgentPaperLoopAction.TRIGGER_MANUAL
+                dispatched.append(snapshot.manual_pending_request_id)
+                await dispatch_manual_request(
+                    settings,
+                    settings,
+                    request_id=snapshot.manual_pending_request_id,
+                    repo_root=tmp_path,
+                    calendar_authority_id=None,
+                    process_environment={},
+                )
+
+            async def heartbeat(at):
+                assert asyncio.current_task() is host_task
+                heartbeats.append(at)
+
+            result = await loop.run_foreground_loop(
+                inspect=inspect_queue,
+                execute=execute,
+                sleep=asyncio.sleep,
+                heartbeat=heartbeat,
+            )
+            assert result == loop.AgentPaperLoopAction.STOP_DISABLED
+            assert inspections == [receipt.request_id, None]
+            assert dispatched == [receipt.request_id]
+            assert len(heartbeats) >= 2  # Before action and after its successful close.
         else:
             with pytest.raises(ValueError, match="CODEX_CAPACITY_POOL_WIRE_EXCEEDED") as captured:
                 await dispatch_pure_research_request(settings, request_id=receipt.request_id)
-            if close_fails:
+            if close_fails in {"audit_commit", "postcondition_commit"}:
+                from sqlalchemy.exc import IntegrityError
+
+                assert isinstance(captured.value.__cause__, IntegrityError)
+                assert len(commit_body_completed) == 1
+            elif close_fails:
                 assert captured.value.__cause__.args == ("private-close-canary",)
         assert len(calls) == 1
         async with factory.begin() as session:
@@ -928,7 +1013,7 @@ async def test_preclaim_refusal_records_safe_reason_and_only_continues_after_nat
                     AuditEvent.payload["failure_phase"].as_string() != "research_cleanup",
                 )
             )
-            if close_fails == "audit":
+            if close_fails in {"audit", "audit_commit"}:
                 assert audit is None
             else:
                 assert audit is not None
