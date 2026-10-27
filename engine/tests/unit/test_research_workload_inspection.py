@@ -463,3 +463,43 @@ def test_envelope_covers_mixed_claim_counts_and_citation_width_branches(rich_fin
             )
             assert len(codex_request_wire(payload).encode()) <= row["wire_upper_bytes"]
     assert result["aggregate_sdk_input_completion_proven"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid", [True, False])
+async def test_independent_inspection_requires_exact_native_manifest_before_formal_factory(
+    monkeypatch, valid
+):
+    from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+    from nexus.monitoring import independent_context, independent_storage
+    from nexus.ops import research_workload_inspection as inspection
+
+    monkeypatch.setattr(
+        "nexus.agents.capacity_cycle.capacity_output_mode_qualified", AsyncMock(return_value=False)
+    )
+    session = SimpleNamespace(get=AsyncMock(return_value=object()))
+    run = SimpleNamespace(data_snapshot_id="frozen-snapshot")
+    monkeypatch.setattr(independent_context, "is_independent_snapshot", lambda _: True)
+    authority = AsyncMock(
+        return_value=object(),
+        side_effect=None if valid else ValueError("INDEPENDENT_MONITOR_SOURCE_INVALID"),
+    )
+    monkeypatch.setattr(independent_storage, "require_independent_run", authority)
+    factory = AsyncMock()
+    monkeypatch.setattr(inspection, "_committee", factory)
+    if not valid:
+        with pytest.raises(ValueError, match="INDEPENDENT_MONITOR_SOURCE_INVALID"):
+            await inspection._inspection_committee(
+                session,
+                None,
+                run,
+                model=SimpleNamespace(version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION),
+            )
+        factory.assert_not_called()
+    else:
+        await inspection._inspection_committee(
+            session, None, run, model=SimpleNamespace(version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION)
+        )
+        authority.assert_awaited_once_with(session, run)
+        assert factory.call_args.kwargs["formal_stage_capacity"] is True
+        assert factory.call_args.kwargs["full_input_capacity"] is False

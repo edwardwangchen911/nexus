@@ -22,7 +22,7 @@ from nexus.persistence.models.runtime import Job
 from sqlalchemy import func, select
 
 
-def archive(root, entry, *, extra=False):
+def archive(root, entry, *, extra=False, exhibit_text=""):
     root.mkdir(parents=True)
     accession = entry["accession_number"]
     base = f"https://www.sec.gov/Archives/edgar/data/123456/{accession.replace('-', '')}/"
@@ -33,7 +33,11 @@ def archive(root, entry, *, extra=False):
         ),
         "ex99.htm": (
             "EX-99.1",
-            b"<p>Unaudited revenue USD 100 million; quarter, not year to date.</p>",
+            (
+                "<p>Unaudited revenue USD 100 million; quarter, not year to date."
+                + exhibit_text
+                + "</p>"
+            ).encode(),
         ),
     }
     if extra:

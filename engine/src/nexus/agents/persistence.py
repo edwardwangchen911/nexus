@@ -1534,13 +1534,13 @@ def _schema_hash(*, portfolio_prompt_version: str | None = None) -> str:
     from nexus.agents.committee import (
         DAILY_PENDING_SCOPE_PROMPT_VERSION,
         DISCLOSURE_SCOPE_PROMPT_VERSION,
-        INDEPENDENT_MONITOR_PROMPT_VERSION,
+        INDEPENDENT_MONITOR_PROMPT_VERSIONS,
         MONITORING_SCOPE_PROMPT_VERSION,
     )
 
     name = (
         "research-intent-v11-independent-monitor.schema.json"
-        if portfolio_prompt_version == INDEPENDENT_MONITOR_PROMPT_VERSION
+        if portfolio_prompt_version in INDEPENDENT_MONITOR_PROMPT_VERSIONS
         else "research-intent-v10-sec-monitor.schema.json"
         if portfolio_prompt_version == DISCLOSURE_SCOPE_PROMPT_VERSION
         else "research-intent-v9-daily-pending.schema.json"

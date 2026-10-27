@@ -211,7 +211,7 @@ def synthesize_intent(
     from nexus.agents.committee import (
         DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
         DISCLOSURE_SCOPE_PROMPT_VERSIONS,
-        INDEPENDENT_MONITOR_PROMPT_VERSION,
+        INDEPENDENT_MONITOR_PROMPT_VERSIONS,
         MONITORING_SCOPE_PROMPT_VERSIONS,
     )
 
@@ -222,7 +222,7 @@ def synthesize_intent(
         # Historical adjusted observations cannot authorize raw live thresholds.
         # Drop only this optional kind; independently audited SEC remains usable.
         and (
-            prompts["portfolio"].version != INDEPENDENT_MONITOR_PROMPT_VERSION
+            prompts["portfolio"].version not in INDEPENDENT_MONITOR_PROMPT_VERSIONS
             or price_authority_valid
         )
         and by_role["evidence_audit"].vote == "support"

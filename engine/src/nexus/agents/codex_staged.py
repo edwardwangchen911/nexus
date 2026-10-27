@@ -41,7 +41,8 @@ from nexus.agents.committee import (
     DAILY_PENDING_SCOPE_PROMPT_VERSIONS,
     DISCLOSURE_SCOPE_PROMPT_VERSION,
     DISCLOSURE_SCOPE_PROMPT_VERSIONS,
-    INDEPENDENT_MONITOR_PROMPT_VERSION,
+    INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION,
+    INDEPENDENT_MONITOR_PROMPT_VERSIONS,
     MONITORING_SCOPE_PROMPT_VERSION,
     MONITORING_SCOPE_PROMPT_VERSIONS,
     ROLE_ORDER,
@@ -744,7 +745,7 @@ class StagedCodexCommittee(CodexCommittee):
                 json.dumps(security.get("independent_monitor_context"))
             )
             if (
-                self._prompts["portfolio"].version != INDEPENDENT_MONITOR_PROMPT_VERSION
+                self._prompts["portfolio"].version not in INDEPENDENT_MONITOR_PROMPT_VERSIONS
                 or not self._paper_stage_scope
                 or bound_independent.instrument_id != request.instrument_id
                 or bound_independent.decision_time != request.decision_time
@@ -763,7 +764,7 @@ class StagedCodexCommittee(CodexCommittee):
                 MONITORING_SCOPE_PROMPT_VERSION,
                 DAILY_PENDING_SCOPE_PROMPT_VERSION,
                 DISCLOSURE_SCOPE_PROMPT_VERSION,
-                INDEPENDENT_MONITOR_PROMPT_VERSION,
+                *INDEPENDENT_MONITOR_PROMPT_VERSIONS,
             }
             and self._paper_stage_scope
             and (paper_context_present or monitor_context_present or independent_context_present)
@@ -893,7 +894,7 @@ class StagedCodexCommittee(CodexCommittee):
                 MONITORING_SCOPE_PROMPT_VERSION,
                 DAILY_PENDING_SCOPE_PROMPT_VERSION,
                 DISCLOSURE_SCOPE_PROMPT_VERSION,
-                INDEPENDENT_MONITOR_PROMPT_VERSION,
+                *INDEPENDENT_MONITOR_PROMPT_VERSIONS,
             }
         ):
             # The initial claims and audit vote need the new frozen guidance too.
@@ -1165,6 +1166,14 @@ class StagedCodexCommittee(CodexCommittee):
                 inline_citations=self._inline_citations,
                 financial_table_candidate=True,
             )
+            if self._prompts["portfolio"].version == INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION:
+                from nexus.agents.independent_input_view import project_independent_payload
+
+                payload = project_independent_payload(payload)
+                if "$iv2" not in payload:
+                    # A collision fallback has no four-byte prose guarantee.
+                    # Refuse it before capacity binding or any SDK invocation.
+                    raise ValueError("INDEPENDENT_INPUT_VIEW_UNAVAILABLE")
             return payload, output_model
         payload = (
             project_staged_payload(payload, inline_citations=True)

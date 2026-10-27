@@ -150,3 +150,18 @@ def test_plain_previous_claims_and_empty_sparse_rows_roundtrip():
         )
         == before
     )
+
+
+@pytest.mark.parametrize("depth", [1, 2, 5])
+def test_nested_mixed_arrays_keep_original_types_values_and_key_order(depth):
+    row = {
+        "long_column_a_abcdefghijklmnopqrstuvwxyz": 1,
+        "long_column_b_abcdefghijklmnopqrstuvwxyz": "x",
+    }
+    items = [row, row]
+    for _ in range(depth):
+        items = [items, row, row]
+    original = {"frozen_inputs": {"items": items}}
+    restored = restore_independent_input(project_independent_payload(original))
+    assert restored == original
+    assert json.dumps(restored, ensure_ascii=False) == json.dumps(original, ensure_ascii=False)

@@ -3,6 +3,7 @@
 import argparse
 import json
 from datetime import timedelta
+from hashlib import sha256
 from uuid import UUID
 
 import pytest
@@ -50,6 +51,14 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         tmp_path,
         sec_only=unknown in ("capacity", "sec_only"),
         independent=independent,
+        # A real imported original large enough for byte fallback to exceed the
+        # unchanged 64k allowance even after v2 lossless input compression.
+        exhibit_text=(
+            "Detailed quarterly reconciliation identifiers: "
+            + " ".join(sha256(str(i).encode()).hexdigest() for i in range(200))
+        )
+        if unknown == "tokenizer_missing"
+        else "",
     )
     expected_count = 2 if unknown in ("capacity", "sec_only") else 3
     from nexus.monitoring.mixed_readback import mixed_batch_readback
@@ -300,10 +309,25 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             codex_token_budget, "tokenizer_cache_path", lambda: tmp_path / "missing-vocabulary"
         )
         assert codex_token_budget.local_vocabulary() is None
+        from nexus.agents import codex_capacity
+
+        original_allowance = codex_capacity.codex_input_allowance
+        measured = []
+
+        def observed_allowance(wire, schema):
+            value = original_allowance(wire, schema)
+            measured.append((len(wire.encode()), value))
+            return value
+
+        monkeypatch.setattr(codex_capacity, "codex_input_allowance", observed_allowance)
         with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_INPUT_EXCEEDED$"):
             await run_agent_worker_once(
                 settings, job_ids=(member.job_id,), formal_stage_capacity=True
             )
+        # Envelope diagnostics also count each stage; the final count is the
+        # exact research request that preclaim refuses before any Job claim.
+        assert measured and max(size for size, _ in measured) <= 100479
+        assert measured[-1][1] > 64000
         assert stages == []
         async with factory() as session:
             child = await session.get(AgentResearchRunRecord, member.run_id)

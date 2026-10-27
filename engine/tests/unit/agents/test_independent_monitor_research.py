@@ -226,9 +226,13 @@ def test_independent_stage_schema_cannot_adopt_daily_pending_events():
 
 
 @pytest.mark.asyncio
-async def test_independent_missing_raw_price_basis_drops_only_price_not_audited_sec(monkeypatch):
+@pytest.mark.parametrize(
+    "version", ["independent-monitor-research-v1", "independent-monitor-research-v2"]
+)
+async def test_independent_missing_raw_price_basis_drops_only_price_not_audited_sec(
+    monkeypatch, version
+):
     from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
-    from nexus.agents.independent_monitor import PROMPT_VERSION
     from nexus.agents.synthesis import synthesize_intent
     from nexus.persistence.models.agents import (
         AgentModelConfigRecord,
@@ -255,7 +259,7 @@ async def test_independent_missing_raw_price_basis_drops_only_price_not_audited_
         ),
         {
             role: AgentPromptVersionRecord(
-                role=role, version=PROMPT_VERSION, content=p.content, content_hash=p.content_hash
+                role=role, version=version, content=p.content, content_hash=p.content_hash
             )
             for role, p in captured["prompts"].items()
         },
@@ -368,3 +372,71 @@ async def test_native_independent_sec_reference_is_required_for_exact_audited_ad
         compile_disclosure_proposal(original, reviews, **args)
     with pytest.raises(ValueError, match="DISCLOSURE_PROPOSAL_NOT_APPROVED"):
         compile_disclosure_proposal(proposal, reviews, **(args | {"audit_vote": "oppose"}))
+
+
+@pytest.mark.asyncio
+async def test_compact_independent_version_is_explicit_and_preserves_legacy_wire(monkeypatch):
+    from nexus.agents.codex_sdk import codex_request_wire
+    from nexus.agents.independent_monitor import INSTRUCTIONS
+    from nexus.monitoring.independent_context import IndependentMonitorContext
+    from unit.agents.test_full_input_capacity_v9 import committee
+    from unit.agents.test_monitoring_producer import produce
+
+    captured = {}
+    await produce(monkeypatch, disclosure=True, capture=captured)
+    prompts = {
+        role: p.model_copy(
+            update={
+                "version": "independent-monitor-research-v1",
+                "content": p.content + "\n\n" + INSTRUCTIONS,
+                "content_hash": hashlib.sha256(
+                    (p.content + "\n\n" + INSTRUCTIONS).encode()
+                ).hexdigest(),
+            }
+        )
+        for role, p in captured["prompts"].items()
+    }
+    request = captured["request"]
+    value = context_payload()
+    value.update(
+        instrument_id=str(request.instrument_id),
+        candidate_ids=[str(request.instrument_id)],
+        decision_time=request.decision_time.isoformat(),
+    )
+    value["disclosure_monitoring"] = captured["inputs"]["security_snapshot"]["items"][0][
+        "agent_paper_context"
+    ]["disclosure_monitoring"]
+    context = IndependentMonitorContext.model_validate_json(json.dumps(value))
+    inputs = {
+        "security_snapshot": {
+            "purpose": PURPOSE,
+            "items": [],
+            "independent_monitor_context": context.model_dump(mode="json"),
+        },
+        "financial_facts": {"items": []},
+    }
+    kwargs = dict(
+        stage="research",
+        request=request,
+        evidence_refs=captured["evidence"],
+        frozen_inputs=inputs,
+        previous=[],
+        financial_table_candidate=True,
+    )
+    legacy = committee(prompts=prompts)
+    old, old_schema = legacy.build_stage_request(**kwargs)
+    original = codex_request_wire(old)
+    compact = committee(
+        prompts={
+            role: p.model_copy(update={"version": "independent-monitor-research-v2"})
+            for role, p in prompts.items()
+        }
+    )
+    new, new_schema = compact.build_stage_request(**kwargs)
+    from nexus.agents.independent_input_view import restore_independent_input
+
+    assert new["$iv2"]["version"] == 2
+    assert restore_independent_input(new) == old
+    assert new_schema.model_json_schema() == old_schema.model_json_schema()
+    assert codex_request_wire(legacy.build_stage_request(**kwargs)[0]) == original
+    assert "$iv2" not in old

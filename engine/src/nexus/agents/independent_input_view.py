@@ -111,7 +111,9 @@ def _sparse(value: Any) -> Any:
     if not isinstance(value, list):
         return value
     rows = [_sparse(v) for v in value]
-    if len(rows) < 2 or not all(isinstance(row, dict) for row in rows):
+    # Only original object rows qualify: recursive list projection may itself
+    # create a wrapper dict, which must never change the outer array element type.
+    if len(value) < 2 or not all(isinstance(row, dict) for row in value):
         return rows
     keys = list(dict.fromkeys(k for row in rows for k in row))
     # A stable topological order retains each row's original key order even
@@ -288,7 +290,10 @@ def restore_independent_input(payload: dict[str, Any]) -> dict[str, Any]:
             or int(index) >= len(literals)
         ):
             raise ValueError("INDEPENDENT_INPUT_VIEW_INVALID")
-        return literals[int(index)]
+        item = literals[int(index)]
+        if not isinstance(item, str):
+            raise ValueError("INDEPENDENT_INPUT_VIEW_INVALID")
+        return item
 
     for k in _STATIC:
         if k in result:

@@ -8,10 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.committee import ROLE_ORDER, AgentRole
+from nexus.agents.committee import (
+    INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION,
+    INDEPENDENT_MONITOR_PROMPT_VERSIONS,
+    ROLE_ORDER,
+    AgentRole,
+)
 from nexus.persistence.models.agents import AgentPromptVersionRecord
 
-PROMPT_VERSION = "independent-monitor-research-v1"
+PROMPT_VERSION = INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION
 INSTRUCTIONS = (
     "Root purpose: independent_monitor_research_v1. Research the single security using only "
     "observations available at the frozen cutoff and their original dated scope. "
@@ -36,11 +41,15 @@ INSTRUCTIONS = (
 
 
 def prompts_valid(prompts: Mapping[AgentRole, AgentPromptVersionRecord]) -> bool:
-    return set(prompts) == set(ROLE_ORDER) and all(
-        p.version == PROMPT_VERSION
-        and p.content.endswith(INSTRUCTIONS)
-        and sha256(p.content.encode()).hexdigest() == p.content_hash
-        for p in prompts.values()
+    return (
+        set(prompts) == set(ROLE_ORDER)
+        and len({p.version for p in prompts.values()}) == 1
+        and all(
+            p.version in INDEPENDENT_MONITOR_PROMPT_VERSIONS
+            and p.content.endswith(INSTRUCTIONS)
+            and sha256(p.content.encode()).hexdigest() == p.content_hash
+            for p in prompts.values()
+        )
     )
 
 
@@ -53,7 +62,7 @@ async def ensure_prompts(
     base = await load_complete_prompt_authority(session, orchestrator_id=orchestrator_id)
     if base is None:
         raise ValueError("INDEPENDENT_MONITOR_PROMPT_UNAVAILABLE")
-    if prompts_valid(base):
+    if prompts_valid(base) and base["portfolio"].version == PROMPT_VERSION:
         return base
     if base["portfolio"].version != DISCLOSURE_SCOPE_PROMPT_VERSION:
         raise ValueError("INDEPENDENT_MONITOR_PROMPT_UNAVAILABLE")
