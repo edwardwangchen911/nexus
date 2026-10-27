@@ -147,6 +147,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_monitor_validation_work_pg.py",
     "engine/tests/integration/test_research_monitor_notification_pg.py",
     "engine/tests/integration/test_bark_outbox_pg.py",
+    "engine/tests/integration/test_outbox.py",
 )
 
 # Complete same-tree runs 40226113806 and 40228451043 still exceed 27m.

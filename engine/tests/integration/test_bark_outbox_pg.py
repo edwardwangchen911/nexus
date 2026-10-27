@@ -364,6 +364,7 @@ async def test_diagnostic_one_identity_one_encrypted_delivery_no_business(
             assert receipt["status"] == "provider_accepted"
             assert receipt["device_delivery"] == "unverified"
             assert receipt["attempt_count"] == 1
+            assert receipt["failure"] is None
             assert await session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
             assert (
                 await session.scalar(select(func.count()).select_from(OutboxDeliveryAttempt)) == 1
@@ -444,6 +445,21 @@ async def test_diagnostic_timeout_is_unknown_and_never_redelivered(
             receipt = await read_diagnostic_notification(session, test_id=test_id)
             assert receipt["status"] == "unknown"
             assert receipt["attempt_count"] == 1
+            assert receipt["failure"] == {"stage": "transport", "reason": "READ_TIMEOUT"}
+            from nexus.outbox.failure import FAILURE_ACTION
+            from nexus.persistence.models.runtime import AuditEvent
+
+            facts = list(
+                await session.scalars(select(AuditEvent).where(AuditEvent.action == FAILURE_ACTION))
+            )
+            assert len(facts) == 1
+            assert facts[0].payload == {
+                "event_id": str(test_id),
+                "attempt_no": 1,
+                "stage": "transport",
+                "reason": "READ_TIMEOUT",
+            }
+            assert "private" not in facts[0].canonical_event
             assert (
                 await enqueue_diagnostic_notification(
                     session, test_id=test_id, activated_at=activation
@@ -615,4 +631,173 @@ async def test_diagnostic_claim_before_send_and_expired_lease_never_retries(
         assert len(calls) == 1
     finally:
         release.set()
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_frozen_legacy_diagnostic_failure_keeps_unknown_and_never_replays(
+    migrated_database_url: str,
+) -> None:
+    """Sanitized shape of the frozen one-attempt 2026-10-27 result, not a new send."""
+    from nexus.notifications.diagnostic import (
+        enqueue_diagnostic_notification,
+        read_diagnostic_notification,
+    )
+    from nexus.persistence.models.runtime import AuditEvent
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    test_id = new_uuid7()
+    activation = datetime(2020, 1, 1, tzinfo=UTC)
+    try:
+        async with factory.begin() as session:
+            await enqueue_diagnostic_notification(session, test_id=test_id, activated_at=activation)
+            event = await session.get(OutboxEvent, test_id)
+            assert event is not None
+            start = event.created_at
+        from nexus.outbox.dispatcher import dispatch_outbox_once
+        from nexus.outbox.models import OutboxMessage, PublisherSpec
+        from nexus.outbox.registry import PublisherRegistry
+
+        async def legacy_failure(message: OutboxMessage) -> None:
+            raise RuntimeError("legacy failure has no structured evidence")
+
+        assert await dispatch_outbox_once(
+            factory,
+            worker_id="frozen-test-consumer",
+            clock=lambda: start,
+            registry=PublisherRegistry(
+                [
+                    PublisherSpec(
+                        "diagnostic.notification.test",
+                        "diagnostic_notification_v1",
+                        True,
+                        legacy_failure,
+                    )
+                ]
+            ),
+        )
+        settings = load_bark_worker_settings(
+            {
+                "NEXUS_BARK_ENABLED": "true",
+                "DATABASE_URL": migrated_database_url,
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+                "NEXUS_BARK_ACTIVATED_AT": activation.isoformat(),
+            }
+        )
+        calls = []
+
+        def forbidden(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            raise AssertionError("old notification must never be sent")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+            assert await run_bark_worker(settings, run_forever=False, client=client) == 0
+        async with factory.begin() as session:
+            first = await read_diagnostic_notification(session, test_id=test_id)
+            assert first["status"] == "unknown" and first["failure"] is None
+            assert first["device_delivery"] == "unverified" and first["attempt_count"] == 1
+            assert await read_diagnostic_notification(session, test_id=test_id) == first
+            assert await session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+            assert (
+                await session.scalar(select(func.count()).select_from(OutboxDeliveryAttempt)) == 1
+            )
+            event = await session.get(OutboxEvent, test_id)
+            assert event is not None and event.last_error_code == "PUBLISHER_FAILED"
+            assert event.max_attempts == 1 and event.status == "dead_letter"
+        assert calls == []
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_rollback", [False, True])
+async def test_failure_fact_cannot_survive_rollback_or_late_expired_claim(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_rollback: bool,
+) -> None:
+    from datetime import timedelta
+
+    from nexus.notifications.diagnostic import (
+        enqueue_diagnostic_notification,
+        read_diagnostic_notification,
+    )
+    from nexus.outbox.failure import FAILURE_ACTION
+    from nexus.persistence.models.runtime import AuditEvent
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    test_id = new_uuid7()
+    activation = datetime(2020, 1, 1, tzinfo=UTC)
+    try:
+        async with factory.begin() as session:
+            await enqueue_diagnostic_notification(session, test_id=test_id, activated_at=activation)
+            event = await session.get(OutboxEvent, test_id)
+            assert event is not None
+            start = event.created_at
+        settings = load_bark_worker_settings(
+            {
+                "NEXUS_BARK_ENABLED": "true",
+                "DATABASE_URL": migrated_database_url,
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+                "NEXUS_BARK_ACTIVATED_AT": activation.isoformat(),
+            }
+        )
+        calls = []
+
+        def timeout(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            raise httpx.ReadTimeout("private transport text", request=request)
+
+        async def failed_audit(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("audit transaction rejected")
+
+        if audit_rollback:
+            monkeypatch.setattr("nexus.outbox.dispatcher.append_audit_event", failed_audit)
+        moments = iter([start, start if audit_rollback else start + timedelta(seconds=61)])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
+            if audit_rollback:
+                with pytest.raises(RuntimeError, match="audit transaction rejected"):
+                    await run_bark_worker(
+                        settings, run_forever=False, client=client, clock=lambda: next(moments)
+                    )
+            else:
+                assert (
+                    await run_bark_worker(
+                        settings, run_forever=False, client=client, clock=lambda: next(moments)
+                    )
+                    == 1
+                )
+            async with factory.begin() as session:
+                event = await session.get(OutboxEvent, test_id)
+                assert (
+                    event is not None and event.status == "delivering" and event.attempt_count == 1
+                )
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(AuditEvent)
+                        .where(AuditEvent.action == FAILURE_ACTION)
+                    )
+                    == 0
+                )
+            assert (
+                await run_bark_worker(
+                    settings,
+                    run_forever=False,
+                    client=client,
+                    clock=lambda: start + timedelta(seconds=62),
+                )
+                == 0
+            )
+        async with factory.begin() as session:
+            result = await read_diagnostic_notification(session, test_id=test_id)
+            assert result["status"] == "unknown" and result["failure"] is None
+            event = await session.get(OutboxEvent, test_id)
+            assert event is not None and event.status == "dead_letter" and event.max_attempts == 1
+            assert event.last_error_code == "LEASE_EXPIRED"
+            assert await session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        assert len(calls) == 1
+    finally:
         await factory.kw["bind"].dispose()
