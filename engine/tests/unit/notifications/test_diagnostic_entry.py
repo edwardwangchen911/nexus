@@ -30,7 +30,9 @@ def test_failed_submission_returns_safe_same_identity_read_instruction(monkeypat
     assert "secret" not in output and "private" not in output
 
 
-def test_typed_pre_submission_rejection_is_not_unknown(monkeypatch, capsys, tmp_path) -> None:
+def test_typed_rejection_identifies_operation_without_denying_prior_notification(
+    monkeypatch, capsys, tmp_path
+) -> None:
     import json
 
     from nexus.notifications.diagnostic import DiagnosticNotificationRejected
@@ -47,7 +49,10 @@ def test_typed_pre_submission_rejection_is_not_unknown(monkeypatch, capsys, tmp_
     identifier = "0199d500-1000-7000-8000-000000000001"
     assert notification_test.main(["enqueue", "--test-id", identifier]) == 1
     receipt = json.loads(capsys.readouterr().out)
-    assert receipt["status"] == "failed"
+    assert receipt["status"] == "unknown"
+    assert receipt["operation_status"] == "rejected"
+    assert receipt["operation"] == "enqueue"
+    assert receipt["next_action"] == "read_same_test_id"
     assert receipt["submission"] == "not_started"
     assert receipt["error_code"] == "DIAGNOSTIC_NOTIFICATION_DISABLED"
 

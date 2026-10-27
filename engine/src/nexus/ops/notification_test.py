@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.exc import ArgumentError
 
 from nexus.notifications.diagnostic import (
     DiagnosticNotificationRejected,
@@ -39,7 +40,7 @@ async def run(environment: dict[str, str], *, action: str, test_id: UUID) -> dic
     database = environment.get("DATABASE_URL")
     try:
         _validate_local_database(database)
-    except ValueError:
+    except (ValueError, ArgumentError):
         raise DiagnosticNotificationRejected("DIAGNOSTIC_DATABASE_UNAVAILABLE") from None
     settings = EngineSettings(database_url=database)
     factory = session_factory(settings)
@@ -92,16 +93,17 @@ def main(argv: list[str] | None = None) -> int:
         environment = load_agent_paper_service_environment(root, {}, env_file=config)
         receipt = asyncio.run(run(environment, action=args.action, test_id=args.test_id))
     except DiagnosticNotificationRejected as error:
-        print(
-            json.dumps(
-                {
-                    "test_id": str(args.test_id),
-                    "status": "failed",
-                    "error_code": str(error),
-                    "submission": "not_started",
-                }
-            )
-        )
+        report = {
+            "test_id": str(args.test_id),
+            "operation": args.action,
+            "operation_status": "rejected",
+            "status": "unknown",
+            "error_code": str(error),
+            "next_action": "read_same_test_id",
+        }
+        if args.action == "enqueue":
+            report["submission"] = "not_started"
+        print(json.dumps(report))
         return 1
     except Exception:
         # A failed response/cleanup does not prove that the enqueue transaction rolled back.

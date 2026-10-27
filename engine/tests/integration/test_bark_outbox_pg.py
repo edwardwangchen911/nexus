@@ -314,6 +314,8 @@ async def test_bark_delivers_only_frozen_rejected_and_filled_paper_outcomes(
 @pytest.mark.asyncio
 async def test_diagnostic_one_identity_one_encrypted_delivery_no_business(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from nexus.notifications.diagnostic import (
         enqueue_diagnostic_notification,
@@ -379,6 +381,28 @@ async def test_diagnostic_one_identity_one_encrypted_delivery_no_business(
         assert notices[0]["title"] == "NEXUS 测试通知｜非投资预警"
         assert notices[0]["body"].startswith("NEXUS 测试通知｜非投资预警")
         assert "url" not in notices[0]
+        from nexus.ops import notification_test
+
+        monkeypatch.setattr(notification_test, "_validate_local_env", lambda root, path: path)
+        monkeypatch.setattr(
+            notification_test,
+            "load_agent_paper_service_environment",
+            lambda *args, **kwargs: {"DATABASE_URL": "invalid"},
+        )
+        # Preflight cannot read the persisted published receipt. It must not deny its history.
+        import asyncio
+
+        assert (
+            await asyncio.to_thread(notification_test.main, ["read", "--test-id", str(test_id)])
+            == 1
+        )
+        failed_read = json.loads(capsys.readouterr().out)
+        assert failed_read["status"] == "unknown"
+        assert failed_read["operation"] == "read" and failed_read["operation_status"] == "rejected"
+        assert "submission" not in failed_read
+        assert failed_read["next_action"] == "read_same_test_id"
+        async with factory.begin() as session:
+            assert await read_diagnostic_notification(session, test_id=test_id) == receipt
     finally:
         await factory.kw["bind"].dispose()
 
