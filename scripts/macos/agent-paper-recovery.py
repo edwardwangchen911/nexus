@@ -282,7 +282,21 @@ def enable(service, root, env_file, project, *, report=True):
         rejected = previous is not None and rejected_start_proven(
             root, previous, previous.get("rejected_start"), boot_id(), status, last_exit
         )
-        if previous is None or not (previous.get("stopped_confirmed") or rejected):
+        reconciled = (
+            previous is not None
+            and previous.get("exit_reconciliation") is not None
+            and service._reconciliation_module().qualified_exit(
+                service,
+                service._recovery_module(),
+                root,
+                env_file,
+                project,
+                previous,
+                status,
+                last_exit,
+            )
+        )
+        if previous is None or not (previous.get("stopped_confirmed") or rejected or reconciled):
             raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
         if any(
             previous.get(key) != value
@@ -302,6 +316,8 @@ def enable(service, root, env_file, project, *, report=True):
         previous.update(
             desired="disabled", generation=str(uuid4()), schema=checked["migration_head"]
         )
+        if reconciled:
+            previous["exit_reconciliation"]["enable_generation"] = previous["generation"]
         write(root, previous)
         install(service, root, env_file, project)
         previous["desired"] = "enabled"
@@ -351,6 +367,10 @@ def enrolled_state(service, root, env_file, project, owner, health, previous):
         for key in ("instance", "boot", "revision", "config_hash", "schema")
     ):
         state["active_attempt"] = previous.get("active_attempt")
+    if previous is not None:
+        for key in ("exit_reconciliation", "exit_reconciliation_history"):
+            if key in previous:
+                state[key] = previous[key]
     if previous is not None and previous.get("unconfirmed_exit") is not None:
         state["unconfirmed_exit"] = previous["unconfirmed_exit"]
     return state
@@ -500,6 +520,10 @@ def recover(service, root, env_file, project, *, report=True):
                 write(root, state)
             if rejected_start_proven(root, state, state["attempt"], boot_id(), status, last_exit):
                 pending = state["attempt"]
+                if state.get("exit_reconciliation") is not None:
+                    service._reconciliation_module().archive_consumed(
+                        root, state, pending, reason="REVOKED_BEFORE_ACTIVATION", observed_at=now
+                    )
                 state.setdefault("attempt_resolutions", []).append(
                     {
                         "attempt_id": pending["id"],
@@ -555,6 +579,15 @@ def recover(service, root, env_file, project, *, report=True):
         if not verified:
             state["healthy_since"] = None
             return finish("RUNNING_UNVERIFIED")
+        if state.get("attempt") is not None and state.get("exit_reconciliation") is not None:
+            service._reconciliation_module().archive_consumed(
+                root,
+                state,
+                state["attempt"],
+                reason="SUCCESSOR_ACTIVATED",
+                observed_at=now,
+                confirmed_instance=owner,
+            )
         if state.get("instance") != owner or state["boot"] != current_boot:
             state["healthy_since"] = now
             state["active_attempt"] = None
@@ -617,6 +650,23 @@ def recover(service, root, env_file, project, *, report=True):
         qualified_exit = rejected_start_proven(
             root, state, state["rejected_start"], current_boot, status, last_exit
         )
+    reconciled = (
+        pending is None
+        and current_boot == state["boot"]
+        and state.get("exit_reconciliation") is not None
+        and service._reconciliation_module().qualified_exit(
+            service,
+            service._recovery_module(),
+            root,
+            env_file,
+            project,
+            state,
+            status,
+            last_exit,
+            require_enable=True,
+        )
+    )
+    qualified_exit = qualified_exit or reconciled
     if pending is not None and not qualified_exit and not pending_prior_boot:
         return finish("START_RESULT_UNKNOWN")
     if current_boot == state["boot"]:
@@ -643,11 +693,23 @@ def recover(service, root, env_file, project, *, report=True):
     # A changed boot ends a local process lifetime, never its unknown business effects.
     # Only the successful full read-only admission above permits a new attempt.
     if pending is not None:
+        if state.get("exit_reconciliation") is not None:
+            service._reconciliation_module().archive_consumed(
+                root,
+                state,
+                pending,
+                reason="PRIOR_BOOT_ENDED" if pending_prior_boot else "EXIT_CONFIRMED",
+                observed_at=now,
+            )
         state["last_resolved_attempt"] = pending
         state["last_attempt_resolution"] = (
             "PRIOR_BOOT_ENDED" if pending_prior_boot else "EXIT_CONFIRMED"
         )
         state["attempt"] = None
+    if current_boot != state["boot"] and state.get("exit_reconciliation") is not None:
+        service._reconciliation_module().archive_unused_prior_boot(
+            root, state, current_boot, observed_at=now
+        )
     # No engine lock is held across launchctl: child obtains it and rechecks.
     attempt = {
         "id": str(uuid4()),
@@ -658,6 +720,10 @@ def recover(service, root, env_file, project, *, report=True):
         "generation": state["generation"],
         "revision": state["revision"],
     }
+    if reconciled:
+        pointer = state["exit_reconciliation"]
+        attempt["exit_reconciliation_sha256"] = pointer["evidence_sha256"]
+        pointer["consumed_by"] = attempt["id"]
     state["attempts"].append(attempt)
     state["attempt"] = attempt
     state.pop("rejected_start", None)
