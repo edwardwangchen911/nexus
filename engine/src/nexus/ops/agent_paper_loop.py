@@ -5267,6 +5267,15 @@ def main(argv: list[str] | None = None) -> int:
                     # must never become proof of a confirmed service exit.
                     error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")
             raise
+        except (Exception, KeyboardInterrupt, asyncio.CancelledError) as error:
+            if recovery is not None:
+                try:
+                    recovery.finish_exception(error)
+                except Exception:
+                    # Recording is best-effort; keep the original exception and
+                    # never turn a missing exit receipt into recovery permission.
+                    error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")
+            raise
         if recovery is not None and recovery.receipt is not None:
             recovery.finish(reason.value)
         if reason == AgentPaperLoopAction.STOP_UNCONFIRMED:

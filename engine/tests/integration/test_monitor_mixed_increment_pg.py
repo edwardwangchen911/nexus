@@ -3,6 +3,7 @@
 import argparse
 import json
 from datetime import timedelta
+from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
 
@@ -11,16 +12,50 @@ from helpers.monitor_materials import prepared_materials
 from helpers.paper_batch import CALENDAR_ID
 from integration.test_candidate_multistock_path import _set_test_insert_clock
 from integration.test_monitor_increment_pg import append_fresh_inputs
+from nexus.agents.persistence import _shared_daily_budget_used
 from nexus.ops.research_monitor import run
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentPortfolioSynthesisBudgetReservationRecord,
     AgentResearchRunRecord,
+    PortfolioDecisionBudgetReservationRecord,
 )
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.monitoring import MonitorIncrement, MonitorTrigger
 from nexus.persistence.models.runtime import Job, JobLease
 from nexus.settings import AgentRuntimeMode
 from sqlalchemy import func, select
+
+_BUDGET_MODELS = (
+    AgentDailyBudgetReservationRecord,
+    AgentPortfolioSynthesisBudgetReservationRecord,
+    PortfolioDecisionBudgetReservationRecord,
+)
+
+
+async def budget_rows(session):
+    return {
+        model: {
+            row.id: tuple((c.name, getattr(row, c.name)) for c in row.__table__.columns)
+            for row in await session.scalars(select(model))
+        }
+        for model in _BUDGET_MODELS
+    }
+
+
+async def assert_shared_day_preserved(session, originals, day, used, child_hold):
+    current = await budget_rows(session)
+    for model, rows in originals.items():
+        assert all(current[model].get(key) == value for key, value in rows.items())
+        assert set(current[model]) - set(rows) == (
+            {child_hold.id} if model is AgentDailyBudgetReservationRecord else set()
+        )
+    assert child_hold.business_date == day
+    child_used = (
+        child_hold.reserved_usd if child_hold.state == "reserved" else child_hold.settled_usd
+    )
+    assert child_used is not None
+    assert await _shared_daily_budget_used(session, business_date=day) == used + child_used
 
 
 @pytest.mark.asyncio
@@ -79,6 +114,35 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
                 for model in (AgentResearchRunRecord, Job, AgentDailyBudgetReservationRecord)
             ]
         )
+    async with factory() as session:
+        roots = tuple(await session.scalars(select(AgentResearchRunRecord)))
+        assert len(roots) == len({r.instrument_id for r in roots}) == 3
+        assert all(
+            r.status == "completed"
+            and r.input_tokens is not None
+            and r.output_tokens is not None
+            and r.settled_cost_usd is not None
+            for r in roots
+        )
+        root_ids = {r.id for r in roots}
+        budget_day = parent.decision_time.date()
+        assert later.date() == budget_day
+        budgets_before = await budget_rows(session)
+        for model in _BUDGET_MODELS:
+            assert all(
+                r.business_date == budget_day and r.state == "settled" and r.settled_usd is not None
+                for r in await session.scalars(select(model))
+            )
+        assert {
+            r.run_id for r in await session.scalars(select(AgentDailyBudgetReservationRecord))
+        } == root_ids
+        assert len(budgets_before[AgentPortfolioSynthesisBudgetReservationRecord]) == (
+            0 if independent else 1
+        )
+        assert not budgets_before[PortfolioDecisionBudgetReservationRecord]
+        shared_before = await _shared_daily_budget_used(session, business_date=budget_day)
+    assert settings.agent_daily_budget_usd == Decimal("3.00")
+    assert settings.agent_monitor_daily_sdk_call_limit == 9
     captured["clock"][0] = later
     await _set_test_insert_clock(factory, later)
     await append_fresh_inputs(factory, pointer.instrument_id, later)
@@ -179,6 +243,26 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             select(MonitorIncrement).where(MonitorIncrement.run_id == research.id)
         )
         assert member.batch_id == batch_id and member.reserved_sdk_calls == 3
+        assert research.decision_time.date() == member.session_date == budget_day
+        assert member.daily_sdk_call_limit == 9
+        child_hold = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == research.id
+            )
+        )
+        assert child_hold.state == "reserved" and child_hold.settled_usd is None
+        await assert_shared_day_preserved(
+            session, budgets_before, budget_day, shared_before, child_hold
+        )
+        assert (
+            await session.scalar(
+                select(func.sum(MonitorIncrement.reserved_sdk_calls)).where(
+                    MonitorIncrement.account_id == pointer.account_id,
+                    MonitorIncrement.session_date == budget_day,
+                )
+            )
+            == 3
+        )
     if unknown == "capacity":
         from nexus.audit.service import append_audit_event
         from nexus.monitoring.preclaim import (
@@ -373,6 +457,11 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         )
         assert (child.settled_cost_usd is None) == (unknown is True)
         assert reservation.state == ("reserved" if unknown is True else "settled")
+        assert reservation.run_id not in root_ids
+        await assert_shared_day_preserved(
+            session, budgets_before, budget_day, shared_before, reservation
+        )
+        assert settings.agent_daily_budget_usd == Decimal("3.00")
         if independent:
             from nexus.agents.research_only import require_formal_research
 

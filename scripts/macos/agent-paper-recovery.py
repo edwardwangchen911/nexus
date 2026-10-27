@@ -490,6 +490,9 @@ def summary(root):
 
 def activation_receipt(root, state, attempt):
     target = path(root).parent / f"recovery-activation-{attempt['id']}.json"
+    pending = target.with_suffix(".write-pending")
+    if pending.exists() or pending.is_symlink():
+        raise ValueError("AGENT_PAPER_RECOVERY_EXIT_WRITE_UNCONFIRMED")
     if not target.exists() and not target.is_symlink():
         return None
     descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
@@ -513,6 +516,8 @@ def activation_receipt(root, state, attempt):
         or receipt.get("revision") != attempt.get("revision", state["revision"])
     ):
         raise ValueError("AGENT_PAPER_RECOVERY_STATE_INVALID")
+    if pending.exists() or pending.is_symlink():
+        raise ValueError("AGENT_PAPER_RECOVERY_EXIT_WRITE_UNCONFIRMED")
     return receipt
 
 

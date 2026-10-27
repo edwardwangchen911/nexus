@@ -352,3 +352,109 @@ def test_observe_is_a_normal_protected_cli_action():
         ["observe", "--calendar-authority-id", str(CALENDAR)]
     )
     assert args.action == "observe" and args.calendar_authority_id == CALENDAR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("increment", [False, True], ids=["daily", "increment"])
+async def test_real_foreground_keeps_five_minute_checks_during_research(
+    monkeypatch, tmp_path, increment
+):
+    from nexus.ops import formal_budget_protection, manual_paper_host, monitor_dispatch
+    from unit.ops.test_agent_paper_loop import snapshot
+
+    stamps = [AT, AT + timedelta(minutes=5), AT + timedelta(minutes=15)]
+    clock = [AT]
+    started, release, scanned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    preparations, scans, beats, executions = [], [], [], []
+    env = {
+        "DATABASE_URL": "postgresql+asyncpg://localhost/nexus_test_monitor",
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(ACCOUNT),
+    }
+    settings = EngineSettings.model_validate(env)
+    expected = (
+        loop.AgentPaperLoopAction.RUN_MONITOR_INCREMENT
+        if increment
+        else loop.AgentPaperLoopAction.RUN_RESEARCH_JOB
+    )
+    state = snapshot(
+        now=AT,
+        calendar_authority_id=CALENDAR,
+        cycle_slot_at=AT,
+        cycle_status="completed" if increment else "researching",
+        research_job_status="queued",
+        research_job_id=UUID(int=30),
+        monitor_trigger_id=UUID(int=40) if increment else None,
+        monitor_trigger_status="admitted" if increment else None,
+    )
+    assert loop.choose_loop_action(state) == expected
+
+    async def calendar(_):
+        return CALENDAR
+
+    async def bind(_settings, environment):
+        return environment, None
+
+    async def evaluation(*_a, **_k):
+        return None
+
+    async def inspect(*_a, **_k):
+        return state
+
+    async def passthrough(*_a, **kwargs):
+        return kwargs["snapshot"]
+
+    async def heartbeat(_settings, **kwargs):
+        beats.append(kwargs["seen_at"])
+
+    async def execute(_settings, **kwargs):
+        executions.append(kwargs["action"])
+        started.set()
+        await release.wait()
+        return loop.AgentPaperLoopAction.STOP_REQUESTED
+
+    async def prepare(_settings, **kwargs):
+        preparations.append(kwargs["scheduled_at"])
+
+    async def scan(*_a, **_k):
+        await started.wait()
+        assert not release.is_set()
+        scans.append(clock[0])
+        scanned.set()
+
+    async def sleep(_seconds):
+        await scanned.wait()
+        scanned.clear()
+        if len(scans) < len(stamps):
+            clock[0] = stamps[len(scans)]
+        else:
+            release.set()
+            await asyncio.Event().wait()  # cancelled by the real foreground cleanup
+
+    monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: nullcontext())
+    monkeypatch.setattr(loop, "_select_initial_service_calendar_authority_id", calendar)
+    monkeypatch.setattr(loop, "load_agent_paper_service_environment", lambda *_a, **_k: env)
+    monkeypatch.setattr(formal_budget_protection, "bind_runtime_environment", bind)
+    monkeypatch.setattr(loop, "inspect_agent_version_evaluation_loop", evaluation)
+    monkeypatch.setattr(loop, "inspect_agent_paper_loop", inspect)
+    monkeypatch.setattr(manual_paper_host, "inspect_manual_close", passthrough)
+    monkeypatch.setattr(manual_paper_host, "inspect_manual_queue", passthrough)
+    monkeypatch.setattr(monitor_dispatch, "inspect_monitor_queue", passthrough)
+    monkeypatch.setattr(loop, "heartbeat_agent_paper_loop", heartbeat)
+    monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
+    monkeypatch.setattr(research_monitor, "refresh_host_observations", prepare)
+    monkeypatch.setattr(research_monitor, "scan_host_once", scan)
+    async with asyncio.timeout(10):
+        result = await loop.run_local_agent_paper_loop(
+            settings,
+            account_id=ACCOUNT,
+            repo_root=tmp_path,
+            sleep=sleep,
+            clock=lambda: clock[0],
+            monotonic=lambda: (clock[0] - AT).total_seconds(),
+        )
+    assert result == loop.AgentPaperLoopAction.STOP_REQUESTED
+    assert executions == [expected]
+    assert preparations == scans == stamps  # missing 14:10 stays unobserved
+    assert all(stamp in beats for stamp in stamps)
+    assert not any(t.get_name() == "nexus-price-monitor" for t in asyncio.all_tasks())
