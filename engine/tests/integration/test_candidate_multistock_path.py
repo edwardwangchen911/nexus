@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 import pytest
@@ -51,6 +52,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     before_research=None,
     monitoring_lifetime_days=None,
     independent=False,
+    before_downgrade=None,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -116,10 +118,18 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
 
     clock_at = [AT + timedelta(seconds=1)]
 
+    clock_anchor = [clock_at[0], monotonic(), clock_at[0]]
+
     class WorkerClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            at = clock_at[0]
+            # Formal stages commit at actual elapsed instants. Keep subsequent
+            # fixture consumers on that same clock, including explicit test jumps.
+            tick = monotonic()
+            if clock_at[0] != clock_anchor[2]:
+                clock_anchor[:2] = [clock_at[0], tick]
+            at = max(clock_at[0], clock_anchor[0] + timedelta(seconds=tick - clock_anchor[1]))
+            clock_at[0] = clock_anchor[2] = at
             return at if tz is None else at.astimezone(tz)
 
     if formal and not manual_entry:
@@ -131,7 +141,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             # This dated scenario controls both clocks; a live database clock
             # would correctly reject admission after its historical session closed.
             if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-                return clock_at[0]
+                # A read after a committed stage observes the same advancing clock.
+                return WorkerClock.now(UTC)
             return await original_scalar(self, statement, *args, **kwargs)
 
         monkeypatch.setattr(AsyncSession, "scalar", database_clock)
@@ -535,6 +546,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert calls == ["research", "critique"]
                 return
         assert calls == ["research", "critique", "synthesis"] * count
+        # A staged Worker advances the shared clock while external work or DB
+        # waits elapse. Later decision probes must not move time behind the
+        # committed research; retain the original two-second sequence otherwise.
+        post_research_at = max(post_research_at, WorkerClock.now(UTC) - timedelta(seconds=2))
         if independent:
             from nexus.paper.research_request import finish_research_request
             from nexus.persistence.models.manual_paper import ManualPaperRequest
@@ -597,7 +612,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 )
             if decision_delay >= timedelta(hours=6):
                 return
-        clock_at[0] = post_research_at + timedelta(seconds=2)
+        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=2))
         async with sessions() as session:
             for run_id in result.research_run_ids:
                 run = await session.get(AgentResearchRunRecord, run_id)
@@ -791,7 +806,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     parent[0].cancel()
 
                 client.close.side_effect = cancel_during_close
-        clock_at[0] = post_research_at + timedelta(seconds=3)
+        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=3))
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             state = await _consume_manual_host_action(settings, "RUN_RESEARCH_JOB")
@@ -916,7 +931,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                         session,
                         cycle_id=result.cycle_id,
                         idempotency_key="sdk-failure-closeout",
-                        now=post_research_at + timedelta(seconds=4),
+                        now=max(post_research_at + timedelta(seconds=4), WorkerClock.now(UTC)),
                         **consumer_mode,
                     )
                     assert closed_cycle.status == "unavailable"
@@ -957,7 +972,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 completed_job.status,
                 completed_job.error_code,
             )
-        clock_at[0] = post_research_at + timedelta(seconds=4)
+        # Synthesis commits after the research observation. Both the binding
+        # negative probe and normal activation must see its committed result.
+        decision_observed_at = max(post_research_at + timedelta(seconds=4), WorkerClock.now(UTC))
+        clock_at[0] = decision_observed_at
         if not trade and count == 3 and not manual:
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
@@ -981,7 +999,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                             session,
                             cycle_id=result.cycle_id,
                             idempotency_key="corrupt-frozen-model",
-                            now=post_research_at + timedelta(seconds=4),
+                            now=decision_observed_at,
                             **consumer_mode,
                         )
             finally:
@@ -993,7 +1011,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row.model_hash == model.config_hash
                     for row in await session.scalars(select(AgentResearchRunRecord))
                 )
-        clock_at[0] = post_research_at + timedelta(seconds=4)
+        decision_observed_at = max(decision_observed_at, WorkerClock.now(UTC))
+        clock_at[0] = decision_observed_at
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             await _consume_manual_host_action(settings, "RESUME")
@@ -1005,7 +1024,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="activate-target",
-                    now=post_research_at + timedelta(seconds=4),
+                    now=decision_observed_at,
                     **consumer_mode,
                 )
             )
@@ -1062,7 +1081,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="activate-target",
-                    now=post_research_at + timedelta(seconds=5),
+                    now=max(decision_observed_at + timedelta(seconds=1), WorkerClock.now(UTC)),
                     **consumer_mode,
                 )
             )
@@ -1101,7 +1120,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 orders,
                 count,
                 formal=formal,
-                decision_observed_at=post_research_at + timedelta(seconds=4),
+                decision_observed_at=decision_observed_at,
                 database_clock_at=clock_at if manual else None,
                 manual_settings=settings if manual else None,
                 manual_request_id=request_id if manual else None,
@@ -1161,6 +1180,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     finally:
                         await transaction.rollback()
         elif profile != "v7" and count == 3:
+            if before_downgrade is not None:
+                await before_downgrade(sessions)
             import asyncio
 
             from alembic import command
@@ -1169,9 +1190,23 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             from sqlalchemy.exc import DBAPIError
 
             migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+            async with sessions() as session:
+                selected_count = await session.scalar(
+                    text("SELECT count(*) FROM research_stage_route")
+                )
+                assert selected_count in {0, count}
+                if selected_count:
+                    assert (
+                        await session.scalar(
+                            text("SELECT count(*) FROM research_stage_terminal WHERE known")
+                        )
+                        == count
+                    )
             with pytest.raises(
                 DBAPIError,
-                match="V11_RUN_BINDINGS_EXIST"
+                match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"
+                if selected_count
+                else "V11_RUN_BINDINGS_EXIST"
                 if profile == "formal_v11"
                 else "V10_OUTPUT_BINDINGS_EXIST"
                 if profile == "formal_v10"

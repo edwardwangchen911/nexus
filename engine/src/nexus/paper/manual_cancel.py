@@ -45,7 +45,7 @@ class TerminalCycleCancelReceipt(BaseModel):
     execution_locked: bool = True
 
 
-async def cancel_unused_manual_research(
+async def _legacy_cancel_unused_manual_research(
     session: AsyncSession,
     *,
     cycle: AgentPaperCycleRecord | None,
@@ -291,3 +291,31 @@ async def close_terminal_cycle_unused_research(
     )
 
     return TerminalCycleCancelReceipt(cancelled_research=cancelled)
+
+
+async def cancel_unused_manual_research(
+    session: AsyncSession,
+    *,
+    cycle: AgentPaperCycleRecord | None,
+    events: tuple[AgentPaperCycleEventRecord, ...],
+    now: datetime,
+    allow_legacy: bool = False,
+    nonblocking: bool = False,
+    research_request: ManualPaperRequest | None = None,
+) -> int:
+    from typing import cast
+
+    from nexus.agents.research_stages.public import _cancel_unused
+
+    return cast(
+        int,
+        await _cancel_unused(
+            session,
+            cycle=cycle,
+            events=events,
+            now=now,
+            allow_legacy=allow_legacy,
+            nonblocking=nonblocking,
+            research_request=research_request,
+        ),
+    )

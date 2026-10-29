@@ -23,6 +23,7 @@ from nexus.agents.paper_context import (
 )
 from nexus.agents.persistence import load_actionable_research_output
 from nexus.agents.portfolio_synthesis_contracts import SYNTHESIS_PROMPT_VERSION
+from nexus.agents.research_maintenance import claim_research_identity as claim_or_lock
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_research import (
     AGENT_VERSION_CHALLENGER_ACTOR,
@@ -88,7 +89,6 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
-from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.risk.authority import (
     RiskAuthorityInput,
     prepare_risk_market_snapshot,
@@ -1416,6 +1416,9 @@ async def _start_cycle(
     manual_request_id: UUID | None = None,
     manual_execution_id: UUID | None = None,
 ) -> AgentPaperCycleResult:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     _validate_formal_cycle_arguments(
         formal_stage_capacity=formal_stage_capacity,
         candidate_stage_capacity=candidate_stage_capacity,
@@ -1769,6 +1772,9 @@ async def _admit_cycle_research(
     omit_monitor_events_for: frozenset[UUID] = frozenset(),
     daily_event_preview_deadline: float | None = None,
 ) -> AgentPaperCycleResult:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     if formal_stage_capacity and any(
         value is not None
         for value in (
@@ -1981,6 +1987,10 @@ async def _admit_cycle_research(
         "RESEARCH_JOBS_PREPARED",
         {"research_run_ids": [str(value) for value in run_ids]},
     )
+    if formal_stage_capacity:
+        from nexus.agents.research_stages.routes import register_new_prepared_runs
+
+        await register_new_prepared_runs(session, tuple(run_ids))
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)
 
 

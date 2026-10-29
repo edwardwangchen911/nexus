@@ -283,8 +283,9 @@ async def test_native_worker_capacity_rejection_closes_without_model_or_false_un
         assert job.status == "skipped" and job.attempt_count == 1
         assert (run.input_tokens, run.output_tokens, run.settled_cost_usd) == (0, 0, 0)
         assert budget.state == "released" and member.reserved_sdk_calls == 3
+        observed_at = await session.scalar(select(func.clock_timestamp()))
         await require_manual_account_available(
-            session, account_id=settings.agent_paper_account_id, now=now
+            session, account_id=settings.agent_paper_account_id, now=observed_at
         )
     assert await confirm_monitor_shutdown(
         settings, account_id=settings.agent_paper_account_id, trigger_id=trigger.id

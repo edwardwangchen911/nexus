@@ -133,50 +133,57 @@ async def require_monitor_account_available(
         )
     )
     for member in members:
-        trigger = await session.get(MonitorTrigger, member.trigger_id)
-        if trigger is None or trigger.status == "unknown":
-            raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
-        run = await session.get(AgentResearchRunRecord, member.run_id)
-        job = await session.get(Job, member.job_id)
-        reservation = await session.scalar(
-            select(AgentDailyBudgetReservationRecord).where(
-                AgentDailyBudgetReservationRecord.run_id == member.run_id
-            )
-        )
-        if run is not None and job is not None and job.status == "skipped":
-            from nexus.monitoring.preclaim import preclaim_rejection_qualified
+        await _require_monitor_member_available(session, member=member, now=now)
 
-            if await preclaim_rejection_qualified(session, run=run, now=now):
-                continue
+
+async def _legacy_require_monitor_member_available(
+    session: AsyncSession, *, member: MonitorIncrement, now: datetime
+) -> None:
+    """One native member; callers retain the account lock and whole-account iteration."""
+    trigger = await session.get(MonitorTrigger, member.trigger_id)
+    if trigger is None or trigger.status == "unknown":
+        raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
+    run = await session.get(AgentResearchRunRecord, member.run_id)
+    job = await session.get(Job, member.job_id)
+    reservation = await session.scalar(
+        select(AgentDailyBudgetReservationRecord).where(
+            AgentDailyBudgetReservationRecord.run_id == member.run_id
+        )
+    )
+    if run is not None and job is not None and job.status == "skipped":
+        from nexus.monitoring.preclaim import preclaim_rejection_qualified
+
+        if await preclaim_rejection_qualified(session, run=run, now=now):
+            return
+    if (
+        run is None
+        or job is None
+        or reservation is None
+        or run.status not in {"completed", "failed", "abstained"}
+        or job.status not in {"succeeded", "failed"}
+        or job.finished_at is None
+        or job.finished_at > now
+        or run.settled_cost_usd is None
+        or run.input_tokens is None
+        or run.output_tokens is None
+        or reservation.state != "settled"
+        or reservation.settled_usd != run.settled_cost_usd
+    ):
+        raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
+    leases = tuple(
+        await session.scalars(
+            select(JobLease).where(JobLease.job_id == job.id, JobLease.expires_at > now)
+        )
+    )
+    for lease in leases:
+        from nexus.jobs.repository import job_lease_consumed
+
         if (
-            run is None
-            or job is None
-            or reservation is None
-            or run.status not in {"completed", "failed", "abstained"}
-            or job.status not in {"succeeded", "failed"}
-            or job.finished_at is None
-            or job.finished_at > now
-            or run.settled_cost_usd is None
-            or run.input_tokens is None
-            or run.output_tokens is None
-            or reservation.state != "settled"
-            or reservation.settled_usd != run.settled_cost_usd
+            not await job_lease_consumed(session, job=job, lease=lease, now=now)
+            or job.attempt_count != 1
+            or job.manual_retry_count != 0
         ):
             raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
-        leases = tuple(
-            await session.scalars(
-                select(JobLease).where(JobLease.job_id == job.id, JobLease.expires_at > now)
-            )
-        )
-        for lease in leases:
-            from nexus.jobs.repository import job_lease_consumed
-
-            if (
-                not await job_lease_consumed(session, job=job, lease=lease, now=now)
-                or job.attempt_count != 1
-                or job.manual_retry_count != 0
-            ):
-                raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
 
 
 async def admit_trigger(
@@ -192,6 +199,16 @@ async def admit_trigger(
     now: datetime,
 ) -> MonitorIncrement:
     """One new identity only; failed eligibility rolls back all admission writes."""
+    from nexus.agents import research_maintenance
+
+    if research_maintenance.IMAGE_MAINTENANCE:
+        existing = await session.scalar(
+            select(MonitorIncrement).where(
+                MonitorIncrement.trigger_id == trigger_id, MonitorIncrement.account_id == account_id
+            )
+        )
+        if existing is None:
+            research_maintenance.require_research_open()
     async with session.begin_nested():
         return await _admit_trigger(
             session,
@@ -270,6 +287,9 @@ async def _admit_trigger(
         if run is None:
             raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
         return await require_increment_binding(session, run)
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     # A monitor continues the scheduled loop after its deterministic execution
     # proof; the history validator still checks every Job, fee and live lease.
     await require_manual_account_available(
@@ -488,6 +508,9 @@ async def _admit_trigger(
             "reserved_sdk_calls": 3,
         },
     )
+    from nexus.agents.research_stages.routes import register_new_prepared_runs
+
+    await register_new_prepared_runs(session, (member.run_id,))
     return member
 
 
@@ -592,13 +615,33 @@ async def _freeze_increment_snapshot(
     return snapshot
 
 
+async def _legacy_monitor_job_finished(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    job: Job | None,
+    leases: tuple[JobLease, ...],
+    now: datetime,
+    rejected_before_claim: bool,
+) -> bool:
+    """Native completion classification, separate from usage and audit recording."""
+    from nexus.jobs.repository import job_lease_consumed
+
+    return not (
+        job is None
+        or run.status not in {"completed", "failed", "abstained"}
+        or (job.status not in {"succeeded", "failed"} and not rejected_before_claim)
+        or len(leases) != 1
+        or not await job_lease_consumed(session, job=job, lease=leases[0], now=now)
+    )
+
+
 async def finish_increment(
     session: AsyncSession, *, account_id: UUID, trigger_id: UUID, now: datetime
 ) -> MonitorTrigger:
     """Record original native completion only; unknown never releases any reservation."""
     from nexus.audit.service import append_audit_event
     from nexus.domain.time import require_utc
-    from nexus.jobs.repository import job_lease_consumed
     from nexus.monitoring.storage import lock_security
     from nexus.paper.target_service import lock_portfolio_account
     from nexus.persistence.models.agents import AgentResearchOutputRecord
@@ -629,14 +672,16 @@ async def finish_increment(
         and job.status == "skipped"
         and await preclaim_rejection_qualified(session, run=run, now=now)
     )
-    if (
-        job is None
-        or run.status not in {"completed", "failed", "abstained"}
-        or (job.status not in {"succeeded", "failed"} and not rejected_before_claim)
-        or len(leases) != 1
-        or not await job_lease_consumed(session, job=job, lease=leases[0], now=now)
+    if not await _monitor_job_finished(
+        session,
+        run=run,
+        job=job,
+        leases=leases,
+        now=now,
+        rejected_before_claim=rejected_before_claim,
     ):
         return trigger
+    assert job is not None
     reservation = await session.scalar(
         select(AgentDailyBudgetReservationRecord).where(
             AgentDailyBudgetReservationRecord.run_id == run.id
@@ -694,3 +739,37 @@ async def finish_increment(
     )
     await session.flush()
     return trigger
+
+
+async def _require_monitor_member_available(
+    session: AsyncSession, *, member: MonitorIncrement, now: datetime
+) -> None:
+    from nexus.agents.research_stages.public import _member_available
+
+    await _member_available(session, member=member, now=now)
+
+
+async def _monitor_job_finished(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    job: Job | None,
+    leases: tuple[JobLease, ...],
+    now: datetime,
+    rejected_before_claim: bool,
+) -> bool:
+    from typing import cast
+
+    from nexus.agents.research_stages.public import _finished
+
+    return cast(
+        bool,
+        await _finished(
+            session,
+            run=run,
+            job=job,
+            leases=leases,
+            now=now,
+            rejected_before_claim=rejected_before_claim,
+        ),
+    )

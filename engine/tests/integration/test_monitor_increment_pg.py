@@ -1,6 +1,6 @@
 """Normal formal three-stock parent to exactly one incremental native Job."""
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
 
@@ -25,6 +25,11 @@ from sqlalchemy import func, select
 
 
 async def ready_trigger(database_url, monkeypatch):
+    captured = {}
+
+    async def capture_clock(settings, sessions, authority, manifest, clock):
+        captured["clock"] = clock
+
     await normal_cycle(
         database_url,
         monkeypatch,
@@ -33,6 +38,7 @@ async def ready_trigger(database_url, monkeypatch):
         "formal_v11",
         monitoring=True,
         monitoring_threshold="100000",
+        before_research=capture_clock,
     )
     factory = session_factory(EngineSettings(database_url=database_url))
     async with factory() as session, session.begin():
@@ -50,14 +56,19 @@ async def ready_trigger(database_url, monkeypatch):
             as_of=run.decision_time,
         )
         cycle = await session.get(AgentPaperCycleRecord, context[0].cycle_id)
+        installed_at = await session.scalar(select(func.clock_timestamp()))
+    # Parent research can outlive the original quote. Append a new synthetic
+    # observation for this tick; never make the old frozen price fresh again.
+    await append_fresh_inputs(factory, run.instrument_id, installed_at)
+    async with factory() as session, session.begin():
         plan = await install_plan_from_output(
             session,
             account_id=cycle.account_id,
             output_id=output.id,
             expected_predecessor_id=None,
-            now=AT + timedelta(seconds=3),
+            now=installed_at,
         )
-        at = AT + timedelta(seconds=4)
+        at = installed_at + timedelta(seconds=1)
         await record_check(
             session,
             plan_id=plan.id,
@@ -92,24 +103,12 @@ async def ready_trigger(database_url, monkeypatch):
     # them and append genuinely new synthetic quote/risk facts; never rewrite old rows.
     async with factory() as session:
         later = await session.scalar(select(func.max(JobLease.expires_at))) + timedelta(seconds=1)
+        later = max(later, await session.scalar(select(func.clock_timestamp())))
     await _set_test_insert_clock(factory, later)
     await append_fresh_inputs(factory, run.instrument_id, later)
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    old_scalar = AsyncSession.scalar
-
-    async def clock(self, statement, *args, **kwargs):
-        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-            return later
-        return await old_scalar(self, statement, *args, **kwargs)
-
-    class WorkerClock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return later if tz is None else later.astimezone(tz)
-
-    monkeypatch.setattr(AsyncSession, "scalar", clock)
-    monkeypatch.setattr("nexus.worker.datetime", WorkerClock)
+    # Advance the existing shared DB/Worker clock rather than install a frozen
+    # observer that predates the stage executor's subsequent durable commits.
+    captured["clock"][0] = later
     return factory, settings, trigger, run, later
 
 
@@ -273,6 +272,8 @@ async def test_normal_trigger_admission_is_single_stock_idempotent_and_blocks_co
         from nexus.monitoring.admission import require_monitor_account_available
         from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
 
+        # Admission observes the completed closeout, not the pre-worker instant.
+        now = await session.scalar(select(func.clock_timestamp()))
         reservation = await session.scalar(
             select(AgentDailyBudgetReservationRecord).where(
                 AgentDailyBudgetReservationRecord.run_id == member.run_id
@@ -438,8 +439,27 @@ async def test_normal_trigger_admission_is_single_stock_idempotent_and_blocks_co
 
         monkeypatch.setenv("DATABASE_URL", migrated_database_url)
         config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-        with pytest.raises(Exception, match="MONITOR_EVIDENCE_DOWNGRADE_FORBIDDEN"):
+        with pytest.raises(Exception, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
             await asyncio.to_thread(command.downgrade, config, "0088_monitor_increments")
+
+        # The new outer fence must not mask the original evidence fence.
+        import importlib.util
+
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        source = Path(__file__).parents[2] / "alembic/versions/0089_monitor_evidence.py"
+        spec = importlib.util.spec_from_file_location("monitor_evidence_guard_test", source)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+
+        def original_downgrade(connection):
+            migration.op = Operations(MigrationContext.configure(connection))
+            migration.downgrade()
+
+        with pytest.raises(Exception, match="MONITOR_EVIDENCE_DOWNGRADE_FORBIDDEN"):
+            async with factory.kw["bind"].begin() as connection:
+                await connection.run_sync(original_downgrade)
 
 
 async def append_fresh_inputs(factory, instrument_id, at, *, midpoint=None, decision_session=None):

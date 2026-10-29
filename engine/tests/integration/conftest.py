@@ -121,9 +121,7 @@ def migrated_database_template(
             command.upgrade(Config(os.path.join(engine_root, "alembic.ini")), "head")
         _freeze_post_migration_created_at_defaults(temporary_database.url)
 
-    with temporary_database_factory.provision(
-        after_create=prepare_template
-    ) as temporary_database:
+    with temporary_database_factory.provision(after_create=prepare_template) as temporary_database:
         yield temporary_database
 
 
@@ -232,3 +230,31 @@ async def _database_exists(admin_url: URL, database_name: str) -> bool:
             )
     finally:
         await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def controlled_research_sdk(monkeypatch):
+    """Integration tests may never fall through to a live model process."""
+    from helpers.formal_sdk import controlled_sdk
+
+    return controlled_sdk(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def historical_stage_fixture_version(request, monkeypatch):
+    """Keep archived prototype matrices on their original preparation version.
+
+    Formal suites importing those scenarios retain normal production selection;
+    only the historical matrix modules explicitly construct the old identities.
+    """
+    name = request.path.stem
+    if name.startswith("test_staged_") or name in {
+        "test_research_commit_ack_pg",
+        "test_research_stage_boundary_pg",
+    }:
+        from nexus.agents.research_stages import routes
+
+        async def original_preparation(session, run_ids):
+            return None
+
+        monkeypatch.setattr(routes, "register_new_prepared_runs", original_preparation)

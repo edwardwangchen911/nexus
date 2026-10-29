@@ -24,7 +24,7 @@ def report() -> dict:
 def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     (tmp_path / "package-lock.json").write_bytes(
-        (Path(__file__).resolve().parents[2] / "package-lock.json").read_bytes()
+        (Path(__file__).parent / "fixtures/npm-audit-braces-package-lock.json").read_bytes()
     )
     (tmp_path / "package.json").write_text('{"private": true}')
     (tmp_path / "next.config.ts").write_text("export default {};\n")
@@ -148,10 +148,22 @@ def test_normal_cli_keeps_complete_report_and_has_no_omit_flag(root, report, mon
     ]
 
 
-def test_real_checkout_matches_approved_identity(report):
-    assert gate.evaluate(report, 1, Path(__file__).resolve().parents[2], NOW).startswith(
-        "risk_accepted"
+def test_historical_report_keeps_its_exact_approved_lock():
+    historical_lock = Path(__file__).parent / "fixtures/npm-audit-braces-package-lock.json"
+    assert gate.file_digest(historical_lock) == gate.LOCK_SHA256
+
+
+def test_current_checkout_rejects_historical_acceptance(report):
+    # The dependency fix changes the inventory; the old report cannot certify it.
+    with pytest.raises(gate.AuditRejected, match="^AUDIT_DEPENDENCY_SCAN_INVALID$"):
+        gate.evaluate(report, 1, Path(__file__).resolve().parents[2], NOW)
+
+
+def test_current_checkout_clean_scan_needs_no_risk_extension():
+    report = json.loads(
+        (Path(__file__).parent / "fixtures/npm-audit-clean-20261029.json").read_text()
     )
+    assert gate.evaluate(report, 0, Path(__file__).resolve().parents[2], gate.EXPIRES_AT) == "clean"
 
 
 @pytest.mark.parametrize("raw", ["not-json", "[]", '{"error":{}}'])

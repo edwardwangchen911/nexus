@@ -163,6 +163,8 @@ async def assert_old_run_superseded(
         "jobs": observed_jobs,
     }
     async with factory() as session, session.begin():
+        # Observe committed stage completion; the preparation time stays frozen on the run.
+        now = await session.scalar(select(func.clock_timestamp()))
         report = await reconcile_account_results(
             session, account_id=pointer.account_id, instrument_ids=(pointer.instrument_id,), now=now
         )
@@ -186,6 +188,7 @@ async def assert_old_run_superseded(
         ).order_by(AgentResearchRunRecord.id),
     )
     async with factory() as session:
+        now = await session.scalar(select(func.clock_timestamp()))
         new_plans = tuple(
             await session.scalars(
                 select(MonitorPlan).where(MonitorPlan.source_run_id == current.id)
@@ -201,7 +204,12 @@ async def assert_old_run_superseded(
             from nexus.monitoring.reconciliation import plan_covered
 
             view_before = await read_monitoring_view(session, current, now=now)
-            assert view_before.state == "valid" and view_before.plan_id == replacement.id
+            assert view_before.state == "valid" and view_before.plan_id == replacement.id, {
+                "view": view_before.model_dump(mode="json"),
+                "now": now.isoformat(),
+                "plan_created_at": replacement.created_at.isoformat(),
+                "plan_effective_at": replacement.effective_at.isoformat(),
+            }
             assert await plan_covered(session, plan=replacement, now=now)
 
         saved_counts = {

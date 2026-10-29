@@ -428,8 +428,11 @@ def _validate_original(root, state, pointer):
         / ".secrets/nexus-agent-paper"
         / ("recovery-activation-" + pointer["attempt_id"] + ".json")
     )
+    pending = receipt_path.with_suffix(".write-pending")
+    if pending.exists() or pending.is_symlink():
+        _reject("BINDING_CHANGED")
     _, receipt_hash = _read(receipt_path)
-    if receipt_hash != producer.get("receipt_sha256"):
+    if pending.exists() or pending.is_symlink() or receipt_hash != producer.get("receipt_sha256"):
         _reject("BINDING_CHANGED")
 
 

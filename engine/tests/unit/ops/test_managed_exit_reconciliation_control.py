@@ -45,7 +45,7 @@ def ended_activated_host(tmp_path):
             + "    async def inspect(settings):\n"
             + "        return {'status':options.get('recovery_status','ready'), "
             + "'blocking_codes':options.get('blocking_codes',[]), "
-            + "'migration_head':'0098_independent_monitor','scope_hash':manual_host_scope(config), "
+            + "'migration_head':'0099_research_stages','scope_hash':manual_host_scope(config), "
             + "'execution_locked':True,'external_requests':0,'checked_at':'2026-10-27T14:00:00Z'}\n"
             + "    checks.inspect_recovery_readiness=inspect\n"
             + "    checks.require_recovery_process_quiescence=lambda:None\n"
@@ -870,3 +870,18 @@ def test_cross_boot_rate_limit_then_disable_keeps_explicit_enable_reentry(tmp_pa
     assert state["exit_reconciliation_history"][0]["consumed_by"] is None
     assert "exit_reconciliation_sha256" not in state["attempt"]
     assert len(starts(root)) == 1
+
+
+@pytest.mark.parametrize("after_publish", [False, True])
+def test_unconfirmed_receipt_write_blocks_reconciliation_and_consumption(tmp_path, after_publish):
+    root, env, state_path, receipt_path = ended_activated_host(tmp_path)
+    if after_publish:
+        assert _invoke(root, env, "reconcile-exit").returncode == 0
+    marker = receipt_path.with_suffix(".write-pending")
+    marker.write_text("unconfirmed")
+    marker.chmod(0o600)
+    before = receipt_path.read_bytes()
+    action = "enable-recovery" if after_publish else "reconcile-exit"
+    assert _invoke(root, env, action).returncode != 0
+    assert starts(root) == []
+    assert marker.exists() and receipt_path.read_bytes() == before

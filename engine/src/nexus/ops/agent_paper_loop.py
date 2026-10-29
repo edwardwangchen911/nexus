@@ -2202,6 +2202,9 @@ async def run_foreground_loop(
     monotonic: Callable[[], float] = monotonic_clock,
 ) -> AgentPaperLoopAction:
     """Run persisted one-step actions until a fail-closed stop condition is reached."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     interval_seconds = heartbeat_interval.total_seconds()
     if interval_seconds <= 0:
         raise ValueError("heartbeat_interval must be positive")
@@ -2593,6 +2596,9 @@ async def run_local_agent_paper_loop(
     recovery_guard: Callable[[EngineSettings], Awaitable[None]] | None = None,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
 
     if not settings.database_url:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
@@ -5262,9 +5268,18 @@ def main(argv: list[str] | None = None) -> int:
             if recovery is not None and recovery.receipt is not None:
                 try:
                     recovery.finish_database_error(error)
-                except Exception:
+                except BaseException:
                     # Keep the original database failure; an unwritten receipt
                     # must never become proof of a confirmed service exit.
+                    error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")
+            raise
+        except (Exception, KeyboardInterrupt, asyncio.CancelledError) as error:
+            if recovery is not None:
+                try:
+                    recovery.finish_exception(error)
+                except BaseException:
+                    # Recording is best-effort; keep the original exception and
+                    # never turn a missing exit receipt into recovery permission.
                     error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")
             raise
         if recovery is not None and recovery.receipt is not None:

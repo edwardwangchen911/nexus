@@ -87,6 +87,11 @@ async def test_v10_resume_observes_jobs_committed_after_entry_time(
             await asyncio.wait_for(entered_read.wait(), timeout=10)
             completed = await original_worker(settings, **kwargs)
             assert completed is True
+            if observation == "completed":
+                # Observe the committed result with the same advancing clock as
+                # the Worker; the two rejection cases keep their earlier times.
+                async with async_sessionmaker(engine)() as session:
+                    observed_at = await session.scalar(select(func.clock_timestamp()))
             allow_read.set()
             result = await asyncio.wait_for(resume_task, timeout=30)
             async with async_sessionmaker(engine)() as session:

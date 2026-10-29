@@ -72,7 +72,7 @@ async def installed(
             "agent_paper_candidate_batch_id": cycle.candidate_batch_id,
         }
     )
-    captured["clock"][0] = AT + timedelta(seconds=6)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=6))
     await _set_test_insert_clock(factory, captured["clock"][0])
     for kind in kinds:
         result = await run(
@@ -89,7 +89,7 @@ async def installed(
             ),
         )
         assert repeated["plan_id"] == result["plan_id"]
-    captured["clock"][0] = AT + timedelta(seconds=7)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=7))
     await _set_test_insert_clock(factory, captured["clock"][0])
     return factory, settings, store, captured, pointer
 
@@ -205,9 +205,26 @@ async def test_normal_scan_to_worker_keeps_batch_and_research_unchanged(
                 created_at=AT - timedelta(hours=1),
             )
         )
-    scanned = await run(
-        config, parser().parse_args(["scan", "--calendar-authority-id", str(CALENDAR_ID)])
-    )
+    # Research has finished. This delivery scenario models one simultaneous
+    # scan: seal time and insert defaults share its tick, so batch/legacy event
+    # order is fixed without changing the Worker's activation or retry guards.
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async with factory() as session:
+        scan_at = await session.scalar(select(func.clock_timestamp()))
+    await _set_test_insert_clock(factory, scan_at)
+    scalar = AsyncSession.scalar
+
+    async def scan_clock(self, statement, *args, **kwargs):
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return scan_at
+        return await scalar(self, statement, *args, **kwargs)
+
+    with monkeypatch.context() as scan_patch:
+        scan_patch.setattr(AsyncSession, "scalar", scan_clock)
+        scanned = await run(
+            config, parser().parse_args(["scan", "--calendar-authority-id", str(CALENDAR_ID)])
+        )
     assert scanned["new_triggers"] == 3 and scanned["notifications"] == 1
     async with factory() as session:
         batch = await session.scalar(
@@ -349,6 +366,8 @@ async def test_late_capture_is_separate_and_legacy_outbox_reuse_is_rejected(
         assert blockers, "late legacy insertion must wait for the outbox ownership lock"
     with pytest.raises(DBAPIError, match="MONITOR_BATCH_MEMBERS_INVALID"):
         await attempt
+    async with factory() as session:
+        late_capture_at = await session.scalar(select(func.clock_timestamp()))
     await append_capture(
         config,
         store,
@@ -357,10 +376,10 @@ async def test_late_capture_is_separate_and_legacy_outbox_reuse_is_rejected(
         tmp_path,
         "late",
         added=3,
-        received=AT + timedelta(seconds=8),
-        imported_at=AT + timedelta(seconds=9),
+        received=late_capture_at + timedelta(seconds=1),
+        imported_at=late_capture_at + timedelta(seconds=2),
     )
-    captured["clock"][0] = AT + timedelta(seconds=10)
+    captured["clock"][0] = max(captured["clock"][0], late_capture_at + timedelta(seconds=3))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory() as session, session.begin():
         later = await scan_stock_batch(
@@ -400,16 +419,20 @@ async def test_newer_legacy_monitoring_run_stops_old_sec_plan(
         # regardless of whether its result later completes or vetoes adoption.
         manifest = dict(parent.prompt_manifest)
         manifest["portfolio"] = {**manifest["portfolio"], "version": version}
+        # This new historical-version row is born after the completed parent.
+        successor_at = await session.scalar(select(func.clock_timestamp()))
         session.add(
             clone(
                 parent,
                 idempotency_key=f"successor-{version}",
-                decision_time=AT + timedelta(seconds=8),
+                decision_time=successor_at,
+                created_at=successor_at,
                 prompt_manifest=manifest,
                 status="failed",
             )
         )
     async with factory() as session:
         plan = await session.get(MonitorPlan, plan.id)
-        assert not await disclosure_source_current(session, plan, AT + timedelta(seconds=9))
+        read_at = await session.scalar(select(func.clock_timestamp()))
+        assert not await disclosure_source_current(session, plan, read_at)
     await factory.kw["bind"].dispose()

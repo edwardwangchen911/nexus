@@ -336,3 +336,210 @@ def test_main_preserves_database_exception_when_exit_receipt_fails(tmp_path, mon
     assert guard.receipt == {"phase": "activated"}
     with pytest.raises(OSError, match="private-filesystem-message"):
         guard.finish("stop_requested")
+
+
+@pytest.mark.parametrize("kind", ["generic", "database", "interrupt", "cancelled"])
+@pytest.mark.parametrize("write_fails", [False, True, "interrupt", "cancelled"])
+def test_main_records_caught_exit_without_granting_recovery(
+    tmp_path, monkeypatch, capsys, kind, write_fails
+):
+    import asyncio
+
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.ops import agent_paper_recovery as readiness
+    from nexus.ops import agent_paper_recovery_activation as activation
+
+    env, generation, attempt, _ = state(tmp_path)
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra/compose.yaml").write_text("fixture")
+    settings = EngineSettings(release_revision="a" * 40)
+    guard = activation.make_recovery_guard(
+        settings, repo_root=tmp_path, env_file=env, generation=generation, attempt_id=attempt
+    )
+
+    async def ready(_):
+        return {"status": "ready"}
+
+    monkeypatch.setattr(readiness, "inspect_recovery_readiness", ready)
+    monkeypatch.setattr(readiness, "require_recovery_process_quiescence", lambda: None)
+    asyncio.run(guard(settings))
+    before = guard.receipt_path.read_bytes()
+    monkeypatch.setattr(loop, "_validate_local_env", lambda *_: env)
+    monkeypatch.setattr(
+        loop,
+        "load_agent_paper_service_environment",
+        lambda *_a, **_k: {
+            "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+            "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(uuid4()),
+            "AGENT_RUNTIME_MODE": "codex_sdk",
+        },
+    )
+    monkeypatch.setattr(activation, "make_recovery_guard", lambda *_a, **_k: guard)
+    from sqlalchemy.exc import SQLAlchemyError
+
+    observed = []
+
+    class OriginalError(SQLAlchemyError if kind == "database" else RuntimeError):
+        def __str__(self):
+            observed.append(self)
+            return super().__str__()
+
+    original = OriginalError("private-response")
+    error = {
+        "generic": original,
+        "database": original,
+        "interrupt": KeyboardInterrupt("private-response"),
+        "cancelled": asyncio.CancelledError("private-response"),
+    }[kind]
+
+    async def fail_loop(*_a, **_k):
+        raise error
+
+    monkeypatch.setattr(loop, "run_local_agent_paper_loop", fail_loop)
+    if write_fails:
+
+        def fail_replace(*_):
+            raise OSError("private-filesystem")
+
+        if write_fails is True:
+            monkeypatch.setattr(activation.os, "replace", fail_replace)
+        else:
+            real_fsync = activation.os.fsync
+            calls = []
+
+            def interrupt_sync(descriptor):
+                calls.append(descriptor)
+                if len(calls) == 3:  # Receipt sync, after durable negative witness.
+                    if write_fails == "interrupt":
+                        raise KeyboardInterrupt("private-second-interrupt")
+                    raise asyncio.CancelledError("private-second-cancel")
+                real_fsync(descriptor)
+
+            monkeypatch.setattr(activation.os, "fsync", interrupt_sync)
+    argv = [
+        "--repo-root",
+        str(tmp_path),
+        "--env-file",
+        str(env),
+        "--recovery-generation",
+        generation,
+        "--recovery-attempt",
+        attempt,
+    ]
+    if kind == "cancelled":
+        with pytest.raises(asyncio.CancelledError) as caught:
+            loop.main(argv)
+        assert caught.value is error
+    else:
+        assert loop.main(argv) == (130 if kind == "interrupt" else 1)
+    if kind in {"generic", "database"}:
+        assert observed == [error]
+    output = capsys.readouterr().out
+    assert "private" not in output
+    receipt = json.loads(guard.receipt_path.read_text())
+    assert receipt["attempt_id"] == attempt
+    assert receipt["generation"] == generation
+    if write_fails:
+        assert guard.receipt_path.read_bytes() == before
+        assert guard.receipt == json.loads(before)
+        assert guard.receipt_path.with_suffix(".write-pending").exists()
+        assert error.__notes__ == ["AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED"]
+    else:
+        assert receipt["phase"] == "exited"
+        assert receipt["reason"] == "unclassified"
+        if kind == "database":
+            assert "exit_stage" not in receipt
+            return
+        assert receipt["exit_stage"] == "host_loop"
+        assert receipt["exit_code"] == (
+            "AGENT_PAPER_LOOP_INTERRUPTED"
+            if kind == "interrupt"
+            else "AGENT_PAPER_LOOP_CANCELLED"
+            if kind == "cancelled"
+            else "AGENT_PAPER_LOOP_RESULT_UNKNOWN"
+        )
+        assert "private" not in json.dumps(receipt)
+
+
+def test_failed_exit_write_keeps_in_memory_activation_unconfirmed(tmp_path, monkeypatch):
+    from nexus.ops import agent_paper_recovery_activation as activation
+
+    env, generation, attempt, _ = state(tmp_path)
+    guard = activation.make_recovery_guard(
+        EngineSettings(),
+        repo_root=tmp_path,
+        env_file=env,
+        generation=generation,
+        attempt_id=attempt,
+    )
+    guard.receipt = {"phase": "activated", "reason": "READY"}
+    guard.receipt_path.write_text(json.dumps(guard.receipt))
+
+    def fail_replace(*_):
+        raise OSError("private-filesystem")
+
+    monkeypatch.setattr(activation.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        guard.finish("stop_requested")
+    assert guard.receipt == {"phase": "activated", "reason": "READY"}
+    assert json.loads(guard.receipt_path.read_text()) == guard.receipt
+
+
+@pytest.mark.parametrize("phase", ["checking", "rejected"])
+def test_generic_failure_preserves_pre_activation_receipt(tmp_path, phase):
+    from nexus.ops.agent_paper_recovery_activation import make_recovery_guard
+
+    env, generation, attempt, _ = state(tmp_path)
+    guard = make_recovery_guard(
+        EngineSettings(),
+        repo_root=tmp_path,
+        env_file=env,
+        generation=generation,
+        attempt_id=attempt,
+    )
+    guard.receipt = {"phase": phase, "reason": "PRE_ACTIVATION_REJECTED"}
+    guard.receipt_path.write_text(json.dumps(guard.receipt))
+    before = guard.receipt_path.read_bytes()
+    guard.finish_exception(RuntimeError("private"))
+    assert guard.receipt_path.read_bytes() == before
+    assert guard.receipt == json.loads(before)
+
+
+@pytest.mark.parametrize("reason", ["stop_requested", "database_unavailable", "unclassified"])
+def test_post_replace_failure_leaves_persistent_unconfirmed_write(tmp_path, monkeypatch, reason):
+    import stat
+
+    from nexus.ops import agent_paper_recovery_activation as activation
+
+    env, generation, attempt, _ = state(tmp_path)
+    guard = activation.make_recovery_guard(
+        EngineSettings(),
+        repo_root=tmp_path,
+        env_file=env,
+        generation=generation,
+        attempt_id=attempt,
+    )
+    guard.receipt = {"phase": "activated", "reason": "READY"}
+    guard.receipt_path.write_text(json.dumps(guard.receipt))
+    real_fsync = activation.os.fsync
+    replaced = []
+    real_replace = activation.os.replace
+
+    def replace(*args):
+        real_replace(*args)
+        replaced.append(True)
+
+    def fsync(descriptor):
+        if replaced and stat.S_ISDIR(activation.os.fstat(descriptor).st_mode):
+            raise OSError("private-directory-sync")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(activation.os, "replace", replace)
+    monkeypatch.setattr(activation.os, "fsync", fsync)
+    with pytest.raises(OSError):
+        guard.finish(reason)
+    assert json.loads(guard.receipt_path.read_text())["phase"] == "exited"
+    assert guard.receipt == {"phase": "activated", "reason": "READY"}
+    assert guard.receipt_path.with_suffix(".write-pending").exists()
+    with pytest.raises(FileExistsError):
+        guard.finish("stop_requested")

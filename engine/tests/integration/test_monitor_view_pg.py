@@ -6,6 +6,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 import httpx
@@ -35,7 +36,7 @@ from nexus.persistence.models.runtime import (
     OutboxEvent,
 )
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 
 async def business_facts(factory):
@@ -219,16 +220,18 @@ async def test_price_api_does_not_read_later_run_usage_or_notification_facts(
             from sqlalchemy.ext.asyncio import AsyncSession
 
             original_scalar = AsyncSession.scalar
+            completion_anchor = monotonic()
 
             async def completion_clock(self, statement, *args, **kwargs):
                 if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-                    return terminal_at
+                    return WorkerClock.now(UTC)
                 return await original_scalar(self, statement, *args, **kwargs)
 
             class WorkerClock(datetime):
                 @classmethod
                 def now(cls, tz=None):
-                    return terminal_at if tz is None else terminal_at.astimezone(tz)
+                    at = now + timedelta(seconds=10 + monotonic() - completion_anchor)
+                    return at if tz is None else at.astimezone(tz)
 
             monkeypatch.setattr(AsyncSession, "scalar", completion_clock)
             monkeypatch.setattr("nexus.worker.datetime", WorkerClock)
@@ -239,6 +242,8 @@ async def test_price_api_does_not_read_later_run_usage_or_notification_facts(
                 settings, parser().parse_args(["finish", "--trigger-id", str(trigger.id)])
             )
             assert finished["status"] == "completed", finished
+            async with factory() as session:
+                terminal_at = await session.scalar(select(func.clock_timestamp()))
             expected_usage, expected_status = "known", "completed"
             early = now + timedelta(seconds=5)
     else:

@@ -1,5 +1,6 @@
 """Single-use, generation-bound activation after the host process lock."""
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -112,17 +113,36 @@ class RecoveryActivation:
             spec.loader.exec_module(helper)
             helper.validate_pending_activation(self.root, value, attempt)
 
-    def _save(self, phase: str, reason: str) -> None:
+    def _save(self, phase: str, reason: str, *, exit_code: str | None = None) -> None:
         if self.receipt is None:
             raise ValueError(_BLOCKED)
-        self.receipt.update(phase=phase, reason=reason)
-        with NamedTemporaryFile(dir=self.directory, prefix="activation.", delete=False) as stream:
-            temporary = Path(stream.name)
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write((json.dumps(self.receipt, sort_keys=True) + "\n").encode())
+        receipt = {**self.receipt, "phase": phase, "reason": reason}
+        if exit_code is not None:
+            receipt.update(exit_stage="host_loop", exit_code=exit_code)
+        # Keep a durable negative witness until every receipt write step has
+        # completed. A replace followed by failed directory fsync is unknown,
+        # even if a reader can already see the new qualified exit contents.
+        pending = self.receipt_path.with_suffix(".write-pending")
+        descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(b"AGENT_PAPER_RECOVERY_EXIT_WRITE_UNCONFIRMED\n")
             stream.flush()
             os.fsync(stream.fileno())
+        directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        temporary: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                dir=self.directory, prefix="activation.", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write((json.dumps(receipt, sort_keys=True) + "\n").encode())
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, self.receipt_path)
             descriptor = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -130,7 +150,12 @@ class RecoveryActivation:
             finally:
                 os.close(descriptor)
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        # Last fallible operation: no fsync after removing the negative witness.
+        # A crash that resurrects it can only block recovery, never authorize it.
+        pending.unlink()
+        self.receipt = receipt
 
     async def __call__(self, effective: EngineSettings) -> None:
         from nexus.ops.agent_paper_recovery import (
@@ -185,6 +210,20 @@ class RecoveryActivation:
                 raise ValueError(_BLOCKED) from None
         except (OSError, RuntimeError, ValueError, TypeError, KeyError):
             raise ValueError(_BLOCKED) from None
+
+    def finish_exception(self, error: BaseException) -> None:
+        # A rejected/checking activation is not a running host. Preserve its
+        # original evidence, and never infer a business result from this exit.
+        if self.receipt is None or self.receipt.get("phase") != "activated":
+            return
+        code = (
+            "AGENT_PAPER_LOOP_INTERRUPTED"
+            if isinstance(error, KeyboardInterrupt)
+            else "AGENT_PAPER_LOOP_CANCELLED"
+            if isinstance(error, asyncio.CancelledError)
+            else "AGENT_PAPER_LOOP_RESULT_UNKNOWN"
+        )
+        self._save("exited", "unclassified", exit_code=code)
 
     def finish_database_error(self, error: SQLAlchemyError) -> None:
         self.finish(

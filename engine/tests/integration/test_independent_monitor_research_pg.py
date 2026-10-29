@@ -23,10 +23,18 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("formal_stages", [False, True])
 async def test_independent_three_stock_preparation_freezes_identity_scope_and_budget_without_cycle(
-    migrated_database_url, tmp_path, monkeypatch
+    migrated_database_url, tmp_path, monkeypatch, formal_stages
 ):
     calls = []
+    if not formal_stages:
+        from nexus.agents.research_stages import routes
+
+        async def legacy_preparation(session, run_ids):
+            return None
+
+        monkeypatch.setattr(routes, "register_new_prepared_runs", legacy_preparation)
 
     async def unexpected_sdk_call(*args, **kwargs):
         calls.append(True)
@@ -212,12 +220,20 @@ async def test_independent_three_stock_preparation_freezes_identity_scope_and_bu
 
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    with pytest.raises(Exception, match="INDEPENDENT_MONITOR_DOWNGRADE_FORBIDDEN"):
+    if not formal_stages:
+        # Establish the actual historical schema in its own transaction. A later
+        # rejected downgrade must leave that schema intact, not roll back 0099 too.
+        await asyncio.to_thread(command.downgrade, config, "0098_independent_monitor")
+    with pytest.raises(
+        Exception,
+        match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"
+        if formal_stages
+        else "INDEPENDENT_MONITOR_DOWNGRADE_FORBIDDEN",
+    ):
         await asyncio.to_thread(command.downgrade, config, "0097_monitor_daily_events")
     async with factory() as session:
-        assert (
-            await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0098_independent_monitor"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0099_research_stages" if formal_stages else "0098_independent_monitor"
         )
         assert (await session.get(ManualPaperRequest, receipt.request_id)).contract_version == 3
     await factory.kw["bind"].dispose()
@@ -270,7 +286,7 @@ async def test_sec_only_new_root_cannot_replace_after_other_kind_is_installed_la
             agent_runtime_mode=AgentRuntimeMode.CODEX_SDK,
         )
     )
-    captured["clock"][0] = AT + timedelta(seconds=2)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=2))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory.begin() as session:
         receipt = await admit_manual_request(
@@ -322,7 +338,7 @@ async def test_sec_only_new_root_cannot_replace_after_other_kind_is_installed_la
         assert output.intent.get("monitoring_proposal") is None
         assert output.intent["disclosure_proposal"] is not None
         frozen_hash = output.content_hash
-    captured["clock"][0] = AT + timedelta(seconds=3)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=3))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory.begin() as session:
         installed = await install_plan_from_output(
@@ -408,7 +424,7 @@ async def _new_independent_result(factory, settings, captured, pointer, *, secon
             agent_runtime_mode=AgentRuntimeMode.CODEX_SDK,
         )
     )
-    captured["clock"][0] = AT + timedelta(seconds=second)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=second))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory.begin() as session:
         receipt = await admit_manual_request(
@@ -461,7 +477,7 @@ async def test_independent_reconcile_completes_existing_same_run_kind_once(
 
     from integration.test_candidate_multistock_path import AT, _set_test_insert_clock
 
-    captured["clock"][0] = AT + timedelta(seconds=2)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=2))
     await _set_test_insert_clock(factory, captured["clock"][0])
     now = captured["clock"][0]
     async with factory.begin() as session:
@@ -549,7 +565,7 @@ async def test_independent_existing_predecessor_change_fences_whole_pair(
 
     from integration.test_candidate_multistock_path import AT, _set_test_insert_clock
 
-    captured["clock"][0] = AT + timedelta(seconds=2)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=2))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory.begin() as session:
         assert (
@@ -570,7 +586,7 @@ async def test_independent_existing_predecessor_change_fences_whole_pair(
         factory, settings, captured, pointer, second=3
     )
     target, output = await _new_independent_result(factory, settings, captured, pointer, second=4)
-    captured["clock"][0] = AT + timedelta(seconds=5)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=5))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory.begin() as session:
         bound = await read_independent_context(
@@ -632,3 +648,21 @@ async def test_independent_existing_predecessor_change_fences_whole_pair(
             await session.get(AgentResearchOutputRecord, output.id)
         ).content_hash == output.content_hash
     await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_independent_rollback_keeps_original_admission_contract(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from integration.test_monitor_mixed_increment_pg import (
+        test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three_calls,
+    )
+    from nexus.agents.research_stages import routes
+
+    async def legacy_birth(session, run_ids):
+        return None
+
+    monkeypatch.setattr(routes, "register_new_prepared_runs", legacy_birth)
+    await test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three_calls(
+        migrated_database_url, monkeypatch, tmp_path, "rollback", independent=True
+    )

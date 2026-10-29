@@ -292,6 +292,8 @@ async def partial_daily(url, monkeypatch, root, *, before_reconcile=None):
     assert len(calls) == 9 and all(
         calls.count(stage) == 3 for stage in ("research", "critique", "synthesis")
     )
+    async with factory() as session:
+        now = await session.scalar(select(func.clock_timestamp()))
     if before_reconcile is not None:
         await before_reconcile(factory, settings, captured, pointer, batch_id, target, now)
     async with factory() as session, session.begin():

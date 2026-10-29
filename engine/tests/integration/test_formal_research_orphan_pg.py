@@ -40,7 +40,7 @@ class VanishedWorker(BaseException):
     ],
 )
 async def test_formal_research_orphan_preserves_completed_and_unknown(
-    migrated_database_url, monkeypatch, tmp_path, case
+    migrated_database_url, monkeypatch, tmp_path, case, *, known_prefix=None, legacy=False
 ):
     original = worker.execute_and_finalize_job
     dispatches = []
@@ -52,6 +52,54 @@ async def test_formal_research_orphan_preserves_completed_and_unknown(
         return await original(session, **kwargs)
 
     monkeypatch.setattr(worker, "execute_and_finalize_job", interrupted)
+    from nexus.agents.research_stages import executor, routes
+    from nexus.agents.research_stages import protocol as stage_protocol
+    from nexus.agents.research_stages.protocol import StagedProtocol
+
+    if legacy:
+        # Historical birth has no selected stage route; never rewrite a committed identity.
+        async def historical_birth(session, run_ids):
+            return None
+
+        monkeypatch.setattr(routes, "register_new_prepared_runs", historical_birth)
+
+    execute_staged = executor.execute_staged_claim
+
+    async def interrupted_staged(*, factory, claim, clock, execute):
+        dispatches.append(claim.job_id)
+        if len(dispatches) != 2:
+            return await execute_staged(factory=factory, claim=claim, clock=clock, execute=execute)
+        async with factory() as session:
+            route = await routes.selected_route(session, claim.job_id)
+        now = clock()
+        protocol = StagedProtocol(factory)
+        await protocol.install(
+            scope_id=route["scope_id"],
+            claims=(claim,),
+            now=now,
+            work_deadline=now + timedelta(seconds=100),
+            cleanup_deadline=now + timedelta(seconds=110),
+        )
+        ticket = await protocol.authorize(claim, stage=1, now=now, wire=b"controlled-orphan")
+        if known_prefix is not None:
+            from hashlib import sha256
+
+            await protocol.observe(
+                ticket, now=now, payload=b"verified-prefix", tokens=known_prefix, valid=True
+            )
+            assert await protocol.verify(
+                ticket,
+                now=now,
+                wire_hash=sha256(b"controlled-orphan").hexdigest(),
+                payload=b"verified-prefix",
+                tokens=known_prefix,
+            )
+            await protocol.cleanup(ticket, now=now, confirmed=True)
+            ticket = await protocol.authorize(claim, stage=2, now=now, wire=b"unknown-successor")
+        await protocol.cleanup(ticket, now=now, confirmed=True)
+        raise VanishedWorker
+
+    monkeypatch.setattr(executor, "execute_staged_claim", interrupted_staged)
     with pytest.raises(VanishedWorker):
         await seed_cycle(
             migrated_database_url,
@@ -140,6 +188,7 @@ async def test_formal_research_orphan_preserves_completed_and_unknown(
                 raise RuntimeError("controlled terminal rollback")
 
             monkeypatch.setattr(research_orphan, "_persist_terminal", fail_terminal)
+            monkeypatch.setattr(stage_protocol, "_persist_terminal", fail_terminal)
 
         async def resume():
             async with sessions.begin() as session:
@@ -186,7 +235,13 @@ async def test_formal_research_orphan_preserves_completed_and_unknown(
             assert job.status == ("dead_letter" if closed else "running")
             assert attempt.outcome == ("lost" if closed else "running")
             assert run.status == ("failed" if closed else "prepared")
-            assert run.input_tokens is run.output_tokens is run.settled_cost_usd is None
+            assert run.settled_cost_usd is None
+            expected_usage = (
+                known_prefix
+                if closed and known_prefix is not None and any(known_prefix)
+                else (None, None)
+            )
+            assert (run.input_tokens, run.output_tokens) == expected_usage
             assert budget.state == "reserved" and budget.settled_usd is None
             if closed:
                 assert job.last_error_code == attempt.error_code == "LEASE_EXPIRED"

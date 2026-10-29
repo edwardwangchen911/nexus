@@ -1,8 +1,10 @@
 """One sealed stock batch reaches one native job, never three event jobs."""
 
 import argparse
+import asyncio
 import json
 from datetime import timedelta
+from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
 
@@ -11,16 +13,50 @@ from helpers.monitor_materials import prepared_materials
 from helpers.paper_batch import CALENDAR_ID
 from integration.test_candidate_multistock_path import _set_test_insert_clock
 from integration.test_monitor_increment_pg import append_fresh_inputs
+from nexus.agents.persistence import _shared_daily_budget_used
 from nexus.ops.research_monitor import run
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentPortfolioSynthesisBudgetReservationRecord,
     AgentResearchRunRecord,
+    PortfolioDecisionBudgetReservationRecord,
 )
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.monitoring import MonitorIncrement, MonitorTrigger
 from nexus.persistence.models.runtime import Job, JobLease
 from nexus.settings import AgentRuntimeMode
 from sqlalchemy import func, select
+
+_BUDGET_MODELS = (
+    AgentDailyBudgetReservationRecord,
+    AgentPortfolioSynthesisBudgetReservationRecord,
+    PortfolioDecisionBudgetReservationRecord,
+)
+
+
+async def budget_rows(session):
+    return {
+        model: {
+            row.id: tuple((c.name, getattr(row, c.name)) for c in row.__table__.columns)
+            for row in await session.scalars(select(model))
+        }
+        for model in _BUDGET_MODELS
+    }
+
+
+async def assert_shared_day_preserved(session, originals, day, used, child_hold):
+    current = await budget_rows(session)
+    for model, rows in originals.items():
+        assert all(current[model].get(key) == value for key, value in rows.items())
+        assert set(current[model]) - set(rows) == (
+            {child_hold.id} if model is AgentDailyBudgetReservationRecord else set()
+        )
+    assert child_hold.business_date == day
+    child_used = (
+        child_hold.reserved_usd if child_hold.state == "reserved" else child_hold.settled_usd
+    )
+    assert child_used is not None
+    assert await _shared_daily_budget_used(session, business_date=day) == used + child_used
 
 
 @pytest.mark.asyncio
@@ -79,6 +115,35 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
                 for model in (AgentResearchRunRecord, Job, AgentDailyBudgetReservationRecord)
             ]
         )
+    async with factory() as session:
+        roots = tuple(await session.scalars(select(AgentResearchRunRecord)))
+        assert len(roots) == len({r.instrument_id for r in roots}) == 3
+        assert all(
+            r.status == "completed"
+            and r.input_tokens is not None
+            and r.output_tokens is not None
+            and r.settled_cost_usd is not None
+            for r in roots
+        )
+        root_ids = {r.id for r in roots}
+        budget_day = parent.decision_time.date()
+        assert later.date() == budget_day
+        budgets_before = await budget_rows(session)
+        for model in _BUDGET_MODELS:
+            assert all(
+                r.business_date == budget_day and r.state == "settled" and r.settled_usd is not None
+                for r in await session.scalars(select(model))
+            )
+        assert {
+            r.run_id for r in await session.scalars(select(AgentDailyBudgetReservationRecord))
+        } == root_ids
+        assert len(budgets_before[AgentPortfolioSynthesisBudgetReservationRecord]) == (
+            0 if independent else 1
+        )
+        assert not budgets_before[PortfolioDecisionBudgetReservationRecord]
+        shared_before = await _shared_daily_budget_used(session, business_date=budget_day)
+    assert settings.agent_daily_budget_usd == Decimal("3.00")
+    assert settings.agent_monitor_daily_sdk_call_limit == 9
     captured["clock"][0] = later
     await _set_test_insert_clock(factory, later)
     await append_fresh_inputs(factory, pointer.instrument_id, later)
@@ -179,6 +244,26 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             select(MonitorIncrement).where(MonitorIncrement.run_id == research.id)
         )
         assert member.batch_id == batch_id and member.reserved_sdk_calls == 3
+        assert research.decision_time.date() == member.session_date == budget_day
+        assert member.daily_sdk_call_limit == 9
+        child_hold = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == research.id
+            )
+        )
+        assert child_hold.state == "reserved" and child_hold.settled_usd is None
+        await assert_shared_day_preserved(
+            session, budgets_before, budget_day, shared_before, child_hold
+        )
+        assert (
+            await session.scalar(
+                select(func.sum(MonitorIncrement.reserved_sdk_calls)).where(
+                    MonitorIncrement.account_id == pointer.account_id,
+                    MonitorIncrement.session_date == budget_day,
+                )
+            )
+            == 3
+        )
     if unknown == "capacity":
         from nexus.audit.service import append_audit_event
         from nexus.monitoring.preclaim import (
@@ -188,6 +273,8 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
 
         assert rows[0].kind == "disclosure"
         async with factory() as session, session.begin():
+            # Dispatch follows admission on the shared advancing database clock.
+            later = await session.scalar(select(func.clock_timestamp()))
             await append_audit_event(
                 session,
                 actor_id="research-monitor",
@@ -215,6 +302,8 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             == closed
         )
         async with factory() as session:
+            # Read the native close proof after its committed terminal facts.
+            later = await session.scalar(select(func.clock_timestamp()))
             child = await session.get(AgentResearchRunRecord, member.run_id)
             assert (child.input_tokens, child.output_tokens, child.settled_cost_usd) == (0, 0, 0)
             assert await preclaim_rejection_qualified(session, run=child, now=later)
@@ -263,10 +352,14 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
 
     native = codex_staged.invoke_codex
     stages = []
+    entered, release = asyncio.Event(), asyncio.Event()
 
     async def tracked(payload, **kwargs):
         wire = _restore_view(payload)
         stages.append(wire["stage"])
+        if unknown is False and wire["stage"] == "research":
+            entered.set()
+            await release.wait()
         security = wire["frozen_inputs"]["security_snapshot"]
         assert security["purpose"] == "monitor_increment_v2"
         context = next(
@@ -347,9 +440,44 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             ) == tuple(count + 1 for count in before)
         await factory.kw["bind"].dispose()
         return
-    assert await run_agent_worker_once(
-        settings, job_ids=(member.job_id,), formal_stage_capacity=True
-    )
+    if unknown is False:
+        from nexus.ops.research_monitor import scan_configured_once
+        from nexus.persistence.models.monitoring import MonitorCheck
+        from nexus.persistence.models.runtime import OutboxEvent
+
+        async with factory() as session:
+            existing_checks = set(await session.scalars(select(MonitorCheck.id)))
+            outbox_count = await session.scalar(select(func.count()).select_from(OutboxEvent))
+        worker = asyncio.create_task(
+            run_agent_worker_once(settings, job_ids=(member.job_id,), formal_stage_capacity=True)
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 30)
+            async with factory() as session:
+                assert (await session.get(Job, member.job_id)).status == "running"
+                assert await session.scalar(
+                    select(JobLease.id).where(
+                        JobLease.job_id == member.job_id, JobLease.expires_at > later
+                    )
+                )
+            scanned = await scan_configured_once(settings, calendar_authority_id=CALENDAR_ID)
+            assert scanned["new_triggers"] == scanned["notifications"] == 0
+            assert not worker.done() and stages == ["research"]
+            async with factory() as session:
+                checks = tuple(await session.scalars(select(MonitorCheck)))
+                assert any(row.id not in existing_checks for row in checks)
+                assert (
+                    await session.scalar(select(func.count()).select_from(OutboxEvent))
+                    == outbox_count
+                )
+        finally:
+            release.set()
+            result = await worker
+        assert result
+    else:
+        assert await run_agent_worker_once(
+            settings, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
     assert stages == (
         ["research", "critique"] if unknown is True else ["research", "critique", "synthesis"]
     )
@@ -373,6 +501,11 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         )
         assert (child.settled_cost_usd is None) == (unknown is True)
         assert reservation.state == ("reserved" if unknown is True else "settled")
+        assert reservation.run_id not in root_ids
+        await assert_shared_day_preserved(
+            session, budgets_before, budget_day, shared_before, reservation
+        )
+        assert settings.agent_daily_budget_usd == Decimal("3.00")
         if independent:
             from nexus.agents.research_only import require_formal_research
 
@@ -400,7 +533,12 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     from nexus.monitoring.admission import require_monitor_account_available
 
     async with factory() as session, session.begin():
-        if unknown is True:
+        from nexus.agents.research_stages.routes import selected_route
+
+        formal_route = await selected_route(session, member.job_id)
+        # A known model result is insufficient while the native trigger is still
+        # admitted. Keep the old unselected contract in an explicit legacy case.
+        if unknown is True or (unknown == "rollback" and formal_route is not None):
             with pytest.raises(ValueError, match="MONITOR_ACCOUNT_BUSY_OR_UNKNOWN"):
                 await require_monitor_account_available(
                     session, account_id=pointer.account_id, now=captured["clock"][0]
@@ -523,6 +661,11 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         if unknown == "unresolved"
         else 0
     )
+    if unknown is not True:
+        async with factory.begin() as session:
+            await require_monitor_account_available(
+                session, account_id=pointer.account_id, now=captured["clock"][0]
+            )
     if replay["impact_review"] == "verified":
         assert replay["reason"] == "MONITOR_EVENT_REVIEW_VERIFIED"
         assert replay["native_reason"] == "MONITOR_EVENT_REVIEW_UNRESOLVED"

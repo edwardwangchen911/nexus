@@ -7,8 +7,6 @@ import pytest
 from helpers.paper_batch import INSTRUMENTS
 from integration.test_candidate_multistock_path import _set_test_insert_clock
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
-from nexus.jobs.models import QueueName
-from nexus.jobs.repository import claim_next_job
 from nexus.ops import agent_paper_loop as loop
 from nexus.ops.agent_capacity_rejection import close_capacity_rejected_cycle_once
 from nexus.ops.openai_local import prepare_database
@@ -104,21 +102,11 @@ async def test_host_preclaim_rejection_closes_without_model_or_order(
             jobs = tuple(await session.scalars(select(Job).order_by(Job.id)))
             original_events = await agent_cycle._events(session, started.cycle_id)
             original_hashes = tuple(event.event_hash for event in original_events)
-            if fault == "claimed":
-                from nexus.agents.codex_formal_stage import formal_stage_job_qualified
+        if fault == "claimed":
+            from helpers.native_execution import claim_without_dispatch
 
-                current[0] = AT + timedelta(seconds=1)
-                await claim_next_job(
-                    session,
-                    queue=QueueName.GENERAL,
-                    worker_id="claimed-model-unknown",
-                    now=AT + timedelta(seconds=1),
-                    job_ids=(jobs[0].id,),
-                    job_types=("agent.paper.research",),
-                    lease_seconds=210,
-                    locked_job_guard=formal_stage_job_qualified,
-                    research_budget_profile=model.version,
-                )
+            current[0] = AT + timedelta(seconds=1)
+            await claim_without_dispatch(settings, monkeypatch, job_id=jobs[0].id, now=current[0])
         settings = settings.model_copy(
             update={
                 "agent_paper_account_id": authority.account_id,

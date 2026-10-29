@@ -101,8 +101,13 @@ async def run_job_worker_once(
     preclaim_guard: PreclaimGuard | None = None,
     job_ids: tuple[UUID, ...] | None = None,
     locked_job_guard: LockedJobGuard | None = None,
+    research_executor: Callable[..., Awaitable[object]] | None = None,
 ) -> bool:
     """Heartbeat, reclaim, claim, and terminalize at most one durable Job."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    if any(str(spec.job_type).startswith("agent.") for spec in registry.specs):
+        require_research_open()
     # Freeze one scope for both operations, including when an untyped caller
     # supplied a mutable sequence. None retains the existing queue-wide mode.
     job_ids = None if job_ids is None else tuple(job_ids)
@@ -228,6 +233,38 @@ async def run_job_worker_once(
         if research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
         else loop.time()
     ) + spec.timeout_seconds
+
+    async def execute(target_session: AsyncSession) -> JobCompletion:
+        context = JobHandlerContext(
+            session=target_session,
+            claim=claim,
+            payload=payload,
+            _clock=clock,
+            _monotonic_deadline=handler_deadline,
+        )
+        result = await spec.handler(context)
+        if (
+            research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            and loop.time() >= handler_deadline
+        ):
+            raise TimeoutError
+        return JobCompletion(
+            outcome=result.outcome,
+            result_code=result.result_code,
+            finished_at=clock(),
+            error_code=result.error_code,
+        )
+
+    if research_executor is not None:
+        try:
+            async with asyncio.timeout_at(handler_deadline):
+                if loop.time() >= handler_deadline:
+                    raise TimeoutError
+                await research_executor(claim=claim, clock=clock, execute=execute)
+        except BaseException as error:
+            stop_current_dispatch(error)
+            raise
+        return True
     try:
         async with asyncio.timeout_at(handler_deadline):
             if loop.time() >= handler_deadline:
@@ -238,28 +275,6 @@ async def run_job_worker_once(
                 session.begin(),
                 dispatch_failure_boundary(),
             ):
-
-                async def execute(target_session: AsyncSession) -> JobCompletion:
-                    context = JobHandlerContext(
-                        session=target_session,
-                        claim=claim,
-                        payload=payload,
-                        _clock=clock,
-                        _monotonic_deadline=handler_deadline,
-                    )
-                    result = await spec.handler(context)
-                    if (
-                        research_budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
-                        and loop.time() >= handler_deadline
-                    ):
-                        raise TimeoutError
-                    return JobCompletion(
-                        outcome=result.outcome,
-                        result_code=result.result_code,
-                        finished_at=clock(),
-                        error_code=result.error_code,
-                    )
-
                 await execute_and_finalize_job(
                     session,
                     claim=claim,

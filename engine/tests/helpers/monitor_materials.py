@@ -40,7 +40,7 @@ async def prepared_materials(
             instrument_id=pointer.instrument_id,
             now=captured["clock"][0],
         )
-    captured["clock"][0] = AT + timedelta(seconds=9)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=9))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory() as session:
         current = await session.scalar(

@@ -277,12 +277,16 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
     from alembic.config import Config
 
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    with pytest.raises(Exception, match="MONITOR_KIND_HISTORY_DOWNGRADE_FORBIDDEN"):
+    with pytest.raises(Exception, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
         await asyncio.to_thread(command.downgrade, config, "0092_monitor_daily_receipts")
+    from helpers.migration_guard import historical_downgrade_guard
+
+    with pytest.raises(Exception, match="MONITOR_KIND_HISTORY_DOWNGRADE_FORBIDDEN"):
+        await historical_downgrade_guard(migrated_database_url, "0093_monitor_kinds")
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0098_independent_monitor"
+            == "0099_research_stages"
         )
         assert (await session.get(MonitorTrigger, scope[1])).kind == "disclosure"
     await factory.kw["bind"].dispose()

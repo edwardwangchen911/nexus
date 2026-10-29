@@ -36,7 +36,7 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev --hostname 127.0.0.1 --port 4174",
+      command: "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev --host 127.0.0.1 --port 4174",
       env: {
         ...realFixtureEnvironment,
         DATABASE_URL: "",

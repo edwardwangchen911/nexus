@@ -110,6 +110,9 @@ async def dispatch_manual_request(
     process_environment: Mapping[str, str],
 ) -> None:
     """Commit the claim before normal trigger; uncertain preparation is never replayed."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.ops.agent_paper_once import (
         AgentPaperTriggerRequest,
         _validate_trigger_dependencies,
@@ -461,6 +464,9 @@ async def finish_configured_manual_request(
 
 
 async def dispatch_pure_research_request(settings: EngineSettings, *, request_id: UUID) -> bool:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.agents.preparation_reuse import research_preparation_scope
 
     with research_preparation_scope():
@@ -624,6 +630,7 @@ async def _dispatch_two_flight_members(
     settings: EngineSettings, *, view: ManualRequestView
 ) -> None:
     import asyncio
+    import sys
 
     from nexus.agents.research_dispatch import (
         ResearchDispatch,
@@ -638,6 +645,7 @@ async def _dispatch_two_flight_members(
     factory = session_factory(settings)
     pending: set[asyncio.Task[None]] = set()
     primary: BaseException | None = None
+    completed_normally = False
 
     async def execute(member: ResearchMemberView) -> None:
         ready = state.active[member.run_id]
@@ -697,6 +705,7 @@ async def _dispatch_two_flight_members(
                         primary = error
         if primary is not None:
             raise state.first_error or primary
+        completed_normally = True
     except BaseException:
         state.stopped = True
         # Only caller cancellation/exit reaches here with live siblings.
@@ -705,7 +714,15 @@ async def _dispatch_two_flight_members(
         await asyncio.gather(*pending, return_exceptions=True)
         raise
     finally:
-        await factory.kw["bind"].dispose()
+        # A successful direct await may inherit the caller's handled exception.
+        # Only an abnormal exit here owns a propagating error, including cancel.
+        propagating = None if completed_normally else sys.exc_info()[1]
+        try:
+            await factory.kw["bind"].dispose()
+        except BaseException:
+            if propagating is None:
+                raise
+            propagating.add_note("RESEARCH_DISPATCH_CLEANUP_UNCONFIRMED")
 
 
 async def run_pure_research_once(
@@ -715,6 +732,9 @@ async def run_pure_research_once(
     mode: Literal["research_only", "research_and_monitor"] = "research_only",
 ) -> ManualRequestView:
     """Normal bounded foreground entry; same admission/host lock, no calendar or scheduler."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     import asyncio
     from datetime import UTC
 

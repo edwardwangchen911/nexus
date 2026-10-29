@@ -284,7 +284,7 @@ _REAL_E2E_CONFIG_REQUIRED = (
 # The workflow digest covers only the real-e2e job so unrelated CI maintenance
 # does not require re-approving the real-fixture boundary.
 _EXPECTED_REAL_E2E_CONFIG_SHA256 = (
-    "78dbbb17a0bcfa2689a349bd8a98254e9e5797a37ea3a2f2a945cfd7519fffb2"
+    "58932c53161881106ec3ecaf0d76ef0c473790e364b4f38d7862c98f16869957"
 )
 _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
     "2215a61e40986080d95f957894514ba4c1e448a9b95bdd5e29fdef8f26394f31"

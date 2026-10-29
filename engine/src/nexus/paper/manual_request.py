@@ -484,6 +484,9 @@ async def admit_manual_request(
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         # Read historical receipt before validating today's model/batch/availability.
         return await read_manual_request(session, existing)
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
@@ -547,7 +550,7 @@ async def admit_manual_request(
     return await _append(session, row, status="queued", code="MANUAL_REQUEST_QUEUED", at=now)
 
 
-async def _require_cycle_jobs_settled(
+async def _legacy_require_cycle_jobs_settled(
     session: AsyncSession,
     *,
     cycle_id: UUID,
@@ -770,6 +773,9 @@ async def claim_manual_request(
     if view.status != "queued":
         # Preparing is durable intent, never permission to repeat external work.
         return view, False
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     now = await _database_now(session)
     await require_manual_account_available(
         session, account_id=row.account_id, now=now, excluding_request_id=row.id
@@ -951,3 +957,24 @@ async def require_cycle_execution_mode(session: AsyncSession, *, cycle_id: UUID)
     row = await manual_request_for_cycle(session, cycle_id=cycle_id)
     if row is not None and row.mode == "research_only":
         raise ValueError("MANUAL_RESEARCH_ONLY_EXECUTION_FORBIDDEN")
+
+
+async def _require_cycle_jobs_settled(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    now: datetime,
+    require_no_live_lease: bool = True,
+    allow_accepted_synthesis: bool = False,
+    read_only: bool = False,
+) -> None:
+    from nexus.agents.research_stages.public import _cycle_settled
+
+    await _cycle_settled(
+        session,
+        cycle_id=cycle_id,
+        now=now,
+        require_no_live_lease=require_no_live_lease,
+        allow_accepted_synthesis=allow_accepted_synthesis,
+        read_only=read_only,
+    )

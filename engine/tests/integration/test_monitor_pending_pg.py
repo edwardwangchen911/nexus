@@ -149,11 +149,12 @@ async def test_pending_stock_is_frozen_whole_or_explicitly_rejected(
         async with factory() as session:
             member = await session.scalar(select(MonitorIncrement))
             native = await session.get(AgentResearchRunRecord, member.run_id)
+            # Context identity uses admission time, not the earlier trigger scan.
             bound = await read_monitor_context(
                 session,
                 snapshot_id=native.data_snapshot_id,
                 instrument_id=parent.instrument_id,
-                as_of=now,
+                as_of=native.decision_time,
             )
             assert {item.trigger_id for item in bound[0].trigger_checks} == set(ids)
             rows = list(await session.scalars(select(MonitorTrigger)))
@@ -268,7 +269,8 @@ async def test_group_dispatch_from_secondary_finishes_exact_members(
         from nexus.persistence.models.agents import AgentResearchRunRecord
         from sqlalchemy.ext.asyncio import AsyncSession
 
-        later = now + timedelta(seconds=1)
+        async with factory() as session:
+            later = await session.scalar(select(func.clock_timestamp())) + timedelta(seconds=1)
         await _set_test_insert_clock(factory, later)
         await append_fresh_inputs(factory, parent.instrument_id, later)
         old_scalar = AsyncSession.scalar

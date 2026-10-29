@@ -430,15 +430,10 @@ async def test_current_host_interruption_recovers_via_normal_cli(
             )
             return
 
-        async def claim_original_job():
-            from nexus.agents.codex_versions import FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
-            from nexus.jobs.models import QueueName
-            from nexus.jobs.repository import claim_next_job
+        async def claim_original_job(*, expect_claim=True):
+            from helpers.native_execution import claim_without_dispatch
 
-            async def guard(_session, _job):
-                return True
-
-            async with sessions.begin() as session:
+            async with sessions() as session:
                 job_id = await session.scalar(
                     select(Job.id)
                     .where(Job.job_type == "agent.paper.research")
@@ -446,17 +441,9 @@ async def test_current_host_interruption_recovers_via_normal_cli(
                     .limit(1)
                 )
                 assert job_id is not None
-                return await claim_next_job(
-                    session,
-                    queue=QueueName.GENERAL,
-                    worker_id="isolated-claim",
-                    now=AT,
-                    lease_seconds=210,
-                    job_ids=(job_id,),
-                    job_types=("agent.paper.research",),
-                    locked_job_guard=guard,
-                    research_budget_profile=FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
-                )
+            return await claim_without_dispatch(
+                settings, monkeypatch, job_id=job_id, now=AT, expect_claim=expect_claim
+            )
 
         if failure_point in {
             "cycle_wrong_execution",
@@ -522,7 +509,7 @@ async def test_current_host_interruption_recovers_via_normal_cli(
 
             async def contender():
                 if failure_point == "maintenance_before_worker":
-                    return await claim_original_job()
+                    return await claim_original_job(expect_claim=False)
                 if failure_point == "concurrent_recovery":
                     return await manual_paper.run(settings, args)
                 async with sessions.begin() as session:

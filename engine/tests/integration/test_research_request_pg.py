@@ -5,7 +5,7 @@ import importlib
 import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -322,6 +322,7 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
     calls = []
     reuse_states = []
     client, thread, result, _ = _sdk(monkeypatch)
+    original_close = client.close
     processes = []
     client._client._sync = SimpleNamespace(_proc=None)
 
@@ -385,8 +386,22 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
                     )
             options["output_model"].model_validate(response)
         result.final_response = json.dumps(response)
+        if options.pop("response_only", False):
+            return result
         return await real_invoke(payload, **options)
 
+    if contract_version == 3:
+        from helpers.formal_sdk import current_sdk_options
+        from unit.agents.test_codex_sdk import _restore_view
+
+        async def sdk_response(wire, **kwargs):
+            # Formal execution reaches the same real SDK and real child process;
+            # supply the model response at its transport edge, without re-invoking it.
+            return await invoke(
+                _restore_view(json.loads(wire)), **current_sdk_options(), response_only=True
+            )
+
+        thread.run.side_effect = sdk_response
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
     monkeypatch.setattr(
         "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
@@ -427,7 +442,7 @@ async def test_normal_v11_bounded_host_three_stages_each_without_calendar_or_sch
         assert all(m.status == "completed" and m.usage_known for m in view.research.members)
         assert calls == ["research", "critique", "synthesis"] * 3
         assert len(processes) == 9 and all(p.poll() == 0 for p in processes)
-        assert client.close.await_count == 9
+        assert original_close.await_count == 9
         if mode == "research_and_monitor":
             from nexus.agents.research_only import require_formal_research
             from nexus.monitoring.batches import disclosure_source_current
@@ -656,18 +671,37 @@ async def test_interrupted_atomic_preparation_closes_without_replay(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode,contract_version", [("research_only", 2), ("research_and_monitor", 3)]
+    "mode,contract_version,formal_stages",
+    [
+        ("research_only", 2, False),
+        ("research_and_monitor", 3, False),
+        ("research_and_monitor", 3, True),
+    ],
 )
 @pytest.mark.parametrize("typed_after_claim", [False, True])
 async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_next(
-    migrated_database_url, tmp_path, monkeypatch, mode, contract_version, typed_after_claim
+    migrated_database_url,
+    tmp_path,
+    monkeypatch,
+    mode,
+    contract_version,
+    formal_stages,
+    typed_after_claim,
 ):
     from datetime import timedelta
 
+    from nexus.agents.research_stages import executor, routes
     from nexus.jobs import worker
     from nexus.ops.manual_paper_host import run_pure_research_once
     from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
     from nexus.persistence.models.runtime import JobLease
+
+    if not formal_stages:
+
+        async def legacy_preparation(session, run_ids):
+            return None
+
+        monkeypatch.setattr(routes, "register_new_prepared_runs", legacy_preparation)
 
     factory, settings, store, ids = await prepare_scope(
         migrated_database_url, tmp_path, bounded=mode == "research_and_monitor"
@@ -727,6 +761,7 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
 
         monkeypatch.setattr("nexus.ops.agent_paper_once.run_cycle_job_once", reject_after_claim)
     monkeypatch.setattr(worker, "execute_and_finalize_job", disappear)
+    monkeypatch.setattr(executor, "execute_and_finalize_job", disappear)
     monkeypatch.setattr(
         "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
     )
@@ -752,6 +787,37 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
         monkeypatch.setattr("nexus.paper.research_request.database_now", after_expiry)
         async with factory.begin() as session:
             row = await session.get(ManualPaperRequest, request_id)
+            if formal_stages:
+                from helpers.monitoring_readview_browser import stage_facts
+                from nexus.agents.research_stages.protocol import ProtocolRejected
+
+                before = await stage_facts(session)
+                with pytest.raises(ProtocolRejected, match="STAGED_RECOVERY_EVIDENCE_REQUIRED"):
+                    await finish_research_request(session, row=row, cancel_unused=True)
+                assert await stage_facts(session) == before
+                job = await session.get(Job, calls[0])
+                run = await session.get(AgentResearchRunRecord, UUID(job.payload["run_id"]))
+                budget = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == run.id
+                    )
+                )
+                assert job.status == "running" and job.attempt_count == 1
+                assert run.status == "prepared" and run.settled_cost_usd is None
+                assert run.input_tokens is run.output_tokens is None
+                assert budget.state == "reserved" and budget.settled_usd is None
+                with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                    await admit_manual_request(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        batch_id=settings.agent_paper_candidate_batch_id,
+                        model_config_id=settings.agent_paper_formal_model_config_id,
+                        mode=mode,
+                        idempotency_key="blocked-missing-stage-proof",
+                        contract_version=contract_version,
+                    )
+                assert len(calls) == 1
+                return
             closed = await finish_research_request(session, row=row, cancel_unused=True)
             assert closed.status == "unknown" and closed.cycle_id is None
             unknown = [m for m in closed.research.members if not m.usage_known]

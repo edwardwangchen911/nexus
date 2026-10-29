@@ -144,6 +144,23 @@ async def reader_source(
         clock_at[0] = AT + timedelta(seconds=1)
         await _set_test_insert_clock(sessions, AT - timedelta(seconds=1))
 
+    async def prepare_at_frozen_clock(settings, sessions, authority, manifest, clock_at):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_scalar = AsyncSession.scalar
+
+        async def preparation_clock(session, statement, *args, **kwargs):
+            # Synthetic archive custody must precede the fixed research cutoff.
+            # Setup latency is not evidence availability; stages resume the
+            # advancing native fixture clock after this preparation scope.
+            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+                return clock_at[0]
+            return await original_scalar(session, statement, *args, **kwargs)
+
+        with monkeypatch.context() as preparation:
+            preparation.setattr(AsyncSession, "scalar", preparation_clock)
+            await prepare(settings, sessions, authority, manifest, clock_at)
+
     await normal_cycle(
         database_url,
         monkeypatch,
@@ -152,7 +169,7 @@ async def reader_source(
         "formal_v11",
         monitoring=True,
         disclosure=True,
-        before_research=prepare,
+        before_research=prepare_at_frozen_clock,
         monitoring_lifetime_days=monitoring_lifetime_days,
         independent=independent,
     )
@@ -201,7 +218,7 @@ async def reader_source(
             condition_hash=proposal.condition.semantic_hash,
             baseline_snapshot_id=proposal.baseline_snapshot_id,
             baseline_as_of=proposal.baseline_as_of,
-            effective_at=AT + timedelta(seconds=4),
+            effective_at=max(AT + timedelta(seconds=4), captured["clock"][0]),
             review_due_at=proposal.review_due_at,
             valid_until=proposal.valid_until,
         )
@@ -223,7 +240,11 @@ async def append_capture(
     imported_at=None,
 ):
     received = received or AT + timedelta(seconds=2)
-    captured["clock"][0] = imported_at or AT + timedelta(seconds=5)
+    captured["clock"][0] = (
+        imported_at
+        if imported_at is not None
+        else max(captured["clock"][0], AT + timedelta(seconds=5))
+    )
     await _set_test_insert_clock(factory, captured["clock"][0])
     target = root / name
     target.mkdir()

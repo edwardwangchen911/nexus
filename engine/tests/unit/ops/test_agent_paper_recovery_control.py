@@ -61,12 +61,12 @@ def recovery_root(tmp_path):
             "    revision = subprocess.check_output(['git','-C',str(Path(__file__).parents[2]),"
             "'rev-parse','HEAD'],text=True).strip()\n"
             "    heartbeat = {'status':'fresh','release_revision':"
-            "options.get('health_revision',revision),'migration_head':'0098_independent_monitor'}\n"
+            "options.get('health_revision',revision),'migration_head':'0099_research_stages'}\n"
             "    print(json.dumps({'heartbeat': heartbeat, 'preflight':{'status':'ready'}})); "
             "sys.exit(0)\n"
             "if '--service-recovery-check' in sys.argv:\n"
             "    print(json.dumps({'status':options.get('recovery_status','ready'), "
-            "'migration_head':'0098_independent_monitor', "
+            "'migration_head':'0099_research_stages', "
             "'blocking_codes':options.get('blocking_codes',[])})); sys.exit(0)\n"
             "if '--service-startup-preflight' in sys.argv:",
         )
@@ -816,3 +816,53 @@ def test_healthy_reenrollment_keeps_local_resolution_audit(tmp_path):
     assert _invoke(root, env, "enable-recovery").returncode == 0
     assert json.loads(target.read_text())["attempt_resolutions"] == audit
     assert starts(root) == []
+
+
+def test_exact_unclassified_exit_diagnostic_does_not_allow_auto_recovery(tmp_path):
+    root, env = recovery_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        target, receipt = add_activation(root)
+        data = json.loads(target.read_text())
+        data["active_attempt"] = data["attempts"][-1]
+        target.write_text(json.dumps(data))
+        value = json.loads(receipt.read_text())
+        value.update(
+            reason="unclassified",
+            exit_stage="host_loop",
+            exit_code="AGENT_PAPER_LOOP_RESULT_UNKNOWN",
+        )
+        receipt.write_text(json.dumps(value))
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    before = receipt.read_bytes()
+    _register(root, state="inactive", exit_code=1)
+    _invoke(root, env, "recover")
+    assert starts(root) == []
+    assert json.loads(target.read_text())["reason"] == "EXIT_UNCLASSIFIED"
+    assert receipt.read_bytes() == before
+
+
+def test_pending_receipt_write_cannot_authorize_recovery(tmp_path):
+    root, env = recovery_root(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        target, receipt = add_activation(root)
+        data = json.loads(target.read_text())
+        data["active_attempt"] = data["attempts"][-1]
+        target.write_text(json.dumps(data))
+        marker = receipt.with_suffix(".write-pending")
+        marker.write_text("unconfirmed")
+        marker.chmod(0o600)
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    _register(root, state="inactive", exit_code=1)
+    _invoke(root, env, "recover")
+    assert starts(root) == []
+    assert marker.exists()

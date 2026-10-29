@@ -253,3 +253,14 @@ def test_diagnostic_notification_delivery_regressions_are_in_merge_gate() -> Non
         "engine/tests/integration/test_outbox.py",
     ):
         assert selected.count(path) == 1
+
+
+def test_formal_stage_lifecycle_regressions_are_in_merge_gate() -> None:
+    selected = [selector for group in MERGE_GROUPS[1:] for selector in selectors_for(group)]
+    for path in (
+        "engine/tests/integration/test_research_stages_migration_pg.py",
+        "engine/tests/integration/test_research_stages_runtime_pg.py",
+        "engine/tests/integration/test_research_stages_public_pg.py",
+        "engine/tests/integration/test_research_stages_dispatch_pg.py",
+    ):
+        assert selected.count(path) == 1

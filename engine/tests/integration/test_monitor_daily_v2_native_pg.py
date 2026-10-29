@@ -230,6 +230,8 @@ async def test_new_daily_native_consumes_only_qualified_historical_events(
         assert not await run_agent_worker_once(
             settings, job_ids=(job.id,), formal_stage_capacity=True
         )
+    async with factory() as session:
+        now = await session.scalar(select(func.clock_timestamp()))
     if mode.startswith("superseded_"):
         from helpers.monitor_generation import assert_old_run_superseded
         from integration.test_daily_v2_readback_pg import close_daily_cycle
@@ -296,7 +298,15 @@ async def test_new_daily_native_consumes_only_qualified_historical_events(
                 select(MonitorCoverageReceipt).where(MonitorCoverageReceipt.run_id == target.id)
             )
         )
-        assert {row.kind for row in coverage} == {"price", "disclosure"}
+        assert {row.kind for row in coverage} == {"price", "disclosure"}, {
+            "report": report,
+            "now": now.isoformat(),
+            "seen": seen,
+            "jobs": [
+                (j.status, j.last_error_code, str(j.finished_at))
+                for j in await session.scalars(select(Job).where(Job.id.in_([j.id for j in jobs])))
+            ],
+        }
         if mode in {"unresolved", "veto"}:
             assert all(row.status == "gap" and row.active_plan_id is None for row in coverage)
             assert {row.reason for row in coverage} == {

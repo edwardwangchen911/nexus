@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 import httpx
@@ -132,17 +133,23 @@ async def test_filled_hold_and_complete_watch_follow_normal_monitoring_without_n
         agent_paper_formal_model_config_id=seed_runs[0].model_config_id,
     )
     clock = [first_at]
+    anchor = [clock[0], monotonic(), clock[0]]
     original_scalar = AsyncSession.scalar
 
     async def database_clock(self, statement, *args, **kwargs):
         if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-            return clock[0]
+            return WorkerClock.now(clock[0].tzinfo)
         return await original_scalar(self, statement, *args, **kwargs)
 
     class WorkerClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return clock[0] if tz is None else clock[0].astimezone(tz)
+            tick = monotonic()
+            if clock[0] != anchor[2]:
+                anchor[:2] = [clock[0], tick]
+            at = max(clock[0], anchor[0] + timedelta(seconds=tick - anchor[1]))
+            clock[0] = anchor[2] = at
+            return at if tz is None else at.astimezone(tz)
 
     monkeypatch.setattr(AsyncSession, "scalar", database_clock)
     monkeypatch.setattr("nexus.worker.datetime", WorkerClock)

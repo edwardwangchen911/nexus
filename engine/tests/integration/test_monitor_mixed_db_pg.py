@@ -362,12 +362,16 @@ async def test_mixed_members_materials_scope_and_late_binding_fences(
             .values(status="unknown")
         )
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
-    with pytest.raises(DBAPIError, match="MONITOR_MIXED_HISTORY_DOWNGRADE_FORBIDDEN"):
+    with pytest.raises(DBAPIError, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
         await asyncio.to_thread(
             command.downgrade,
             Config(str(Path(__file__).parents[2] / "alembic.ini")),
             "0094_monitor_batches",
         )
+    from helpers.migration_guard import historical_downgrade_guard
+
+    with pytest.raises(DBAPIError, match="MONITOR_MIXED_HISTORY_DOWNGRADE_FORBIDDEN"):
+        await historical_downgrade_guard(migrated_database_url, "0095_monitor_mixed_increments")
     await factory.kw["bind"].dispose()
 
 

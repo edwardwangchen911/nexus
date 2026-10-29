@@ -423,7 +423,7 @@ async def _seal_manual_scope(
     return target
 
 
-async def _proof(
+async def _legacy_proof(
     session: AsyncSession,
     *,
     cycle_id: UUID,
@@ -608,7 +608,27 @@ async def _proof(
             .order_by(AgentResearchEventRecord.sequence)
         )
     )
-    if expired_attempt:
+    from nexus.agents.research_stages.proof import read_terminal_proof
+    from nexus.agents.research_stages.protocol import ProtocolRejected
+
+    try:
+        stage_proof = await read_terminal_proof(session, run_id=run.id, now=now)
+    except ProtocolRejected:
+        raise ValueError(_BLOCKED) from None
+    if stage_proof is not None:
+        # Selected identities prove their frozen lower bound from stage facts;
+        # stopped publication need not have emitted legacy per-role outputs.
+        if stage_proof.known or not stage_proof.cleanup_confirmed:
+            raise ValueError(_BLOCKED)
+        if (expired_attempt and not stage_proof.orphan) or (
+            same_day and not expired_attempt and stage_proof.orphan
+        ):
+            raise ValueError(_BLOCKED)
+        if any(output.role is not None for output in outputs):
+            await _require_partial_usage_proof(session, run, outputs, model)
+        elif any(output.status != "failed" or output.intent is not None for output in outputs):
+            raise ValueError(_BLOCKED)
+    elif expired_attempt:
         from nexus.paper.research_orphan_proof import require_expired_research_proof
 
         if not formal_preparation_model_matches(model):
@@ -807,3 +827,31 @@ async def seal_failed_research(
         # Recheck after proof/audit work, before returning to the CLI's commit fence.
         require_research_processes_quiescent()
     return HistorySealReceipt(sealed_research=len(run_ids), replayed=new == 0)
+
+
+async def _proof(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    run_id: UUID,
+    now: datetime,
+    same_day: bool = False,
+    expired_attempt: bool = False,
+    read_only: bool = False,
+) -> dict[str, object]:
+    from typing import cast
+
+    from nexus.agents.research_stages.public import _history_proof
+
+    return cast(
+        dict[str, object],
+        await _history_proof(
+            session,
+            cycle_id=cycle_id,
+            run_id=run_id,
+            now=now,
+            same_day=same_day,
+            expired_attempt=expired_attempt,
+            read_only=read_only,
+        ),
+    )

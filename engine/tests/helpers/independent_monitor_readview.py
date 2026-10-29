@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 import httpx
-from helpers.monitoring_readview_browser import verify_monitoring_browser
+from helpers.monitoring_readview_browser import stage_facts, verify_monitoring_browser
 from helpers.paper_api import app, headers
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -41,7 +41,7 @@ async def verify_readview(database_url, factory, monkeypatch, pointer, child_id,
                     )
                 )
             ]
-            return identities, budgets
+            return identities, budgets, await stage_facts(session)
 
     before = await facts()
     from nexus.paper.read_service import PaperReadService

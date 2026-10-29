@@ -351,7 +351,7 @@ async def verify_controlled_browser(
         web_process = await asyncio.create_subprocess_exec(
             str(web_root / "node_modules/.bin/vinext"),
             "dev",
-            "--hostname",
+            "--host",
             "127.0.0.1",
             "--port",
             str(web_port),

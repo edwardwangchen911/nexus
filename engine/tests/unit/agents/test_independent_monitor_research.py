@@ -274,10 +274,19 @@ async def test_independent_missing_raw_price_basis_drops_only_price_not_audited_
 
 
 @pytest.mark.asyncio
-async def test_independent_capacity_bounds_sec_and_price_prior_outputs_before_sdk(monkeypatch):
+@pytest.mark.parametrize("prior_mode", ["empty", "max"])
+@pytest.mark.parametrize(
+    "prior_text",
+    ["\x00" * 400, "".join(chr(0x10000 + i) for i in range(400))],
+    ids=["c0", "distinct-four-byte"],
+)
+async def test_independent_capacity_bounds_sec_and_price_prior_outputs_before_sdk(
+    monkeypatch, prior_mode, prior_text
+):
     from nexus.agents import codex_capacity
     from nexus.agents.codex_sdk import codex_request_wire
     from nexus.agents.codex_staged import STAGES
+    from nexus.agents.committee import ROLE_ORDER
     from nexus.agents.independent_monitor import INSTRUCTIONS, PROMPT_VERSION
     from nexus.monitoring.independent_context import IndependentMonitorContext
     from unit.agents.test_full_input_capacity_v9 import committee
@@ -326,13 +335,28 @@ async def test_independent_capacity_bounds_sec_and_price_prior_outputs_before_sd
     assert maximum._outputs["market_state"].monitoring_proposal is not None
     for role in ("bear", "evidence_audit"):
         assert maximum._outputs[role].disclosure_review is not None
-    for stage, _ in STAGES:
+    for stage, roles in STAGES:
+        previous = (
+            [
+                dict(
+                    claim_id=f"{role}:{index}",
+                    role=role,
+                    vote="abstain",
+                    text=prior_text,
+                    citations=[len(evidence) - 1] * 3,
+                )
+                for role in ROLE_ORDER[: ROLE_ORDER.index(roles[0])]
+                for index in range(2)
+            ]
+            if prior_mode == "max"
+            else []
+        )
         payload, _ = maximum.build_stage_request(
             stage=stage,
             request=request,
             evidence_refs=evidence,
             frozen_inputs=inputs,
-            previous=[],
+            previous=previous,
             financial_table_candidate=True,
         )
         bound = next(row for row in envelope["stages"] if row["stage"] == stage)
