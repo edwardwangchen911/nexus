@@ -269,7 +269,15 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
     )
 
     async def coordinated_tick(at, *, diagnostic=None):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
         results = {}
+        scalar = AsyncSession.scalar
+
+        async def tick_clock(self, statement, *values, **options):
+            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+                return at
+            return await scalar(self, statement, *values, **options)
 
         async def prepare(bucket):
             results["observed"] = await research_monitor.run(settings, args)
@@ -281,10 +289,14 @@ async def test_observe_cli_to_real_persisted_checks_preserves_research_and_dedup
             )
             return results["scanned"]
 
-        coordinator = PriceMonitorCoordinator(scan, prepare=prepare)
-        assert coordinator.last_bucket is None
-        assert coordinator.kick(at)
-        await coordinator.close()
+        # Research has completed. One deterministic observation tick uses one
+        # instant; wall-clock jitter must not straddle the exact 300s SEC boundary.
+        with monkeypatch.context() as tick_patch:
+            tick_patch.setattr(AsyncSession, "scalar", tick_clock)
+            coordinator = PriceMonitorCoordinator(scan, prepare=prepare)
+            assert coordinator.last_bucket is None
+            assert coordinator.kick(at)
+            await coordinator.close()
         assert not coordinator.busy
         assert coordinator.last_diagnostic == diagnostic, json.dumps(results, default=str)
         assert not coordinator.kick(at)

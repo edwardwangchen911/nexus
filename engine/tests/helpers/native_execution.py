@@ -20,7 +20,9 @@ def use_historical_research_preparation(monkeypatch):
     monkeypatch.setattr(routes, "register_new_prepared_runs", historical)
 
 
-async def claim_without_dispatch(settings, monkeypatch, *, job_id, now):
+async def claim_without_dispatch(
+    settings, monkeypatch, *, job_id, now, expect_claim=True, worker_id=None
+):
     """Stop after the real Worker commits its guarded claim, before any SDK work."""
     from nexus.agents.research_stages import executor
     from nexus.worker import run_agent_worker_once
@@ -42,8 +44,15 @@ async def claim_without_dispatch(settings, monkeypatch, *, job_id, now):
     with monkeypatch.context() as patch:
         patch.setattr("nexus.worker.datetime", Clock)
         patch.setattr("nexus.worker._ONCE_STARTED_AT", now)
-        patch.setattr("nexus.worker._ONCE_WORKER_ID", f"controlled-claim-{job_id}")
+        patch.setattr("nexus.worker._ONCE_WORKER_ID", worker_id or f"controlled-claim-{job_id}")
         patch.setattr(executor, "execute_staged_claim", interrupted)
+        if not expect_claim:
+            result = await run_agent_worker_once(
+                settings, job_ids=(job_id,), formal_stage_capacity=True
+            )
+            assert result is False
+            assert claims == []
+            return None
         with pytest.raises(Claimed):
             await run_agent_worker_once(settings, job_ids=(job_id,), formal_stage_capacity=True)
     assert len(claims) == 1

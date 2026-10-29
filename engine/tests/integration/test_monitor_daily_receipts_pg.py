@@ -461,6 +461,25 @@ async def test_frozen_daily_history_blocks_downgrade_without_any_receipt(
     factory, _receipt, _trigger = await receipt_source(migrated_database_url, monkeypatch)
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    with pytest.raises(DBAPIError, match="MONITOR_DAILY_HISTORY_DOWNGRADE_FORBIDDEN"):
+    with pytest.raises(DBAPIError, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
         await asyncio.to_thread(command.downgrade, config, "0091_monitor_frozen_members")
+
+    # Exercise the retained historical guard behind the new outer stage fence.
+    import importlib.util
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    source = Path(__file__).parents[2] / "alembic/versions/0092_monitor_daily_receipts.py"
+    spec = importlib.util.spec_from_file_location("historical_monitor_guard_test", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def original_downgrade(connection):
+        module.op = Operations(MigrationContext.configure(connection))
+        module.downgrade()
+
+    with pytest.raises(DBAPIError, match="MONITOR_DAILY_HISTORY_DOWNGRADE_FORBIDDEN"):
+        async with factory.kw["bind"].begin() as connection:
+            await connection.run_sync(original_downgrade)
     await factory.kw["bind"].dispose()
