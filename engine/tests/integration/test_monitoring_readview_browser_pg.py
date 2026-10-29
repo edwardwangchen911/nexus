@@ -331,3 +331,39 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
             ] == budget_states
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_disclosure_readview_survives_slow_archive_preparation(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from helpers import disclosure_observations
+    from integration import test_candidate_multistock_path as candidate
+
+    native_monotonic = candidate.monotonic
+    native_capture = disclosure_observations.import_baseline_capture
+    preparation_elapsed = 0.0
+
+    def elapsed_clock():
+        return native_monotonic() + preparation_elapsed
+
+    async def delayed_capture(*args, **kwargs):
+        nonlocal preparation_elapsed
+        # Advance setup time past the fixed historical research cutoff without
+        # sleeping or changing any persisted evidence or business time limit.
+        preparation_elapsed += 3.0
+        return await native_capture(*args, **kwargs)
+
+    browser_root = os.environ.get("NEXUS_TEST_MONITOR_BROWSER_DIR")
+    if browser_root:
+        monkeypatch.setenv(
+            "NEXUS_TEST_MONITOR_BROWSER_DIR", str(Path(browser_root) / "slow-preparation")
+        )
+    monkeypatch.setattr(candidate, "monotonic", elapsed_clock)
+    monkeypatch.setattr(disclosure_observations, "import_baseline_capture", delayed_capture)
+    await test_saved_monitoring_api_and_optional_normal_browser(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        "MONITOR_KIND_EVENTS_UNRESOLVED",
+    )
