@@ -336,6 +336,10 @@ async def test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
 async def test_manual_native_terminal_reconciliation_requires_settled_jobs(
     migrated_database_url, monkeypatch, candidate_count, mode, failure_status
 ):
+    # Preserve the pre-stage synthetic terminal compatibility matrix explicitly.
+    from helpers.native_execution import use_historical_research_preparation
+
+    use_historical_research_preparation(monkeypatch)
     await test_manual_native_cycle_binds_request_and_replays_without_new_jobs(
         migrated_database_url, monkeypatch, candidate_count, mode, failure_status=failure_status
     )

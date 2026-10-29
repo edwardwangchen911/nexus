@@ -70,6 +70,10 @@ async def test_completed_scheduled_v10_history_admission(migrated_database_url, 
 async def test_formal_entries_require_settled_matching_historical_jobs(
     migrated_database_url, monkeypatch, tmp_path, shape
 ):
+    # This matrix constructs archived failed/unknown history, without native stage facts.
+    from helpers.native_execution import use_historical_research_preparation
+
+    use_historical_research_preparation(monkeypatch)
     await prepare_database(
         EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk"),
         **{**V9_OPTIONS, "formal_flexible_stage_budget": True},

@@ -52,6 +52,10 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 async def test_formal_failure_seal_keeps_unknown_usage_and_unlocks_only_settled_account(
     migrated_database_url, monkeypatch, version, fault, same_day=False
 ):
+    # This matrix constructs archived failed/unknown history, without native stage facts.
+    from helpers.native_execution import use_historical_research_preparation
+
+    use_historical_research_preparation(monkeypatch)
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     engine, sessions, authority, manifest = await seed_normal_path(
         migrated_database_url,

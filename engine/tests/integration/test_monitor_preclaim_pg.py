@@ -153,23 +153,11 @@ async def test_rejection_never_releases_unproved_or_used_increment(
             run = await session.get(AgentResearchRunRecord, run_id)
             run.input_tokens = 1
     if fault == "claimed":
-        from nexus.agents.codex_formal_stage import formal_stage_job_qualified
-        from nexus.jobs.models import QueueName
-        from nexus.jobs.repository import claim_next_job
+        from helpers.native_execution import claim_without_dispatch
 
-        async with factory() as session, session.begin():
-            run = await session.get(AgentResearchRunRecord, run_id)
-            assert await claim_next_job(
-                session,
-                queue=QueueName.GENERAL,
-                worker_id="synthetic-worker",
-                now=now,
-                lease_seconds=330,
-                job_ids=(job_id,),
-                job_types=("agent.paper.research",),
-                locked_job_guard=formal_stage_job_qualified,
-                research_budget_profile=run.pricing_version,
-            )
+        async with factory() as session:
+            claimed_at = await session.scalar(select(func.clock_timestamp()))
+        assert await claim_without_dispatch(settings, monkeypatch, job_id=job_id, now=claimed_at)
     with pytest.raises(ValueError, match="MONITOR_PRECLAIM_CLOSE_UNCONFIRMED"):
         await close_capacity_rejected_increment_once(
             settings,

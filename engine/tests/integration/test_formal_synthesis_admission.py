@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 import pytest
@@ -42,7 +43,12 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
     protected,
     manual_mode=None,
     manual_consumer=False,
+    historical_preparation=False,
 ):
+    if historical_preparation:
+        from helpers.native_execution import use_historical_research_preparation
+
+        use_historical_research_preparation(monkeypatch)
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     await prepare_database(settings, **OPTIONS)
     if manual_mode is not None:
@@ -72,15 +78,27 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
 
     async def database_clock(self, statement, *args, **kwargs):
         if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-            return clock_at[0]
+            return WorkerClock.now(UTC)
         return await original_scalar(self, statement, *args, **kwargs)
 
     monkeypatch.setattr(AsyncSession, "scalar", database_clock)
 
+    clock_anchor = [clock_at[0], monotonic(), clock_at[0]]
+    read_snapshot_at = [None]
+
     class WorkerClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            at = clock_at[0]
+            if read_snapshot_at[0] is not None:
+                at = read_snapshot_at[0]
+                return at if tz is None else at.astimezone(tz)
+            # Real staged commits advance within one research run; admission must
+            # observe that same timeline, including explicit historical test jumps.
+            tick = monotonic()
+            if clock_at[0] != clock_anchor[2]:
+                clock_anchor[:2] = [clock_at[0], tick]
+            at = max(clock_at[0], clock_anchor[0] + timedelta(seconds=tick - clock_anchor[1]))
+            clock_at[0] = clock_anchor[2] = at
             return at if tz is None else at.astimezone(tz)
 
     async def invoke(payload, **kwargs):
@@ -281,7 +299,12 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
         )
 
         if count == 3 and not trade:
-            with pytest.raises(ValueError, match="AGENT_PAPER_RESULT_UNKNOWN"):
+            error = (
+                "AGENT_PAPER_RESULT_UNKNOWN"
+                if historical_preparation
+                else "CODEX_STAGED_WORKER_ARGUMENT_INVALID"
+            )
+            with pytest.raises(ValueError, match=error):
                 await run_research_once(
                     settings,
                     AgentPaperRunResearchRequest(action="run-research", cycle_id=result.cycle_id),
@@ -523,7 +546,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             assert not await run_agent_worker_once(
                 settings, job_ids=(job.id,), formal_stage_capacity=True
             )
-        clock_at[0] = AT + timedelta(seconds=2)
+        clock_at[0] = max(WorkerClock.now(UTC), AT + timedelta(seconds=2))
         assert calls == ["research", "critique", "synthesis"] * count
         async with sessions() as session:
             for run_id in result.research_run_ids:
@@ -550,7 +573,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 action = await load_actionable_research_output(
                     session,
                     run_id=run_id,
-                    decision_time=AT + timedelta(seconds=2),
+                    decision_time=clock_at[0],
                     allow_safe_no_trade=True,
                     formal_stage_capacity=True,
                 )
@@ -619,7 +642,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                         await load_actionable_research_output(
                             session,
                             run_id=run_id,
-                            decision_time=AT + timedelta(seconds=2),
+                            decision_time=clock_at[0],
                             allow_safe_no_trade=True,
                             formal_stage_capacity=True,
                         )
@@ -629,7 +652,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 active_target_version_id=None,
                 projection_hash=projection.projection_hash,
                 daily_limit_usd=Decimal("3"),
-                now=AT + timedelta(seconds=2),
+                now=clock_at[0],
                 formal_stage_capacity=True,
             )
             from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
@@ -647,7 +670,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                         session,
                         cycle_id=result.cycle_id,
                         idempotency_key="reject-mode",
-                        now=AT + timedelta(seconds=2),
+                        now=clock_at[0],
                         **changes,
                     )
             assert [
@@ -657,7 +680,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 session,
                 cycle_id=result.cycle_id,
                 idempotency_key="formal-admit-synthesis",
-                now=AT + timedelta(seconds=2),
+                now=clock_at[0],
                 daily_limit_usd=Decimal("3"),
                 formal_stage_capacity=True,
             )
@@ -733,7 +756,7 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
         monkeypatch.setattr(
             "nexus.agents.portfolio_synthesis_worker.invoke_codex_portfolio", invoke_portfolio
         )
-        clock_at[0] = AT + timedelta(seconds=3)
+        clock_at[0] = max(WorkerClock.now(UTC), AT + timedelta(seconds=3))
         await _set_test_insert_clock(sessions, clock_at[0])
         # Fault injection is confined to a rolled-back savepoint in the owned test DB.
         # A frozen identity mismatch must stop before lease/attempt/model I/O.
@@ -832,8 +855,8 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             StrategyDecisionAgentOutputRecord,
         )
 
-        await _set_test_insert_clock(sessions, AT + timedelta(seconds=4))
-        clock_at[0] = AT + timedelta(seconds=4)
+        clock_at[0] = max(WorkerClock.now(UTC), AT + timedelta(seconds=4))
+        await _set_test_insert_clock(sessions, clock_at[0])
         if count == 3 and not trade:
             from integration.test_portfolio_management_e2e import _business_facts
 
@@ -965,13 +988,13 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="default-terminal-replay",
-                    now=AT + timedelta(seconds=5),
+                    now=max(WorkerClock.now(UTC), AT + timedelta(seconds=5)),
                 )
             replay = await resume_schwab_agent_paper_cycle(
                 session,
                 cycle_id=result.cycle_id,
                 idempotency_key="formal-activate-target",
-                now=AT + timedelta(seconds=5),
+                now=max(WorkerClock.now(UTC), AT + timedelta(seconds=5)),
                 formal_stage_capacity=True,
             )
             assert replay.order_ids == finished.order_ids
@@ -1011,7 +1034,9 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                     == 0
                 )
                 unchanged = await load_paper_projection(
-                    session, account_id=authority.account_id, as_of=AT + timedelta(seconds=5)
+                    session,
+                    account_id=authority.account_id,
+                    as_of=max(WorkerClock.now(UTC), AT + timedelta(seconds=5)),
                 )
                 assert unchanged.positions == projection.positions
                 assert unchanged.available_cash == projection.available_cash
@@ -1065,7 +1090,10 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
             window_end = await session.scalar(
                 select(func.max(AgentPaperMarketWindowRecord.window_end_at))
             )
-            api_now = (window_end or AT) + timedelta(seconds=5)
+            api_now = max(WorkerClock.now(UTC), (window_end or AT) + timedelta(seconds=5))
+        # All research/synthesis work has finished. Freeze one subsequent read
+        # snapshot for exact close-event and API comparisons in this scenario.
+        read_snapshot_at[0] = api_now
         if manual_mode == "research_and_paper":
             from nexus.ops.manual_paper_host import (
                 finish_configured_manual_request,
@@ -1242,3 +1270,17 @@ async def test_formal_multistock_research_admits_exact_portfolio_synthesis(
                 assert view.status == "completed" and view.code == "MANUAL_PAPER_COMPLETED"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_historical_formal_research_retains_unqualified_worker_rejection(
+    migrated_database_url, monkeypatch
+):
+    await test_formal_multistock_research_admits_exact_portfolio_synthesis(
+        migrated_database_url,
+        monkeypatch,
+        count=3,
+        trade=False,
+        protected=False,
+        historical_preparation=True,
+    )

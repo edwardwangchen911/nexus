@@ -59,9 +59,33 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         from unit.agents.test_codex_sdk import _sdk
 
         client, thread, sdk_result, _ = _sdk(monkeypatch)
+        original_close = client.close
+        from types import SimpleNamespace
+
+        exited = [False]
+        client._client._sync = SimpleNamespace(
+            _proc=SimpleNamespace(
+                poll=lambda: 0 if exited[0] else None,
+                kill=lambda: exited.__setitem__(0, True),
+            )
+        )
+
+        async def close():
+            exited[0] = True
+            if research_timeout:
+                closed.set()
+
+        async def account(**kwargs):
+            # The unit SDK double reuses its client; each invocation still owns
+            # a live process edge and its original close mock independently.
+            exited[0] = False
+            client.close = original_close
+            return client.account.return_value
+
+        client.account.side_effect = account
+        original_close.side_effect = close
         if research_timeout:
             import asyncio
-            from types import SimpleNamespace
             from unittest.mock import AsyncMock
 
             # Real product SDK wrapper deadline/cancellation and close dispatch,
@@ -76,7 +100,6 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
 
             monkeypatch.setattr(asyncio, "timeout_at", observe_timer)
             closed = asyncio.Event()
-            client.close.side_effect = closed.set
             client._client.next_turn_notification = AsyncMock(
                 return_value=SimpleNamespace(
                     method="item/reasoning/textDelta", payload="private-progress-canary"
@@ -109,8 +132,9 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
     else:
         config, config_hash = capacity_config(), capacity_config_hash()
 
-    async def invoke(payload, **options):
-        calls.append(payload["stage"])
+    async def invoke(payload, *, response_only=False, **options):
+        if response_only or not (flexible or bounded):
+            calls.append(payload["stage"])
         assert options["max_wire_bytes"] == 100479
         if flexible or bounded:
             assert options["stage_budget_version"] == config["version"]
@@ -126,9 +150,23 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
         )
         if flexible or bounded:
             sdk_result.final_response = json.dumps(body)
+            if response_only:
+                if research_timeout:
+                    return await unfinished_turn()
+                return sdk_result
             return await real_sdk_invoke(payload, **options)
         return json.dumps(body), UsageSnapshot(input_tokens=100, output_tokens=80)
 
+    if flexible or bounded:
+        from helpers.formal_sdk import current_sdk_options
+        from unit.agents.test_codex_sdk import _restore_view
+
+        async def sdk_response(wire, **kwargs):
+            return await invoke(
+                _restore_view(json.loads(wire)), response_only=True, **current_sdk_options()
+            )
+
+        thread.run.side_effect = sdk_response
     monkeypatch.setattr("nexus.agents.codex_staged.invoke_codex", invoke)
     try:
         await _set_test_insert_clock(sessions, AT)
@@ -398,7 +436,7 @@ async def test_full_cycle_worker_rederives_whole_pool_before_claim_or_sdk(
                 assert response.json()["data"]["abstention_reason"] == "model_usage_uncertain"
                 assert calls == ["research"]
                 thread.run.assert_awaited_once()
-                client.close.assert_awaited_once()
+                original_close.assert_awaited_once()
                 return
             if flexible or bounded:
                 from nexus.persistence.models.agents import AgentResearchOutputRecord
