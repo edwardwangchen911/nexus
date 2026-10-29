@@ -104,7 +104,11 @@ from nexus.providers.market.alpaca_http import (
     InstrumentSymbolResolver,
     SqlInstrumentSymbolResolver,
 )
-from nexus.providers.market.schwab_oauth import SchwabOAuthError, schwab_http_client
+from nexus.providers.market.schwab_oauth import (
+    SchwabOAuthError,
+    safe_schwab_oauth_error_code,
+    schwab_http_client,
+)
 from nexus.providers.market.schwab_price_history import SchwabPriceHistoryProvider
 from nexus.providers.market.schwab_stream import SchwabStreamError
 from nexus.reconciliation.admission_claim import claim_or_lock
@@ -612,6 +616,8 @@ def _raise_schwab_l1_incomplete(error: Exception, *, diagnostic_path: Path) -> N
         "stage": "capture_or_import",
         "provider_error_code": provider_error_code,
     }
+    if category := safe_schwab_oauth_error_code(error):
+        payload["oauth_error_code"] = category
     failure_stage = getattr(error, "failure_stage", None)
     if failure_stage in {
         "archive_pack",

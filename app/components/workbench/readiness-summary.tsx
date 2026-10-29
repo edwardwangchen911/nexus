@@ -46,6 +46,8 @@ export function ReadinessSummary({ workbench }: { workbench: Workbench }): React
     {readiness ? <p>已保存阶段：{stages[readiness.stage]} · <code>{readiness.reason_code}</code></p> : null}
     {readiness?.blocker === "research_not_actionable" ? <p>现有记录只证明研究未通过交易准入；不据此推断具体资料缺口，也不等同于已形成充分证据的不调整结论。</p> : null}
     {readiness?.reason_code === "OPEN_ORDER_EXISTS" ? <p>已有订单尚未完成，等待原订单的执行结果。</p> : null}
+    {!workbench.latest_cycle && readiness?.reason_code === "SCHWAB_L1_INCOMPLETE" ? <p>自然启动已记录行情准备失败，尚未形成研究周期；不能据此推断授权过期或行情源的具体原因。静态资料齐备不代表远端授权及窗口行情已核验，原失败请求不会因刷新页面而重放。</p> : null}
+    {!workbench.latest_cycle && readiness?.reason_code === "SCHWAB_L1_FRESHNESS_UNPROVEN" ? <p>自然启动未能证明行情时效，尚未形成研究周期；等待后续正常入口重新核验，不补跑原失败请求。</p> : null}
     {readiness?.blocker === "result_unknown" ? <p>先核对原周期和订单结果；此处不提供重放或恢复按钮。</p> : null}
     <p>{readiness?.previous_cycle_id
       ? <>与本交易日上一周期相比：{readiness.changes.length ? `变化项为${readiness.changes.map((key) => changes[key]).join("、")}` : "阶段、阻断、结果、风控和订单数量均无变化"}。<a href={`/decisions/${readiness.previous_cycle_id}`}>查看上一周期</a></>

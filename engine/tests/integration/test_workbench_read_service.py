@@ -397,3 +397,113 @@ async def test_readiness_round_trips_persisted_adjacent_cycles_through_read_only
         response = await client.get(path, headers=headers("GET", path))
     assert response.status_code == 200
     assert response.json()["data"] == result.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "exact",
+        "other_account",
+        "other_day",
+        "other_route",
+        "other_schema",
+        "future",
+        "pending",
+        "unknown",
+        "generic",
+        "completed",
+        "non_object",
+        "extra_unknown",
+    ],
+)
+async def test_workbench_reads_only_exact_visible_natural_trigger_failure(
+    migrated_database_url: str, variant: str
+) -> None:
+    from nexus.persistence.models.runtime import IdempotencyRecord
+    from sqlalchemy import text
+
+    seed = await seed_paper_batch(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payload = {"outcome": "failed", "error_code": "SCHWAB_L1_INCOMPLETE"}
+    if variant == "pending":
+        payload = {}
+    elif variant == "unknown":
+        payload["error_code"] = "UNSAFE_PROVIDER_TEXT"
+    elif variant == "generic":
+        payload["error_code"] = "AGENT_PAPER_TRIGGER_FAILED"
+    elif variant == "completed":
+        payload = {"outcome": "completed"}
+    elif variant == "non_object":
+        payload = []
+    elif variant == "extra_unknown":
+        payload["external_effects"] = "unknown"
+    claim_id = UUID("72000000-0000-0000-0000-000000000881")
+    actor_account = UUID(int=999) if variant == "other_account" else seed.account_id
+    async with factory.begin() as session:
+        session.add(
+            IdempotencyRecord(
+                id=claim_id,
+                actor_id=f"local-agent-paper-schwab:{actor_account}",
+                route="other-route"
+                if variant == "other_route"
+                else "agent-paper-schwab-trigger-v2",
+                idempotency_key=(
+                    ACTIVE_DECISION_TIME - timedelta(days=1)
+                    if variant == "other_day"
+                    else ACTIVE_DECISION_TIME
+                ).isoformat(),
+                schema_version="other-schema"
+                if variant == "other_schema"
+                else "agent_paper_schwab_trigger_v2",
+                request_hash="a" * 64,
+                response_payload=payload,
+                created_at=ACTIVE_DECISION_TIME + timedelta(minutes=2)
+                if variant == "future"
+                else ACTIVE_DECISION_TIME,
+            )
+        )
+    async with factory() as session:
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        result = await WorkbenchReadService(
+            session, ACTIVE_DECISION_TIME + timedelta(minutes=1)
+        ).read()
+        saved = await session.get(IdempotencyRecord, claim_id)
+        assert saved is not None and saved.response_payload == payload
+    assert result.execution_locked is True
+    assert result.latest_cycle is None
+    assert result.readiness is not None
+    expected = (
+        "SCHWAB_L1_INCOMPLETE"
+        if variant == "exact"
+        else (
+            "AGENT_PAPER_RESULT_UNKNOWN"
+            if variant
+            in {"pending", "unknown", "generic", "completed", "non_object", "extra_unknown"}
+            else "CYCLE_MISSING"
+        )
+    )
+    assert result.readiness.reason_code == expected
+    assert result.readiness.blocker == (
+        "data_missing"
+        if variant == "exact"
+        else "result_unknown"
+        if expected == "AGENT_PAPER_RESULT_UNKNOWN"
+        else "unknown"
+    )
+
+    if variant == "exact":
+        import httpx
+        from helpers.paper_api import app, headers
+
+        route = "/internal/v1/workbench"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app(migrated_database_url, now=ACTIVE_DECISION_TIME + timedelta(minutes=1))
+            ),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(route, headers=headers("GET", route))
+        assert response.status_code == 200
+        assert response.json()["data"]["readiness"]["reason_code"] == "SCHWAB_L1_INCOMPLETE"
+        assert response.json()["data"]["execution_locked"] is True
