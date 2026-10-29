@@ -223,17 +223,27 @@ async def _history_proof(session: Any, **kwargs: Any) -> Any:
 async def _research_settled(
     session: Any, *, row: Any, view: Any, now: Any, allow_unknown_usage: Any = False
 ) -> Any:
-    await research_request._legacy_require_research_jobs_settled(
-        session, row=row, view=view, now=now, allow_unknown_usage=allow_unknown_usage
-    )
-    if await session.scalar(text("SELECT to_regclass('research_stage_route')")) is None:
-        return
+    historical = []
     for member in view.members:
+        if await selected_route(session, member.job_id) is None:
+            historical.append(member)
+            continue
+        # The formal proof validates the consumed fence and cleanup separately
+        # from usage. A retained, unexpired lease must not prevent recording an
+        # unknown outcome; it still cannot grant next-round admission.
         await _selected_member_settled(
             session,
             owner_id=row.id,
             kind="independent",
             member=member,
+            now=now,
+            allow_unknown_usage=allow_unknown_usage,
+        )
+    if historical:
+        await research_request._legacy_require_research_jobs_settled(
+            session,
+            row=row,
+            view=view.model_copy(update={"members": historical}),
             now=now,
             allow_unknown_usage=allow_unknown_usage,
         )

@@ -154,6 +154,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_research_stages_runtime_pg.py",
     "engine/tests/integration/test_research_stages_public_pg.py",
     "engine/tests/integration/test_research_stages_dispatch_pg.py",
+    "engine/tests/integration/test_research_unknown_closeout_pg.py",
 )
 
 # Complete same-tree runs 40226113806 and 40228451043 still exceed 27m.
