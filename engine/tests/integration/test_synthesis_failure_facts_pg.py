@@ -21,9 +21,60 @@ from sqlalchemy import select
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("known_usage", [False, True])
+@pytest.mark.parametrize("native_sdk", [False, True])
 async def test_worker_failure_facts_survive_terminal_and_normal_readback(
-    migrated_database_url, known_usage, caplog
+    migrated_database_url, known_usage, native_sdk, monkeypatch, caplog
 ):
+    if native_sdk:
+        from unittest.mock import AsyncMock
+
+        from nexus.agents.codex_sdk import invoke_codex_portfolio
+        from openai_codex._run import _collect_async_turn_result
+        from openai_codex.errors import TransportClosedError
+        from openai_codex.generated.v2_all import ThreadTokenUsageUpdatedNotification
+        from openai_codex.models import Notification
+        from unit.agents.test_codex_sdk import _sdk
+        from unit.agents.test_sdk_error_details import terminal
+
+        client, thread, _, _ = _sdk(monkeypatch)
+        notifications = []
+        if known_usage:
+            usage = dict(
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cached_input_tokens=0,
+                reasoning_output_tokens=0,
+            )
+            notifications.append(
+                Notification(
+                    "thread/tokenUsage/updated",
+                    ThreadTokenUsageUpdatedNotification.model_validate(
+                        {
+                            "thread_id": "thread",
+                            "turn_id": "turn",
+                            "token_usage": {"last": usage, "total": usage},
+                        }
+                    ),
+                )
+            )
+        notifications.append(
+            terminal(
+                '{"error":{"code":"rate_limit_exceeded","message":"PRIVATE_DIAGNOSTIC_CANARY"}}',
+                {"httpConnectionFailed": {"httpStatusCode": 429}},
+            )
+        )
+        client._client.next_turn_notification = AsyncMock(side_effect=notifications)
+        client.close.side_effect = TransportClosedError("PRIVATE_DIAGNOSTIC_CANARY")
+
+        async def fail_turn(*args, **kwargs):
+            async def events():
+                for _ in notifications:
+                    yield await client._client.next_turn_notification("turn")
+
+            return await _collect_async_turn_result(events(), turn_id="turn")
+
+        thread.run.side_effect = fail_turn
     engine, sessions, options = await seed_synthesis(migrated_database_url)
     try:
         async with sessions.begin() as session:
@@ -40,6 +91,8 @@ async def test_worker_failure_facts_survive_terminal_and_normal_readback(
 
             async def invoke(self, payload):
                 calls.append(1)
+                if native_sdk:
+                    return await invoke_codex_portfolio({})
                 error = CodexInvocationError(
                     "CODEX_UNEXPECTED_EXCEPTION",
                     phase="turn_run",
@@ -82,7 +135,12 @@ async def test_worker_failure_facts_survive_terminal_and_normal_readback(
             assert diag.input_hash == input_hash and diag.output_id == output.id
             assert diag.binding_hash == output.binding_hash
             assert diag.observation.failure_facts.cleanup_kind == "transport_closed"
-            assert diag.observation.failure_facts.exception_kind == "rpc_error"
+            assert diag.observation.failure_facts.exception_kind == (
+                "runtime_error" if native_sdk else "rpc_error"
+            )
+            if native_sdk:
+                assert diag.observation.failure_facts.http_status_code == 429
+                assert diag.observation.failure_facts.provider_error_code == "rate_limit_exceeded"
             assert diag.observation.invocation_phase == "turn_run"
             assert output.intent is None and output.status == "failed"
             stored = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
