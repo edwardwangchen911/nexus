@@ -32,6 +32,8 @@ async def admitted(database_url, monkeypatch, *, dispatch=True):
     assert receipt["status"] == "admitted"
     if dispatch:
         async with factory() as session, session.begin():
+            # Dispatch can only follow the newly committed admission.
+            now = await session.scalar(select(func.clock_timestamp()))
             await append_audit_event(
                 session,
                 actor_id="research-monitor",
@@ -90,6 +92,7 @@ async def test_capacity_rejection_closes_original_without_refunding_calls(
         == result
     )
     async with factory() as session, session.begin():
+        now = await session.scalar(select(func.clock_timestamp()))
         run = await session.get(AgentResearchRunRecord, run_id)
         job = await session.get(Job, job_id)
         assert run.status == "abstained" and job.status == "skipped"
@@ -183,30 +186,29 @@ async def test_rejection_never_releases_unproved_or_used_increment(
 async def test_native_zero_usage_skip_without_capacity_proof_stays_occupied(
     migrated_database_url, monkeypatch
 ):
-    from nexus.agents.codex_formal_stage import formal_stage_job_qualified
+    from helpers.native_execution import claim_without_dispatch
     from nexus.agents.execution import _terminal_without_usage
-    from nexus.jobs.models import QueueName
-    from nexus.jobs.repository import claim_next_job, finalize_job
+    from nexus.jobs.repository import finalize_job, job_lease_consumed
     from nexus.monitoring.admission import finish_increment, require_monitor_account_available
-    from nexus.monitoring.preclaim import REASON, RESULT, preclaim_rejection_qualified
+    from nexus.monitoring.preclaim import ACTION, REASON, RESULT, preclaim_rejection_qualified
+    from nexus.persistence.models.runtime import AuditEvent, JobLease
 
-    factory, _settings, trigger, run_id, job_id, now = await admitted(
+    factory, settings, trigger, run_id, job_id, now = await admitted(
         migrated_database_url, monkeypatch
     )
+    async with factory() as session:
+        claimed_at = await session.scalar(select(func.clock_timestamp()))
+    claim = await claim_without_dispatch(
+        settings,
+        monkeypatch,
+        job_id=job_id,
+        now=claimed_at,
+        worker_id=f"monitor-preclaim:{trigger.id}",
+    )
+    assert claim is not None
     async with factory() as session, session.begin():
+        now = await session.scalar(select(func.clock_timestamp()))
         run = await session.get(AgentResearchRunRecord, run_id)
-        claim = await claim_next_job(
-            session,
-            queue=QueueName.GENERAL,
-            worker_id=f"monitor-preclaim:{trigger.id}",
-            now=now,
-            lease_seconds=330,
-            job_ids=(job_id,),
-            job_types=("agent.paper.research",),
-            locked_job_guard=formal_stage_job_qualified,
-            research_budget_profile=run.pricing_version,
-        )
-        assert claim is not None
         await _terminal_without_usage(
             session,
             run,
@@ -216,6 +218,15 @@ async def test_native_zero_usage_skip_without_capacity_proof_stays_occupied(
             reason=REASON,
         )
         await finalize_job(session, claim=claim, now=now, outcome="skipped", result_code=RESULT)
+        job = await session.get(Job, job_id)
+        lease = await session.scalar(select(JobLease).where(JobLease.job_id == job_id))
+        assert lease.worker_id == f"monitor-preclaim:{trigger.id}"
+        assert await job_lease_consumed(session, job=job, lease=lease, now=now)
+        assert not await session.scalar(
+            select(AuditEvent.id).where(
+                AuditEvent.action == ACTION, AuditEvent.payload["run_id"].astext == str(run_id)
+            )
+        )
         assert not await preclaim_rejection_qualified(session, run=run, now=now)
         with pytest.raises(ValueError, match="MONITOR_ACCOUNT_BUSY_OR_UNKNOWN"):
             await require_monitor_account_available(session, account_id=trigger.account_id, now=now)

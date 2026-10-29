@@ -13,7 +13,7 @@ from nexus.ops.research_monitor import run as monitor_entry
 from nexus.persistence.models.agents import AgentResearchOutputRecord
 from nexus.persistence.models.monitoring import MonitorPlan
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 
 @pytest.mark.asyncio
@@ -77,8 +77,13 @@ async def test_increment_output_installs_only_against_frozen_parent(
     from nexus.monitoring import source_qualification
 
     async with factory() as session:
+        # Observe after the Worker's durable finalization, not at preparation time.
+        observed_at = await session.scalar(select(func.clock_timestamp()))
         qualified = await source_qualification.load_qualified_source(
-            session, account_id=settings.agent_paper_account_id, output_id=output.id, now=now
+            session,
+            account_id=settings.agent_paper_account_id,
+            output_id=output.id,
+            now=observed_at,
         )
         assert qualified.intent.quality_status == ("partial" if partial else "complete")
     if mode not in {"complete", "partial"}:
@@ -88,7 +93,7 @@ async def test_increment_output_installs_only_against_frozen_parent(
                     session,
                     account_id=settings.agent_paper_account_id,
                     output_id=output.id,
-                    now=now,
+                    now=observed_at,
                 )
         await factory.kw["bind"].dispose()
         return
@@ -101,7 +106,7 @@ async def test_increment_output_installs_only_against_frozen_parent(
                         session,
                         account_id=settings.agent_paper_account_id,
                         output_id=output.id,
-                        now=now,
+                        now=observed_at,
                     )
     from nexus.agents import price_authority
 
@@ -117,7 +122,7 @@ async def test_increment_output_installs_only_against_frozen_parent(
                     session,
                     account_id=settings.agent_paper_account_id,
                     output_id=output.id,
-                    now=now,
+                    now=observed_at,
                 )
     for predecessor in (None, uuid4()):
         async with factory() as session, session.begin():
@@ -127,11 +132,14 @@ async def test_increment_output_installs_only_against_frozen_parent(
                     account_id=settings.agent_paper_account_id,
                     output_id=output.id,
                     expected_predecessor_id=predecessor,
-                    now=now,
+                    now=observed_at,
                 )
     async with factory() as session, session.begin():
         source = await load_approved_source(
-            session, account_id=settings.agent_paper_account_id, output_id=output.id, now=now
+            session,
+            account_id=settings.agent_paper_account_id,
+            output_id=output.id,
+            now=observed_at,
         )
         assert source.context.plan_id == old.id
         plan = await install_plan_from_output(
@@ -139,7 +147,7 @@ async def test_increment_output_installs_only_against_frozen_parent(
             account_id=settings.agent_paper_account_id,
             output_id=output.id,
             expected_predecessor_id=old.id,
-            now=now,
+            now=observed_at,
         )
         assert plan.predecessor_id == old.id and plan.generation == 2
         assert plan.source_hash == output.content_hash
@@ -149,7 +157,7 @@ async def test_increment_output_installs_only_against_frozen_parent(
             account_id=settings.agent_paper_account_id,
             output_id=output.id,
             expected_predecessor_id=old.id,
-            now=now,
+            now=observed_at,
         )
         assert replay.id == plan.id
     await factory.kw["bind"].dispose()
