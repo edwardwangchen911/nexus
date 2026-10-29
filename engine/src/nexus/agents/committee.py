@@ -176,6 +176,27 @@ type SdkExceptionKind = Literal[
     "transport_closed", "rpc_error", "runtime_error", "timeout", "validation_error", "other"
 ]
 
+type SdkProviderErrorCode = Literal[
+    "server_error",
+    "rate_limit_exceeded",
+    "invalid_prompt",
+    "vector_store_timeout",
+    "invalid_image",
+    "invalid_image_format",
+    "invalid_base64_image",
+    "invalid_image_url",
+    "image_too_large",
+    "image_too_small",
+    "image_parse_error",
+    "image_content_policy_violation",
+    "invalid_image_mode",
+    "image_file_too_large",
+    "unsupported_image_media_type",
+    "empty_image_file",
+    "failed_to_download_image",
+    "image_file_not_found",
+]
+
 
 class SdkFailureFacts(BaseModel):
     """Allowlisted metadata only; no exception messages or provider response bodies."""
@@ -183,6 +204,10 @@ class SdkFailureFacts(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     exception_kind: SdkExceptionKind = "other"
     cleanup_kind: SdkExceptionKind | None = None
+    http_status_code: int | None = Field(default=None, ge=100, le=599, strict=True)
+    rpc_error_code: int | None = Field(default=None, ge=-32768, le=-32000, strict=True)
+    cleanup_rpc_error_code: int | None = Field(default=None, ge=-32768, le=-32000, strict=True)
+    provider_error_code: SdkProviderErrorCode | None = None
     terminal_status: Literal["completed", "failed", "interrupted", "inProgress"] | None = None
     provider_reason: (
         Literal[
@@ -205,6 +230,20 @@ class SdkFailureFacts(BaseModel):
         ]
         | None
     ) = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_details(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        serialized = cast(dict[str, object], handler(self))
+        # Old diagnostic hashes include their exact original shape.
+        for field in (
+            "http_status_code",
+            "rpc_error_code",
+            "cleanup_rpc_error_code",
+            "provider_error_code",
+        ):
+            if getattr(self, field) is None:
+                serialized.pop(field, None)
+        return serialized
 
 
 class StageFailureDiagnostic(BaseModel):

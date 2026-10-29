@@ -18,14 +18,16 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.runtime import Job, JobLease
+from openai_codex.errors import JsonRpcError
 from sqlalchemy import select, text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expired", [False, True])
 @pytest.mark.parametrize("cleanup_confirmed", [True, False])
+@pytest.mark.parametrize("rpc_failure", [False, True])
 async def test_unknown_root_closes_only_with_consumed_stage_proof(
-    migrated_database_url, monkeypatch, tmp_path, expired, cleanup_confirmed
+    migrated_database_url, monkeypatch, tmp_path, expired, cleanup_confirmed, rpc_failure
 ):
     controlled_sdk(monkeypatch)
     captured = advancing_formal_clock(monkeypatch)
@@ -34,8 +36,12 @@ async def test_unknown_root_closes_only_with_consumed_stage_proof(
 
     def sdk(config):
         client = create(config)
-        client.thread_start.return_value.run.side_effect = RuntimeError(
-            "controlled terminal failure"
+        client.thread_start.return_value.run.side_effect = (
+            JsonRpcError(
+                -32602, "private-diagnostic-canary", {"secret": "private-diagnostic-canary"}
+            )
+            if rpc_failure
+            else RuntimeError("controlled terminal failure")
         )
         if not cleanup_confirmed:
             client.close.side_effect = RuntimeError("controlled cleanup failure")
@@ -66,6 +72,10 @@ async def test_unknown_root_closes_only_with_consumed_stage_proof(
             )
             assert output.payload["reason"] == "model_usage_uncertain"
             assert output.payload["diagnostic"]["invocation_phase"] == "turn_run"
+            assert output.payload["diagnostic"]["failure_facts"].get("rpc_error_code") == (
+                -32602 if rpc_failure else None
+            )
+            assert "private-diagnostic-canary" not in str(output.payload)
             assert (
                 await session.scalar(text("SELECT count(*) FROM research_stage_authorization")) == 1
             )

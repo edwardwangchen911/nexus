@@ -1,8 +1,8 @@
 """Bounded metadata observer around the pinned SDK's existing turn reader.
 
-Never consume a second stream or retain notification objects. Read only typed
-terminal status/error tags and token counts, never text or account fields,
-or alter SDK collection, cancellation, retry or cleanup behavior.
+Never consume a second stream or retain notification objects. Keep only typed
+terminal tags, bounded allowlisted error codes and token counts, never prose
+or account fields. Do not alter SDK collection, cancellation, retry or cleanup.
 """
 
 from collections.abc import Iterator
@@ -19,6 +19,7 @@ from openai_codex.models import Notification
 
 from nexus.agents.committee import SdkFailureFacts, SdkStreamProgress
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.sdk_error_details import provider_error_code, typed_http_status
 
 _PROGRESS_METHODS = frozenset(
     {
@@ -90,8 +91,10 @@ class SdkStreamObserver:
                 turn = terminal.turn
                 self.measured_usage = self._reported_usage
                 reason = None
+                http_status = None
                 if turn.error is not None and turn.error.codex_error_info is not None:
                     info = turn.error.codex_error_info.root
+                    http_status = typed_http_status(info)
                     if isinstance(info, CodexErrorInfoValue):
                         reason = info.value
                     else:
@@ -118,7 +121,14 @@ class SdkStreamObserver:
                                     reason = field.alias
                                     break
                 self.failure_facts = SdkFailureFacts.model_validate(
-                    {"terminal_status": turn.status.value, "provider_reason": reason}
+                    {
+                        "terminal_status": turn.status.value,
+                        "provider_reason": reason,
+                        "http_status_code": http_status,
+                        "provider_error_code": provider_error_code(turn.error.message)
+                        if turn.error is not None
+                        else None,
+                    }
                 )
             self.terminal_notification_seen = True
             if self.terminal_notification_ms is None:

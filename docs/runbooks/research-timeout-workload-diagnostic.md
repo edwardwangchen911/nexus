@@ -228,3 +228,12 @@ uv run --project engine nexus-openai-local setup --backend codex_sdk \
 ### 超时来源诊断
 
 新增可选 `timeout_source`：阶段自身截止为 `stage_deadline`，旧独立调用截止为 `invocation_deadline`，委员会自身截止为 `committee_deadline`；上游 TimeoutError 未能确认来源时为 `unknown`。只在本地计时器实际 expired 或显式单调截止检查满足时确认来源。旧回执缺字段保留原样，不回填；SDK idle 或 Worker 外层超时不能由本字段倒推。未修改 120s/135s、阶段配额、SDK 重试或清理期限。诊断能定位计时器不证明加时会成功，也不代表自然运行验收。
+
+SDK 失败的 `failure_facts` 可追加类型化 `http_status_code`、`rpc_error_code` 和独立的
+`cleanup_rpc_error_code`。`provider_error_code` 仅从不超过 8 KiB 的完整 JSON 错误对象
+提取已固定的 OpenAI ResponseError 白名单代码；正文、additionalDetails、参数值、URL
+和认证内容不保存。自由文本、重复键、未知代码、格式异常继续保留未知，不猜测原因。
+这些字段不改变调用次数、期限、用量结算、预算或恢复资格；HTTP 拒绝也不等于费用为零。
+旧回执缺少字段时不补 null，保持原序列化及校验 hash；旧结果不回填。本次没有数据库迁移。
+出现含新诊断字段的记录后，回滚须使用同样支持这些读取字段的维护镜像，保留 0099；
+更旧读取器可能将新诊断标为不可核验，不能据此修改原失败或释放预算。

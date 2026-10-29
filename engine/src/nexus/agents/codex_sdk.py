@@ -52,6 +52,7 @@ from nexus.agents.committee import (
 )
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.sdk_error_details import rpc_error_code
 from nexus.agents.sdk_stream_progress import SdkStreamObserver, observe_sdk_notifications
 from nexus.agents.tools import ReadOnlyToolRegistry
 from nexus.agents.trailing_valuation import derive_trailing_valuation
@@ -345,7 +346,10 @@ def _invocation_boundary(
         ):
             failure.usage = state.stream_observer.measured_usage
         failure.failure_facts = (observed or SdkFailureFacts()).model_copy(
-            update={"exception_kind": _exception_kind(original)}
+            update={
+                "exception_kind": _exception_kind(original),
+                "rpc_error_code": rpc_error_code(original),
+            }
         )
         raise failure from None
     finally:
@@ -862,7 +866,10 @@ async def _invoke_codex(
                             if cleanup.kind == "timeout"
                             else cleanup.failure_facts.exception_kind
                             if cleanup.failure_facts
-                            else "other"
+                            else "other",
+                            "cleanup_rpc_error_code": cleanup.failure_facts.rpc_error_code
+                            if cleanup.failure_facts
+                            else None,
                         }
                     )
                 elif isinstance(primary, asyncio.CancelledError):
