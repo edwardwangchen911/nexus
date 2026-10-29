@@ -272,6 +272,61 @@ def install(service, root, env_file, project):
     )
 
 
+def prior_boot_active(service, root, env_file, project, state, current_boot, status, last_exit):
+    """Read exact old activation evidence; a reboot never settles business effects."""
+    if (
+        state is None
+        or status not in {"stopped", "inactive"}
+        or last_exit == 75
+        or any(
+            state.get(key) is not None
+            for key in ("attempt", "unconfirmed_exit", "exit_reconciliation", "rejected_start")
+        )
+        or state.get("boot") == current_boot
+    ):
+        return None
+    attempt = state.get("active_attempt")
+    owner = state.get("instance")
+    if (
+        not isinstance(attempt, dict)
+        or attempt not in state["attempts"]
+        or attempt.get("boot") != state["boot"]
+        or not isinstance(owner, dict)
+    ):
+        return None
+    target = binding(service, root, env_file, project)
+    if any(state.get(key) != target[key] for key in ("root", "env_file", "project", "config_hash")):
+        return None
+    receipt = activation_receipt(root, state, attempt)
+    if (
+        receipt is None
+        or receipt.get("phase") != "activated"
+        or receipt.get("reason") != "READY"
+        or type(receipt.get("pid")) is not int
+        or receipt.get("pid") != owner["pid"]
+        or receipt.get("process_started") != owner["started"]
+    ):
+        return None
+    # Numeric PIDs can be reused after reboot. Current process exclusion belongs
+    # to canonical admission and the child's existing unique lifecycle lock.
+    return {
+        "attempt": attempt,
+        "owner": owner,
+        "receipt": receipt,
+        "target": target,
+        "boot": current_boot,
+    }
+
+
+def recheck_prior_boot_active(service, root, env_file, project, expected):
+    status, last_exit = service._launchctl_inspection("launchctl", root, env_file, project)
+    observed = prior_boot_active(
+        service, root, env_file, project, read(root), boot_id(), status, last_exit
+    )
+    if observed != expected:
+        raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
+
+
 def enable(service, root, env_file, project, *, report=True):
     service._private_directory(root)
     previous = read(root)
@@ -306,8 +361,19 @@ def enable(service, root, env_file, project, *, report=True):
                 last_exit,
             )
         )
-        if previous is None or not (
+        prior_active = None
+        if previous is not None and not (
             previous.get("stopped_confirmed") or rejected or reconciled or prior_boot_unused
+        ):
+            prior_active = prior_boot_active(
+                service, root, env_file, project, previous, current_boot, status, last_exit
+            )
+        if previous is None or not (
+            previous.get("stopped_confirmed")
+            or rejected
+            or reconciled
+            or prior_boot_unused
+            or prior_active is not None
         ):
             raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
         if any(
@@ -334,6 +400,8 @@ def enable(service, root, env_file, project, *, report=True):
             service._reconciliation_module().validate_unused_prior_boot(
                 root, previous, current_boot
             )
+        if prior_active is not None:
+            recheck_prior_boot_active(service, root, env_file, project, prior_active)
         previous.update(binding(service, root, env_file, project))
         previous.update(
             desired="disabled", generation=str(uuid4()), schema=checked["migration_head"]
@@ -342,6 +410,8 @@ def enable(service, root, env_file, project, *, report=True):
             previous["exit_reconciliation"]["enable_generation"] = previous["generation"]
         write(root, previous)
         install(service, root, env_file, project)
+        if prior_active is not None:
+            recheck_prior_boot_active(service, root, env_file, project, prior_active)
         if prior_boot_unused:
             # Preserve reentry through installation, backoff and dependency failures.
             # recover archives only with the first new attempt, after full admission.

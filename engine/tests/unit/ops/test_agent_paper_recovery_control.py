@@ -866,3 +866,260 @@ def test_pending_receipt_write_cannot_authorize_recovery(tmp_path):
     _invoke(root, env, "recover")
     assert starts(root) == []
     assert marker.exists()
+
+
+def prior_boot_maintenance(root, env, tmp_path):
+    """A managed active instance lost to reboot, with its original receipt intact."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        register_pid(root, child.pid)
+        assert _invoke(root, env, "enable-recovery").returncode == 0
+        target, receipt = add_activation(root)
+        state = json.loads(target.read_text())
+        state["active_attempt"] = state["attempts"][-1]
+        target.write_text(json.dumps(state))
+        value = json.loads(receipt.read_text())
+        value.update(phase="activated", reason="READY")
+        receipt.write_text(json.dumps(value))
+        assert _invoke(root, env, "maintenance").returncode == 0
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    _executable(tmp_path / "bin/sysctl", "print('22222222-2222-2222-2222-222222222222')\n")
+    (root.parent / "state").write_text("{}")
+    return target, receipt
+
+
+@pytest.mark.parametrize("eligible,reused_pid", [(False, False), (True, False), (True, True)])
+def test_reenable_prior_boot_active_host_preserves_history_and_current_admission(
+    tmp_path, eligible, reused_pid
+):
+    root, env = recovery_root(tmp_path)
+    target, receipt = prior_boot_maintenance(root, env, tmp_path)
+    if reused_pid:
+        # A current unrelated process may reuse the old numeric PID after reboot.
+        state = json.loads(target.read_text())
+        evidence = json.loads(receipt.read_text())
+        state["instance"]["pid"] = evidence["pid"] = os.getpid()
+        target.write_text(json.dumps(state))
+        receipt.write_text(json.dumps(evidence))
+    before = target.read_bytes()
+    state = json.loads(before)
+    original_receipt = receipt.read_bytes()
+    options(root, recovery_status="ready" if eligible else "blocked")
+    result = _invoke(root, env, "enable-recovery")
+    assert result.returncode == (0 if eligible else 1), result.stdout + result.stderr
+    assert len(starts(root)) == int(eligible)
+    after = json.loads(target.read_text())
+    if eligible:
+        assert after["desired"] == "enabled"
+        assert after["attempts"][:-1] == state["attempts"]
+        assert after["attempt"]["boot"] == "22222222-2222-2222-2222-222222222222"
+        assert after["attempt"]["id"] != state["active_attempt"]["id"]
+        assert after["active_attempt"] == state["active_attempt"]
+        assert after.get("stopped_confirmed") is not True
+        assert after.get("stop_proof") == state.get("stop_proof")
+        assert any(c[0] == "engine" and "--service-recovery-check" in c for c in _calls(root))
+        _invoke(root, env, "recover")
+        assert len(starts(root)) == 1
+    else:
+        assert target.read_bytes() == before
+    assert receipt.read_bytes() == original_receipt
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "same_boot",
+        "attempt_boot",
+        "missing_receipt",
+        "receipt_boot",
+        "receipt_attempt",
+        "receipt_generation",
+        "receipt_revision",
+        "receipt_owner",
+        "checking",
+        "unclassified",
+        "write_pending",
+        "owner_binding",
+        "boot_unavailable",
+        "status_unknown",
+        "unknown_exit",
+        "exit75",
+        "pending",
+        "config_changed",
+    ],
+)
+def test_reenable_prior_boot_active_rejects_unverified_identity_without_mutation(tmp_path, case):
+    root, env = recovery_root(tmp_path)
+    target, receipt = prior_boot_maintenance(root, env, tmp_path)
+    state = json.loads(target.read_text())
+    evidence = json.loads(receipt.read_text())
+    if case == "same_boot":
+        _executable(tmp_path / "bin/sysctl", "print('11111111-1111-1111-1111-111111111111')\n")
+    elif case == "attempt_boot":
+        state["active_attempt"]["boot"] = "33333333-3333-3333-3333-333333333333"
+        state["attempts"][-1] = state["active_attempt"]
+    elif case.startswith("receipt_"):
+        key, value = {
+            "receipt_boot": ("boot", "33333333-3333-3333-3333-333333333333"),
+            "receipt_attempt": ("attempt_id", "33333333-3333-3333-3333-333333333333"),
+            "receipt_generation": ("generation", "33333333-3333-3333-3333-333333333333"),
+            "receipt_revision": ("revision", "b" * 40),
+            "receipt_owner": ("process_started", "another process birth"),
+        }[case]
+        evidence[key] = value
+    elif case == "checking":
+        evidence["phase"] = "checking"
+    elif case == "unclassified":
+        evidence.update(phase="exited", reason="unclassified")
+    elif case == "write_pending":
+        marker = receipt.with_suffix(".write-pending")
+        marker.write_text("unconfirmed")
+        marker.chmod(0o600)
+    elif case == "owner_binding":
+        state["instance"]["pid"] = os.getpid()
+    elif case == "boot_unavailable":
+        _executable(tmp_path / "bin/sysctl", "print('unavailable')\n")
+    elif case == "status_unknown":
+        _register(root, state="error")
+    elif case == "unknown_exit":
+        state["unconfirmed_exit"] = {"exit": 75}
+    elif case == "exit75":
+        _register(root, state="inactive", exit_code=75)
+    elif case == "pending":
+        state["attempt"] = state["active_attempt"]
+    elif case == "config_changed":
+        with (root / "infra/.env.test").open("a") as stream:
+            stream.write("\n# changed configuration\n")
+    target.write_text(json.dumps(state))
+    receipt.write_text(json.dumps(evidence))
+    if case == "missing_receipt":
+        receipt.unlink()
+    original_state = target.read_bytes()
+    original_receipt = receipt.read_bytes() if receipt.exists() else None
+    result = _invoke(root, env, "enable-recovery")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert starts(root) == []
+    assert target.read_bytes() == original_state
+    assert (receipt.read_bytes() if receipt.exists() else None) == original_receipt
+
+
+@pytest.mark.parametrize("pause", ["install", "rate", "business"])
+def test_prior_boot_reenable_upgrade_and_reentry_keep_original_authority(tmp_path, pause):
+    root, env = recovery_root(tmp_path)
+    target, receipt = prior_boot_maintenance(root, env, tmp_path)
+    state = json.loads(target.read_text())
+    state["schema"] = "0098_sdk_tool_barrier"
+    state["exit_reconciliation_history"] = [{"consumed_by": "historical-only"}]
+    if pause == "rate":
+        state["next_start_at"] = state["checked_at"] + 3600
+    target.write_text(json.dumps(state))
+    original_receipt = receipt.read_bytes()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "upgrade",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    registration = root.parent / "recovery-registration"
+    saved_registration = registration.read_bytes()
+    engine = root / ".venv/bin/nexus-engine-agent-paper-loop"
+    saved_engine = engine.read_text()
+    if pause == "install":
+        registration.write_text("{}")
+        launchctl = tmp_path / "bin/launchctl"
+        saved_launchctl = launchctl.read_text()
+        launchctl.write_text(
+            saved_launchctl.replace(
+                "if action == 'bootstrap':",
+                "if action == 'bootstrap' and 'com.nexus.agent-paper-recovery' in sys.argv[3]:\n"
+                "    sys.exit(1)\n"
+                "if action == 'bootstrap':",
+            )
+        )
+    elif pause == "business":
+        engine.write_text(
+            saved_engine.replace(
+                "if '--service-recovery-check' in sys.argv:\n",
+                "if '--service-recovery-check' in sys.argv:\n"
+                "    if options.get('seen_ready'): options['recovery_status'] = 'blocked'\n"
+                "    else: control.write_text(json.dumps({'seen_ready':True}))\n",
+            )
+        )
+    first = _invoke(root, env, "enable-recovery")
+    after = json.loads(target.read_text())
+    assert starts(root) == []
+    assert after["attempts"] == state["attempts"]
+    assert after["active_attempt"] == state["active_attempt"]
+    assert after["instance"] == state["instance"] and after["boot"] == state["boot"]
+    assert after["exit_reconciliation_history"] == state["exit_reconciliation_history"]
+    assert after["revision"] == revision and after["schema"] == "0099_research_stages"
+    assert after["next_start_at"] == state["next_start_at"]
+    assert receipt.read_bytes() == original_receipt
+    if pause == "install":
+        assert first.returncode == 1 and after["desired"] == "disabled"
+        launchctl.write_text(saved_launchctl)
+        registration.write_bytes(saved_registration)
+    elif pause == "rate":
+        assert after["reason"] == "RATE_LIMITED"
+        # Advance only the deterministic test's rate window, not production policy.
+        after["next_start_at"] = 0
+        target.write_text(json.dumps(after))
+    else:
+        assert after["reason"] == "BUSINESS_OR_DEPENDENCY_BLOCKED"
+        engine.write_text(saved_engine)
+        options(root)
+    second = _invoke(root, env, "enable-recovery")
+    assert second.returncode == 0, second.stdout + second.stderr
+    final = json.loads(target.read_text())
+    assert len(starts(root)) == 1 and final["attempts"][:-1] == state["attempts"]
+    assert final["active_attempt"] == state["active_attempt"]
+    assert final["exit_reconciliation_history"] == state["exit_reconciliation_history"]
+    assert receipt.read_bytes() == original_receipt
+
+
+@pytest.mark.parametrize("boundary", ["admission", "install"])
+def test_prior_boot_reenable_rechecks_evidence_after_external_boundaries(tmp_path, boundary):
+    root, env = recovery_root(tmp_path)
+    target, receipt = prior_boot_maintenance(root, env, tmp_path)
+    before = json.loads(target.read_text())
+    mutation = f"Path({str(receipt.with_suffix('.write-pending'))!r}).write_text('unknown')"
+    if boundary == "admission":
+        engine = root / ".venv/bin/nexus-engine-agent-paper-loop"
+        engine.write_text(
+            engine.read_text().replace(
+                "if '--service-recovery-check' in sys.argv:\n",
+                "if '--service-recovery-check' in sys.argv:\n    " + mutation + "\n",
+            )
+        )
+    else:
+        (root.parent / "recovery-registration").write_text("{}")
+        launchctl = tmp_path / "bin/launchctl"
+        launchctl.write_text(
+            launchctl.read_text().replace(
+                "if action == 'bootstrap':",
+                "if action == 'bootstrap' and 'com.nexus.agent-paper-recovery' in sys.argv[3]:\n"
+                "    " + mutation + "\nif action == 'bootstrap':",
+            )
+        )
+    result = _invoke(root, env, "enable-recovery")
+    assert result.returncode == 1
+    after = json.loads(target.read_text())
+    assert starts(root) == [] and after["attempts"] == before["attempts"]
+    assert after["active_attempt"] == before["active_attempt"]
+    assert after["desired"] == ("maintenance" if boundary == "admission" else "disabled")
