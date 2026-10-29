@@ -273,6 +273,8 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
 
         assert rows[0].kind == "disclosure"
         async with factory() as session, session.begin():
+            # Dispatch follows admission on the shared advancing database clock.
+            later = await session.scalar(select(func.clock_timestamp()))
             await append_audit_event(
                 session,
                 actor_id="research-monitor",
@@ -300,6 +302,8 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             == closed
         )
         async with factory() as session:
+            # Read the native close proof after its committed terminal facts.
+            later = await session.scalar(select(func.clock_timestamp()))
             child = await session.get(AgentResearchRunRecord, member.run_id)
             assert (child.input_tokens, child.output_tokens, child.settled_cost_usd) == (0, 0, 0)
             assert await preclaim_rejection_qualified(session, run=child, now=later)
