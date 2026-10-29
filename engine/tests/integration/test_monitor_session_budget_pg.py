@@ -94,6 +94,9 @@ async def stock_batch(factory, settings, instrument_id, clock, now):
     )
     assert installed_plan["plan_id"]
     async with factory() as session, session.begin():
+        # A newly installed plan becomes effective at the CLI's own clock sample.
+        # The following scan must observe that committed installation.
+        now = await session.scalar(select(func.clock_timestamp()))
         batch = await scan_stock_batch(
             session,
             account_id=settings.agent_paper_account_id,
@@ -430,14 +433,15 @@ async def test_normal_sealed_batches_reset_calls_only_for_new_session(
         from nexus.paper.manual_request import require_manual_account_available
 
         async with factory() as session, session.begin():
+            observed_at = await session.scalar(select(func.clock_timestamp()))
             if outcome == "unknown":
                 with pytest.raises(ValueError, match="MONITOR_ACCOUNT_BUSY_OR_UNKNOWN"):
                     await require_manual_account_available(
-                        session, account_id=pointer.account_id, now=monday
+                        session, account_id=pointer.account_id, now=observed_at
                     )
             else:
                 await require_manual_account_available(
-                    session, account_id=pointer.account_id, now=monday
+                    session, account_id=pointer.account_id, now=observed_at
                 )
     finally:
         await factory.kw["bind"].dispose()
