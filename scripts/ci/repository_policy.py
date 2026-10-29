@@ -38,7 +38,8 @@ _EXPECTED_SDK_EVIDENCE = {
     "written_permission": "docs/runbooks/fosun-sdk-admission.md#private-use-basis",
     "provider_test_vector": "integrations/fosun_gateway/tests/fixtures/fosun",
     "security_review": (
-        "docs/superpowers/reviews/2026-08-27-task-21-final-operational-gates-review.md"
+        "docs/superpowers/reviews/"
+        "2026-08-27-task-21-final-operational-gates-review.md"
     ),
     "tls_verification_remediation": (
         "integrations/fosun_gateway/tests/security/test_provider_tls.py"
@@ -140,7 +141,8 @@ _EXPECTED_MARKET_OPERATIONS = frozenset(
     {"fosun_capabilities", "fosun_get_quotes", "fosun_get_bars"}
 )
 _EXPECTED_GATEWAY_ROUTES = frozenset(
-    (f"/{operation}", operation, ("POST",)) for operation in _EXPECTED_GATEWAY_OPERATIONS
+    (f"/{operation}", operation, ("POST",))
+    for operation in _EXPECTED_GATEWAY_OPERATIONS
 )
 _EXPECTED_GATEWAY_ROUTE_PREFIX = "/internal/v1/read-only"
 _EXPECTED_SDK_READ_METHODS = frozenset(
@@ -194,14 +196,22 @@ _EXPECTED_FOSUN_GATEWAY_PROJECT = {
         "nexus-fosun-gateway-ready": "nexus_fosun_gateway.readiness:main",
         "nexus-fosun-activation-gate": "nexus_fosun_gateway.activation:main",
         "nexus-fosun-read-only-probe": "nexus_fosun_gateway.probe_cli:run",
-        "nexus-fosun-capture-read-only-probe": ("nexus_fosun_gateway.probe_capture:run"),
+        "nexus-fosun-capture-read-only-probe": (
+            "nexus_fosun_gateway.probe_capture:run"
+        ),
         "nexus-fosun-push-probe": "nexus_fosun_gateway.push_probe_cli:run",
         "nexus-fosun-probe-publisher-key-preflight": (
             "nexus_fosun_gateway.probe_capture:key_preflight_run"
         ),
-        "nexus-fosun-publish-probe-receipt": ("nexus_fosun_gateway.probe_receipt:run"),
-        "nexus-fosun-simulation-fixture": ("nexus_fosun_gateway.simulation_main:run_fixture"),
-        "nexus-fosun-simulation-readonly": ("nexus_fosun_gateway.simulation_readonly_cli:run"),
+        "nexus-fosun-publish-probe-receipt": (
+            "nexus_fosun_gateway.probe_receipt:run"
+        ),
+        "nexus-fosun-simulation-fixture": (
+            "nexus_fosun_gateway.simulation_main:run_fixture"
+        ),
+        "nexus-fosun-simulation-readonly": (
+            "nexus_fosun_gateway.simulation_readonly_cli:run"
+        ),
     },
 }
 _EXPECTED_FOSUN_GATEWAY_BUILD_SYSTEM = {
@@ -209,7 +219,11 @@ _EXPECTED_FOSUN_GATEWAY_BUILD_SYSTEM = {
     "build-backend": "hatchling.build",
 }
 _EXPECTED_FOSUN_GATEWAY_TOOL = {
-    "hatch": {"build": {"targets": {"wheel": {"packages": ["src/nexus_fosun_gateway"]}}}},
+    "hatch": {
+        "build": {
+            "targets": {"wheel": {"packages": ["src/nexus_fosun_gateway"]}}
+        }
+    },
     "uv": {
         "sources": {
             "fsopenapi": {
@@ -219,7 +233,9 @@ _EXPECTED_FOSUN_GATEWAY_TOOL = {
         }
     },
 }
-_EXPECTED_COMPOSE_SHA256 = "4871bdde39d37847c3959baab9aadc48f0b7372d6ca077df6f0bf9b403151fd3"
+_EXPECTED_COMPOSE_SHA256 = (
+    "4871bdde39d37847c3959baab9aadc48f0b7372d6ca077df6f0bf9b403151fd3"
+)
 _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256 = (
     "f22c88598929e7cab2282fab240b0d19791e12a7af4c6ca051df99d7eda9d6f1"
 )
@@ -237,7 +253,9 @@ _REAL_E2E_WORKFLOW_JOB = re.compile(r"^(?:real-e2e|['\"]real-e2e['\"])\s*:")
 _REAL_E2E_YAML_INDIRECTION = re.compile(
     r"(?m)(?:^\s*<<\s*:|(?:^|[\s:\[,])[&*][A-Za-z_][A-Za-z0-9_-]*)"
 )
-_REAL_E2E_WORKFLOW_RUN_SHELL = re.compile(r"(?ms)^defaults:\s*$.*?^  run:\s*$.*?^    shell\s*:")
+_REAL_E2E_WORKFLOW_RUN_SHELL = re.compile(
+    r"(?ms)^defaults:\s*$.*?^  run:\s*$.*?^    shell\s*:"
+)
 _REAL_E2E_NETWORK_MOCK = re.compile(
     r"\b(?:page|context|browserContext)\s*(?:\.\s*|\[\s*['\"`])(?:route|routeFromHAR|addInitScript)(?:['\"`]\s*\])?\s*\(|"
     r"\broute\s*(?:\.\s*|\[\s*['\"`])fulfill(?:['\"`]\s*\])?\s*\(|"
@@ -271,12 +289,16 @@ _EXPECTED_REAL_E2E_CONFIG_SHA256 = (
 _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
     "2215a61e40986080d95f957894514ba4c1e448a9b95bdd5e29fdef8f26394f31"
 )
-_EXPECTED_REAL_E2E_TEST_SHA256 = "8f885abe57ba46a3b681026330692f88bf13abd620fc2a2169bc9c9dacca7773"
+_EXPECTED_REAL_E2E_TEST_SHA256 = (
+    "8f885abe57ba46a3b681026330692f88bf13abd620fc2a2169bc9c9dacca7773"
+)
 _REAL_E2E_POSTGRES_IMAGE = (
-    "postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449"
+    "postgres:17@sha256:"
+    "e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449"
 )
 _REAL_E2E_DATABASE_URL = (
-    "postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci"
+    "postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@"
+    "127.0.0.1:5432/nexus_e2e_ci"
 )
 
 
@@ -348,7 +370,8 @@ def check_provider_tls_remediation(root: Path) -> list[PolicyFinding]:
     """Pin the two reviewed v1.2.0 verify=False call sites to gateway-owned verification."""
     main_path = root / "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py"
     remediation_path = (
-        root / "integrations/fosun_gateway/src/nexus_fosun_gateway/security/provider_tls.py"
+        root
+        / "integrations/fosun_gateway/src/nexus_fosun_gateway/security/provider_tls.py"
     )
     if not main_path.is_file() or not remediation_path.is_file():
         return [
@@ -361,7 +384,8 @@ def check_provider_tls_remediation(root: Path) -> list[PolicyFinding]:
     main_content = _read_text(main_path)
     remediation = _read_text(remediation_path)
     gateway_source = "\n".join(
-        _read_text(path) for path in sorted((root / "integrations/fosun_gateway/src").rglob("*.py"))
+        _read_text(path)
+        for path in sorted((root / "integrations/fosun_gateway/src").rglob("*.py"))
     )
     if (
         "enforce_sdk_tls_verification(client, auth_module)" not in main_content
@@ -452,7 +476,9 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
     )
     operation_bindings_are_exact = all(
         sum(
-            isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store)
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, ast.Store)
             for node in ast.walk(operations_tree)
         )
         == 1
@@ -472,7 +498,8 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
             and any(
-                isinstance(target, ast.Name) and target.id == "router" for target in node.targets
+                isinstance(target, ast.Name) and target.id == "router"
+                for target in node.targets
             )
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
@@ -485,7 +512,10 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             (keyword.value for keyword in node.value.keywords if keyword.arg == "prefix"),
             None,
         )
-        if isinstance(prefix_keyword, ast.Constant) and isinstance(prefix_keyword.value, str):
+        if (
+            isinstance(prefix_keyword, ast.Constant)
+            and isinstance(prefix_keyword.value, str)
+        ):
             route_prefix = prefix_keyword.value
         else:
             malformed_route = True
@@ -533,16 +563,22 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
     router_loads = [
         node
         for node in ast.walk(routes_tree)
-        if isinstance(node, ast.Name) and node.id == "router" and isinstance(node.ctx, ast.Load)
+        if isinstance(node, ast.Name)
+        and node.id == "router"
+        and isinstance(node.ctx, ast.Load)
     ]
     router_stores = [
         node
         for node in ast.walk(routes_tree)
-        if isinstance(node, ast.Name) and node.id == "router" and isinstance(node.ctx, ast.Store)
+        if isinstance(node, ast.Name)
+        and node.id == "router"
+        and isinstance(node.ctx, ast.Store)
     ]
     direct_route_functions = {id(node.func) for node in route_calls}
     direct_router_loads = {
-        id(node.func.value) for node in route_calls if isinstance(node.func, ast.Attribute)
+        id(node.func.value)
+        for node in route_calls
+        if isinstance(node.func, ast.Attribute)
     }
     top_level_route_calls = {
         id(node.value)
@@ -555,7 +591,8 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
         or len(router_stores) != 1
         or top_level_route_calls != {id(node) for node in route_calls}
         or any(
-            isinstance(node, ast.Constant) and node.value in {"add_api_route", "include_router"}
+            isinstance(node, ast.Constant)
+            and node.value in {"add_api_route", "include_router"}
             for node in ast.walk(routes_tree)
         )
     ):
@@ -576,7 +613,8 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             len(node.args) != 2
             or node.keywords
             or any(
-                not isinstance(argument, ast.Constant) or not isinstance(argument.value, str)
+                not isinstance(argument, ast.Constant)
+                or not isinstance(argument.value, str)
                 for argument in node.args
             )
         ):
@@ -595,7 +633,8 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
         if isinstance(node, ast.Attribute) and node.attr == "_client"
     ]
     if (
-        {id(node) for node in sdk_method_attributes} != {id(node.func) for node in sdk_method_calls}
+        {id(node) for node in sdk_method_attributes}
+        != {id(node.func) for node in sdk_method_calls}
         or len(sdk_client_attributes) != 2
         or sum(isinstance(node.ctx, ast.Store) for node in sdk_client_attributes) != 1
         or sum(isinstance(node.ctx, ast.Load) for node in sdk_client_attributes) != 1
@@ -691,7 +730,9 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             "websocket_route",
         }
     }
-    main_registration_surface_is_exact = app_registration_calls == allowed_app_registration_calls
+    main_registration_surface_is_exact = (
+        app_registration_calls == allowed_app_registration_calls
+    )
 
     if (
         operation_literal != set(_EXPECTED_GATEWAY_OPERATIONS)
@@ -791,7 +832,8 @@ def _literal_type_alias(tree: ast.Module, name: str) -> set[str] | None:
         return None
     elements = value.slice.elts if isinstance(value.slice, ast.Tuple) else [value.slice]
     if any(
-        not isinstance(item, ast.Constant) or not isinstance(item.value, str) for item in elements
+        not isinstance(item, ast.Constant) or not isinstance(item.value, str)
+        for item in elements
     ):
         return None
     return {item.value for item in elements}  # type: ignore[misc]
@@ -823,7 +865,9 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
         scripts = None
         build_system = None
         tool_config = None
-    packaged_entrypoint = scripts.get("nexus-fosun-gateway") if isinstance(scripts, dict) else None
+    packaged_entrypoint = (
+        scripts.get("nexus-fosun-gateway") if isinstance(scripts, dict) else None
+    )
     try:
         compose = _read_text(compose_path)
         dockerfile = _read_text(dockerfile_path)
@@ -857,7 +901,8 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
             gateway_service,
         )
         is not None
-        or docker_instructions != [("ENTRYPOINT", "[]"), ("CMD", '["nexus-fosun-gateway"]')]
+        or docker_instructions
+        != [("ENTRYPOINT", "[]"), ("CMD", '["nexus-fosun-gateway"]')]
         or any(
             marker in gateway_service or marker in dockerfile
             for marker in (
@@ -903,14 +948,10 @@ def _compose_uses_yaml_aliases(compose: str) -> bool:
     """Reject anchors, aliases, and merge keys that obscure the effective service."""
     for raw_line in compose.splitlines():
         line = raw_line.split("#", 1)[0]
-        if (
-            re.search(r"<<\s*:", line) is not None
-            or re.search(
-                r"(?:^|[\s:\[,])[&*][A-Za-z0-9_][A-Za-z0-9_.-]*",
-                line,
-            )
-            is not None
-        ):
+        if re.search(r"<<\s*:", line) is not None or re.search(
+            r"(?:^|[\s:\[,])[&*][A-Za-z0-9_][A-Za-z0-9_.-]*",
+            line,
+        ) is not None:
             return True
     return False
 
@@ -931,12 +972,15 @@ def _docker_final_stage_process_instructions(
             stages.append((index, match.group(1), match.group(2)))
     if not stages:
         return []
-    prior_aliases = {alias.casefold() for _index, _base, alias in stages[:-1] if alias is not None}
+    prior_aliases = {
+        alias.casefold() for _index, _base, alias in stages[:-1] if alias is not None
+    }
     final_index, final_base, _final_alias = stages[-1]
     if (
         final_base.casefold() in prior_aliases
         or "$" in final_base
-        or re.fullmatch(r"[^\s@]+:[^\s@]+@sha256:[0-9a-f]{64}", final_base) is None
+        or re.fullmatch(r"[^\s@]+:[^\s@]+@sha256:[0-9a-f]{64}", final_base)
+        is None
     ):
         return [("INHERITED_STAGE", final_base)]
     instructions: list[tuple[str, str]] = []
@@ -999,10 +1043,9 @@ def _runtime_import_graph_reaches_probe_only(main_path: Path) -> bool:
                 return True
             if imported_names & _PROBE_ONLY_NAMES:
                 return True
-            for candidate in (
-                imported_module,
-                *(f"{imported_module}.{name}" for name in imported_names),
-            ):
+            for candidate in (imported_module, *(
+                f"{imported_module}.{name}" for name in imported_names
+            )):
                 if _is_probe_only_module(candidate):
                     return True
                 schedule_with_package_initializers(candidate)
@@ -1016,11 +1059,14 @@ def _local_imports(
     is_package: bool,
 ) -> list[tuple[str, set[str]]]:
     imports: list[tuple[str, set[str]]] = []
-    current_package = current_module if is_package else current_module.rpartition(".")[0]
+    current_package = (
+        current_module if is_package else current_module.rpartition(".")[0]
+    )
     allowed_dynamic_calls = {
         id(node)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _is_allowed_sdk_dynamic_import(current_module, node)
+        if isinstance(node, ast.Call)
+        and _is_allowed_sdk_dynamic_import(current_module, node)
     }
     allowed_dynamic_attributes = {
         id(node.func)
@@ -1099,20 +1145,17 @@ def _has_forbidden_dynamic_import_surface(
             and id(node) not in allowed_dynamic_attributes
         ):
             return True
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Load)
-            and (node.id in _DYNAMIC_IMPORT_MARKERS or node.id in {"compile", "eval", "exec"})
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
+            node.id in _DYNAMIC_IMPORT_MARKERS or node.id in {"compile", "eval", "exec"}
         ):
             return True
         if isinstance(node, ast.ImportFrom) and any(
             alias.name in _DYNAMIC_IMPORT_MARKERS for alias in node.names
         ):
             return True
-        if (
-            isinstance(node, ast.Constant | ast.BinOp)
-            and _static_string(node) in _DYNAMIC_IMPORT_MARKERS
-        ):
+        if isinstance(node, ast.Constant | ast.BinOp) and _static_string(
+            node
+        ) in _DYNAMIC_IMPORT_MARKERS:
             return True
     return False
 
@@ -1286,7 +1329,9 @@ def _sdk_lock_package_is_exact(package: dict[str, object]) -> bool:
 def _private_sdk_subject_is_exact(root: Path) -> bool:
     try:
         lock_document = tomllib.loads(_read_text(root / "uv.lock"))
-        manifest = json.loads(_read_text(root / "contracts/providers/fosun/manifest.json"))
+        manifest = json.loads(
+            _read_text(root / "contracts/providers/fosun/manifest.json")
+        )
     except (OSError, UnicodeError, json.JSONDecodeError, tomllib.TOMLDecodeError):
         return False
     sdk_packages = _sdk_lock_packages(lock_document)
@@ -1363,7 +1408,9 @@ def _python_inventory() -> list[DependencyRecord]:
             or distribution.metadata.get("License")
             or ""
         ).strip()
-        records.append(DependencyRecord("python", name, distribution.version, license_name.strip()))
+        records.append(
+            DependencyRecord("python", name, distribution.version, license_name.strip())
+        )
     return records
 
 
@@ -1518,7 +1565,11 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
     workflow_artifact_safe = workflow_present and _tracked_regular_artifact_is_safe(
         root, workflow_path, _REAL_E2E_WORKFLOW_PATH
     )
-    workflow_job = _real_e2e_workflow_job_block(workflow_path) if workflow_artifact_safe else None
+    workflow_job = (
+        _real_e2e_workflow_job_block(workflow_path)
+        if workflow_artifact_safe
+        else None
+    )
     workflow_job_present = workflow_job is not None
     adopted = (
         config_path.exists()
@@ -1636,7 +1687,9 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E CI job must preserve its fixed local-only execution",
             )
         )
-    can_scan_real_e2e_source = _frozen_artifact_path_is_safe(root, root / _REAL_E2E_TEST_PATH)
+    can_scan_real_e2e_source = _frozen_artifact_path_is_safe(
+        root, root / _REAL_E2E_TEST_PATH
+    )
     if test_directory.is_dir() and can_scan_real_e2e_source:
         for path in sorted(test_directory.rglob("*")):
             if not path.is_file():
@@ -1715,9 +1768,12 @@ def _real_e2e_workflow_is_safe(root: Path, workflow_path: Path, job: str) -> boo
     except OSError:
         return False
     run_commands = re.findall(r"(?m)^\s*-\s+run:\s*(.+?)\s*$", workflow)
-    real_e2e_commands = [command for command in run_commands if "npm run test:e2e:real" in command]
+    real_e2e_commands = [
+        command for command in run_commands if "npm run test:e2e:real" in command
+    ]
     return (
-        _normalized_text_sha256(job.encode("utf-8")) == _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256
+        _normalized_text_sha256(job.encode("utf-8"))
+        == _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256
         and _REAL_E2E_YAML_INDIRECTION.search(workflow) is None
         and _REAL_E2E_WORKFLOW_RUN_SHELL.search(workflow) is None
         and real_e2e_commands == ["npm run test:e2e:real"]
@@ -1913,7 +1969,9 @@ def _frozen_artifact_path_is_safe(root: Path, path: Path) -> bool:
     return path.is_file()
 
 
-def _tracked_regular_artifact_is_safe(root: Path, path: Path, relative_path: str) -> bool:
+def _tracked_regular_artifact_is_safe(
+    root: Path, path: Path, relative_path: str
+) -> bool:
     if not _frozen_artifact_path_is_safe(root, path):
         return False
     identity = _git_artifact_identity(root, relative_path)
@@ -2058,7 +2116,7 @@ def check_workflow(root: Path) -> list[PolicyFinding]:
             )
             break
     required_markers = (
-        'NEXUS_OFFLINE_SOCKET_GUARD: "1"',
+        "NEXUS_OFFLINE_SOCKET_GUARD: \"1\"",
         "scripts/offline_guard/selftest.py",
         "scripts/ci/repository_policy.py",
         "nexus-engine-backup-restore-drill",
