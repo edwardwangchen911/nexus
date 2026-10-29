@@ -42,7 +42,11 @@ uv run --package nexus-engine nexus-engine-schwab-market-stream schwab \
 
 ### Agent Paper 决策报价预检
 
-正式候选批次先运行 `nexus-engine-agent-paper-readiness` 核对静态证据。需要提前验证嘉信报价链路时，对该批次的实际标的各提供一条现有 Instrument 绑定，并使用全新私有目录：
+正式候选批次先运行 `nexus-engine-agent-paper-readiness` 核对静态证据。`ready_static` 只证明当日静态资料齐备，`window_evidence_status=not_evaluated` 不代表正式行情或远端授权可用。新增只读 `authentication` 说明区分本地 access token 当前有效、待刷新或文件无效；`remote_authentication=not_checked` 始终明确远端尚未验证。过期 access token 通常由正常采集入口刷新，不能据此断言 refresh token 已失效，也不因此改变宿主准入。
+
+OAuth 非成功响应保留原固定 HTTP 错误码，并仅在响应结构合格时提取 RFC 6749 白名单 `error` 类别，随正式失败诊断写入可选 `oauth_error_code`；不保存原始响应、描述或凭据。HTTP 400 本身不能区分 `invalid_grant`、`invalid_client` 等原因，旧记录缺少分类时保持未知，不为取回原因重放刷新。工作台无周期时只读取同账户、当前显示交易日的精确自然认领；不合格或未完成回执保持结果未知，不推断为成功或确定失败。
+
+需要提前验证嘉信报价链路时，对该批次的实际标的各提供一条现有 Instrument 绑定，并使用全新私有目录：
 
 ```sh
 uv run --project engine nexus-engine-schwab-market-stream paper-probe \

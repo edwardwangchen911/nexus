@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,12 +26,14 @@ from nexus.ops.agent_paper_loop import (
     _classify_agent_paper_service_heartbeat,
     parse_agent_paper_process_version,
 )
+from nexus.paper.agent_cycle import _TRIGGER_FAILURE_CODES
+from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import (
     AGENT_PAPER_LOOP_PROCESS_VERSION,
     CURRENT_MIGRATION_HEAD,
 )
-from nexus.persistence.models.runtime import WorkerHeartbeat
+from nexus.persistence.models.runtime import IdempotencyRecord, WorkerHeartbeat
 from nexus.workbench.activity_read import read_activity
 from nexus.workbench.readiness import cycle_blocker, runtime_readiness
 
@@ -66,7 +69,14 @@ class WorkbenchReadService:
             execution_locked=True,
             loop=loop,
             compatibility=compatibility,
-            readiness=runtime_readiness(cycles.items, cycles.summary, active_orders),
+            readiness=runtime_readiness(
+                cycles.items,
+                cycles.summary,
+                active_orders,
+                trigger_failure_code=(
+                    await self._trigger_failure(paper, cycles.summary) if latest is None else None
+                ),
+            ),
             session=cycles.summary,
             latest_cycle=latest,
             active_orders=active_orders,
@@ -78,6 +88,43 @@ class WorkbenchReadService:
                 session=cycles.summary,
             ),
         )
+
+    async def _trigger_failure(
+        self, paper: PaperReadService, summary: AgentPaperSessionSummaryResponse
+    ) -> str | None:
+        """Read this displayed session's exact natural claim, never the next slot."""
+        if summary.decision_session is None or summary.status == "calendar_unavailable":
+            return None
+        account, _ = await paper.account()
+        slot = datetime.combine(
+            summary.decision_session,
+            PORTFOLIO_ALLOCATION_V1.decision_local_time,
+            tzinfo=ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
+        ).astimezone(UTC)
+        claim = await self._session.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account.id}",
+                IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                IdempotencyRecord.idempotency_key == slot.isoformat(),
+                IdempotencyRecord.schema_version == "agent_paper_schwab_trigger_v2",
+                IdempotencyRecord.created_at <= self._request_time,
+            )
+        )
+        if claim is None:
+            return None
+        payload = claim.response_payload
+        if not isinstance(payload, dict) or set(payload) != {"outcome", "error_code"}:
+            return "AGENT_PAPER_RESULT_UNKNOWN"
+        code = payload.get("error_code")
+        if (
+            payload.get("outcome") == "failed"
+            and isinstance(code, str)
+            and code in _TRIGGER_FAILURE_CODES
+            and code != "AGENT_PAPER_TRIGGER_FAILED"
+        ):
+            return code
+        # A claim without a cycle is not proof of completion or failure.
+        return "AGENT_PAPER_RESULT_UNKNOWN"
 
     async def _loop_status(
         self,

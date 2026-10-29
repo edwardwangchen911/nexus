@@ -331,3 +331,30 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
     await expect(summary).toHaveCount(0);
   });
 }
+
+for (const width of [390, 1440]) {
+  test(`precycle quote failure stays read-only at ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const payload = readyWorkbench();
+    payload.data.latest_cycle = null;
+    payload.data.session.status = "stopped";
+    payload.data.session.cycle_count = 0;
+    payload.data.session.completed_count = 0;
+    payload.data.session.latest_result_code = null;
+    payload.data.readiness = { stage: "data", blocker: "data_missing", reason_code: "SCHWAB_L1_INCOMPLETE", previous_cycle_id: null, changes: [] };
+    const methods: string[] = [];
+    await installFixtures(page, payload, methods);
+    await page.goto("/workspace");
+    const region = page.getByRole("region", { name: "运行就绪与阻断" });
+    await expect(region).toContainText("自然启动已记录行情准备失败");
+    await expect(region).toContainText("不能据此推断授权过期或行情源的具体原因");
+    await expect(region.getByRole("button")).toHaveCount(0);
+    await expect(page.getByText("实盘锁定", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.getByRole("button", { name: "刷新工作台", exact: true }).click();
+    await expect(region).toContainText("SCHWAB_L1_INCOMPLETE");
+    expect(methods.length).toBeGreaterThanOrEqual(2);
+    expect(methods.every((method) => method === "GET")).toBe(true);
+    await page.screenshot({ path: `test-results/precycle-quote-${width}.png`, fullPage: true });
+  });
+}

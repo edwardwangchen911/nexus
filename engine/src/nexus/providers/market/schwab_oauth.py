@@ -30,6 +30,17 @@ _MAX_TOKEN_RESPONSE_BYTES = 256 * 1024
 _TOKEN_SCHEMA = "nexus_schwab_oauth_token_v1"
 _MAX_TOKEN_FILE_BYTES = 32 * 1024
 _TOKEN_REFRESH_LOCK = ".refresh.lock"
+# RFC 6749 section 5.2 token error categories only; never retain provider prose.
+_TOKEN_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+    }
+)
 
 
 def schwab_http_client(*, timeout: float = 10) -> httpx.AsyncClient:
@@ -42,7 +53,30 @@ def schwab_http_client(*, timeout: float = 10) -> httpx.AsyncClient:
 
 
 class SchwabOAuthError(ValueError):
-    """Stable, value-free Schwab OAuth error."""
+    """Stable error code with an optional value-free OAuth category."""
+
+    def __init__(self, message: str, *, oauth_error_code: str | None = None) -> None:
+        super().__init__(message)
+        self.oauth_error_code = oauth_error_code if oauth_error_code in _TOKEN_ERROR_CODES else None
+
+
+def safe_schwab_oauth_error_code(error: BaseException) -> str | None:
+    value = getattr(error, "oauth_error_code", None)
+    return value if isinstance(value, str) and value in _TOKEN_ERROR_CODES else None
+
+
+def _token_response_error(response: httpx.Response, code: str) -> SchwabOAuthError:
+    category = None
+    if len(response.content) <= _MAX_TOKEN_RESPONSE_BYTES:
+        try:
+            payload = json.loads(response.content, object_pairs_hook=_unique_json)
+        except (TypeError, ValueError, RecursionError):
+            payload = None
+        if isinstance(payload, dict):
+            value = payload.get("error")
+            if isinstance(value, str) and value in _TOKEN_ERROR_CODES:
+                category = value
+    return SchwabOAuthError(code, oauth_error_code=category)
 
 
 @dataclass(frozen=True)
@@ -144,7 +178,7 @@ async def exchange_schwab_authorization_code(
     except httpx.HTTPError:
         raise SchwabOAuthError("SCHWAB_OAUTH_TOKEN_REQUEST_FAILED") from None
     if response.status_code != 200:
-        raise SchwabOAuthError(f"SCHWAB_OAUTH_TOKEN_HTTP_{response.status_code}")
+        raise _token_response_error(response, f"SCHWAB_OAUTH_TOKEN_HTTP_{response.status_code}")
     if len(response.content) > _MAX_TOKEN_RESPONSE_BYTES:
         raise SchwabOAuthError("SCHWAB_OAUTH_TOKEN_RESPONSE_INVALID")
     try:
@@ -200,7 +234,7 @@ async def refresh_schwab_access_token(
     except httpx.HTTPError:
         raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_REQUEST_FAILED") from None
     if response.status_code != 200:
-        raise SchwabOAuthError(f"SCHWAB_OAUTH_REFRESH_HTTP_{response.status_code}")
+        raise _token_response_error(response, f"SCHWAB_OAUTH_REFRESH_HTTP_{response.status_code}")
     if len(response.content) > _MAX_TOKEN_RESPONSE_BYTES:
         raise SchwabOAuthError("SCHWAB_OAUTH_REFRESH_RESPONSE_INVALID")
     try:
@@ -340,6 +374,26 @@ def require_live_schwab_access_token(
     if checked_at >= token.expires_at:
         raise SchwabOAuthError("SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED")
     return token.access_token
+
+
+def inspect_schwab_token_readiness(repo_root: Path, *, now: datetime) -> dict[str, str | None]:
+    """Inspect stored validity only; current tokens do not prove remote authorization."""
+    state, reason = "current", None
+    try:
+        require_live_schwab_access_token(load_schwab_token(repo_root), now=now)
+    except SchwabOAuthError as error:
+        state = (
+            "refresh_required" if str(error) == "SCHWAB_OAUTH_ACCESS_TOKEN_EXPIRED" else "invalid"
+        )
+        reason = str(error)
+    except OSError:
+        state, reason = "invalid", "SCHWAB_OAUTH_TOKEN_STORE_INVALID"
+    return {
+        "local_access_token": state,
+        "reason_code": reason,
+        "remote_authentication": "not_checked",
+        "market_window_evidence": "not_evaluated",
+    }
 
 
 @asynccontextmanager

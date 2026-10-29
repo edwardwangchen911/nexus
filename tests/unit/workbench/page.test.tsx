@@ -332,3 +332,18 @@ it.each([
   expect(readiness).not.toHaveTextContent("五分钟槽");
   expect(readiness).not.toHaveTextContent("开盘时间");
 });
+
+it("explains the saved precycle quote failure without inventing an OAuth cause or retry action", () => {
+  const payload = readyPayload();
+  payload.data.latest_cycle = null;
+  payload.data.readiness = {
+    stage: "data", blocker: "data_missing", reason_code: "SCHWAB_L1_INCOMPLETE",
+    previous_cycle_id: null, changes: [],
+  };
+  render(<WorkbenchPanel state="ready" payload={payload} refreshing={false} onRefresh={vi.fn()} />);
+  const readiness = screen.getByRole("region", { name: "运行就绪与阻断" });
+  expect(readiness).toHaveTextContent("自然启动已记录行情准备失败");
+  expect(readiness).toHaveTextContent("不能据此推断授权过期或行情源的具体原因");
+  expect(within(readiness).queryByRole("button")).not.toBeInTheDocument();
+  expect(readiness).not.toHaveTextContent("invalid_grant");
+});

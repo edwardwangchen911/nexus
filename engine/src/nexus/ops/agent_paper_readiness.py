@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_stack import LocalStackConfigurationError, _validate_local_env
 from nexus.paper.candidate_batch import inspect_agent_paper_candidate_static_readiness
 from nexus.persistence.session import session_factory
+from nexus.providers.market.schwab_oauth import inspect_schwab_token_readiness
 from nexus.settings import EngineSettings
 
 
@@ -48,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         account_id = UUID(environment.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", ""))
         batch_id = UUID(environment.get("NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID", ""))
         result = asyncio.run(_inspect(settings, account_id=account_id, batch_id=batch_id))
+        result["authentication"] = inspect_schwab_token_readiness(root, now=datetime.now(UTC))
     except (KeyError, TypeError, ValueError, LocalStackConfigurationError):
         print(json.dumps({"status": "blocked", "error_code": "AGENT_PAPER_READINESS_INVALID"}))
         return 1

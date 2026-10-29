@@ -69,6 +69,8 @@ def runtime_readiness(
     cycles: tuple[AgentPaperCycleResponse, ...],
     summary: AgentPaperSessionSummaryResponse,
     orders: tuple[PaperOrderResponse, ...],
+    *,
+    trigger_failure_code: str | None = None,
 ) -> WorkbenchReadinessResponse:
     latest = cycles[0] if cycles else None
     previous = cycles[1] if len(cycles) > 1 else None
@@ -83,6 +85,14 @@ def runtime_readiness(
         stage = "window"
     elif latest is None and summary.status == "ready":
         stage = "data"
+    if latest is None and summary.status != "calendar_unavailable" and trigger_failure_code:
+        reason = trigger_failure_code
+        trigger_stages: dict[str, tuple[WorkbenchStage, WorkbenchBlocker]] = {
+            "SCHWAB_L1_INCOMPLETE": ("data", "data_missing"),
+            "SCHWAB_L1_FRESHNESS_UNPROVEN": ("data", "stale"),
+            "AGENT_PAPER_RESULT_UNKNOWN": ("recovery", "result_unknown"),
+        }
+        stage, blocker = trigger_stages.get(trigger_failure_code, ("unknown", "unknown"))
     if any(order.status == "reconciling" for order in orders):
         stage, blocker, reason = "recovery", "result_unknown", "ORDER_RESULT_UNKNOWN"
     changes = []

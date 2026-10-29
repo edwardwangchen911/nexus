@@ -169,3 +169,34 @@ def test_saved_risk_rejection_takes_priority_over_no_order_result() -> None:
     result = runtime_readiness((rejected, cycle()), summary(), ())
     assert result.blocker == "risk_rejected"
     assert result.changes == ("blocker", "risk")
+
+
+@pytest.mark.parametrize(
+    ("code", "stage", "blocker"),
+    [
+        ("SCHWAB_L1_INCOMPLETE", "data", "data_missing"),
+        ("SCHWAB_L1_FRESHNESS_UNPROVEN", "data", "stale"),
+        ("AGENT_PAPER_RESULT_UNKNOWN", "recovery", "result_unknown"),
+        ("RISK_INPUT_REQUIRED", "unknown", "unknown"),
+    ],
+)
+def test_precycle_failure_is_explained_without_claiming_a_cycle(code, stage, blocker):
+    result = runtime_readiness((), summary("stopped"), (), trigger_failure_code=code)
+    assert (result.stage, result.blocker, result.reason_code) == (stage, blocker, code)
+    assert result.previous_cycle_id is None
+    assert result.changes == ()
+
+
+def test_precycle_failure_does_not_override_cycle_or_calendar():
+    assert (
+        runtime_readiness(
+            (cycle(),), summary(), (), trigger_failure_code="SCHWAB_L1_INCOMPLETE"
+        ).reason_code
+        == "NO_ORDER_REQUIRED"
+    )
+    assert (
+        runtime_readiness(
+            (), summary("calendar_unavailable"), (), trigger_failure_code="SCHWAB_L1_INCOMPLETE"
+        ).reason_code
+        == "CALENDAR_UNAVAILABLE"
+    )
