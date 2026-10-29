@@ -14,7 +14,7 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.monitoring import MonitorDailyTriggerReceipt, MonitorTrigger
 from nexus.persistence.models.runtime import AuditEvent, Job, OutboxEvent
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 
 async def prepare_daily(
@@ -422,6 +422,7 @@ async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
             settings, job_ids=(job.id,), formal_stage_capacity=True
         )
     async with factory() as session, session.begin():
+        now = await session.scalar(select(func.clock_timestamp()))
         observed = await reconcile_account_results(
             session,
             account_id=trigger.account_id,

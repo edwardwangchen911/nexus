@@ -40,6 +40,9 @@ async def test_normal_scan_reconciles_daily_outputs_once_without_model_calls(
     async with factory() as session:
         cycle = await session.scalar(select(AgentPaperCycleRecord))
         original_runs = tuple(await session.scalars(select(AgentResearchRunRecord.id)))
+        scan_at = max(
+            AT + timedelta(seconds=10), await session.scalar(select(func.clock_timestamp()))
+        )
     from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 
     async with factory() as session, session.begin():
@@ -87,14 +90,14 @@ async def test_normal_scan_reconciles_daily_outputs_once_without_model_calls(
                 universe_snapshot_id=cycle.universe_snapshot_id,
                 instrument_ids=securities[:2],
                 idempotency_key="new-current-monitor-scope",
-                created_at=AT + timedelta(seconds=10),
+                created_at=scan_at,
             )
         settings = settings.model_copy(update={"agent_paper_candidate_batch_id": current.batch_id})
     old_scalar = AsyncSession.scalar
 
     async def clock(self, statement, *args, **kwargs):
         if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-            return AT + timedelta(seconds=10)
+            return scan_at
         return await old_scalar(self, statement, *args, **kwargs)
 
     monkeypatch.setattr(AsyncSession, "scalar", clock)
@@ -138,6 +141,7 @@ async def test_normal_scan_reconciles_daily_outputs_once_without_model_calls(
 
         from alembic import command
         from alembic.config import Config
+        from helpers.migration_guard import historical_downgrade_guard
         from sqlalchemy import update
         from sqlalchemy.exc import DBAPIError
 
@@ -147,8 +151,10 @@ async def test_normal_scan_reconciles_daily_outputs_once_without_model_calls(
                     await session.execute(update(MonitorCoverageReceipt).values(reason="rewritten"))
         monkeypatch.setenv("DATABASE_URL", migrated_database_url)
         config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-        with pytest.raises(Exception, match="MONITOR_COVERAGE_HISTORY_DOWNGRADE_FORBIDDEN"):
+        with pytest.raises(Exception, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
             await asyncio.to_thread(command.downgrade, config, "0089_monitor_evidence")
+        with pytest.raises(Exception, match="MONITOR_COVERAGE_HISTORY_DOWNGRADE_FORBIDDEN"):
+            await historical_downgrade_guard(migrated_database_url, "0090_monitor_coverage")
     await factory.kw["bind"].dispose()
 
 
@@ -251,6 +257,8 @@ async def test_increment_completion_replaces_or_preserves_explicit_coverage(
     assert await run_agent_worker_once(
         settings, job_ids=(UUID(admitted["job_id"]),), formal_stage_capacity=True
     )
+    async with factory() as session:
+        now = await session.scalar(select(func.clock_timestamp()))
     if mode == "veto":
         async with factory() as session:
             # A newly finished rejection must block old-parent admission even
@@ -342,7 +350,7 @@ async def test_normal_daily_reconcile_adopts_original_sec_plan_independently(
     factory, settings, _, captured, pointer = await reader_source(
         migrated_database_url, monkeypatch, tmp_path
     )
-    captured["clock"][0] = AT + timedelta(seconds=6)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=6))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory() as session:
         source = await session.get(AgentResearchRunRecord, pointer.source_run_id)
@@ -505,7 +513,7 @@ async def test_new_ordinary_daily_sec_refusal_preserves_native_facts(
     factory, settings, _, captured, pointer = await reader_source(
         migrated_database_url, monkeypatch, tmp_path
     )
-    captured["clock"][0] = AT + timedelta(seconds=6)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=6))
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory() as session:
         parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)
@@ -643,6 +651,7 @@ async def test_new_ordinary_daily_sec_refusal_preserves_native_facts(
             ["research", "critique"] if mode == "unknown" else ["research", "critique", "synthesis"]
         )
         async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
             budget_query = select(
                 AgentDailyBudgetReservationRecord.id,
                 AgentDailyBudgetReservationRecord.state,

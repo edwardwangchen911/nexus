@@ -424,7 +424,11 @@ async def test_native_installed_plan_fresh_then_real_l1_import(
             reference = result["observations"][0]
             quote = await session.get(LatestQuote, UUID(reference["quote_id"]))
             artifact = await session.get(DataArtifact, quote.data_artifact_id)
-            assert quote.observed_at == captured["clock"][0] - timedelta(seconds=1)
+            source_at = captured["clock"][0] - timedelta(seconds=1)
+            # Schwab's wire timestamp encodes whole milliseconds, while receipt
+            # and availability retain the independent local observation clock.
+            source_at = source_at.replace(microsecond=source_at.microsecond // 1000 * 1000)
+            assert quote.observed_at == source_at
             assert (
                 quote.available_at
                 == quote.received_at

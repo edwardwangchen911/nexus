@@ -268,7 +268,8 @@ async def test_group_dispatch_from_secondary_finishes_exact_members(
         from nexus.persistence.models.agents import AgentResearchRunRecord
         from sqlalchemy.ext.asyncio import AsyncSession
 
-        later = now + timedelta(seconds=1)
+        async with factory() as session:
+            later = await session.scalar(select(func.clock_timestamp())) + timedelta(seconds=1)
         await _set_test_insert_clock(factory, later)
         await append_fresh_inputs(factory, parent.instrument_id, later)
         old_scalar = AsyncSession.scalar
