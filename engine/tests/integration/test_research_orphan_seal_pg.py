@@ -68,6 +68,9 @@ async def original_facts(session):
         "live_lease",
         "extra_event",
         "budget_released",
+        "usage",
+        "request_hash",
+        "source_evidence",
         "process_live",
         "late_process",
         "close_rollback",
@@ -77,12 +80,19 @@ async def original_facts(session):
     ],
 )
 async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
-    migrated_database_url, monkeypatch, tmp_path, case
+    migrated_database_url, monkeypatch, tmp_path, case, *, known_prefix=None, legacy=False
 ):
-    cross_day = case == "cross_day"
+    cross_day = case in {"cross_day", "cross_day_no_ack"}
     # Existing regression runs normal HTTP/manual/Worker paths, interrupts only the
     # second Worker, resumes twice and proves known/unknown/unused accounting.
-    await recover_case(migrated_database_url, monkeypatch, tmp_path, "manual")
+    await recover_case(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        "manual",
+        known_prefix=known_prefix,
+        legacy=legacy,
+    )
     engine = create_async_engine(migrated_database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -146,6 +156,19 @@ async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
                 worker_id=lease.worker_id,
             )
         mutations = {
+            "usage": (
+                "agent_research_runs",
+                "input_tokens=coalesce(input_tokens,0)+1",
+                "id",
+                run.id,
+            ),
+            "request_hash": ("agent_research_runs", "input_hash=repeat('0',64)", "id", run.id),
+            "source_evidence": (
+                "agent_research_runs",
+                "evidence_hash=repeat('0',64)",
+                "id",
+                run.id,
+            ),
             "worker": ("job_attempts", "worker_id='wrong-worker'", "job_id", job.id),
             "fence": ("job_leases", "fence_token=fence_token+1", "job_id", job.id),
             "job_key": ("jobs", "job_key=repeat('0',64)", "id", job.id),
@@ -191,7 +214,7 @@ async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
                         run_id=run.id, sequence=2, state="failed", details={}, event_hash="a" * 64
                     )
                 )
-        if case == "no_ack":
+        if case in {"no_ack", "cross_day_no_ack"}:
             args.accept_unknown_usage = False
         elif case == "default_policy":
             args.same_day = args.expired_attempt = False
@@ -219,6 +242,7 @@ async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
             monkeypatch.setattr(manual_request, "close_failed_manual_request", reject_after_close)
         failures = set(mutations) | {
             "no_ack",
+            "cross_day_no_ack",
             "default_policy",
             "sdk_policy",
             "wrong_run",

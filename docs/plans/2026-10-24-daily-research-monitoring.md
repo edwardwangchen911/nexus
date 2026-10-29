@@ -1126,3 +1126,23 @@ A只切换已冻结authority消费复验；新增完整reader与原写方共享�
 
 
 最终收口（2026-10-28）：Chat 补包 3ad7e591-6e43-4598-9239-afca6dde6bca 已返回；外层 except 继承旧异常的 P2 已用实际控制器单测复现（1 失败、5 通过），completed_normally 修复后 39 单测通过，最终 18 项数据库回归通过（125.84 秒）。类型、格式和差异检查通过，本地复核无新增问题；评审明确的本切片结束条件已满足，无需重发。分批覆盖 51 个不同数据库案例，并非单次全量。隔离库零临时库、零其他连接后已停用保卷，宿主仍维护停用。完整 T 尚未通过；下一切片是已领取但确证未调用的正常结案及公共证明消费，其后保留期限、连接池、真实进程和 prepare/writer/scan 矩阵。未推送、合入部署、重放或释放真实未知预算。
+
+## 2026-10-29：PR51 候选已提交；维护回滚镜像实测通过，CI 与终审回归仍未收口
+
+唯一 writer `/Users/wangchen/.codex/worktrees/synthesis-failure-facts/投资`，branch `edward/research-lifecycle-closure`。本回合05:36:28UTC起，06:21:28UTC边界。私有接续入口 `.secrets/staged-execution-20261029/release/checkpoint.json`。已提交推送 a6987fa9；本地后续提交0f177688尚未推送，另有终审修复及测试WIP。PR51保持draft，未合入、未部署，main仍b526d61e。
+
+同head Actions 40824522887已全部结束：policy/web/gateway成功，fast、七个PG组、两组浏览器及PG汇总失败。七PG共182项失败已统一分类保存ci-a698-analysis.json；不是只修第一组。实际已修且本地复验：原生SDK/Worker受控接点94项、浏览器19项、真实BFF浏览器1项；阶段用量已知前缀下界及未知后继/迟到写入、原孤儿路径、旧迁移保护等定向组见checkpoint，不以这些结果冒充全CI通过。剩余失败涉及原claim入口/selected阶段证明、孤儿故障注入接点、容量SDK接点、冻结时间与原件毫秒精度等，继续按统一正式机制迁接，不能改断言变绿。
+
+已修真实产品缺陷：可信已知前缀后出现未知阶段时，正常与孤儿结案保留已知token下界，费用仍未知、预算仍reserved，迟到用量不能回写冻结结论。指定Chat定向终审指出两处P2：跨日孤儿默认封存模式，以及过期证明入口传入记录的精确绑定。两处源码已修改；精确reservation/job/attempt/lease错配拒绝与正常绑定2项12.38秒通过，Mypy两文件通过；跨日显式接受、重复读回及零/单侧零等边界仍待补验和定向收口。未因此接受任何真实未知影响。
+
+兼容回滚采用已审maintenance镜像：编译固定拒绝新根、领取和阶段授权，保留0099读取及原生收尾/结算，业务宿主和Worker保持停用。已构建正式F及维护R的0f177688镜像，实际安装代码在同一非空0099隔离库完成F→R→F两组验证（已知/未知），2项74.11秒；传入精确合成SEC原件，未mock资格判定。R拒绝新工作、正常close及事实/预算保护读回已验。它不是旧代码全功能回滚，也不保证对保留reader自身缺陷回滚；必要时停止写入并向前修复。镜像尚不含后续P2 WIP，不能当作最终可部署镜像。身份、日志、逐步快照均在release私有目录。
+
+下一步补齐跨日封存及剩余CI失败簇，统一提交最终候选、全部必需CI、定向终审，再重建最终F/R并完成兼容验证；通过后才合入和维护态部署。已有0099阶段事实不得降至0098，原旧身份和历史读取继续保留。正常业务host已核stopped/maintenance，本回合无真实模型/通知/资料调用、重放、未知接受释放、live迁移或宿主启动。隔离测试库收尾以release/test-cleanup.json及最终checkpoint为准；保留数据卷、当前镜像及回滚/在验镜像。
+
+### 2026-10-29 当前候选的跨日封存与失败夹具收口
+
+保留原日期、账户、模型、预算和租约门禁，修正 selected orphan 的跨日默认封存模式；过期证明精确核对调用方 reservation/job/attempt/lease 并复用旧公共校验，可信下界不表示整Run已知。真实正常CLI覆盖未知、正数前缀、0/0与单侧零、无接受拒绝、seal重复读回、原事实与预算不变。selected公共矩阵与单位边界41项863.54秒通过；补强最终阶段读取的跨日11项488.48秒通过；历史未选版same/cross day2项91.96秒通过。原orphan与seal29项842.77秒通过；新增当前usage/request_hash/source_evidence损坏3项192.22秒拒绝正确；原8个legacy proof注入负例167.89秒通过。故障接点从旧Worker迁到实际selected executor/protocol，历史用例明确在出生时不选版，无冻结身份改写。
+
+已知前缀normal/orphan+晚到与错绑定2项复用上一轮相同生产代码结果；本轮v10/v11 research_unknown两项105.81秒通过，配合原5项已覆盖原7项下界回归。共享准备后观察与合成后观察用同一单调时钟，原future/session和DB binding negative不变；ready_trigger追加当前合成行情，不刷新原冻结事实，最终increment2项118.89秒通过。完整Mypy681、Ruff通过；Playwright仅--hostname到实际--host拼写修正，已复验真实BFF且本地完整差异审计后更新配置精确指纹，policy224项59.79秒及repository policy通过，无新风险豁免。
+
+独立代码定向复核无新增P1/P2。指定Chat请求标记nexus-0099-crossday-final-20261029-03已受理，当前仍待完整回复，不能宣称终审完成。此记录不证明最终CI/镜像/部署已过；旧head a6987fa9的失败仍以实际Actions结果为准。业务host仍stopped/maintenance，无真实请求、通知或未知占用变更。

@@ -431,6 +431,23 @@ async def test_manual_partial_seal_rejection_preserves_all_facts(
     original_close = manual_request.close_failed_manual_request
     original_stop = agent_cycle._stop_failed
 
+    if fault in {
+        "usage",
+        "request-hash",
+        "source-evidence",
+        "terminal-hash",
+        "stage-input-missing",
+        "sibling-attempt",
+    }:
+        from nexus.agents.research_stages import routes
+
+        async def historical_proof_birth(session, run_ids):
+            # These faults explicitly exercise the old per-role proof interface.
+            # Selected stage evidence corruption is covered by the public orphan matrix.
+            return None
+
+        monkeypatch.setattr(routes, "register_new_prepared_runs", historical_proof_birth)
+
     class VerifiedRejection(Exception):
         pass
 

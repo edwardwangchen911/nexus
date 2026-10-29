@@ -162,6 +162,36 @@ async def _expired_proof(session: Any, **kwargs: Any) -> Any:
         return await research_orphan_proof._legacy_require_expired_research_proof(session, **kwargs)
     if proof.known or not proof.cleanup_confirmed or not proof.orphan:
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        AgentResearchRunRecord,
+    )
+    from nexus.persistence.models.runtime import JobAttempt, JobLease
+
+    # The reader establishes the persisted proof, while this interface also
+    # validates the caller's exact component set, as its legacy contract did.
+    persisted_run = await session.get(AgentResearchRunRecord, proof.run_id)
+    for name, model, predicate in (
+        (
+            "reservation",
+            AgentDailyBudgetReservationRecord,
+            AgentDailyBudgetReservationRecord.run_id == proof.run_id,
+        ),
+        ("job", Job, Job.payload["run_id"].astext == str(proof.run_id)),
+        ("attempt", JobAttempt, JobAttempt.job_id == kwargs["job"].id),
+        ("lease", JobLease, JobLease.job_id == kwargs["job"].id),
+    ):
+        values = tuple(await session.scalars(select(model).where(predicate)))
+        if len(values) != 1 or any(
+            getattr(kwargs[name], column.key) != getattr(values[0], column.key)
+            for column in model.__table__.columns
+        ):
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    await research_orphan_proof._legacy_require_expired_research_proof(
+        session,
+        **kwargs,
+        _verified_stage_usage=(persisted_run.input_tokens, persisted_run.output_tokens),
+    )
 
 
 async def _history_proof(session: Any, **kwargs: Any) -> Any:

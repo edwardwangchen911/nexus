@@ -288,6 +288,64 @@ async def test_formal_route_birth_legacy_isolation_and_unknown_rollback_protecti
                     )
                 ).one() == (10, 5, None)
                 assert proof.orphan is orphan
+                if orphan:
+                    from types import SimpleNamespace
+                    from uuid import uuid4
+
+                    from nexus.paper.research_orphan_proof import require_expired_research_proof
+                    from nexus.persistence.models.agents import (
+                        AgentDailyBudgetReservationRecord,
+                        AgentResearchEventRecord,
+                        AgentResearchOutputRecord,
+                        AgentResearchRunRecord,
+                    )
+                    from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
+                    from sqlalchemy import select
+
+                    bound = {
+                        "run": await session.get(AgentResearchRunRecord, run_id),
+                        "reservation": await session.scalar(
+                            select(AgentDailyBudgetReservationRecord).where(
+                                AgentDailyBudgetReservationRecord.run_id == run_id
+                            )
+                        ),
+                        "job": await session.get(Job, job_id),
+                        "attempt": await session.scalar(
+                            select(JobAttempt).where(JobAttempt.job_id == job_id)
+                        ),
+                        "lease": await session.scalar(
+                            select(JobLease).where(JobLease.job_id == job_id)
+                        ),
+                        "outputs": tuple(
+                            await session.scalars(
+                                select(AgentResearchOutputRecord).where(
+                                    AgentResearchOutputRecord.run_id == run_id
+                                )
+                            )
+                        ),
+                        "events": tuple(
+                            await session.scalars(
+                                select(AgentResearchEventRecord).where(
+                                    AgentResearchEventRecord.run_id == run_id
+                                )
+                            )
+                        ),
+                        "now": close_at + timedelta(seconds=2),
+                    }
+                    await require_expired_research_proof(session, **bound)
+                    for name in ("reservation", "job", "attempt", "lease"):
+                        original = bound[name]
+                        mismatched = SimpleNamespace(
+                            **{
+                                column.key: getattr(original, column.key)
+                                for column in original.__table__.columns
+                            }
+                        )
+                        mismatched.id = uuid4()
+                        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                            await require_expired_research_proof(
+                                session, **{**bound, name: mismatched}
+                            )
     finally:
         await factory.kw["bind"].dispose()
 

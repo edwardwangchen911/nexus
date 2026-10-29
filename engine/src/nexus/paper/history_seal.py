@@ -620,7 +620,9 @@ async def _legacy_proof(
         # stopped publication need not have emitted legacy per-role outputs.
         if stage_proof.known or not stage_proof.cleanup_confirmed:
             raise ValueError(_BLOCKED)
-        if stage_proof.orphan != expired_attempt:
+        if (expired_attempt and not stage_proof.orphan) or (
+            same_day and not expired_attempt and stage_proof.orphan
+        ):
             raise ValueError(_BLOCKED)
         if any(output.role is not None for output in outputs):
             await _require_partial_usage_proof(session, run, outputs, model)

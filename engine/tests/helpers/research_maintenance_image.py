@@ -6,6 +6,7 @@ not create fixtures, run migrations, send models or accept unknown effects.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -85,6 +86,24 @@ async def main():
     assert action in {"inspect", "refuse", "finish", "close"}
     settings = EngineSettings(**args["settings"])
     factory = session_factory(settings)
+    if "synthetic_originals" in args:
+        originals = {
+            key: base64.b64decode(value, validate=True)
+            for key, value in args["synthetic_originals"].items()
+        }
+
+        class FrozenOriginals:
+            async def read_raw(self, key, *, uri):
+                content = originals[key]
+                assert (
+                    uri
+                    == "s3://synthetic/" + key + "?versionId=" + hashlib.sha256(content).hexdigest()
+                )
+                return content
+
+            read_evidence = read_raw
+
+        factory.kw["info"] = {"sec_exhibit_store": FrozenOriginals()}
     now = datetime.fromisoformat(args["now"])
     original_scalar = AsyncSession.scalar
 

@@ -27,6 +27,7 @@ async def _legacy_require_expired_research_proof(
     outputs: tuple[AgentResearchOutputRecord, ...],
     events: tuple[AgentResearchEventRecord, ...],
     now: datetime,
+    _verified_stage_usage: tuple[int | None, int | None] | None = None,
 ) -> None:
     """Called only after the common frozen cycle/model/budget/claim checks."""
     bound_jobs = tuple(
@@ -36,12 +37,15 @@ async def _legacy_require_expired_research_proof(
     )
     if (
         run.status != "failed"
-        or any(
-            value is not None
-            for value in (run.input_tokens, run.output_tokens, run.settled_cost_usd)
-        )
+        or (run.input_tokens, run.output_tokens) != (_verified_stage_usage or (None, None))
+        or run.settled_cost_usd is not None
         or reservation.state != "reserved"
+        or reservation.run_id != run.id
         or bound_jobs != (job.id,)
+        or attempt.job_id != job.id
+        or lease.job_id != job.id
+        or attempt.lease_token != lease.lease_token
+        or attempt.fence_token != lease.fence_token
         or job.status != "dead_letter"
         or job.queue != "general"
         or job.schema_version != "agent_research_job_v1"
@@ -76,7 +80,9 @@ async def _legacy_require_expired_research_proof(
     output, event = outputs[0], events[0]
     reason = {"reason": "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"}
     if (
-        output.sequence != 1
+        output.run_id != run.id
+        or event.run_id != run.id
+        or output.sequence != 1
         or output.role is not None
         or output.prompt_hash is not None
         or output.status != "failed"
