@@ -549,7 +549,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         # A staged Worker advances the shared clock while external work or DB
         # waits elapse. Later decision probes must not move time behind the
         # committed research; retain the original two-second sequence otherwise.
-        post_research_at = max(post_research_at, clock_at[0] - timedelta(seconds=2))
+        post_research_at = max(post_research_at, WorkerClock.now(UTC) - timedelta(seconds=2))
         if independent:
             from nexus.paper.research_request import finish_research_request
             from nexus.persistence.models.manual_paper import ManualPaperRequest
@@ -931,7 +931,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                         session,
                         cycle_id=result.cycle_id,
                         idempotency_key="sdk-failure-closeout",
-                        now=post_research_at + timedelta(seconds=4),
+                        now=max(post_research_at + timedelta(seconds=4), WorkerClock.now(UTC)),
                         **consumer_mode,
                     )
                     assert closed_cycle.status == "unavailable"
@@ -972,7 +972,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 completed_job.status,
                 completed_job.error_code,
             )
-        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=4))
+        # Synthesis commits after the research observation. Both the binding
+        # negative probe and normal activation must see its committed result.
+        decision_observed_at = max(post_research_at + timedelta(seconds=4), WorkerClock.now(UTC))
+        clock_at[0] = decision_observed_at
         if not trade and count == 3 and not manual:
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
@@ -996,7 +999,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                             session,
                             cycle_id=result.cycle_id,
                             idempotency_key="corrupt-frozen-model",
-                            now=post_research_at + timedelta(seconds=4),
+                            now=decision_observed_at,
                             **consumer_mode,
                         )
             finally:
@@ -1008,7 +1011,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row.model_hash == model.config_hash
                     for row in await session.scalars(select(AgentResearchRunRecord))
                 )
-        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=4))
+        decision_observed_at = max(decision_observed_at, WorkerClock.now(UTC))
+        clock_at[0] = decision_observed_at
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             await _consume_manual_host_action(settings, "RESUME")
@@ -1020,7 +1024,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="activate-target",
-                    now=post_research_at + timedelta(seconds=4),
+                    now=decision_observed_at,
                     **consumer_mode,
                 )
             )
@@ -1077,7 +1081,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     session,
                     cycle_id=result.cycle_id,
                     idempotency_key="activate-target",
-                    now=post_research_at + timedelta(seconds=5),
+                    now=max(decision_observed_at + timedelta(seconds=1), WorkerClock.now(UTC)),
                     **consumer_mode,
                 )
             )
@@ -1116,7 +1120,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 orders,
                 count,
                 formal=formal,
-                decision_observed_at=post_research_at + timedelta(seconds=4),
+                decision_observed_at=decision_observed_at,
                 database_clock_at=clock_at if manual else None,
                 manual_settings=settings if manual else None,
                 manual_request_id=request_id if manual else None,
