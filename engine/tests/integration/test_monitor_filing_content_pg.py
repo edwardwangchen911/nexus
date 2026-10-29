@@ -124,7 +124,10 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
                 for model in (AgentResearchRunRecord, Job, AgentDailyBudgetReservationRecord)
             ]
         )
-    captured["clock"][0] = AT + timedelta(seconds=9)
+        import_started_at = max(
+            AT + timedelta(seconds=9), await session.scalar(select(func.clock_timestamp()))
+        )
+    captured["clock"][0] = import_started_at
     await _set_test_insert_clock(factory, captured["clock"][0])
     original_put = store.put_if_absent
     delayed = [False]
@@ -134,10 +137,10 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
         result = await original_put(key=key, content=content)
         if key.startswith("raw/sec/monitor-filing/") and not raw_delayed[0]:
             raw_delayed[0] = True
-            captured["clock"][0] = AT + timedelta(seconds=10)
+            captured["clock"][0] += timedelta(seconds=1)
         if key.startswith("evidence/monitor-filing/") and not delayed[0]:
             delayed[0] = True
-            captured["clock"][0] = AT + timedelta(seconds=11)
+            captured["clock"][0] += timedelta(seconds=1)
         return result
 
     monkeypatch.setattr(store, "put_if_absent", put_with_later_custody)
@@ -166,6 +169,16 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
                     )
                 )
                 assert first_archived >= AT + timedelta(seconds=10)
+                assert first_archived >= import_started_at + timedelta(seconds=1)
+                assert current.available_at <= import_started_at
+                assert (
+                    await read_filing_content(
+                        session,
+                        snapshot_id=UUID(imported["snapshot_id"]),
+                        as_of=import_started_at,
+                    )
+                    is None
+                )
                 assert (
                     await read_filing_content(
                         session,
@@ -308,7 +321,9 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
         )
     store.objects[key] = saved
     # Later conflicting originals are new facts; they cannot rewrite the old cutoff.
-    captured["clock"][0] = AT + timedelta(seconds=12)
+    captured["clock"][0] = max(
+        captured["clock"][0] + timedelta(seconds=1), AT + timedelta(seconds=12)
+    )
     await _set_test_insert_clock(factory, captured["clock"][0])
     conflict_dir = archive(tmp_path / "conflicting", entries[0])
     filename = entries[0]["primary_document"]
@@ -341,7 +356,9 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
     from nexus.persistence.models.agents import AgentResearchOutputRecord
     from nexus.persistence.models.monitoring import MonitorPlan
 
-    captured["clock"][0] = AT + timedelta(seconds=13)
+    captured["clock"][0] = max(
+        captured["clock"][0] + timedelta(seconds=1), AT + timedelta(seconds=13)
+    )
     await _set_test_insert_clock(factory, captured["clock"][0])
     async with factory() as session, session.begin():
         prior_plan = await session.scalar(select(MonitorPlan).where(MonitorPlan.kind == "price"))

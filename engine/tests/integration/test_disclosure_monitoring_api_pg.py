@@ -165,7 +165,7 @@ async def test_daily_sec_proof_overrides_only_when_original_proof_valid(
     from integration import test_monitor_daily_v2_native_pg as native
     from nexus.api import research_disclosure_monitoring as reader
     from nexus.persistence.models.monitoring import MonitorDailyEventReceipt
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     fixtures = []
     prepare = native.unresolved_then_daily
@@ -182,6 +182,7 @@ async def test_daily_sec_proof_overrides_only_when_original_proof_valid(
     factory, _, pointer, _, _, old_run, _, now, _, _ = fixtures[0]
     try:
         async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
             parent = await session.get(AgentResearchRunRecord, pointer.source_run_id)
             view = await reader.read_disclosure_monitoring_view(session, parent, now=now)
             assert view.trigger_count == 2

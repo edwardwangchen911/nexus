@@ -80,6 +80,9 @@ async def test_exact_disclosure_observation(migrated_database_url, monkeypatch, 
             captured["clock"][0] + timedelta(seconds=2),
             AT + (timedelta(minutes=7, seconds=1) if mode == "stale" else timedelta(seconds=10)),
         )
+        if mode == "stale":
+            current = await session.get(DataSnapshot, UUID(result["snapshot_id"]))
+            now = current.available_at + timedelta(seconds=1)
         observation = await read_disclosure_observation(session, plan=plan, now=now)
         expected = {
             "new": "true",
