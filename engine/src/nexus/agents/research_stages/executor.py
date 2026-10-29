@@ -23,6 +23,7 @@ from nexus.agents.research_stages.protocol import (
     ProtocolRejected,
     StagedProtocol,
     evidence_digest,
+    known_usage_lower_bound,
     stage_evidence,
     usage_known,
 )
@@ -110,6 +111,9 @@ class FrozenCommittee:
 
 
 async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute: Any) -> Any:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     wall_anchor = clock()
     monotonic_anchor = asyncio.get_running_loop().time()
     original_clock = clock
@@ -307,17 +311,7 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
                 and committee.failure_reason == "model_usage_uncertain"
             ):
                 frozen.failure_reason = "model_research_stopped"
-            from nexus.agents.responses_budget import UsageSnapshot
-
-            frozen.usage = UsageSnapshot(
-                input_tokens=sum(row["input_tokens"] or 0 for row in rows if row["eligible"])
-                if matched
-                else 0,
-                output_tokens=sum(row["output_tokens"] or 0 for row in rows if row["eligible"])
-                if matched
-                else 0,
-                provider_calls=len(rows),
-            )
+            frozen.usage = known_usage_lower_bound(rows)
 
             async def finalize(target: Any) -> Any:
                 result = await execute_research_run(target, **{**args, "committee": frozen})

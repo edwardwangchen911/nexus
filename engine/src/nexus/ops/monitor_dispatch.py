@@ -230,6 +230,9 @@ async def dispatch_configured_once(
     Retrying a blocked eligibility check on a later tick does not retry research.
     Any existing Run identity, including unknown/failed, is never replaced.
     """
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.audit.service import append_audit_event
     from nexus.monitoring.admission import require_increment_binding
     from nexus.ops.agent_paper_once import _validate_local_database
@@ -453,6 +456,9 @@ async def dispatch_host_once(
     env_file: Path | None = None,
     prepared_market_open_at: datetime | None = None,
 ) -> dict[str, object]:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.ops.research_monitor import load_host_settings
 
     private_context: dict[str, str] = {}

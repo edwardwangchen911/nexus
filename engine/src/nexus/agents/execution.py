@@ -97,6 +97,9 @@ async def execute_research_run(
     allow_fixture_price_authority: bool = False,
 ) -> ResearchRunResult:
     """Advance one prepared run through every durable state or a fail-closed terminal."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
     if run is None:
         raise ValueError("research run is missing")

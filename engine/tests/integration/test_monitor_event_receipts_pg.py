@@ -227,7 +227,9 @@ async def native_result(url, monkeypatch, root, mode):
     assert await run_agent_worker_once(
         settings, job_ids=(member.job_id,), formal_stage_capacity=True
     )
-    return factory, member, context, ph, digest(reviews), captured["clock"][0]
+    async with factory() as session:
+        observed_at = await session.scalar(select(func.clock_timestamp()))
+    return factory, member, context, ph, digest(reviews), observed_at
 
 
 @pytest.mark.asyncio
@@ -338,11 +340,19 @@ async def test_original_mixed_receipts_and_atomic_coverage(
                 )
                 assert {r.kind for r in receipts} == {"price", "disclosure"}
             monkeypatch.setenv("DATABASE_URL", migrated_database_url)
-            with pytest.raises(DBAPIError, match="MONITOR_EVENT_HISTORY_DOWNGRADE_FORBIDDEN"):
+            # Current stage history blocks the full chain first. Independently
+            # retain the original receipt fence assertion in a rollback-only call.
+            with pytest.raises(DBAPIError, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
                 await asyncio.to_thread(
                     command.downgrade,
                     Config(str(Path(__file__).parents[2] / "alembic.ini")),
                     "0095_monitor_mixed_increments",
+                )
+            from helpers.migration_guard import historical_downgrade_guard
+
+            with pytest.raises(DBAPIError, match="MONITOR_EVENT_HISTORY_DOWNGRADE_FORBIDDEN"):
+                await historical_downgrade_guard(
+                    migrated_database_url, "0096_monitor_event_receipts"
                 )
         else:
             code = {

@@ -119,6 +119,9 @@ async def run_portfolio_synthesis_worker_once(
     formal_stage_capacity: bool = False,
 ) -> bool:
     """Explicit one-shot synthesis using frozen Codex authority and no retry."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.agents.portfolio_synthesis_worker import (
         CodexSynthesisTransport,
         run_synthesis_job_once,
@@ -203,6 +206,9 @@ async def run_agent_worker_once(
     full_input_capacity: bool = False,
 ) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     runtime_mode = _require_worker_runtime(settings)
     job_ids = None if job_ids is None else tuple(job_ids)
     if (
@@ -483,6 +489,9 @@ async def run_portfolio_decision_worker_once(
     job_ids: tuple[UUID, ...] | None = None,
 ) -> bool:
     """Run the dedicated no-retry portfolio decision worker once."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     runtime_mode = _require_worker_runtime(settings)
     client = responses_client
     if client is None:
@@ -513,6 +522,9 @@ async def run_portfolio_decision_worker_once(
 
 async def run_worker(settings: EngineSettings | None = None, *, run_forever: bool = False) -> None:
     """Validate fixture startup in tests, or poll durable jobs in the worker process."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     configured = settings or EngineSettings()
     _require_worker_runtime(configured)
     if run_forever and configured.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:

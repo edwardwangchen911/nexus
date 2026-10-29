@@ -61,12 +61,12 @@ def recovery_root(tmp_path):
             "    revision = subprocess.check_output(['git','-C',str(Path(__file__).parents[2]),"
             "'rev-parse','HEAD'],text=True).strip()\n"
             "    heartbeat = {'status':'fresh','release_revision':"
-            "options.get('health_revision',revision),'migration_head':'0098_independent_monitor'}\n"
+            "options.get('health_revision',revision),'migration_head':'0099_research_stages'}\n"
             "    print(json.dumps({'heartbeat': heartbeat, 'preflight':{'status':'ready'}})); "
             "sys.exit(0)\n"
             "if '--service-recovery-check' in sys.argv:\n"
             "    print(json.dumps({'status':options.get('recovery_status','ready'), "
-            "'migration_head':'0098_independent_monitor', "
+            "'migration_head':'0099_research_stages', "
             "'blocking_codes':options.get('blocking_codes',[])})); sys.exit(0)\n"
             "if '--service-startup-preflight' in sys.argv:",
         )

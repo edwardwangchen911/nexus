@@ -104,6 +104,10 @@ async def run_job_worker_once(
     research_executor: Callable[..., Awaitable[object]] | None = None,
 ) -> bool:
     """Heartbeat, reclaim, claim, and terminalize at most one durable Job."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    if any(str(spec.job_type).startswith("agent.") for spec in registry.specs):
+        require_research_open()
     # Freeze one scope for both operations, including when an untyped caller
     # supplied a mutable sequence. None retains the existing queue-wide mode.
     job_ids = None if job_ids is None else tuple(job_ids)

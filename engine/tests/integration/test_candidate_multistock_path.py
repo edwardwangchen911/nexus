@@ -141,7 +141,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             # This dated scenario controls both clocks; a live database clock
             # would correctly reject admission after its historical session closed.
             if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-                return clock_at[0]
+                # A read after a committed stage observes the same advancing clock.
+                return WorkerClock.now(UTC)
             return await original_scalar(self, statement, *args, **kwargs)
 
         monkeypatch.setattr(AsyncSession, "scalar", database_clock)
@@ -611,7 +612,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 )
             if decision_delay >= timedelta(hours=6):
                 return
-        clock_at[0] = post_research_at + timedelta(seconds=2)
+        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=2))
         async with sessions() as session:
             for run_id in result.research_run_ids:
                 run = await session.get(AgentResearchRunRecord, run_id)
@@ -805,7 +806,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     parent[0].cancel()
 
                 client.close.side_effect = cancel_during_close
-        clock_at[0] = post_research_at + timedelta(seconds=3)
+        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=3))
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             state = await _consume_manual_host_action(settings, "RUN_RESEARCH_JOB")
@@ -971,7 +972,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 completed_job.status,
                 completed_job.error_code,
             )
-        clock_at[0] = post_research_at + timedelta(seconds=4)
+        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=4))
         if not trade and count == 3 and not manual:
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
@@ -1007,7 +1008,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     row.model_hash == model.config_hash
                     for row in await session.scalars(select(AgentResearchRunRecord))
                 )
-        clock_at[0] = post_research_at + timedelta(seconds=4)
+        clock_at[0] = max(clock_at[0], post_research_at + timedelta(seconds=4))
         await _set_test_insert_clock(sessions, clock_at[0])
         if manual:
             await _consume_manual_host_action(settings, "RESUME")

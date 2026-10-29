@@ -26,7 +26,7 @@ from nexus.persistence.models.monitoring import (
 from nexus.persistence.models.runtime import Job
 from nexus.settings import AgentRuntimeMode
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import select
+from sqlalchemy import func, select
 from unit.agents import test_monitoring_producer as price_wire
 from unit.agents.test_codex_sdk import _restore_view
 
@@ -205,6 +205,7 @@ async def test_normal_daily_consumes_historical_material_with_current_predecesso
             stages.count(stage) == 3 for stage in ("research", "critique", "synthesis")
         )
         async with factory() as session, session.begin():
+            now = await session.scalar(select(func.clock_timestamp()))
             report = await reconcile_account_results(
                 session,
                 account_id=pointer.account_id,

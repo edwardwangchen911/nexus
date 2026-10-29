@@ -50,14 +50,15 @@ async def ready_trigger(database_url, monkeypatch):
             as_of=run.decision_time,
         )
         cycle = await session.get(AgentPaperCycleRecord, context[0].cycle_id)
+        installed_at = await session.scalar(select(func.clock_timestamp()))
         plan = await install_plan_from_output(
             session,
             account_id=cycle.account_id,
             output_id=output.id,
             expected_predecessor_id=None,
-            now=AT + timedelta(seconds=3),
+            now=installed_at,
         )
-        at = AT + timedelta(seconds=4)
+        at = installed_at + timedelta(seconds=1)
         await record_check(
             session,
             plan_id=plan.id,

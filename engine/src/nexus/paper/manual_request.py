@@ -484,6 +484,9 @@ async def admit_manual_request(
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         # Read historical receipt before validating today's model/batch/availability.
         return await read_manual_request(session, existing)
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
@@ -770,6 +773,9 @@ async def claim_manual_request(
     if view.status != "queued":
         # Preparing is durable intent, never permission to repeat external work.
         return view, False
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     now = await _database_now(session)
     await require_manual_account_available(
         session, account_id=row.account_id, now=now, excluding_request_id=row.id

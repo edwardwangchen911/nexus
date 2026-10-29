@@ -157,9 +157,10 @@ async def _close_orphan(session: Any, **binding: Any) -> Any:
 
 
 async def _expired_proof(session: Any, **kwargs: Any) -> Any:
-    await research_orphan_proof._legacy_require_expired_research_proof(session, **kwargs)
     proof = await read_terminal_proof(session, run_id=kwargs["run"].id, now=kwargs["now"])
-    if proof is not None and (proof.known or not proof.cleanup_confirmed or (not proof.orphan)):
+    if proof is None:
+        return await research_orphan_proof._legacy_require_expired_research_proof(session, **kwargs)
+    if proof.known or not proof.cleanup_confirmed or not proof.orphan:
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
 
 

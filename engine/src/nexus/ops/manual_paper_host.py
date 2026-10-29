@@ -110,6 +110,9 @@ async def dispatch_manual_request(
     process_environment: Mapping[str, str],
 ) -> None:
     """Commit the claim before normal trigger; uncertain preparation is never replayed."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.ops.agent_paper_once import (
         AgentPaperTriggerRequest,
         _validate_trigger_dependencies,
@@ -461,6 +464,9 @@ async def finish_configured_manual_request(
 
 
 async def dispatch_pure_research_request(settings: EngineSettings, *, request_id: UUID) -> bool:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     from nexus.agents.preparation_reuse import research_preparation_scope
 
     with research_preparation_scope():
@@ -726,6 +732,9 @@ async def run_pure_research_once(
     mode: Literal["research_only", "research_and_monitor"] = "research_only",
 ) -> ManualRequestView:
     """Normal bounded foreground entry; same admission/host lock, no calendar or scheduler."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     import asyncio
     from datetime import UTC
 

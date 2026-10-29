@@ -199,6 +199,16 @@ async def admit_trigger(
     now: datetime,
 ) -> MonitorIncrement:
     """One new identity only; failed eligibility rolls back all admission writes."""
+    from nexus.agents import research_maintenance
+
+    if research_maintenance.IMAGE_MAINTENANCE:
+        existing = await session.scalar(
+            select(MonitorIncrement).where(
+                MonitorIncrement.trigger_id == trigger_id, MonitorIncrement.account_id == account_id
+            )
+        )
+        if existing is None:
+            research_maintenance.require_research_open()
     async with session.begin_nested():
         return await _admit_trigger(
             session,
@@ -277,6 +287,9 @@ async def _admit_trigger(
         if run is None:
             raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
         return await require_increment_binding(session, run)
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     # A monitor continues the scheduled loop after its deterministic execution
     # proof; the history validator still checks every Job, fee and live lease.
     await require_manual_account_available(

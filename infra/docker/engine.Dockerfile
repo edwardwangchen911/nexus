@@ -11,6 +11,8 @@ COPY integrations/fosun_gateway/pyproject.toml integrations/fosun_gateway/pyproj
 COPY contracts/strategy contracts/strategy
 COPY contracts/agent contracts/agent
 COPY engine/src engine/src
+ARG NEXUS_RESEARCH_MAINTENANCE=false
+RUN case "$NEXUS_RESEARCH_MAINTENANCE" in true) sed -i "s/^IMAGE_MAINTENANCE = False$/IMAGE_MAINTENANCE = True/" engine/src/nexus/agents/research_maintenance.py ;; false) ;; *) exit 2 ;; esac
 COPY engine/alembic.ini engine/alembic.ini
 COPY engine/alembic engine/alembic
 RUN uv sync --frozen --no-dev --package nexus-engine \

@@ -21,8 +21,12 @@ for (const viewport of [{ width: 375, height: 812 }, { width: 1440, height: 900 
       data: group,
       meta: { request_id: groupId, schema_version: "1", as_of: context.valuation_time },
     } }));
+    const initialRead = page.waitForResponse((response) =>
+      new URL(response.url()).pathname === `/api/v1/optimization-proposals/${groupId}`
+      && response.request().method() === "GET");
     await page.goto(`/optimize/${groupId}`);
-    await page.waitForLoadState("networkidle");
+    expect((await initialRead).status()).toBe(200);
+    await expect(page.getByRole("region", { name: "三方案比较页面" })).toHaveAttribute("data-state", "ready");
     const region = page.getByRole("region", { name: "冻结研究依据" });
     await expect(region).toBeVisible();
     await expect(region).toContainText("仅辅助阅读，不参与本草稿目标权重计算");
@@ -73,8 +77,12 @@ for (const viewport of [{ width: 375, height: 812 }, { width: 1440, height: 900 
       meta: { request_id: groupId, schema_version: "1", as_of: "2026-08-24T00:00:00Z" },
     } }));
 
+    const initialRead = page.waitForResponse((response) =>
+      new URL(response.url()).pathname === "/api/v1/overview"
+      && response.request().method() === "GET");
     await page.goto("/optimize");
-    await page.waitForLoadState("networkidle");
+    expect((await initialRead).status()).toBe(200);
+    await expect(page.getByRole("region", { name: "组合优化页面" })).toHaveAttribute("data-state", "ready");
     const availability = page.getByRole("region", { name: "历史方案状态" });
     await expect(availability).toContainText("当前没有历史三方案记录");
     await expect(availability).toContainText("诊断存在降低仓位条件");

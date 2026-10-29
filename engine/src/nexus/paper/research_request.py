@@ -200,6 +200,9 @@ async def prepare_research_request(
     view = await read_manual_request(session, row)
     if view.status != "preparing":
         return view
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     now = await database_now(session)
     await require_manual_account_available(
         session, account_id=row.account_id, now=now, excluding_request_id=row.id

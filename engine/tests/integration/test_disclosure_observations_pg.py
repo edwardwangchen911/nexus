@@ -63,8 +63,8 @@ async def test_exact_disclosure_observation(migrated_database_url, monkeypatch, 
             values.update(
                 payload=payload,
                 revision=sha256(capture.canonical()).hexdigest(),
-                available_at=AT + timedelta(seconds=6),
-                received_at=AT + timedelta(seconds=6),
+                available_at=captured["clock"][0] + timedelta(seconds=1),
+                received_at=captured["clock"][0] + timedelta(seconds=1),
             )
             session.add(DataSnapshot(**values))
     async with factory() as session, session.begin():
@@ -76,7 +76,10 @@ async def test_exact_disclosure_observation(migrated_database_url, monkeypatch, 
             store.objects[key] = b"broken"
         elif mode == "store":
             session.info.clear()
-        now = AT + (timedelta(minutes=7, seconds=1) if mode == "stale" else timedelta(seconds=10))
+        now = max(
+            captured["clock"][0] + timedelta(seconds=2),
+            AT + (timedelta(minutes=7, seconds=1) if mode == "stale" else timedelta(seconds=10)),
+        )
         observation = await read_disclosure_observation(session, plan=plan, now=now)
         expected = {
             "new": "true",
@@ -127,7 +130,7 @@ async def test_exact_baseline_and_no_source_fallback(migrated_database_url, monk
             await read_disclosure_observation(session, plan=plan, now=AT + timedelta(seconds=4))
             == before
         )
-        now = AT + timedelta(seconds=10)
+        now = max(captured["clock"][0] + timedelta(seconds=1), AT + timedelta(seconds=10))
         observed = await read_disclosure_observation(session, plan=plan, now=now)
         assert observed.result == "true" and observed.current_snapshot_id == UUID(
             current["snapshot_id"]

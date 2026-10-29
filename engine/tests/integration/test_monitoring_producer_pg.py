@@ -107,12 +107,13 @@ async def test_monitoring_proposal_survives_formal_worker_persistence(
         assert readback["source_output_id"] == str(row.id)
         assert readback["execution_locked"] and readback["model_requests"] == 0
         async with factory() as session, session.begin():
+            observed_at = await session.scalar(select(func.clock_timestamp()))
             replay = await install_plan_from_output(
                 session,
                 account_id=account_id,
                 output_id=row.id,
                 expected_predecessor_id=None,
-                now=AT + timedelta(seconds=4),
+                now=observed_at,
             )
             assert replay.id == plan.id and replay.generation == 1
             assert replay.source_hash == row.content_hash
@@ -124,7 +125,7 @@ async def test_monitoring_proposal_survives_formal_worker_persistence(
                     account_id=account_id,
                     output_id=row.id,
                     expected_predecessor_id=UUID(int=2),
-                    now=AT + timedelta(seconds=4),
+                    now=observed_at,
                 )
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(MonitorPlan)) == (

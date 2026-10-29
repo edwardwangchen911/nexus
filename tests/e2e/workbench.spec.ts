@@ -298,8 +298,12 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
     } });
     const methods: string[] = [];
     await installFixtures(page, payload, methods);
+    const initialRead = page.waitForResponse((response) =>
+      new URL(response.url()).pathname === "/api/v1/workbench"
+      && response.request().method() === "GET");
     await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
+    expect((await initialRead).status()).toBe(200);
+    await expect(page.getByRole("region", { name: "交易工作台页面" })).toHaveAttribute("data-state", "ready");
     const summary = page.getByRole("region", { name: "本轮运行与研究限制" });
     await expect(summary).toContainText("组合判断暂缓");
     await expect(summary.getByRole("region", { name: "纯研究" })).toContainText("今日手动未登记");

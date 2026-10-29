@@ -1022,6 +1022,9 @@ async def trigger_once(
     expected_calendar_authority_id: UUID | None = None,
     process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     _validate_trigger_dependencies(settings)
     assert settings.database_url is not None
     engine = create_async_engine(settings.database_url)

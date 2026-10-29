@@ -105,6 +105,16 @@ def usage_known(rows: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
+def known_usage_lower_bound(rows: Sequence[Mapping[str, Any]]) -> UsageSnapshot:
+    """Preserve individually verified usage without declaring the whole run known."""
+    verified = [row for row in rows if usage_known((row,))]
+    return UsageSnapshot(
+        input_tokens=sum(row["input_tokens"] for row in verified),
+        output_tokens=sum(row["output_tokens"] for row in verified),
+        provider_calls=len(rows),
+    )
+
+
 async def ensure_schema(session: AsyncSession) -> None:
     """Require the migrated schema; runtime code never issues DDL."""
     if await session.scalar(text("SELECT to_regclass('research_stage_route')")) is None:
@@ -199,6 +209,9 @@ class StagedProtocol:
         wire: bytes,
         not_after: datetime | None = None,
     ) -> Ticket:
+        from nexus.agents.research_maintenance import require_research_open
+
+        require_research_open()
         if self.local_stopped or self.claims.get(claim.job_id) != claim:
             raise ProtocolRejected("ORIGIN_STOPPED_OR_UNAVAILABLE")
         async with self.factory() as session:
@@ -570,6 +583,11 @@ class StagedProtocol:
                 )
                 if not await _settle_or_hold_usage(session, run, model=model, usage=usage):
                     raise ProtocolRejected("USAGE_NOT_SETTLED")
+            else:
+                lower_bound = known_usage_lower_bound(rows)
+                if lower_bound.input_tokens or lower_bound.output_tokens:
+                    run.input_tokens = lower_bound.input_tokens
+                    run.output_tokens = lower_bound.output_tokens
             await _persist_terminal(
                 session,
                 run,

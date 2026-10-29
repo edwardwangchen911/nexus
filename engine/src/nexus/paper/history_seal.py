@@ -608,7 +608,25 @@ async def _legacy_proof(
             .order_by(AgentResearchEventRecord.sequence)
         )
     )
-    if expired_attempt:
+    from nexus.agents.research_stages.proof import read_terminal_proof
+    from nexus.agents.research_stages.protocol import ProtocolRejected
+
+    try:
+        stage_proof = await read_terminal_proof(session, run_id=run.id, now=now)
+    except ProtocolRejected:
+        raise ValueError(_BLOCKED) from None
+    if stage_proof is not None:
+        # Selected identities prove their frozen lower bound from stage facts;
+        # stopped publication need not have emitted legacy per-role outputs.
+        if stage_proof.known or not stage_proof.cleanup_confirmed:
+            raise ValueError(_BLOCKED)
+        if stage_proof.orphan != expired_attempt:
+            raise ValueError(_BLOCKED)
+        if any(output.role is not None for output in outputs):
+            await _require_partial_usage_proof(session, run, outputs, model)
+        elif any(output.status != "failed" or output.intent is not None for output in outputs):
+            raise ValueError(_BLOCKED)
+    elif expired_attempt:
         from nexus.paper.research_orphan_proof import require_expired_research_proof
 
         if not formal_preparation_model_matches(model):

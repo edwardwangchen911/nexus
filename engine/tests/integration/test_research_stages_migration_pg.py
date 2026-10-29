@@ -54,7 +54,14 @@ class PreparationSaved(BaseException):
 @pytest.mark.parametrize("independent", [False, True])
 @pytest.mark.parametrize("selected, known", [(False, False), (True, False), (True, True)])
 async def test_formal_route_birth_legacy_isolation_and_unknown_rollback_protection(
-    migrated_database_url, monkeypatch, tmp_path, independent, selected, known
+    migrated_database_url,
+    monkeypatch,
+    tmp_path,
+    independent,
+    selected,
+    known,
+    unknown_prefix=False,
+    orphan=False,
 ):
     from helpers import staged_routes as original_fixture
     from integration.test_staged_roots_pg import (
@@ -211,10 +218,10 @@ async def test_formal_route_birth_legacy_isolation_and_unknown_rollback_protecti
             ticket,
             now=now + timedelta(seconds=1),
             payload=b"unknown result",
-            tokens=(10, 5) if known else None,
-            valid=known,
+            tokens=(10, 5) if known or unknown_prefix else None,
+            valid=known or unknown_prefix,
         )
-        if known:
+        if known or unknown_prefix:
             import hashlib
 
             assert await protocol.verify(
@@ -225,7 +232,25 @@ async def test_formal_route_birth_legacy_isolation_and_unknown_rollback_protecti
                 tokens=(10, 5),
             )
         await protocol.cleanup(ticket, now=now + timedelta(seconds=2), confirmed=True)
-        assert await protocol.close(claim, now=now + timedelta(seconds=3)) is known
+        close_at = now + timedelta(seconds=3)
+        if unknown_prefix:
+            late_ticket = await protocol.authorize(
+                claim, stage=2, now=close_at, wire=b"unknown second stage"
+            )
+            await protocol.cleanup(late_ticket, now=close_at + timedelta(seconds=1), confirmed=True)
+            close_at += timedelta(seconds=2)
+        if orphan:
+            close_at = claim.expires_at + timedelta(seconds=1)
+        assert await protocol.close(claim, now=close_at, orphan=orphan) is known
+        if unknown_prefix:
+            # A later diagnostic cannot turn the frozen unknown stage into settlement.
+            await protocol.observe(
+                late_ticket,
+                now=close_at + timedelta(seconds=1),
+                payload=b"late usage",
+                tokens=(900, 800),
+                valid=True,
+            )
         with pytest.raises(Exception, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
             await asyncio.to_thread(migrate, "0098_independent_monitor", downgrade=True)
         async with factory() as session:
@@ -242,7 +267,7 @@ async def test_formal_route_birth_legacy_isolation_and_unknown_rollback_protecti
             from nexus.agents.research_stages.proof import read_terminal_proof
 
             proof = await read_terminal_proof(
-                session, run_id=run_id, now=now + timedelta(seconds=4)
+                session, run_id=run_id, now=close_at + timedelta(seconds=2)
             )
             assert proof is not None and proof.known is known and proof.cleanup_confirmed
             assert proof.evidence_hash == terminal["chain_hash"]
@@ -252,6 +277,17 @@ async def test_formal_route_birth_legacy_isolation_and_unknown_rollback_protecti
                 {"run": run_id},
             ) == ("settled" if known else "reserved")
             assert await routes.selected_route(session, job_id) == route
+            if unknown_prefix:
+                assert (
+                    await session.execute(
+                        text(
+                            "SELECT input_tokens,output_tokens,settled_cost_usd "
+                            "FROM agent_research_runs WHERE id=:run"
+                        ),
+                        {"run": run_id},
+                    )
+                ).one() == (10, 5, None)
+                assert proof.orphan is orphan
     finally:
         await factory.kw["bind"].dispose()
 
@@ -516,3 +552,20 @@ async def test_nonempty_downgrade_rejects_without_blocking_stage_to_job_order(
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("orphan", [False, True])
+async def test_known_prefix_unknown_successor_keeps_lower_bound_after_close_and_late_write(
+    migrated_database_url, monkeypatch, tmp_path, orphan
+):
+    await test_formal_route_birth_legacy_isolation_and_unknown_rollback_protection(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        independent=False,
+        selected=True,
+        known=False,
+        unknown_prefix=True,
+        orphan=orphan,
+    )

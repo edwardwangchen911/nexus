@@ -53,6 +53,7 @@ from nexus.agents.price_authority import (
     freeze_price_authority,
     revalidate_frozen_price_authority,
 )
+from nexus.agents.research_maintenance import claim_research_identity as claim_or_lock
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.jobs.models import (
     JobKeyV1,
@@ -78,7 +79,6 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
-from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.strategy.intents import ResearchIntent
 
@@ -807,6 +807,12 @@ async def _admit_research_run(
     economic_allocation: "AllocationRequest | None" = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
+    from nexus.agents import research_maintenance
+
+    if research_maintenance.IMAGE_MAINTENANCE:
+        await claim_or_lock(
+            session, actor_id, route, idempotency_key, request_hash, _ADMISSION_SCHEMA_VERSION
+        )
     requested_formal_model_id = model_config_id if formal_stage_capacity else None
     if (
         type(full_input_capacity) is not bool
@@ -913,7 +919,7 @@ async def _admit_research_run(
                 candidate_preview
             ):
                 raise ValueError("CODEX_CANDIDATE_AUTHORITY_INVALID")
-    if after_authority is not None:
+    if after_authority is not None and not research_maintenance.IMAGE_MAINTENANCE:
         await after_authority()
     claim, owner = await claim_or_lock(
         session,

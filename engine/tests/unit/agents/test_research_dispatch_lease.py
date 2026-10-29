@@ -11,6 +11,7 @@ import pytest
 from nexus import worker
 from nexus.agents import codex_sdk, codex_staged
 from nexus.agents.committee import ROLE_ORDER
+from nexus.agents.research_stages import executor as staged_executor
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.jobs.models import JobType
 from nexus.jobs.registry import JobHandlerContext
@@ -106,7 +107,7 @@ async def test_real_worker_registry_binds_claim_clock_to_sdk_dispatch(monkeypatc
             kwargs["committee"].dispatch_guard()
         return SimpleNamespace(status="completed")
 
-    monkeypatch.setattr(worker, "execute_research_run", execute)
+    monkeypatch.setattr(staged_executor, "execute_or_capture", execute)
     registry = worker._agent_registry(
         EngineSettings(agent_runtime_mode="codex_sdk"), responses_client=None, tools=None
     )

@@ -33,6 +33,16 @@ async def admit_batch(
     daily_sdk_call_limit: int,
     now: datetime,
 ) -> MonitorIncrement:
+    from nexus.agents import research_maintenance
+
+    if research_maintenance.IMAGE_MAINTENANCE:
+        existing = await session.scalar(
+            select(MonitorIncrement).where(
+                MonitorIncrement.batch_id == batch_id, MonitorIncrement.account_id == account_id
+            )
+        )
+        if existing is None:
+            research_maintenance.require_research_open()
     async with session.begin_nested():
         return await _admit_batch(
             session,
@@ -112,6 +122,9 @@ async def _admit_batch(
         if run is None:
             raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
         return await require_increment_binding(session, run)
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     await require_manual_account_available(
         session, account_id=account_id, now=now, allow_scheduled_completion=True
     )

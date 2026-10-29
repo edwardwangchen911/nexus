@@ -15,6 +15,7 @@ from nexus.agents.execution import _hash, usage_cost
 from nexus.agents.research_stages.protocol import (
     ProtocolRejected,
     evidence_digest,
+    known_usage_lower_bound,
     stage_evidence,
     usage_known,
 )
@@ -235,6 +236,15 @@ async def read_terminal_proof(
         or run.settled_cost_usd is not None
     ):
         raise ProtocolRejected(invalid)
+    if not known:
+        lower_bound = known_usage_lower_bound(rows)
+        expected = (
+            (lower_bound.input_tokens, lower_bound.output_tokens)
+            if lower_bound.input_tokens or lower_bound.output_tokens
+            else (None, None)
+        )
+        if (run.input_tokens, run.output_tokens) != expected:
+            raise ProtocolRejected(invalid)
     if orphan:
         outputs = tuple(
             await session.scalars(

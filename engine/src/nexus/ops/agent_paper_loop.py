@@ -2202,6 +2202,9 @@ async def run_foreground_loop(
     monotonic: Callable[[], float] = monotonic_clock,
 ) -> AgentPaperLoopAction:
     """Run persisted one-step actions until a fail-closed stop condition is reached."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     interval_seconds = heartbeat_interval.total_seconds()
     if interval_seconds <= 0:
         raise ValueError("heartbeat_interval must be positive")
@@ -2593,6 +2596,9 @@ async def run_local_agent_paper_loop(
     recovery_guard: Callable[[EngineSettings], Awaitable[None]] | None = None,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
 
     if not settings.database_url:
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
