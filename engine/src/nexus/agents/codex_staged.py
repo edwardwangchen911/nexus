@@ -9,7 +9,7 @@ from enum import Enum
 from math import inf, isfinite, nextafter
 from time import perf_counter
 from types import GenericAlias
-from typing import Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
@@ -575,6 +575,8 @@ class _StageInvocationOptions(TypedDict, total=False):
 
 class StagedCodexCommittee(CodexCommittee):
     """Reuse frozen tools and existing durable role outputs; never retry a failed call."""
+
+    stage_invoker: Callable[..., Any] | None = None
 
     failure_reason: str | None = None
     structured_synthesis = False
@@ -1357,7 +1359,7 @@ class StagedCodexCommittee(CodexCommittee):
         committee_timer = asyncio.timeout_at(self._deadline)
         try:
             async with committee_timer:
-                raw, usage = await invoke_codex(
+                raw, usage = await (self.stage_invoker or invoke_codex)(
                     payload, output_model=output_model, **invocation_options
                 )
         except Exception as error:

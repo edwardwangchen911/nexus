@@ -10,7 +10,7 @@ import json
 import math
 import os
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -135,6 +135,13 @@ class CodexInvocationError(ValueError):
         self.provider_call_started = provider_call_started
         self.phase_elapsed_ms: dict[InvocationPhase, int] = {}
         self.timeout_source: TimeoutSource | None = "unknown" if self.kind == "timeout" else None
+
+
+@dataclass(frozen=True)
+class ResearchLifecycle:
+    configure: Callable[["_InvocationState"], None]
+    checked: Callable[[str, UsageSnapshot], None]
+    close: Callable[..., Awaitable[None]]
 
 
 @dataclass
@@ -505,6 +512,7 @@ async def invoke_codex(
     phase_elapsed_ms: dict[InvocationPhase, int] | None = None,
     stream_observer: SdkStreamObserver | None = None,
     dispatch_guard: Callable[[], None] | None = None,
+    lifecycle: ResearchLifecycle | None = None,
 ) -> tuple[str, UsageSnapshot]:
     if diagnostic_profile is not None:
         now = asyncio.get_running_loop().time()
@@ -582,8 +590,11 @@ async def invoke_codex(
     with _invocation_boundary("preflight", state=state):
         if dispatch_guard is not None:
             dispatch_guard()
+        if lifecycle is not None:
+            lifecycle.configure(state)
         return await _invoke_codex(
             payload,
+            **({"lifecycle": lifecycle} if lifecycle is not None else {}),
             invocation_state=state,
             output_model=output_model,
             max_wire_bytes=max_wire_bytes,
@@ -645,6 +656,7 @@ async def _invoke_codex(
     max_wire_bytes: int,
     timeout_seconds: float,
     invocation_state: _InvocationState,
+    lifecycle: ResearchLifecycle | None = None,
 ) -> tuple[str, UsageSnapshot]:
     if invocation_state.stream_observer is None:
         invocation_state.stream_observer = SdkStreamObserver()
@@ -672,6 +684,7 @@ async def _invoke_codex(
             client = AsyncCodex(sdk_config(directory))
         run_task = None
         initialization_attempted = False
+        work_failed = False
         phase: InvocationPhase = "account"
         invocation_timer = (
             asyncio.timeout_at(stage_deadline)
@@ -789,7 +802,10 @@ async def _invoke_codex(
             # Reject an already known bad response before cleanup can await.
             with _invocation_boundary("response_check", state=invocation_state):
                 validated = _checked_codex_response(result, invocation_state)
+                if lifecycle is not None:
+                    lifecycle.checked(*validated)
         except TimeoutError as error:
+            work_failed = True
             from nexus.agents.research_dispatch import stop_current_dispatch
 
             stop_current_dispatch(
@@ -806,8 +822,11 @@ async def _invoke_codex(
             if isinstance(error, CodexInvocationError):
                 raise
             raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
+        except BaseException:
+            work_failed = True
+            raise
         finally:
-            primary = sys.exc_info()[1]
+            primary = sys.exc_info()[1] if lifecycle is None or work_failed else None
             # SDK initialization/close uses to_thread and may clear _proc before
             # its child has stopped. Absence after an attempt is not exit proof.
             sync = getattr(getattr(client, "_client", None), "_sync", None)
@@ -816,7 +835,15 @@ async def _invoke_codex(
 
                 mark_host_drain_unconfirmed()
             try:
-                if invocation_state.cleanup_deadline is not None:
+                if lifecycle is not None:
+                    with _invocation_boundary("client_close", state=invocation_state):
+                        await lifecycle.close(
+                            client,
+                            run_task,
+                            deadline=invocation_state.cleanup_deadline,
+                            primary=primary,
+                        )
+                elif invocation_state.cleanup_deadline is not None:
                     with _invocation_boundary("client_close", state=invocation_state):
                         await _close_portfolio_client(
                             client, run_task, deadline=invocation_state.cleanup_deadline

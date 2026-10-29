@@ -9,7 +9,7 @@ from uuid import UUID
 import httpx
 import pytest
 from helpers.monitor_materials import prepared_materials
-from helpers.monitoring_readview_browser import verify_monitoring_browser
+from helpers.monitoring_readview_browser import stage_facts, verify_monitoring_browser
 from helpers.paper_api import app, headers
 from helpers.paper_batch import CALENDAR_ID
 from nexus.persistence.models.agents import (
@@ -243,6 +243,7 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
             IdempotencyRecord,
         )
         async with factory() as session:
+            stage_before = await stage_facts(session)
             before = {model: set(await session.scalars(select(model.id))) for model in guarded}
             budget_states = [
                 (row.id, row.state, row.reserved_usd, row.settled_usd)
@@ -316,6 +317,7 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
             )
             await verify_monitoring_browser(application, directory=directory)
         async with factory() as session:
+            assert await stage_facts(session) == stage_before
             assert {
                 model: set(await session.scalars(select(model.id))) for model in guarded
             } == before

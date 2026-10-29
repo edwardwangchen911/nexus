@@ -9,6 +9,7 @@ from pathlib import Path
 
 import uvicorn
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET
+from sqlalchemy import text
 
 
 async def verify_monitoring_browser(
@@ -119,3 +120,25 @@ async def verify_monitoring_browser(
         (directory / "http.json").write_text(json.dumps(receipts))
         server.should_exit = True
         await asyncio.wait_for(task, timeout=15)
+
+
+async def stage_facts(session):
+    """Exact persisted formal-stage rows before and after read-only UI access."""
+    result = {}
+    for suffix in (
+        "scope",
+        "member",
+        "authorization",
+        "observation",
+        "verification",
+        "cleanup",
+        "terminal",
+        "prepared_job",
+        "route",
+    ):
+        result[suffix] = tuple(
+            await session.scalars(
+                text(f"SELECT row_to_json(t)::text FROM research_stage_{suffix} t ORDER BY 1")
+            )
+        )
+    return result

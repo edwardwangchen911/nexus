@@ -338,8 +338,8 @@ def test_main_preserves_database_exception_when_exit_receipt_fails(tmp_path, mon
         guard.finish("stop_requested")
 
 
-@pytest.mark.parametrize("kind", ["generic", "interrupt", "cancelled"])
-@pytest.mark.parametrize("write_fails", [False, True])
+@pytest.mark.parametrize("kind", ["generic", "database", "interrupt", "cancelled"])
+@pytest.mark.parametrize("write_fails", [False, True, "interrupt", "cancelled"])
 def test_main_records_caught_exit_without_granting_recovery(
     tmp_path, monkeypatch, capsys, kind, write_fails
 ):
@@ -375,8 +375,19 @@ def test_main_records_caught_exit_without_granting_recovery(
         },
     )
     monkeypatch.setattr(activation, "make_recovery_guard", lambda *_a, **_k: guard)
+    from sqlalchemy.exc import SQLAlchemyError
+
+    observed = []
+
+    class OriginalError(SQLAlchemyError if kind == "database" else RuntimeError):
+        def __str__(self):
+            observed.append(self)
+            return super().__str__()
+
+    original = OriginalError("private-response")
     error = {
-        "generic": RuntimeError("private-response"),
+        "generic": original,
+        "database": original,
         "interrupt": KeyboardInterrupt("private-response"),
         "cancelled": asyncio.CancelledError("private-response"),
     }[kind]
@@ -390,7 +401,21 @@ def test_main_records_caught_exit_without_granting_recovery(
         def fail_replace(*_):
             raise OSError("private-filesystem")
 
-        monkeypatch.setattr(activation.os, "replace", fail_replace)
+        if write_fails is True:
+            monkeypatch.setattr(activation.os, "replace", fail_replace)
+        else:
+            real_fsync = activation.os.fsync
+            calls = []
+
+            def interrupt_sync(descriptor):
+                calls.append(descriptor)
+                if len(calls) == 3:  # Receipt sync, after durable negative witness.
+                    if write_fails == "interrupt":
+                        raise KeyboardInterrupt("private-second-interrupt")
+                    raise asyncio.CancelledError("private-second-cancel")
+                real_fsync(descriptor)
+
+            monkeypatch.setattr(activation.os, "fsync", interrupt_sync)
     argv = [
         "--repo-root",
         str(tmp_path),
@@ -407,6 +432,8 @@ def test_main_records_caught_exit_without_granting_recovery(
         assert caught.value is error
     else:
         assert loop.main(argv) == (130 if kind == "interrupt" else 1)
+    if kind in {"generic", "database"}:
+        assert observed == [error]
     output = capsys.readouterr().out
     assert "private" not in output
     receipt = json.loads(guard.receipt_path.read_text())
@@ -415,10 +442,14 @@ def test_main_records_caught_exit_without_granting_recovery(
     if write_fails:
         assert guard.receipt_path.read_bytes() == before
         assert guard.receipt == json.loads(before)
+        assert guard.receipt_path.with_suffix(".write-pending").exists()
         assert error.__notes__ == ["AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED"]
     else:
         assert receipt["phase"] == "exited"
         assert receipt["reason"] == "unclassified"
+        if kind == "database":
+            assert "exit_stage" not in receipt
+            return
         assert receipt["exit_stage"] == "host_loop"
         assert receipt["exit_code"] == (
             "AGENT_PAPER_LOOP_INTERRUPTED"

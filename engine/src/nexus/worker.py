@@ -8,7 +8,7 @@ from uuid import UUID
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,7 +46,7 @@ from nexus.agents.committee import (
     PromptAsset,
 )
 from nexus.agents.database_tools import database_read_only_tools
-from nexus.agents.execution import TERMINAL, execute_research_run
+from nexus.agents.execution import TERMINAL
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.models import ResearchRequest
 from nexus.agents.portfolio_decision_model import (
@@ -342,6 +342,34 @@ async def run_agent_worker_once(
                 )
 
             preclaim_guard = guard_formal_pool
+    research_executor = None
+    if job_ids is not None and len(job_ids) == 1:
+        from nexus.agents.research_stages.routes import VERSION, selected_route
+
+        async with factory() as routing_session:
+            stage_route = await selected_route(routing_session, job_ids[0])
+        if stage_route is not None:
+            if locked_guard is None or runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+                raise ValueError("CODEX_STAGED_WORKER_ARGUMENT_INVALID")
+            native_locked_guard = locked_guard
+
+            async def stage_locked_guard(session: AsyncSession, job: Job) -> bool:
+                if not await native_locked_guard(session, job):
+                    return False
+                if await selected_route(session, job.id) != stage_route:
+                    raise ValueError("STAGED_ROUTE_BINDING_INVALID")
+                await session.execute(
+                    text("SELECT set_config('nexus.stage_protocol',:value,true)"),
+                    {"value": VERSION},
+                )
+                return True
+
+            locked_guard = stage_locked_guard
+            from functools import partial
+
+            from nexus.agents.research_stages.executor import execute_staged_claim
+
+            research_executor = partial(execute_staged_claim, factory=factory)
     return await run_job_worker_once(
         factory,
         registry=_agent_registry(
@@ -365,6 +393,7 @@ async def run_agent_worker_once(
         job_ids=job_ids,
         preclaim_guard=preclaim_guard,
         locked_job_guard=locked_guard,
+        research_executor=research_executor,
     )
 
 
@@ -734,7 +763,9 @@ def _agent_registry(
                     dispatch.guard()
 
             committee.dispatch_guard = require_dispatch
-        result = await execute_research_run(
+        from nexus.agents.research_stages.executor import execute_or_capture
+
+        result = await execute_or_capture(
             context.session,
             run_id=run.id,
             committee=committee,

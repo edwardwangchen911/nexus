@@ -5262,7 +5262,7 @@ def main(argv: list[str] | None = None) -> int:
             if recovery is not None and recovery.receipt is not None:
                 try:
                     recovery.finish_database_error(error)
-                except Exception:
+                except BaseException:
                     # Keep the original database failure; an unwritten receipt
                     # must never become proof of a confirmed service exit.
                     error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")
@@ -5271,7 +5271,7 @@ def main(argv: list[str] | None = None) -> int:
             if recovery is not None:
                 try:
                     recovery.finish_exception(error)
-                except Exception:
+                except BaseException:
                     # Recording is best-effort; keep the original exception and
                     # never turn a missing exit receipt into recovery permission.
                     error.add_note("AGENT_PAPER_RECOVERY_EXIT_RECEIPT_WRITE_FAILED")

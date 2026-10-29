@@ -547,7 +547,7 @@ async def admit_manual_request(
     return await _append(session, row, status="queued", code="MANUAL_REQUEST_QUEUED", at=now)
 
 
-async def _require_cycle_jobs_settled(
+async def _legacy_require_cycle_jobs_settled(
     session: AsyncSession,
     *,
     cycle_id: UUID,
@@ -951,3 +951,24 @@ async def require_cycle_execution_mode(session: AsyncSession, *, cycle_id: UUID)
     row = await manual_request_for_cycle(session, cycle_id=cycle_id)
     if row is not None and row.mode == "research_only":
         raise ValueError("MANUAL_RESEARCH_ONLY_EXECUTION_FORBIDDEN")
+
+
+async def _require_cycle_jobs_settled(
+    session: AsyncSession,
+    *,
+    cycle_id: UUID,
+    now: datetime,
+    require_no_live_lease: bool = True,
+    allow_accepted_synthesis: bool = False,
+    read_only: bool = False,
+) -> None:
+    from nexus.agents.research_stages.public import _cycle_settled
+
+    await _cycle_settled(
+        session,
+        cycle_id=cycle_id,
+        now=now,
+        require_no_live_lease=require_no_live_lease,
+        allow_accepted_synthesis=allow_accepted_synthesis,
+        read_only=read_only,
+    )

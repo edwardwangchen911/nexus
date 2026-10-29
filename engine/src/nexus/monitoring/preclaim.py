@@ -201,6 +201,16 @@ async def close_capacity_rejected_increment_once(
             ):
                 raise ValueError(INVALID)
             if not await preclaim_rejection_qualified(session, run=run, now=now):
+                from nexus.agents.research_stages.routes import VERSION, selected_route
+
+                route = await selected_route(session, job_id)
+                if route is not None:
+                    if route["kind"] != "increment" or route["scope_id"] != member.id:
+                        raise ValueError(INVALID)
+                    await session.execute(
+                        text("SELECT id FROM research_stage_scope WHERE id=:scope FOR UPDATE"),
+                        {"scope": route["scope_id"]},
+                    )
                 reservation = await session.scalar(
                     select(AgentDailyBudgetReservationRecord).where(
                         AgentDailyBudgetReservationRecord.run_id == run.id
@@ -286,6 +296,22 @@ async def close_capacity_rejected_increment_once(
                     or reservation.pricing_version != run.pricing_version
                 ):
                     raise ValueError(INVALID)
+
+                async def locked_guard(locked_session: AsyncSession, locked_job: Job) -> bool:
+                    if not await formal_stage_job_qualified(locked_session, locked_job):
+                        return False
+                    if route is not None:
+                        if await selected_route(locked_session, locked_job.id) != route:
+                            raise ValueError(INVALID)
+                        await locked_session.execute(
+                            text("SELECT set_config('nexus.stage_protocol',:value,true)"),
+                            {"value": VERSION},
+                        )
+                    return True
+
+                old_marker = await session.scalar(
+                    text("SELECT current_setting('nexus.stage_protocol',true)")
+                )
                 claim = await claim_next_job(
                     session,
                     queue=QueueName.GENERAL,
@@ -296,8 +322,12 @@ async def close_capacity_rejected_increment_once(
                     else 210,
                     job_ids=(job.id,),
                     job_types=("agent.paper.research",),
-                    locked_job_guard=formal_stage_job_qualified,
+                    locked_job_guard=locked_guard,
                     research_budget_profile=run.pricing_version,
+                )
+                await session.execute(
+                    text("SELECT set_config('nexus.stage_protocol',:value,true)"),
+                    {"value": old_marker or ""},
                 )
                 if claim is None:
                     raise ValueError(INVALID)
@@ -312,6 +342,11 @@ async def close_capacity_rejected_increment_once(
                 await finalize_job(
                     session, claim=claim, now=now, outcome="skipped", result_code=RESULT
                 )
+                if route is not None:
+                    await session.execute(
+                        text("UPDATE research_stage_scope SET stopped=true WHERE id=:scope"),
+                        {"scope": route["scope_id"]},
+                    )
                 await append_audit_event(
                     session,
                     actor_id="research-monitor",

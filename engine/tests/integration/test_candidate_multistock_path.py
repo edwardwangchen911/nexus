@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 import pytest
@@ -51,6 +52,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     before_research=None,
     monitoring_lifetime_days=None,
     independent=False,
+    before_downgrade=None,
 ):
     if sdk_lifecycle_case == "legacy_success":
         # Reproduce an old immutable admission through its original v1 version;
@@ -116,10 +118,18 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
 
     clock_at = [AT + timedelta(seconds=1)]
 
+    clock_anchor = [clock_at[0], monotonic(), clock_at[0]]
+
     class WorkerClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            at = clock_at[0]
+            # Formal stages commit at actual elapsed instants. Keep subsequent
+            # fixture consumers on that same clock, including explicit test jumps.
+            tick = monotonic()
+            if clock_at[0] != clock_anchor[2]:
+                clock_anchor[:2] = [clock_at[0], tick]
+            at = max(clock_at[0], clock_anchor[0] + timedelta(seconds=tick - clock_anchor[1]))
+            clock_at[0] = clock_anchor[2] = at
             return at if tz is None else at.astimezone(tz)
 
     if formal and not manual_entry:
@@ -535,6 +545,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                 assert calls == ["research", "critique"]
                 return
         assert calls == ["research", "critique", "synthesis"] * count
+        # A staged Worker advances the shared clock while external work or DB
+        # waits elapse. Later decision probes must not move time behind the
+        # committed research; retain the original two-second sequence otherwise.
+        post_research_at = max(post_research_at, clock_at[0] - timedelta(seconds=2))
         if independent:
             from nexus.paper.research_request import finish_research_request
             from nexus.persistence.models.manual_paper import ManualPaperRequest
@@ -1161,6 +1175,8 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     finally:
                         await transaction.rollback()
         elif profile != "v7" and count == 3:
+            if before_downgrade is not None:
+                await before_downgrade(sessions)
             import asyncio
 
             from alembic import command
@@ -1169,9 +1185,23 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
             from sqlalchemy.exc import DBAPIError
 
             migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+            async with sessions() as session:
+                selected_count = await session.scalar(
+                    text("SELECT count(*) FROM research_stage_route")
+                )
+                assert selected_count in {0, count}
+                if selected_count:
+                    assert (
+                        await session.scalar(
+                            text("SELECT count(*) FROM research_stage_terminal WHERE known")
+                        )
+                        == count
+                    )
             with pytest.raises(
                 DBAPIError,
-                match="V11_RUN_BINDINGS_EXIST"
+                match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"
+                if selected_count
+                else "V11_RUN_BINDINGS_EXIST"
                 if profile == "formal_v11"
                 else "V10_OUTPUT_BINDINGS_EXIST"
                 if profile == "formal_v10"

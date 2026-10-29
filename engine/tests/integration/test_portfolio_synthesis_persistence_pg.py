@@ -1211,3 +1211,103 @@ async def test_synthesis_prompt_does_not_replace_security_committee_portfolio_ro
             )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_three_budget_types_keep_unknown_and_use_one_fixed_daily_limit(migrated_database_url):
+    from integration.test_portfolio_decision_budget_pg import _seed_runs
+    from nexus.agents.persistence import reserve_portfolio_decision_budget
+    from nexus.persistence.models.agents import (
+        AgentDailyBudgetReservationRecord,
+        PortfolioDecisionBudgetReservationRecord,
+    )
+
+    engine, sessions, kwargs = await seed_synthesis(migrated_database_url)
+    decision_id, next_research_id = uuid4(), uuid4()
+    models = (
+        AgentDailyBudgetReservationRecord,
+        AgentPortfolioSynthesisBudgetReservationRecord,
+        PortfolioDecisionBudgetReservationRecord,
+    )
+
+    async def rows(session):
+        return {
+            model: {
+                row.id: tuple(getattr(row, c.name) for c in model.__table__.columns)
+                for row in await session.scalars(select(model))
+            }
+            for model in models
+        }
+
+    try:
+        await _seed_runs(
+            sessions, research_run_ids=(next_research_id,), decision_run_ids=(decision_id,)
+        )
+        async with sessions.begin() as session:
+            run = (await admit_portfolio_synthesis(session, **kwargs)).run
+            run.status = "running"
+            await session.flush()
+            await persist_portfolio_synthesis_terminal(
+                session,
+                run_id=run.id,
+                input_hash=run.input_hash,
+                status="failed",
+                intent=None,
+                input_tokens=None,
+                output_tokens=None,
+                now=kwargs["now"],
+            )
+            await reserve_portfolio_decision_budget(
+                session,
+                run_id=decision_id,
+                now=kwargs["now"],
+                daily_limit_usd=Decimal("0.0008"),
+                worst_case_usd=Decimal("0.0001"),
+                pricing_version="test",
+                pricing_fresh=True,
+            )
+            # Independent arithmetic: two research holds .0004 + unknown synthesis
+            # .0002 + decision .0001. No helper-derived expected total.
+            assert await _shared_daily_budget_used(
+                session, business_date=kwargs["now"].date()
+            ) == Decimal("0.0007")
+            original = await rows(session)
+        async with sessions.begin() as session:
+            with pytest.raises(BudgetExhausted):
+                await reserve_daily_budget(
+                    session,
+                    run_id=next_research_id,
+                    now=kwargs["now"],
+                    daily_limit_usd=Decimal("0.0008"),
+                    worst_case_usd=Decimal("0.00011"),
+                    pricing_version="test",
+                    pricing_fresh=True,
+                )
+            assert await rows(session) == original
+            child = await reserve_daily_budget(
+                session,
+                run_id=next_research_id,
+                now=kwargs["now"],
+                daily_limit_usd=Decimal("0.0008"),
+                worst_case_usd=Decimal("0.00010"),
+                pricing_version="test",
+                pricing_fresh=True,
+            )
+            assert child.business_date == kwargs["now"].date()
+            assert await _shared_daily_budget_used(
+                session, business_date=kwargs["now"].date()
+            ) == Decimal("0.0008")
+        async with sessions() as session:
+            current = await rows(session)
+            for model, before in original.items():
+                assert all(current[model].get(key) == value for key, value in before.items())
+                assert set(current[model]) - set(before) == (
+                    {child.id} if model is AgentDailyBudgetReservationRecord else set()
+                )
+            unknown = await session.scalar(select(AgentPortfolioSynthesisBudgetReservationRecord))
+            assert unknown.state == "reserved" and unknown.settled_usd is None
+            assert (
+                await session.get(AgentPortfolioSynthesisRunRecord, run.id)
+            ).settled_cost_usd is None
+    finally:
+        await engine.dispose()

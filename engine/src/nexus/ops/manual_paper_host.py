@@ -624,6 +624,7 @@ async def _dispatch_two_flight_members(
     settings: EngineSettings, *, view: ManualRequestView
 ) -> None:
     import asyncio
+    import sys
 
     from nexus.agents.research_dispatch import (
         ResearchDispatch,
@@ -638,6 +639,7 @@ async def _dispatch_two_flight_members(
     factory = session_factory(settings)
     pending: set[asyncio.Task[None]] = set()
     primary: BaseException | None = None
+    completed_normally = False
 
     async def execute(member: ResearchMemberView) -> None:
         ready = state.active[member.run_id]
@@ -697,6 +699,7 @@ async def _dispatch_two_flight_members(
                         primary = error
         if primary is not None:
             raise state.first_error or primary
+        completed_normally = True
     except BaseException:
         state.stopped = True
         # Only caller cancellation/exit reaches here with live siblings.
@@ -705,7 +708,15 @@ async def _dispatch_two_flight_members(
         await asyncio.gather(*pending, return_exceptions=True)
         raise
     finally:
-        await factory.kw["bind"].dispose()
+        # A successful direct await may inherit the caller's handled exception.
+        # Only an abnormal exit here owns a propagating error, including cancel.
+        propagating = None if completed_normally else sys.exc_info()[1]
+        try:
+            await factory.kw["bind"].dispose()
+        except BaseException:
+            if propagating is None:
+                raise
+            propagating.add_note("RESEARCH_DISPATCH_CLEANUP_UNCONFIRMED")
 
 
 async def run_pure_research_once(

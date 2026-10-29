@@ -25,6 +25,7 @@ from nexus.paper.manual_request import (
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.agents import (
     AgentPromptVersionRecord,
+    AgentResearchEventRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
@@ -285,6 +286,10 @@ async def prepare_research_request(
             )
         )
     await session.flush()
+    if row.contract_version == 3:
+        from nexus.agents.research_stages.routes import register_new_prepared_runs
+
+        await register_new_prepared_runs(session, tuple(run.id for run, _ in native))
     return await record_manual_request_event(
         session, row, status="active", code="MANUAL_RESEARCH_STARTED"
     )
@@ -357,7 +362,7 @@ async def finish_research_request(
     )
 
 
-async def require_research_jobs_settled(
+async def _legacy_require_research_jobs_settled(
     session: AsyncSession,
     *,
     row: ManualPaperRequest,
@@ -378,6 +383,24 @@ async def require_research_jobs_settled(
             or run.status not in {"completed", "failed", "abstained"}
         ):
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+        if (
+            job.status == "skipped"
+            and job.result_code == "AGENT_ABSTAINED"
+            and await session.scalar(
+                select(AgentResearchEventRecord.id).where(
+                    AgentResearchEventRecord.run_id == run.id,
+                    AgentResearchEventRecord.sequence == 2,
+                    AgentResearchEventRecord.state == "abstained",
+                    AgentResearchEventRecord.details == {"reason": "model_research_stopped"},
+                )
+            )
+        ):
+            from nexus.paper.research_failure import require_claimed_uncalled_research_closed
+
+            await require_claimed_uncalled_research_closed(
+                session, run_id=member.run_id, job_id=member.job_id, now=now
+            )
+            continue
         leases = list(
             await session.scalars(
                 select(JobLease).where(JobLease.job_id == job.id, JobLease.expires_at > now)
@@ -482,3 +505,18 @@ async def require_research_profile(
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     return prompts
+
+
+async def require_research_jobs_settled(
+    session: AsyncSession,
+    *,
+    row: ManualPaperRequest,
+    view: ResearchManifestView,
+    now: datetime,
+    allow_unknown_usage: bool = False,
+) -> None:
+    from nexus.agents.research_stages.public import _research_settled
+
+    await _research_settled(
+        session, row=row, view=view, now=now, allow_unknown_usage=allow_unknown_usage
+    )

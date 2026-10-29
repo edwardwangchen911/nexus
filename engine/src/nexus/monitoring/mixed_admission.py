@@ -335,4 +335,7 @@ async def _admit_batch(
             "reserved_sdk_calls": 3,
         },
     )
+    from nexus.agents.research_stages.routes import register_new_prepared_runs
+
+    await register_new_prepared_runs(session, (member.run_id,))
     return member

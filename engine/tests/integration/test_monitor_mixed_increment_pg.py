@@ -1,6 +1,7 @@
 """One sealed stock batch reaches one native job, never three event jobs."""
 
 import argparse
+import asyncio
 import json
 from datetime import timedelta
 from decimal import Decimal
@@ -347,10 +348,14 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
 
     native = codex_staged.invoke_codex
     stages = []
+    entered, release = asyncio.Event(), asyncio.Event()
 
     async def tracked(payload, **kwargs):
         wire = _restore_view(payload)
         stages.append(wire["stage"])
+        if unknown is False and wire["stage"] == "research":
+            entered.set()
+            await release.wait()
         security = wire["frozen_inputs"]["security_snapshot"]
         assert security["purpose"] == "monitor_increment_v2"
         context = next(
@@ -431,9 +436,44 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             ) == tuple(count + 1 for count in before)
         await factory.kw["bind"].dispose()
         return
-    assert await run_agent_worker_once(
-        settings, job_ids=(member.job_id,), formal_stage_capacity=True
-    )
+    if unknown is False:
+        from nexus.ops.research_monitor import scan_configured_once
+        from nexus.persistence.models.monitoring import MonitorCheck
+        from nexus.persistence.models.runtime import OutboxEvent
+
+        async with factory() as session:
+            existing_checks = set(await session.scalars(select(MonitorCheck.id)))
+            outbox_count = await session.scalar(select(func.count()).select_from(OutboxEvent))
+        worker = asyncio.create_task(
+            run_agent_worker_once(settings, job_ids=(member.job_id,), formal_stage_capacity=True)
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 30)
+            async with factory() as session:
+                assert (await session.get(Job, member.job_id)).status == "running"
+                assert await session.scalar(
+                    select(JobLease.id).where(
+                        JobLease.job_id == member.job_id, JobLease.expires_at > later
+                    )
+                )
+            scanned = await scan_configured_once(settings, calendar_authority_id=CALENDAR_ID)
+            assert scanned["new_triggers"] == scanned["notifications"] == 0
+            assert not worker.done() and stages == ["research"]
+            async with factory() as session:
+                checks = tuple(await session.scalars(select(MonitorCheck)))
+                assert any(row.id not in existing_checks for row in checks)
+                assert (
+                    await session.scalar(select(func.count()).select_from(OutboxEvent))
+                    == outbox_count
+                )
+        finally:
+            release.set()
+            result = await worker
+        assert result
+    else:
+        assert await run_agent_worker_once(
+            settings, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
     assert stages == (
         ["research", "critique"] if unknown is True else ["research", "critique", "synthesis"]
     )
@@ -489,7 +529,12 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     from nexus.monitoring.admission import require_monitor_account_available
 
     async with factory() as session, session.begin():
-        if unknown is True:
+        from nexus.agents.research_stages.routes import selected_route
+
+        formal_route = await selected_route(session, member.job_id)
+        # A known model result is insufficient while the native trigger is still
+        # admitted. Keep the old unselected contract in an explicit legacy case.
+        if unknown is True or (unknown == "rollback" and formal_route is not None):
             with pytest.raises(ValueError, match="MONITOR_ACCOUNT_BUSY_OR_UNKNOWN"):
                 await require_monitor_account_available(
                     session, account_id=pointer.account_id, now=captured["clock"][0]
@@ -612,6 +657,11 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         if unknown == "unresolved"
         else 0
     )
+    if unknown is not True:
+        async with factory.begin() as session:
+            await require_monitor_account_available(
+                session, account_id=pointer.account_id, now=captured["clock"][0]
+            )
     if replay["impact_review"] == "verified":
         assert replay["reason"] == "MONITOR_EVENT_REVIEW_VERIFIED"
         assert replay["native_reason"] == "MONITOR_EVENT_REVIEW_UNRESOLVED"

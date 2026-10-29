@@ -16,7 +16,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
 
-async def require_expired_research_proof(
+async def _legacy_require_expired_research_proof(
     session: AsyncSession,
     *,
     run: AgentResearchRunRecord,
@@ -92,3 +92,30 @@ async def require_expired_research_proof(
         or event.created_at > now
     ):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+
+async def require_expired_research_proof(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    reservation: AgentDailyBudgetReservationRecord,
+    job: Job,
+    attempt: JobAttempt,
+    lease: JobLease,
+    outputs: tuple[AgentResearchOutputRecord, ...],
+    events: tuple[AgentResearchEventRecord, ...],
+    now: datetime,
+) -> None:
+    from nexus.agents.research_stages.public import _expired_proof
+
+    await _expired_proof(
+        session,
+        run=run,
+        reservation=reservation,
+        job=job,
+        attempt=attempt,
+        lease=lease,
+        outputs=outputs,
+        events=events,
+        now=now,
+    )

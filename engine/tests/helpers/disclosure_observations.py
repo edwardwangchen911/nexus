@@ -201,7 +201,7 @@ async def reader_source(
             condition_hash=proposal.condition.semantic_hash,
             baseline_snapshot_id=proposal.baseline_snapshot_id,
             baseline_as_of=proposal.baseline_as_of,
-            effective_at=AT + timedelta(seconds=4),
+            effective_at=max(AT + timedelta(seconds=4), captured["clock"][0]),
             review_due_at=proposal.review_due_at,
             valid_until=proposal.valid_until,
         )
@@ -223,7 +223,11 @@ async def append_capture(
     imported_at=None,
 ):
     received = received or AT + timedelta(seconds=2)
-    captured["clock"][0] = imported_at or AT + timedelta(seconds=5)
+    captured["clock"][0] = (
+        imported_at
+        if imported_at is not None
+        else max(captured["clock"][0], AT + timedelta(seconds=5))
+    )
     await _set_test_insert_clock(factory, captured["clock"][0])
     target = root / name
     target.mkdir()

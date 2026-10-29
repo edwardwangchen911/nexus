@@ -1981,6 +1981,10 @@ async def _admit_cycle_research(
         "RESEARCH_JOBS_PREPARED",
         {"research_run_ids": [str(value) for value in run_ids]},
     )
+    if formal_stage_capacity:
+        from nexus.agents.research_stages.routes import register_new_prepared_runs
+
+        await register_new_prepared_runs(session, tuple(run_ids))
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)
 
 

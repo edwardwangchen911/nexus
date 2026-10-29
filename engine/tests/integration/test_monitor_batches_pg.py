@@ -72,7 +72,7 @@ async def installed(
             "agent_paper_candidate_batch_id": cycle.candidate_batch_id,
         }
     )
-    captured["clock"][0] = AT + timedelta(seconds=6)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=6))
     await _set_test_insert_clock(factory, captured["clock"][0])
     for kind in kinds:
         result = await run(
@@ -89,7 +89,7 @@ async def installed(
             ),
         )
         assert repeated["plan_id"] == result["plan_id"]
-    captured["clock"][0] = AT + timedelta(seconds=7)
+    captured["clock"][0] = max(captured["clock"][0], AT + timedelta(seconds=7))
     await _set_test_insert_clock(factory, captured["clock"][0])
     return factory, settings, store, captured, pointer
 
