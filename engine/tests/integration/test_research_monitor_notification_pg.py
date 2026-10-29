@@ -104,7 +104,7 @@ async def test_concurrent_worker_claims_and_repeat_delivery_do_not_start_researc
 
 
 @pytest.mark.asyncio
-async def test_bark_failure_retries_same_trigger_without_research_or_sensitive_error(
+async def test_bark_failure_preserves_unknown_without_second_delivery_or_research(
     migrated_database_url,
 ):
     factory, trigger, baseline = await captured_trigger(migrated_database_url)
@@ -119,7 +119,7 @@ async def test_bark_failure_retries_same_trigger_without_research_or_sensitive_e
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
-        for seconds in (1, 4):
+        for seconds, expected in ((1, 1), (4, 0)):
             assert (
                 await run_bark_worker(
                     settings(migrated_database_url),
@@ -127,9 +127,9 @@ async def test_bark_failure_retries_same_trigger_without_research_or_sensitive_e
                     client=client,
                     clock=lambda: _NOW + timedelta(seconds=seconds),
                 )
-                == 1
+                == expected
             )
-    assert len(seen) == 2 and seen[0] == seen[1]
+    assert len(seen) == 1
     await assert_capture_unchanged(factory, trigger, baseline)
     async with factory() as session:
         event = await session.get(OutboxEvent, trigger.outbox_id)
@@ -140,15 +140,19 @@ async def test_bark_failure_retries_same_trigger_without_research_or_sensitive_e
                 .order_by(OutboxDeliveryAttempt.attempt_no)
             )
         )
-        assert (event.status, event.attempt_count, event.last_error_code) == ("published", 2, None)
+        assert (event.status, event.attempt_count, event.last_error_code) == (
+            "dead_letter",
+            1,
+            "PUBLISHER_FAILED",
+        )
+        assert event.published_at is None and event.max_attempts == 1
         assert [(a.outcome, a.error_code) for a in attempts] == [
             ("failed", "PUBLISHER_FAILED"),
-            ("published", None),
         ]
 
 
 @pytest.mark.asyncio
-async def test_lost_confirmation_redelivers_stable_notification_id_only(migrated_database_url):
+async def test_lost_confirmation_closes_unknown_without_redelivery(migrated_database_url):
     factory, trigger, baseline = await captured_trigger(migrated_database_url)
     seen = []
 
@@ -183,9 +187,15 @@ async def test_lost_confirmation_redelivers_stable_notification_id_only(migrated
                 client=client,
                 clock=lambda: _NOW + timedelta(seconds=62),
             )
-            == 1
+            == 0
         )
-    assert len(seen) == 2 and seen[0] == seen[1]
+    assert len(seen) == 1
+    async with factory() as session:
+        event = await session.get(OutboxEvent, trigger.outbox_id)
+        attempt = await session.scalar(select(OutboxDeliveryAttempt))
+        assert (event.status, event.attempt_count, event.max_attempts) == ("dead_letter", 1, 1)
+        assert event.published_at is None
+        assert (attempt.outcome, attempt.error_code) == ("lost", "LEASE_EXPIRED")
     await assert_capture_unchanged(factory, trigger, baseline)
 
 
@@ -224,3 +234,58 @@ async def test_invalid_monitor_payload_is_not_silently_acknowledged(migrated_dat
         assert (saved.status, saved.last_error_code) == ("queued", "PUBLISHER_FAILED")
         assert await research_counts(session) == baseline
         assert await session.scalar(select(func.count()).select_from(MonitorTrigger)) == 0
+
+
+@pytest.mark.asyncio
+async def test_persisted_legacy_notification_keeps_its_original_attempt_policy(
+    migrated_database_url,
+):
+    """An isolated archived event retains three attempts; new producer rows stay untouched."""
+    from nexus.domain.ids import new_uuid7
+
+    factory, trigger, baseline = await captured_trigger(migrated_database_url)
+    async with factory() as session, session.begin():
+        original = await session.get(OutboxEvent, trigger.outbox_id)
+        cutoff = original.created_at + timedelta(seconds=1)
+        frozen = (original.status, original.max_attempts, original.attempt_count, original.payload)
+        legacy = OutboxEvent(
+            id=new_uuid7(),
+            aggregate_id=original.aggregate_id,
+            event_type=original.event_type,
+            schema_version=original.schema_version,
+            payload=original.payload,
+            max_attempts=3,
+            created_at=cutoff,
+            available_at=cutoff,
+        )
+        session.add(legacy)
+    sends = []
+
+    async def transport(request):
+        sends.append(_decrypted_bark_notification(request))
+        return httpx.Response(503 if len(sends) == 1 else 200, json={"code": 200})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        for seconds in (1, 4):
+            assert (
+                await run_bark_worker(
+                    settings(migrated_database_url).model_copy(update={"activated_at": cutoff}),
+                    run_forever=False,
+                    client=client,
+                    clock=lambda: cutoff + timedelta(seconds=seconds),
+                )
+                == 1
+            )
+    async with factory() as session:
+        saved = await session.get(OutboxEvent, legacy.id)
+        assert (saved.status, saved.max_attempts, saved.attempt_count) == ("published", 3, 2)
+        original = await session.get(OutboxEvent, trigger.outbox_id)
+        assert (
+            original.status,
+            original.max_attempts,
+            original.attempt_count,
+            original.payload,
+        ) == frozen
+    assert len(sends) == 2 and sends[0] == sends[1]
+    await assert_capture_unchanged(factory, trigger, baseline)
+    await factory.kw["bind"].dispose()

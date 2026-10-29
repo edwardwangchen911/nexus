@@ -125,8 +125,9 @@ docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.
   --profile notifications up -d bark-server bark-notifications
 ```
 
-worker 只领取 `activated_at` 之后、白名单内的 Paper outbox。通知失败会按现有 outbox 最多三次
-记录 `PUBLISHER_FAILED` 并最终 dead-letter；它不会重跑业务动作。断流、worker 退出或观察超时
+worker 只领取 `activated_at` 之后、白名单内的 outbox。新自然监控通知和测试通知至多尝试一次；
+其他 Paper 通知保留原事件的尝试上限。失败记录 `PUBLISHER_FAILED` 并按原规则结案；
+它不会重跑业务动作。断流、worker 退出或观察超时
 不是投递成功，先按 `outbox_events → outbox_delivery_attempts` 核对状态，不重复触发决策或订单。
 
 真实验收必须使用启用后自然产生的一条已批准内部模拟事实，并同时核对：业务事实已提交、对应
@@ -181,3 +182,20 @@ docker compose -p nexus-fosun-live --env-file infra/.env.local -f infra/compose.
 
 本变更不新增数据库迁移、依赖、通知目的地或事件领取范围。回滚应用可继续读取原 outbox/attempt，
 新增审计保留；旧应用忽略新增诊断事实，不应删除审计或重新排队以“恢复”通知。
+
+### 新自然监控通知：至多一次外部尝试
+
+`research.monitor.triggered` 与 `research.monitor.batch_triggered` 的新事件显式保存
+`max_attempts=1`。同一逻辑事件仍复用原 trigger/batch/outbox 身份，重复扫描不另造通知。
+尝试在外发前持久化；HTTP 拒绝、超时、发送后确认丢失及租约过期不授予第二次发送。
+claim 提交但外发前退出可能零次发送，这是保守终态；不为补足一次而重放。
+处理失败或 lost/dead_letter 不证明设备未收到，设备送达仍未知。
+
+仅新生产者使用此策略。旧事件及回执、测试通知的一次上限、其他事件默认策略、领取起点、
+目的地与超时不改写。回滚应用仍按事件既存上限处理，不能重排旧记录。
+
+恢复通知前必须确认所有相关生产者已切换到最终版本，且没有旧生产者在途事务；
+检查原领取范围内所有 queued（含延迟可领取）、全部 delivering/待回收尝试，不能只检查当前due。
+停服期间落盘且仍可领取的事件不获得补发授权：保持停止，不删除、不改上限或移动起点。
+最终检查到恢复生效须复用现有受控互斥边界；不能证明无生产窗口时只部署代码，暂不恢复通知。
+活动研究、准备或扫描期间不切换宿主，不启动普通Worker、不新建手动研究。

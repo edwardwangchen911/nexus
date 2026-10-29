@@ -147,6 +147,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_monitor_receipt_competition_pg.py",
     "engine/tests/integration/test_monitor_validation_work_pg.py",
     "engine/tests/integration/test_research_monitor_notification_pg.py",
+    "engine/tests/integration/test_monitor_single_delivery_pg.py",
     "engine/tests/integration/test_bark_outbox_pg.py",
     "engine/tests/integration/test_outbox.py",
     "engine/tests/integration/test_research_stages_migration_pg.py",

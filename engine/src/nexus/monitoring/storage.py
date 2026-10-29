@@ -139,6 +139,7 @@ async def record_check(
                 aggregate_id=trigger_id,
                 event_type="research.monitor.triggered",
                 schema_version="research_price_trigger_v1",
+                max_attempts=1,
                 payload={
                     "schema_version": "research_price_trigger_v1",
                     "trigger_id": str(trigger_id),
