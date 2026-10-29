@@ -403,6 +403,7 @@ async def scan_stock_batch(
                 aggregate_id=batch_id,
                 event_type="research.monitor.batch_triggered",
                 schema_version="research_monitor_batch_v1",
+                max_attempts=1,
                 payload=payload,
                 available_at=sealed,
             )

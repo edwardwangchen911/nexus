@@ -280,7 +280,7 @@ async def test_normal_scan_to_worker_keeps_batch_and_research_unchanged(
             delivered.append(await run_bark_worker(**options))
         assert delivered[-1] == 0
     batch_seen = [item for item in seen if item["id"] == f"research-monitor-batch:{batch.id}"]
-    assert len(batch_seen) == (2 if fail_first else 1)
+    assert len(batch_seen) == 1
     assert all(item == batch_seen[0] for item in batch_seen)
     assert len(seen) == len(batch_seen) + 2
     assert len({item["id"] for item in seen}) == 3
@@ -288,8 +288,9 @@ async def test_normal_scan_to_worker_keeps_batch_and_research_unchanged(
     assert len(batch_seen[0]["body"]) < 250
     async with factory() as session:
         event = await session.get(OutboxEvent, batch.outbox_id)
-        assert event.status == "published"
-        assert event.attempt_count == (2 if fail_first else 1)
+        assert event.status == ("dead_letter" if fail_first else "published")
+        assert event.attempt_count == 1 and event.max_attempts == 1
+        assert (event.published_at is None) == fail_first
         assert (
             tuple(
                 [
