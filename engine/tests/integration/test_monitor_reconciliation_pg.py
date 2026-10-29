@@ -687,6 +687,7 @@ async def test_new_ordinary_daily_sec_refusal_preserves_native_facts(
         observed = await run(settings, parser().parse_args(["reconcile"]))
         assert observed["model_requests"] == observed["provider_requests"] == 0
         async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
             receipt = await session.scalar(
                 select(MonitorCoverageReceipt).where(
                     MonitorCoverageReceipt.run_id == target.id,
