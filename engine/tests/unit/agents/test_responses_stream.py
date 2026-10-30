@@ -113,3 +113,37 @@ async def test_expired_cleanup_never_claims_closed_or_extends_deadline():
     await task
     result = await close_owned_stream(Stream(), task, deadline=asyncio.get_running_loop().time())
     assert not result.confirmed
+
+
+@pytest.mark.asyncio
+async def test_native_httpx_closed_flag_does_not_mask_stream_close_failure():
+    import asyncio
+
+    import httpx
+    from nexus.agents.responses_stream import close_owned_stream
+
+    original = OSError("controlled close failure")
+
+    class BrokenStream(httpx.AsyncByteStream):
+        calls = 0
+
+        async def __aiter__(self):
+            yield b""
+
+        async def aclose(self):
+            self.calls += 1
+            raise original
+
+    async def finished():
+        return None
+
+    stream = BrokenStream()
+    response = httpx.Response(200, stream=stream)
+    task = asyncio.create_task(finished())
+    await task
+    result = await close_owned_stream(
+        response, task, deadline=asyncio.get_running_loop().time() + 5
+    )
+    assert response.is_closed  # httpx sets this before awaiting the underlying close.
+    assert result.error is original and not result.confirmed
+    assert stream.calls == 1
