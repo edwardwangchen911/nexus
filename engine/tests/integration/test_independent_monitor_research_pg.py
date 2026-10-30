@@ -220,10 +220,13 @@ async def test_independent_three_stock_preparation_freezes_identity_scope_and_bu
 
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
-    if not formal_stages:
-        # Establish the actual historical schema in its own transaction. A later
-        # rejected downgrade must leave that schema intact, not roll back 0099 too.
-        await asyncio.to_thread(command.downgrade, config, "0098_independent_monitor")
+    # Commit each historical reader's starting schema separately. A rejected
+    # downgrade must not roll back the preceding empty comparison migrations too.
+    await asyncio.to_thread(
+        command.downgrade,
+        config,
+        "0099_research_stages" if formal_stages else "0098_independent_monitor",
+    )
     with pytest.raises(
         Exception,
         match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"

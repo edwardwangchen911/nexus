@@ -169,16 +169,17 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_independent_unknown_acceptance_pg.py",
 )
 
-# Complete same-tree runs 40226113806 and 40228451043 still exceed 27m.
-# Minimize the worst observed group cost while retaining whole modules, the
-# complete selector inventory and its original order. See the CI timing report.
+# Run 41091864148 completed pg-g tests in 39m20s but hit the 40m job limit.
+# Rebalance the seven existing lanes using all per-phase timings, retaining
+# whole modules, the selector inventory and its order. Recheck these boundaries
+# when the inventory grows; new modules must not silently overload the tail.
 PG_SPLITS = (
-    "engine/tests/integration/test_candidate_multistock_path.py::test_v11_formal_synthesis_sdk_lifecycle",
-    "engine/tests/integration/test_disclosure_monitoring_api_pg.py",
-    "engine/tests/integration/test_monitor_filing_content_pg.py",
-    "engine/tests/integration/test_daily_v2_capacity_pg.py",
-    "engine/tests/integration/test_monitor_mixed_increment_pg.py",
-    "engine/tests/integration/test_monitor_market_prepare_pg.py",
+    "engine/tests/integration/test_formal_cycle_admission.py",
+    "engine/tests/integration/test_monitor_image_compat_pg.py",
+    "engine/tests/integration/test_monitor_batches_pg.py",
+    "engine/tests/integration/test_monitor_daily_v2_native_pg.py",
+    "engine/tests/integration/test_monitor_mixed_host_pg.py",
+    "engine/tests/integration/test_monitor_validation_work_pg.py",
 )
 MERGE_GROUPS = ("fast", "pg-a", "pg-b", "pg-c", "pg-d", "pg-e", "pg-f", "pg-g")
 
