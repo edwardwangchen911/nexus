@@ -7,7 +7,7 @@ Pre-header transport ownership and native experiment-stage routing remain separa
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +35,7 @@ async def collect_response_stage(
     *,
     work_deadline: float,
     cleanup_deadline: float,
+    on_terminal: Callable[[dict[str, Any], ResponsesStreamFacts], None] | None = None,
 ) -> HttpStageObservation:
     """Read this exact response once, then close it within the original cleanup bound.
 
@@ -109,6 +110,8 @@ async def collect_response_stage(
                     facts.observe(event)
                     if facts.terminal_status is not None:
                         terminal = event["response"]
+                        if on_terminal is not None:
+                            on_terminal(terminal, facts)
                     event_name = None
                 elif line.startswith(":"):
                     continue

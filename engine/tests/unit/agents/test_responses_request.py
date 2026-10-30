@@ -224,3 +224,36 @@ async def test_nonfinite_deadline_never_sends_and_keeps_unclosed_owner(bad_clean
     assert result.owner.client is client
     assert result.cleanup.confirmed is (not bad_cleanup)
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_submission_guard_cannot_extend_original_send_window(monkeypatch):
+    from types import SimpleNamespace
+    from nexus.agents import responses_request
+
+    real = asyncio.get_running_loop().time()
+    observed = real
+
+    def guard():
+        nonlocal observed
+        observed = real + 31
+
+    def unexpected(req):
+        pytest.fail("expired final guard must not send")
+
+    monkeypatch.setattr(
+        responses_request,
+        "asyncio",
+        SimpleNamespace(
+            get_running_loop=lambda: SimpleNamespace(time=lambda: observed),
+            create_task=asyncio.create_task,
+            wait=asyncio.wait,
+        ),
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(unexpected))
+    result = await send_response_stage(
+        client, request(), work_deadline=real + 30, cleanup_deadline=real + 37, before_send=guard
+    )
+    assert not result.owner.send_started
+    assert isinstance(result.error, TimeoutError)
+    assert result.cleanup.confirmed and client.is_closed

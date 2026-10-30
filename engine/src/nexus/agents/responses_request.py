@@ -7,12 +7,19 @@ after unconfirmed cleanup, including a response arriving after cancellation.
 
 import asyncio
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 
 from nexus.agents.responses_stage_stream import HttpStageObservation, collect_response_stage
-from nexus.agents.responses_stream import HttpCleanupResult, StreamProtocolError, close_owned_stream
+from nexus.agents.responses_stream import (
+    HttpCleanupResult,
+    ResponsesStreamFacts,
+    StreamProtocolError,
+    close_owned_stream,
+)
 
 
 @dataclass
@@ -68,6 +75,8 @@ async def send_response_stage(
     *,
     work_deadline: float,
     cleanup_deadline: float,
+    before_send: Callable[[], None] | None = None,
+    on_terminal: Callable[[dict[str, Any], ResponsesStreamFacts], None] | None = None,
 ) -> HttpRequestObservation:
     """Consume an exclusively owned client and one already-authorized request.
 
@@ -88,6 +97,10 @@ async def send_response_stage(
             raise StreamProtocolError("RESPONSES_DEADLINE_INVALID")
         if loop.time() >= work_deadline:
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
+        if before_send is not None:
+            before_send()
+        if loop.time() >= work_deadline:
+            raise TimeoutError("RESPONSES_WORK_DEADLINE")
         owner.send_started = True
         owner.response = await client.send(request, stream=True, follow_redirects=False, auth=None)
         if owner.abandoned:
@@ -104,7 +117,10 @@ async def send_response_stage(
         await task
         assert owner.response is not None
         owner.stage = await collect_response_stage(
-            owner.response, work_deadline=work_deadline, cleanup_deadline=cleanup_deadline
+            owner.response,
+            work_deadline=work_deadline,
+            cleanup_deadline=cleanup_deadline,
+            on_terminal=on_terminal,
         )
         error = owner.stage.error or owner.stage.cleanup.interrupted
     except BaseException as caught:
