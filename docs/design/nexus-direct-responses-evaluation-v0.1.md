@@ -1,4 +1,21 @@
-# 直接 Responses 最小迁移与完整比较（待评审）
+# 直接 Responses 最小迁移与完整比较
+
+## 2026-10-31 实验配置正常登记补齐
+
+PR58 已交付阶段执行与维护部署；真实比较尚未启动。首次实际准入检查发现：共享库只有 SDK 模型配置，API 路线的数据库回归使用夹具配置，尚缺正常登记入口。新增 `register-profile` / `inspect-profile`，只读回或登记固定 `responses-comparison-terra-v11-v1`，不登记实验、不预留预算、不调用模型、不改变默认路线。
+
+登记必须引用现存、完整匹配 v11 且仍在有效期内的 SDK 配置；保留原订阅记账、输入/输出/工具/wire 限额与原定价有效期，独立冻结公共 Responses 端点、stream/store、low 推理及严格 schema 的配置哈希。它不证明实际 grant 或模型资格，也不授权转为付费 API。并发登记按数据库唯一约束读回同一记录，内容冲突拒绝覆盖；登记结果不明先只读核对。管理入口沿用 5 秒 statement / 1 秒 lock 上限。
+
+通用研究和策略研发的默认选择排除实验配置；显式指定也拒绝，避免新记录变成业务默认。组合决策已有工具数量要求，正式研究/合成已有版本和内容校验，继续保留。旧研究及 0099–0104 阶段事实不修改，无新迁移。登记之后不可用缺少隔离检查的普通旧版本恢复业务；回滚需兼容维护镜像，并继续保持研究停用。新登记记录留存，不删除记录来回滚。
+
+正常命令（路径和 SDK 配置 ID 使用本机核验值）：
+
+```sh
+.venv/bin/nexus-engine-research-comparison inspect-profile --repo-root /absolute/repo
+.venv/bin/nexus-engine-research-comparison register-profile --repo-root /absolute/repo --sdk-model-config-id VERIFIED_SDK_CONFIG_UUID
+```
+
+此补齐沿用已评审实验隔离合同；部署与运行状态以当前交接及私有回执为准。后文阶段记录保留其历史含义，不能据旧“待实现”条目重复实施或据离线通过声称比较完成。
 
 状态：2026-10-30 首轮评审及配置纠正复核均已完整取回。指定 Chat 接受 v11 基线纠正，支持最小方向 B 及同库预算方案；实验用途隔离、身份等价和真实调用门槛仍待实现验证。本文不是切换批准或实验通过记录。
 

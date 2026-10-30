@@ -36,6 +36,11 @@ from nexus.agents.codex_versions import (
     STAGED_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import ROLE_ORDER, AgentRole
+from nexus.agents.comparison_profile import (
+    API_PROFILE_VERSION,
+    api_profile_hash,
+    is_comparison_profile,
+)
 from nexus.agents.execution_authority import (
     MAX_FROZEN_EVIDENCE,
     load_frozen_evidence,
@@ -1109,6 +1114,8 @@ async def _admit_research_run(
             .where(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
+                AgentModelConfigRecord.version != API_PROFILE_VERSION,
+                AgentModelConfigRecord.config_hash != api_profile_hash(),
                 # Staged research is explicit; strategy generation is a separate consumer.
                 AgentModelConfigRecord.version.not_in(
                     (
@@ -1126,6 +1133,8 @@ async def _admit_research_run(
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
         )
+    if model is not None and is_comparison_profile(model):
+        raise ValueError("COMPARISON_MODEL_BUSINESS_FORBIDDEN")
     if formal_stage_capacity:
         from nexus.agents.codex_formal_stage import require_formal_preparation_model_profile
 

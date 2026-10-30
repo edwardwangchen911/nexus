@@ -59,6 +59,42 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                 "replay_allowed": False,
             }
         async with factory() as session, session.begin():
+            if args.command in {"inspect-profile", "register-profile"}:
+                await session.execute(text("SET LOCAL statement_timeout='5s'"))
+                await session.execute(text("SET LOCAL lock_timeout='1s'"))
+            if args.command == "inspect-profile":
+                from nexus.agents.comparison_profile import read_api_profile
+
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+                profile = await read_api_profile(session)
+                return {
+                    "status": "profile_not_registered" if profile is None else "profile_registered",
+                    "inspection_only": True,
+                    "dispatch_authority": False,
+                    **(
+                        {}
+                        if profile is None
+                        else {
+                            "model_config_id": str(profile.id),
+                            "config_hash": profile.config_hash,
+                            "version": profile.version,
+                        }
+                    ),
+                }
+            if args.command == "register-profile":
+                from nexus.agents.comparison_profile import register_api_profile
+
+                profile = await register_api_profile(
+                    session, sdk_model_config_id=args.sdk_model_config_id
+                )
+                return {
+                    "status": "profile_registered",
+                    "model_config_id": str(profile.id),
+                    "config_hash": profile.config_hash,
+                    "version": profile.version,
+                    "dispatch_authority": False,
+                    "model_calls": 0,
+                }
             if args.command == "inspect-position":
                 await session.execute(text("SET TRANSACTION READ ONLY"))
                 row = (
@@ -185,6 +221,11 @@ def main() -> int:
     admit = subcommands.add_parser("admit-position")
     inspect = subcommands.add_parser("inspect-position")
     run = subcommands.add_parser("run-position")
+    profile = subcommands.add_parser("register-profile")
+    profile.add_argument("--repo-root", type=Path, required=True)
+    profile.add_argument("--sdk-model-config-id", type=UUID, required=True)
+    profile_inspect = subcommands.add_parser("inspect-profile")
+    profile_inspect.add_argument("--repo-root", type=Path, required=True)
     for subcommand in (admit, inspect, run):
         subcommand.add_argument("--repo-root", type=Path, required=True)
         subcommand.add_argument("--position", type=int, choices=range(1, 13), required=True)
@@ -248,6 +289,8 @@ def main() -> int:
                     "status": "unknown",
                     "reason": "COMPARISON_ADMISSION_RESULT_UNKNOWN"
                     if args.command == "admit-position"
+                    else "COMPARISON_PROFILE_REGISTRATION_UNKNOWN"
+                    if args.command == "register-profile"
                     else "COMPARISON_EXECUTION_RESULT_UNKNOWN"
                     if args.command == "run-position"
                     else "COMPARISON_READ_FAILED",
