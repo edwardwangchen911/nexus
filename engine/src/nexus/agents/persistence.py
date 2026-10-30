@@ -581,6 +581,9 @@ async def release_daily_budget(
     await _lock_budget_day(session, reservation.business_date.isoformat())
     if reservation.state != "reserved":
         raise BudgetExhausted("only an open reservation can be released")
+    from nexus.agents.research_usage import require_unspent_research_reservation
+
+    await require_unspent_research_reservation(session, run_id=run_id)
     reservation.state = "released"
     reservation.settled_usd = None
     await session.flush()
@@ -594,6 +597,9 @@ async def release_daily_budget_if_reserved(
     reservation = await _locked_reservation(session, run_id)
     await _lock_budget_day(session, reservation.business_date.isoformat())
     if reservation.state == "reserved":
+        from nexus.agents.research_usage import require_unspent_research_reservation
+
+        await require_unspent_research_reservation(session, run_id=run_id)
         reservation.state = "released"
         reservation.settled_usd = None
         await session.flush()
@@ -1476,11 +1482,22 @@ async def _locked_portfolio_decision_budget(
 
 
 async def _shared_daily_budget_used(session: AsyncSession, *, business_date: date) -> Decimal:
+    from nexus.agents.research_usage import research_reserved_occupancy
     from nexus.persistence.models.agents import AgentPortfolioSynthesisBudgetReservationRecord
 
     totals: list[Decimal] = []
+    for reservation in await session.scalars(
+        select(AgentDailyBudgetReservationRecord).where(
+            AgentDailyBudgetReservationRecord.business_date == business_date
+        )
+    ):
+        if reservation.state == "reserved":
+            totals.append(await research_reserved_occupancy(session, reservation))
+        elif reservation.state == "settled":
+            if reservation.settled_usd is None:
+                raise ValueError("RESEARCH_USAGE_SETTLEMENT_INVALID")
+            totals.append(reservation.settled_usd)
     for model in (
-        AgentDailyBudgetReservationRecord,
         PortfolioDecisionBudgetReservationRecord,
         AgentPortfolioSynthesisBudgetReservationRecord,
     ):

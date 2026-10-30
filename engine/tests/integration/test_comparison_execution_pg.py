@@ -54,7 +54,7 @@ def stage_response(wire, route, seen):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api_failure", [False, True])
+@pytest.mark.parametrize("api_failure", [False, True, "overrun"])
 async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persistence(
     migrated_database_url, monkeypatch, api_failure, tmp_path
 ):
@@ -98,10 +98,14 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
         assert request.headers["authorization"] == "Bearer fixture-token"
         payload = json.loads(envelope["input"][1]["content"])
         body = stage_response(payload, "responses", seen)
-        fail = api_failure and restore_independent_input(payload)["stage"] == "critique"
+        fail = api_failure is True and restore_independent_input(payload)["stage"] == "critique"
         event = terminal("failed" if fail else "completed")
         event["response"]["output"][0]["content"][0]["text"] = json.dumps(body)
         event["response"]["usage"].update(input_tokens=300, output_tokens=80, total_tokens=380)
+        if api_failure == "overrun":
+            event["response"]["usage"].update(
+                input_tokens=20_000_000, output_tokens=80, total_tokens=20_000_080
+            )
         stream = Body(("data: " + json.dumps(event) + "\n\n").encode())
         bodies.append(stream)
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
@@ -197,6 +201,39 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
             assert tuple(seen) == before
         async with factory() as session:
             run = await session.get(AgentResearchRunRecord, admitted.run_id)
+            if ordinal == 2 and api_failure == "overrun":
+                from nexus.agents.persistence import _shared_daily_budget_used
+                from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
+
+                budget = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == run.id
+                    )
+                )
+                model_record = await session.get(AgentModelConfigRecord, run.model_config_id)
+                cost = (
+                    Decimal(20_000_000) * model_record.input_usd_per_million
+                    + Decimal(80) * model_record.output_usd_per_million
+                ) / Decimal(1_000_000)
+                charged = await _shared_daily_budget_used(
+                    session, business_date=budget.business_date
+                )
+                stopped = await session.scalar(text("SELECT stopped FROM research_stage_scope"))
+                assert run.status == "failed"
+                assert (run.input_tokens, run.output_tokens) == (20_000_000, 80)
+                assert budget.state == "reserved" and budget.settled_usd is None
+                assert run.settled_cost_usd is None and cost > budget.reserved_usd
+                assert seen == [("sdk", s) for s in ("research", "critique", "synthesis")] + [
+                    ("responses", "research")
+                ]
+                assert all(c.is_closed for c in clients) and all(b.closed == 1 for b in bodies)
+                assert (stopped, charged >= cost + Decimal(2)) == (True, True), {
+                    "scope_stopped": stopped,
+                    "shared_charge": str(charged),
+                    "known_cost": str(cost),
+                    "reservation": str(budget.reserved_usd),
+                }
+                return
             assert run.status == ("failed" if ordinal == 2 and api_failure else "completed"), (
                 seen,
                 await session.scalar(

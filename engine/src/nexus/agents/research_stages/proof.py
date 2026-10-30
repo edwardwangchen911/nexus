@@ -253,6 +253,15 @@ async def read_terminal_proof(
         )
         if (run.input_tokens, run.output_tokens) != expected:
             raise ProtocolRejected(invalid)
+        from nexus.agents.synthesis import observed_usage_cost
+
+        if (
+            observed_usage_cost(model, lower_bound.input_tokens, lower_bound.output_tokens)
+            > budget.reserved_usd
+        ):
+            # Unknown-history acceptance cannot waive a separately known cost
+            # overrun, including after the original reservation's business day.
+            raise ProtocolRejected(invalid)
     if orphan:
         outputs = tuple(
             await session.scalars(

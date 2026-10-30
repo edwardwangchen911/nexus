@@ -21,6 +21,7 @@ from nexus.agents.execution import _persist_terminal, _settle_or_hold_usage
 from nexus.agents.persistence import require_reserved_daily_budget
 from nexus.agents.research_dispatch import dispatch_failure_boundary
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.synthesis import observed_usage_cost
 from nexus.jobs.repository import (
     ClaimedJob,
     JobCompletion,
@@ -28,7 +29,11 @@ from nexus.jobs.repository import (
     _lock_active_claim,
     execute_and_finalize_job,
 )
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
+    AgentModelConfigRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
 
@@ -492,17 +497,62 @@ class StagedProtocol:
             else:
                 if self._now(now) >= member["cleanup_deadline"]:
                     raise ProtocolRejected("VERIFICATION_WINDOW_CLOSED")
+                # Scope -> exact claim -> original budget day. Publishing trusted
+                # costs and new reservations share this existing short mutex.
+                from nexus.agents.persistence import _lock_budget_day
+
+                budget_day = required(
+                    await session.scalar(
+                        select(AgentDailyBudgetReservationRecord.business_date).where(
+                            AgentDailyBudgetReservationRecord.run_id == ticket.run_id
+                        )
+                    )
+                )
+                await _lock_budget_day(session, budget_day.isoformat())
+                check_window()
                 await session.execute(
                     text("INSERT INTO research_stage_verification VALUES(:run,:stage,:verified)"),
                     {"run": ticket.run_id, "stage": ticket.stage, "verified": matched},
                 )
-                check_window()
-                await self._commit(session, member["scope_id"])
-                check_window()
+            if matched:
+                await self._fence_exceeded_usage(session, member=member, run_id=ticket.run_id)
+            check_window()
+            await self._commit(session, member["scope_id"])
+            check_window()
         # A commit already issued before cutoff may be found by original-identity
         # readback; a late acknowledgement does not grant new execution time.
         check_window()
         return matched
+
+    async def _fence_exceeded_usage(
+        self, session: AsyncSession, *, member: Mapping[str, Any], run_id: UUID
+    ) -> None:
+        """Commit the shared stop with trusted usage, before terminal accounting.
+
+        Cleanup failure or a later settlement rollback cannot erase this fence.
+        Scope ownership is already locked by verify; all authorization shares it.
+        """
+        usage = known_usage_lower_bound(await stage_evidence(session, run_id))
+        run = required(await session.get(AgentResearchRunRecord, run_id))
+        model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
+        budget = required(
+            await session.scalar(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id == run_id
+                )
+            )
+        )
+        if (
+            usage.input_tokens > model.max_input_tokens
+            or usage.output_tokens > model.max_output_tokens
+            or observed_usage_cost(model, usage.input_tokens, usage.output_tokens)
+            > budget.reserved_usd
+        ):
+            self.local_stopped = True
+            await session.execute(
+                text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
+                {"id": member["scope_id"]},
+            )
 
     async def cleanup(
         self, ticket: Ticket, *, now: datetime, confirmed: bool, not_after: datetime | None = None
