@@ -37,6 +37,172 @@ from sqlalchemy.exc import DBAPIError
 from unit.agents.test_comparison_inputs import archive_source, digest
 
 
+async def _seed_canonical_sdk_profile(factory, **changes):
+    from nexus.agents.codex_bounded_budget import bounded_stage_config
+
+    config = bounded_stage_config()
+    fields = {
+        key: config[key]
+        for key in (
+            "model_id",
+            "version",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_tool_calls",
+        )
+    }
+    fields.update(config_hash=SDK_HASH)
+    for key in ("input_usd_per_million", "output_usd_per_million"):
+        fields[key] = Decimal(str(config[key]))
+    for key in ("pricing_available_at", "pricing_expires_at"):
+        fields[key] = datetime.fromisoformat(str(config[key]))
+    fields.update(changes)
+    async with factory() as session, session.begin():
+        row = AgentModelConfigRecord(**fields)
+        session.add(row)
+        await session.flush()
+        return row.id
+
+
+@pytest.mark.asyncio
+async def test_normal_api_profile_registration_is_idempotent_and_preserves_unknown(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.agents.comparison_profile import API_PROFILE_VERSION, api_profile_hash
+    from nexus.ops import openai_local
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    _, _, _, _, old_id = await seed(factory)
+    sdk_id = await _seed_canonical_sdk_profile(factory)
+    monkeypatch.setattr(openai_local, "local_settings", lambda *a, **kw: settings)
+    args = Namespace(command="register-profile", repo_root=tmp_path, sdk_model_config_id=sdk_id)
+    inspection = Namespace(command="inspect-profile", repo_root=tmp_path)
+    assert (await native_command(inspection))["status"] == "profile_not_registered"
+    first, second = await asyncio.gather(native_command(args), native_command(args))
+    assert first == second
+    assert first["dispatch_authority"] is False
+    assert first["config_hash"] == api_profile_hash()
+    readback = await native_command(inspection)
+    assert readback["model_config_id"] == first["model_config_id"]
+    assert readback["inspection_only"] is True and readback["dispatch_authority"] is False
+    async with factory() as session:
+        rows = list(
+            await session.scalars(
+                select(AgentModelConfigRecord).where(
+                    AgentModelConfigRecord.version == API_PROFILE_VERSION
+                )
+            )
+        )
+        assert len(rows) == 1 and str(rows[0].id) == first["model_config_id"]
+        original = await session.get(AgentModelConfigRecord, sdk_id)
+        for key in (
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_tool_calls",
+            "pricing_available_at",
+            "pricing_expires_at",
+            "input_usd_per_million",
+            "output_usd_per_million",
+        ):
+            assert getattr(rows[0], key) == getattr(original, key)
+        old = await session.get(AgentDailyBudgetReservationRecord, old_id)
+        assert (old.state, old.reserved_usd, old.settled_usd) == ("reserved", Decimal(2), None)
+        assert await session.scalar(text("SELECT count(*) FROM research_comparison_chain")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM research_comparison_manifest")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM jobs")) == 0
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["source", "existing"])
+async def test_api_profile_registration_rejects_changed_authority_without_overwriting(
+    migrated_database_url, damage
+):
+    from nexus.agents.comparison_profile import API_PROFILE_VERSION, register_api_profile
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    source_id = await _seed_canonical_sdk_profile(
+        factory, **({"max_input_tokens": 64000} if damage == "source" else {})
+    )
+    if damage == "existing":
+        await _seed_canonical_sdk_profile(
+            factory, version=API_PROFILE_VERSION, config_hash="f" * 64
+        )
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="COMPARISON_PROFILE_.*INVALID"):
+            await register_api_profile(session, sdk_model_config_id=source_id)
+        rows = list(
+            await session.scalars(
+                select(AgentModelConfigRecord).where(
+                    AgentModelConfigRecord.version == API_PROFILE_VERSION
+                )
+            )
+        )
+        assert len(rows) == (0 if damage == "source" else 1)
+        if rows:
+            assert rows[0].config_hash == "f" * 64
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_registered_api_profile_is_not_generic_research_authority(migrated_database_url):
+    from integration.test_agent_execution_pg import _seed_authority
+    from integration.test_candidate_research_authority import admit
+    from nexus.agents.comparison_profile import API_PROFILE_VERSION, register_api_profile
+    from nexus.jobs.models import JobType
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await _seed_authority(factory)
+    await prepare_database(settings)
+    sdk_id = await _seed_canonical_sdk_profile(factory)
+    # Make the new profile unambiguously newer than the generic model. The
+    # suite normally freezes all created_at defaults to one old instant.
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE agent_model_configs ALTER COLUMN created_at "
+                "SET DEFAULT '2026-09-02T00:00:00+00:00'::timestamptz"
+            )
+        )
+    async with factory() as session, session.begin():
+        registered = await register_api_profile(session, sdk_model_config_id=sdk_id)
+        api_id = registered.id
+    # Same normal producer, both default selection and explicit model selection.
+    admission = await admit(factory, None, job_type=JobType.AGENT_RESEARCH, key="default")
+    async with factory() as session:
+        model = await session.get(AgentModelConfigRecord, admission.run.model_config_id)
+        assert model.version != API_PROFILE_VERSION and model.id != api_id
+    with pytest.raises(ValueError, match="COMPARISON_MODEL_BUSINESS_FORBIDDEN"):
+        await admit(factory, api_id, job_type=JobType.AGENT_RESEARCH, key="explicit-api")
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_profile_registration_wait_is_bounded_and_readback_resolves_commit(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.agents.comparison_profile import register_api_profile
+    from nexus.ops import openai_local
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    sdk_id = await _seed_canonical_sdk_profile(factory)
+    monkeypatch.setattr(openai_local, "local_settings", lambda *a, **kw: settings)
+    args = Namespace(command="register-profile", repo_root=tmp_path, sdk_model_config_id=sdk_id)
+    async with factory() as owner, owner.begin():
+        profile = await register_api_profile(owner, sdk_model_config_id=sdk_id)
+        with pytest.raises(DBAPIError) as caught:
+            await native_command(args)
+        assert caught.value.orig.sqlstate == "55P03"
+    readback = await native_command(Namespace(command="inspect-profile", repo_root=tmp_path))
+    assert readback["model_config_id"] == str(profile.id)
+    assert readback["inspection_only"] is True
+    await factory.kw["bind"].dispose()
+
+
 async def seed(factory, *, source_kind="fixture", protect_unknown=True):
     archive = archive_source()
     # Native references are content addressed; no personal or live data is used.

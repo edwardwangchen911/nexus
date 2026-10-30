@@ -99,6 +99,7 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
 ) -> None:
     from nexus.agents.codex_sdk import MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, MODEL_ID
     from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+    from nexus.agents.comparison_profile import API_PROFILE_VERSION, api_profile_hash
     from nexus.agents.responses_budget import UsageSnapshot
     from nexus.evolution import codex
     from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
@@ -173,6 +174,21 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
         if runtime_mode == "fixture":
             # Newer consumer-specific configurations must not shadow the eligible
             # general version in fixture or Responses resolution.
+            session.add(
+                AgentModelConfigRecord(
+                    id=uuid4(),
+                    model_id="fixture-strategy-rnd",
+                    version=API_PROFILE_VERSION,
+                    config_hash=api_profile_hash(),
+                    max_input_tokens=96000,
+                    max_tool_calls=0,
+                    max_output_tokens=8192,
+                    input_usd_per_million=Decimal("0"),
+                    output_usd_per_million=Decimal("0"),
+                    pricing_available_at=generation_time - timedelta(seconds=10),
+                    pricing_expires_at=generation_time + timedelta(days=1),
+                )
+            )
             session.add_all(
                 [
                     AgentModelConfigRecord(
@@ -232,6 +248,16 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
                 model_id="fixture-strategy-rnd",
             )
             assert resolved.model.id == model_id
+            from nexus.evolution.authority import StrategyRNDAuthorityError
+
+            with pytest.raises(StrategyRNDAuthorityError):
+                await DatabaseStrategyRNDAuthorityResolver().load_generation(
+                    session,
+                    expected_generation=1,
+                    as_of=generation_time,
+                    model_id="fixture-strategy-rnd",
+                    model_version=API_PROFILE_VERSION,
+                )
 
     async def codex_invoke(request_payload, *, output_model):
         del output_model

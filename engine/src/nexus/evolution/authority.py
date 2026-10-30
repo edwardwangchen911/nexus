@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
+from nexus.agents.comparison_profile import API_PROFILE_VERSION, api_profile_hash
 from nexus.audit.canonical import canonical_json
 from nexus.backtest.authority_loader import (
     LoadedPointInTimeBacktest,
@@ -302,6 +303,8 @@ class DatabaseStrategyRNDAuthorityResolver:
             )
         )
         model_query = select(AgentModelConfigRecord).where(
+            AgentModelConfigRecord.version != API_PROFILE_VERSION,
+            AgentModelConfigRecord.config_hash != api_profile_hash(),
             AgentModelConfigRecord.pricing_available_at <= cutoff,
             AgentModelConfigRecord.pricing_expires_at > cutoff,
             AgentModelConfigRecord.max_tool_calls <= 4,
