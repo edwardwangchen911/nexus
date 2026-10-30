@@ -129,6 +129,13 @@ def main() -> int:
     prepare.add_argument("--source-sha256", required=True)
     prepare.add_argument("--experiment-id", type=UUID, required=True)
     prepare.add_argument("--output", type=Path, required=True)
+    for name in ("inspect-grant", "refresh-grant"):
+        grant = subcommands.add_parser(name)
+        grant.add_argument(
+            "--credentials-dir",
+            type=Path,
+            default=Path.home() / ".config" / "nexus-chatgpt-latency-probe",
+        )
     admit = subcommands.add_parser("admit-position")
     inspect = subcommands.add_parser("inspect-position")
     for subcommand in (admit, inspect):
@@ -141,6 +148,22 @@ def main() -> int:
     inspect.add_argument("--experiment-id", type=UUID, required=True)
     args = parser.parse_args()
     try:
+        if args.command in {"inspect-grant", "refresh-grant"}:
+            from nexus.agents.chatgpt_grant import GrantStore
+
+            store = GrantStore(args.credentials_dir)
+            if args.command == "inspect-grant":
+                result = asyncio.run(store.inspect(clock=lambda: datetime.now(UTC)))
+            else:
+                asyncio.run(store.refresh_once(clock=lambda: datetime.now(UTC)))
+                result = {
+                    "status": "access_ready",
+                    "credential_writes": 1,
+                    "model_calls": 0,
+                    "dispatch_authority": False,
+                }
+            print(json.dumps(result))
+            return 0
         if args.command != "prepare":
             result = asyncio.run(native_command(args))
             print(json.dumps(result))
@@ -165,12 +188,20 @@ def main() -> int:
         return 1
     except (OSError, ValueError, KeyError, TypeError) as error:
         code = "COMPARISON_BUDGET_EXHAUSTED" if isinstance(error, BudgetExhausted) else str(error)
-        if not re.fullmatch(r"(?:COMPARISON|FORMAL_BUDGET|CODEX)_[A-Z_]+", code) and code not in {
+        if not re.fullmatch(
+            r"(?:COMPARISON|FORMAL_BUDGET|CODEX|CHATGPT)_[A-Z_]+", code
+        ) and code not in {
             "RESEARCH_ONLY_SNAPSHOT_INVALID",
             "INDEPENDENT_MONITOR_CONTEXT_INVALID",
         }:
             code = "COMPARISON_PREPARATION_FAILED"
-        print(json.dumps({"status": "rejected", "reason": code}))
+        details = {}
+        if args.command in {"inspect-grant", "refresh-grant"}:
+            from nexus.agents.chatgpt_grant import GrantError
+
+            if isinstance(error, GrantError):
+                details = {"phase": error.phase, "http_status": error.http_status}
+        print(json.dumps({"status": "rejected", "reason": code, **details}))
         return 1
     print(json.dumps(result))
     return 0

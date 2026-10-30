@@ -83,7 +83,7 @@
 
 | 剩余项 | 当前证据和下一动作 |
 | --- | --- |
-| 合法现有grant只读核验 | 用户提醒后补查发现已有NEXUS应用授权，位于 `~/.config/nexus-chatgpt-latency-probe/credentials.json`；独立client/host、直接scope与历史成功刷新回执匹配。先前只查正常配置/Codex登录而漏查历史存储，不能据此要求重新注册。当前access已过期，远端刷新资格和模型兼容性仍待正常入口验证；复用既有注册，不转用Codex登录。 |
+| 合法现有grant只读核验 | 已找到原NEXUS自有client/host授权；新正常 inspect-grant 已以官方公开JWKS验签原access及历史ID、subject/client/scope绑定，当前为 refresh_required。全部凭据目录文件未变，未刷新。继续复用原注册；真实刷新与模型资格仍未知，不能据过期或密钥端点网络拒绝要求重新注册。 |
 | 原输入等价与真实三阶段因果链 | 输入重建、正常首阶段编译及原生生产者已有离线/PG证据；继续接每条新链自身前驱、SDK/HTTP三阶段和最终待发送树。第一条预定API阶段兼做真实模型/schema验证，不增加调用次数。 |
 | 同库预算与旧unknown保护 | 原生日锁/原子预留及并发证据已具备；新增接线只补相关回归。保留保护预算入口，不能接受/释放本笔真实unknown。 |
 | 实验与业务消费者隔离 | 当前正式准入/消费、监控来源已有拒绝；普通Worker的通用领取与租约回收已排除实验类型，仍需核对业务查询/计划/通知等消费者。要求实验不污染业务，不要求真实监控循环先发生。 |
@@ -155,3 +155,14 @@ HTTP 单次发送适配已补到正式模块：明确拥有客户端、请求任
 同一 StagedProtocol 安装、授权、观察、清理和公共终态读取支持精确 comparison 绑定；已知失败结算可信用量，未知继续保留预算，正常与孤儿路径共用证据。迟到观察不修改冻结终态。工作/收尾截止分别受原领取起点的300/315秒上限约束，330秒租约不作为延长执行时间的理由。0103 空库可正常回退；已领取位置拒绝 schema 降级，必须使用支持新事实的兼容读取版本。
 
 本片只是原生领取及终态接线，尚未接真实 SDK/HTTP 三阶段 runner、完整最终发送树、受保护授权 loader/刷新和 HTTP 资源事实；不得当作真实实验已可运行。已有 NEXUS 应用注册与授权已找到，当前 access 过期不代表授权撤销；后续复用原 client/host，当前远端刷新资格与模型可用性仍未知。历史“现有 grant 未证实”记录由本次只读核对更正，不要求重新注册。
+
+
+### 原应用授权接线（正常入口，离线刷新已验证）
+
+`nexus-engine-research-comparison inspect-grant` 读取原 `~/.config/nexus-chatgpt-latency-probe/`，仅获取固定官方公开JWKS，不向该端点发送token，不调用模型或修改本地文件。验证RS256签名、issuer/audience/subject/client、实际scope、host及注册记录、属主/0700目录/0600文件；拒绝符号链接与重复JSON字段。过期的历史ID只用于核验原签名身份，不当作当前登录；实际请求还必须具备未过期access。正常入口实测结果为refresh_required且signature_verified，全部原目录文件未变；刷新资格和模型资格仍未知。
+
+`nexus-engine-research-comparison refresh-grant` 是明确的凭据轮换操作，**不是本轮已经执行的命令**。当前“不改变凭据权限”限制下不执行真实刷新；在具体操作授权具备、真实比较即将开始时才运行，避免提前刷新后再次过期。它复用同一client和host、不传scope或扩大权限、不新建注册、不改用Codex token或付费key。保留既有系统网络路由；HTTP端点固定、TLS验证开启、禁止重定向、默认认证为空、零自动重试，总观察边界10秒。最初关闭环境路由造成公开JWKS直连403；同一端点沿既有路由200，修正在正常客户端，不把此问题归为授权失效。HTTP状态和jwks/token阶段通过固定安全字段返回，不透传正文。
+
+刷新使用原目录的credentials.refresh-lock跨进程排他锁；发送前同步落盘一次性refresh-token指纹意图。超时、确认丢失、取消、坏响应、校验或保存失败均保留旧凭据、阻止同一token再发；没有自动重试。replacement经签名/原身份/范围/时点验证后，同目录0600临时文件fsync、原子替换并同步目录，同时保存access、scope、expiry和新refresh。外部写入冲突拒绝覆盖。结果回执仅保存安全原因、阶段、HTTP状态及凭据提交是否确认；诊断写入失败也不取消已持久化的发送围栏。密钥端点拒绝不能被标成token撤销。
+
+这不证明当前远端refresh可用，也不赋予实验派发权。真实轮换、完整SDK/HTTP三阶段runner、模型/schema实际资格及配对比较仍待完成。公开依据：[注册与签名校验](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[账户、会话及刷新](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)。
