@@ -45,6 +45,11 @@ async def register_comparison(session: AsyncSession, manifest: ComparisonManifes
     )
     if row["id"] != manifest.experiment_id or row["manifest_hash"] != manifest.digest:
         raise ValueError("COMPARISON_REGISTRATION_CONFLICT")
+    if await session.scalar(
+        text("SELECT stopped FROM research_stage_scope WHERE id=:id FOR UPDATE"),
+        {"id": manifest.experiment_id},
+    ):
+        raise ValueError("COMPARISON_STOPPED")
 
 
 async def reserve_comparison_chain(
@@ -77,6 +82,11 @@ async def reserve_comparison_chain(
     )
     if stored is None:
         raise ValueError("COMPARISON_REGISTRATION_REQUIRED")
+    if await session.scalar(
+        text("SELECT stopped FROM research_stage_scope WHERE id=:id FOR UPDATE"),
+        {"id": experiment_id},
+    ):
+        raise ValueError("COMPARISON_STOPPED")
     manifest = ComparisonManifest.model_validate_json(json.dumps(stored["payload"]))
     if manifest.experiment_id != experiment_id or manifest.digest != stored["manifest_hash"]:
         raise ValueError("COMPARISON_REGISTRATION_CONFLICT")

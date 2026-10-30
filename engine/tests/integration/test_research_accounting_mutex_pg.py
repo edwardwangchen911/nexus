@@ -514,7 +514,7 @@ async def test_worker_accounting_busy_keeps_claim_and_never_schedules_retry(migr
                 worker_id="accounting-busy-worker",
                 worker_started_at=jobs._NOW,
                 process_version="fixture",
-                migration_head="0104_comparison_chain_stop",
+                migration_head="0105_comparison_preclaim",
                 clock=lambda: jobs._NOW,
                 job_ids=(job_id,),
             )

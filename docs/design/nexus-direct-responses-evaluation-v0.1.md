@@ -1,5 +1,20 @@
 # 直接 Responses 最小迁移与完整比较
 
+## 全阶段容量预检与精确未领取关闭
+
+正常 prepare 与 admit 在创建任何实验、Run、Job 或预算预留之前，复用 runner 的同一容量函数检查三股全三阶段保守上界。保留 runner 领取前的全池检查和各阶段消费本链新前驱后的实际输入检查。首阶段可容纳不代表后两阶段合格；容量拒绝不是模型实际生成超限，也不能据此推导模型质量、成功率或速度。
+
+`inspect-preclaim` / `close-preclaim` 仅支持原实验唯一已登记位置为 position1、原生 queued / prepared 且从未领取的形态。正常入口从原 source / prepared / manifest 重新计算容量拒绝，事务内校验完整身份、原预算日、无 attempt / lease / 阶段成员及执行事实。关闭沿 manifest → scope → Job / Run / reservation → 原 G→try D 财务锁，原子永久停止实验、追加版本化 AuditEvent、结束未派发 Job / Run，只释放该笔未使用预留；usage 和 settled_usd 保持 NULL。任何已领取、未知或矛盾执行事实均拒绝此入口，旧 unknown 及其预留不受影响。
+
+```sh
+.venv/bin/nexus-engine-research-comparison inspect-preclaim --repo-root /absolute/repo --source ORIGINAL_PRIVATE_ARCHIVE --prepared ORIGINAL_PRIVATE_PREPARED --manifest ORIGINAL_PRIVATE_MANIFEST
+.venv/bin/nexus-engine-research-comparison close-preclaim --repo-root /absolute/repo --source ORIGINAL_PRIVATE_ARCHIVE --prepared ORIGINAL_PRIVATE_PREPARED --manifest ORIGINAL_PRIVATE_MANIFEST
+```
+
+先只读核验，显式关闭时重新检查。提交异常返回 `COMPARISON_PRECLOSE_RESULT_UNKNOWN`，只读 inspect 原身份，不自动重发关闭或研究。成功关闭的重复读回和无关后续审计不增加释放或审计记录。永久停止同时禁止后续 admit、claim 和迟到阶段安装；这不是模型 stage terminal，也不授予前驱接替或任何新研究执行权。原冻结实验记为执行前拒绝、比较未完成，不跳过位置或另造改良样本继续。
+
+迁移 0105 不新增账本表，仅增加精确未领取终态约束、审计唯一性和停止围栏；保留 0099–0104 及普通业务读取/执行语义。无关闭证明时可正常降回 0104；已有关闭证明时拒绝破坏性降级，须保留 0105 并使用支持此证明的兼容维护镜像。本文定义入口合同，不证明已经部署或已关闭真实预留；实际状态以版本、数据库和正常入口回执为准。
+
 ## 2026-10-31 实验配置正常登记补齐
 
 PR58 已交付阶段执行与维护部署；真实比较尚未启动。首次实际准入检查发现：共享库只有 SDK 模型配置，API 路线的数据库回归使用夹具配置，尚缺正常登记入口。新增 `register-profile` / `inspect-profile`，只读回或登记固定 `responses-comparison-terra-v11-v1`，不登记实验、不预留预算、不调用模型、不改变默认路线。

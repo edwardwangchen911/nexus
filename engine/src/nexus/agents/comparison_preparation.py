@@ -6,8 +6,13 @@ from typing import Any
 from uuid import UUID
 
 from nexus.agents.codex_sdk import codex_output_schema, codex_request_wire
-from nexus.agents.comparison_compiler import compile_comparison_stage
-from nexus.agents.comparison_inputs import TOOLS, assert_outbound_safe, prepare_comparison_input
+from nexus.agents.comparison_compiler import compile_comparison_stage, validate_comparison_capacity
+from nexus.agents.comparison_inputs import (
+    TOOLS,
+    PreparedComparisonInput,
+    assert_outbound_safe,
+    prepare_comparison_input,
+)
 from nexus.agents.comparison_manifest import PURPOSE
 from nexus.agents.models import ResearchRequest
 from nexus.jobs.models import job_input_hash
@@ -18,6 +23,20 @@ SYMBOLS = ("AAPL", "AVGO", "NVDA")
 def prepare_archive(
     source: bytes, *, expected_source_hash: str, experiment_id: UUID
 ) -> dict[str, Any]:
+    artifact = reconstruct_archive(
+        source, expected_source_hash=expected_source_hash, experiment_id=experiment_id
+    )
+    for member in artifact["members"]:
+        validate_comparison_capacity(
+            PreparedComparisonInput(member["payload"], member["proof"], tuple(member["forbidden"]))
+        )
+    return artifact
+
+
+def reconstruct_archive(
+    source: bytes, *, expected_source_hash: str, experiment_id: UUID
+) -> dict[str, Any]:
+    """Read/reconstruct frozen identity, including rejected archives; never admit or dispatch."""
     if len(source) > 8 * 1024 * 1024 or hashlib.sha256(source).hexdigest() != expected_source_hash:
         raise ValueError("COMPARISON_SOURCE_HASH_INVALID")
     original = json.loads(source)

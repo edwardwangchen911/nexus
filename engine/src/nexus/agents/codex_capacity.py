@@ -599,6 +599,38 @@ class CapacityPoolMember:
     evidence_refs: tuple[EvidenceRef, ...]
 
 
+def qualify_capacity_input(
+    committee: StagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: tuple[EvidenceRef, ...],
+    inputs: dict[str, object],
+) -> dict[str, object]:
+    """Check one frozen input with the runner's gates; grant no pool/send authority."""
+    envelope = candidate_capacity_envelope(
+        committee, request=request, evidence_refs=evidence_refs, inputs=inputs
+    )
+    if cast(int, envelope["wire_upper_bytes"]) > committee._max_wire_bytes:
+        raise ValueError("CODEX_CAPACITY_POOL_WIRE_EXCEEDED")
+    payload, model = committee.build_stage_request(
+        stage="research",
+        request=request,
+        evidence_refs=evidence_refs,
+        frozen_inputs=inputs,
+        previous=[],
+    )
+    allowance = codex_input_allowance(codex_request_wire(payload), codex_output_schema(model))
+    if allowance > MAX_INPUT_TOKENS or allowance > committee._aggregate_input_tokens:
+        raise ValueError("CODEX_CAPACITY_POOL_INPUT_EXCEEDED")
+    return {
+        "instrument_id": str(request.instrument_id),
+        "snapshot_id": str(request.data_snapshot_id),
+        "request_hash": codex_request_hash(payload, model),
+        "wire_upper_bytes": envelope["wire_upper_bytes"],
+        "research_allowance_units": allowance,
+    }
+
+
 async def preflight_capacity_pool(
     members: Sequence[CapacityPoolMember], *, expected_instrument_ids: tuple[UUID, ...]
 ) -> dict[str, object]:
@@ -633,32 +665,10 @@ async def preflight_capacity_pool(
     for member in members:
         committee, request, refs = member.committee, member.request, member.evidence_refs
         inputs = await committee._inputs(request)
-        envelope = candidate_capacity_envelope(
-            committee, request=request, evidence_refs=refs, inputs=inputs
-        )
-        if cast(int, envelope["wire_upper_bytes"]) > committee._max_wire_bytes:
-            raise ValueError("CODEX_CAPACITY_POOL_WIRE_EXCEEDED")
-        payload, model = committee.build_stage_request(
-            stage="research",
-            request=request,
-            evidence_refs=refs,
-            frozen_inputs=inputs,
-            previous=[],
-        )
-        allowance = codex_input_allowance(codex_request_wire(payload), codex_output_schema(model))
-        if allowance > MAX_INPUT_TOKENS or allowance > committee._aggregate_input_tokens:
-            raise ValueError("CODEX_CAPACITY_POOL_INPUT_EXCEEDED")
-        request_hash = codex_request_hash(payload, model)
+        row = qualify_capacity_input(committee, request=request, evidence_refs=refs, inputs=inputs)
+        request_hash = cast(str, row["request_hash"])
         pending.append((member, request_hash))
-        rows.append(
-            {
-                "instrument_id": str(request.instrument_id),
-                "snapshot_id": str(request.data_snapshot_id),
-                "request_hash": request_hash,
-                "wire_upper_bytes": envelope["wire_upper_bytes"],
-                "research_allowance_units": allowance,
-            }
-        )
+        rows.append(row)
     manifest = hashlib.sha256(
         json.dumps(
             {

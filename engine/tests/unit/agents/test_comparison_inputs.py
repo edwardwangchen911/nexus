@@ -299,6 +299,64 @@ def test_normal_prepare_entry_is_offline_private_exclusive_and_deterministic(tmp
     assert output.read_bytes() == artifact
 
 
+def test_full_capacity_check_preserves_eligible_legacy_preparation(monkeypatch):
+    from nexus.agents import comparison_preparation
+
+    source = json.dumps(archive_source()).encode()
+    arguments = dict(expected_source_hash=hashlib.sha256(source).hexdigest(), experiment_id=uuid4())
+    with monkeypatch.context() as legacy:
+        legacy.setattr(comparison_preparation, "validate_comparison_capacity", lambda _: None)
+        old = prepare_archive(source, **arguments)
+    assert prepare_archive(source, **arguments) == old
+
+
+@pytest.mark.parametrize("member_index", [0, 1, 2])
+@pytest.mark.parametrize("excerpt_size,first_exceeded", [(50000, "synthesis"), (65000, "critique")])
+def test_prepare_rejects_later_stage_capacity_before_creating_artifact(
+    tmp_path, member_index, excerpt_size, first_exceeded
+):
+    from nexus.agents.codex_capacity import candidate_capacity_envelope
+    from nexus.agents.codex_sdk import codex_request_wire
+    from nexus.agents.committee import INDEPENDENT_MONITOR_PROMPT_VERSION
+    from nexus.agents.comparison_execution import FrozenComparisonCommittee
+    from nexus.domain.evidence import EvidenceRef
+
+    archive = archive_source()
+    member = archive["members"][member_index]
+    for prompt in member["prompts"].values():
+        prompt["version"] = INDEPENDENT_MONITOR_PROMPT_VERSION
+    member["inputs"]["filing_disclosures"]["items"] = [{"excerpt": "x" * excerpt_size}]
+    experiment = uuid4()
+    item = prepare_comparison_input(member, experiment_id=experiment)
+    payload, _ = compile_comparison_stage(
+        item, expected_input_hash=item.input_hash, stage="research", previous=[]
+    )
+    assert len(codex_request_wire(payload).encode()) < 100479
+    compiler = FrozenComparisonCommittee(item, deadline=300)
+    envelope = candidate_capacity_envelope(
+        compiler,
+        request=compiler.frozen_request,
+        evidence_refs=tuple(EvidenceRef.model_validate(r) for r in item.payload["evidence"]),
+        inputs=item.payload["inputs"],
+    )
+    assert (
+        next(row["stage"] for row in envelope["stages"] if row["wire_upper_bytes"] > 100479)
+        == first_exceeded
+    )
+    source, output = tmp_path / "source.json", tmp_path / "prepared.json"
+    raw = json.dumps(archive).encode()
+    source.write_bytes(raw)
+    with pytest.raises(ValueError, match="^CODEX_CAPACITY_POOL_WIRE_EXCEEDED$"):
+        prepare_file(
+            source=source,
+            expected_source_hash=hashlib.sha256(raw).hexdigest(),
+            experiment_id=experiment,
+            output=output,
+        )
+    assert not output.exists()
+    assert source.read_bytes() == raw
+
+
 @pytest.mark.parametrize("corruption", ["symbol", "source_hash", "pool", "identity", "time"])
 def test_normal_prepare_rejects_wrong_pool_or_source(corruption):
     archive = archive_source()
