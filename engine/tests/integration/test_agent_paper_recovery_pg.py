@@ -41,7 +41,8 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
     migrated_database_url, monkeypatch, shape, expected_code
 ):
-    at = datetime.now(UTC) if shape.startswith("comparison_") else AT
+    # Business setup needs a valid market session, independently of when CI runs.
+    at = AT
     assert importlib.util.find_spec("nexus.ops.agent_paper_recovery") is not None
     from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
 
@@ -52,6 +53,11 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
     engine, sessions, authority, manifest = await seed_normal_path(
         migrated_database_url, monkeypatch, decision_time=at, occupied=shape == "occupied"
     )
+    if shape.startswith("comparison_"):
+        # Native comparison claims bind the real database budget day. Recovery is
+        # cross-session and must inspect that clock without reseeding business work.
+        async with sessions() as session:
+            at = await session.scalar(text("SELECT clock_timestamp()"))
     original_scalar = AsyncSession.scalar
 
     async def clock(self, statement, *args, **kwargs):
@@ -217,3 +223,28 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
                 assert claims[0].idempotency_key == (at - timedelta(days=1)).isoformat()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape, expected_code",
+    [
+        ("comparison_settled", None),
+        ("comparison_held", "RESEARCH_ACCOUNTING_UNSETTLED"),
+        ("comparison_held_zero", "RESEARCH_ACCOUNTING_UNSETTLED"),
+    ],
+)
+async def test_comparison_recovery_fixture_is_independent_of_closed_wall_clock(
+    migrated_database_url, monkeypatch, shape, expected_code
+):
+    class ClosedWallClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 31, 23, tzinfo=UTC).astimezone(tz)
+
+    # Freeze only this test module's wall clock. Database time and production
+    # market/budget gates remain real; recovery must reach the accounting check.
+    monkeypatch.setattr(f"{__name__}.datetime", ClosedWallClock)
+    await test_recovery_reads_actual_schema_host_and_cross_day_claims(
+        migrated_database_url, monkeypatch, shape, expected_code
+    )
