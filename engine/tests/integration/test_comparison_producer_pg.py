@@ -372,6 +372,10 @@ async def test_normal_admit_and_read_only_receipt_after_missing_client_ack(
         )
     )
     assert receipt["inspection_only"] is True and receipt["status"] == "position_registered"
+    assert receipt["stage_route"] == "comparison"
+    assert receipt["stage_version"] == "research-stages-v1"
+    assert receipt["stage_scope_stopped"] is False
+    assert receipt["dispatch_authority"] is False
     assert (
         receipt["job_status"],
         receipt["run_status"],
@@ -445,7 +449,7 @@ async def test_exact_context_binding_and_compatible_reader_rollback(migrated_dat
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0101_comparison_inputs"
+            == "0102_comparison_routes"
         )
         assert await session.scalar(text("SELECT count(*) FROM research_comparison_chain")) == 1
 

@@ -34,6 +34,11 @@ VERSION = "research-stages-v1"
 
 
 async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) -> tuple[UUID, str]:
+    from nexus.agents.comparison_routes import comparison_owner
+
+    comparison = await comparison_owner(session, run, job)
+    if comparison is not None:
+        return comparison, "comparison"
     increment = await session.scalar(
         select(MonitorIncrement).where(
             MonitorIncrement.run_id == run.id, MonitorIncrement.job_id == job.id
@@ -99,25 +104,40 @@ async def register_prepared_runs(session: AsyncSession, run_ids: Sequence[UUID])
         if existing is not None:
             # Exact immutable selection is read-only on replay, never a new send right.
             continue
-        if not await formal_stage_job_qualified(session, job):
+        if job.job_type != "agent.research.comparison" and not await formal_stage_job_qualified(
+            session, job
+        ):
             raise ProtocolRejected("STAGED_PREPARATION_NOT_QUALIFIED")
         scope, kind = await owner(session, run, job)
-        await session.execute(
-            text(
-                "INSERT INTO research_stage_scope(id,cycle_id,increment_id,request_id) "
-                "VALUES(:scope,:cycle,:inc,:request) ON CONFLICT(id) DO NOTHING"
-            ),
-            {
-                "scope": scope,
-                "cycle": scope if kind == "formal" else None,
-                "inc": scope if kind == "increment" else None,
-                "request": scope if kind == "independent" else None,
-            },
-        )
+        if kind == "comparison":
+            await session.execute(
+                text(
+                    "INSERT INTO research_stage_scope(id,comparison_id) "
+                    "VALUES(:scope,:scope) ON CONFLICT(id) DO NOTHING"
+                ),
+                {"scope": scope},
+            )
+        else:
+            await _register_business_scope(session, scope, kind)
         await session.execute(
             text("INSERT INTO research_stage_route VALUES(:run,:job,:scope,:kind,:version)"),
             {"run": run.id, "job": job.id, "scope": scope, "kind": kind, "version": VERSION},
         )
+
+
+async def _register_business_scope(session: AsyncSession, scope: UUID, kind: str) -> None:
+    await session.execute(
+        text(
+            "INSERT INTO research_stage_scope(id,cycle_id,increment_id,request_id) "
+            "VALUES(:scope,:cycle,:inc,:request) ON CONFLICT(id) DO NOTHING"
+        ),
+        {
+            "scope": scope,
+            "cycle": scope if kind == "formal" else None,
+            "inc": scope if kind == "increment" else None,
+            "request": scope if kind == "independent" else None,
+        },
+    )
 
 
 async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, Any] | None:

@@ -417,6 +417,7 @@ async def claim_next_job(
     )
     conditions = [
         Job.queue == queue.value,
+        Job.job_type != "agent.research.comparison",
         Job.status == JobStatus.QUEUED.value,
         Job.available_at <= now,
         Job.attempt_count < Job.max_attempts + Job.manual_retry_count,
@@ -851,6 +852,7 @@ async def reclaim_expired_jobs(
         return 0
     conditions = [
         Job.queue == queue.value,
+        Job.job_type != "agent.research.comparison",
         Job.status == JobStatus.RUNNING.value,
         JobLease.expires_at <= now,
         _not_candidate_agent_job(),

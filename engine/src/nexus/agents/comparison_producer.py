@@ -371,4 +371,7 @@ async def admit_comparison_position(
             job_id=job_id,
             daily_limit_usd=daily_limit_usd,
         )
+        from nexus.agents.research_stages.routes import register_prepared_runs
+
+        await register_prepared_runs(session, (run_id,))
         return ComparisonAdmission(run_id, job_id, reservation)

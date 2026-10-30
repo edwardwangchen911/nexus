@@ -21,6 +21,7 @@ from nexus.agents.comparison_preparation import prepare_archive
 async def native_command(args: argparse.Namespace) -> dict[str, Any]:
     from nexus.agents.comparison_manifest import ComparisonManifest
     from nexus.agents.comparison_producer import admit_comparison_position
+    from nexus.agents.research_stages.routes import selected_route
     from nexus.ops.openai_local import local_settings
     from nexus.persistence.session import session_factory
 
@@ -46,9 +47,22 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                     .mappings()
                     .one_or_none()
                 )
+                route = None if row is None else await selected_route(session, row["job_id"])
+                stopped = (
+                    None
+                    if route is None
+                    else await session.scalar(
+                        text("SELECT stopped FROM research_stage_scope WHERE id=:id"),
+                        {"id": route["scope_id"]},
+                    )
+                )
                 return {
                     "status": "position_not_admitted" if row is None else "position_registered",
                     "inspection_only": True,
+                    "stage_route": None if route is None else route["kind"],
+                    "stage_version": None if route is None else route["version"],
+                    "stage_scope_stopped": stopped,
+                    "dispatch_authority": False,
                     **(
                         {}
                         if row is None

@@ -361,6 +361,10 @@ async def test_empty_downgrade_waits_for_jobs_before_locking_stage_storage(
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
+    # This is a historical 0099 lock-order experiment, not a direct invocation
+    # of 0099 underneath newer dependent schemas. Use the real reverse chain
+    # to establish its original starting point before installing the writer.
+    await asyncio.to_thread(migrate, "0099_research_stages", downgrade=True)
     file = Path(__file__).resolve().parents[2] / "alembic/versions/0099_research_stages.py"
     spec = importlib.util.spec_from_file_location("stage_migration_test", file)
     migration = importlib.util.module_from_spec(spec)
