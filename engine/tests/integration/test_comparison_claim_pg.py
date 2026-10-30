@@ -244,7 +244,7 @@ async def test_claimed_position_requires_compatible_reader_rollback(migrated_dat
         )
     async with factory() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0103_comparison_claim"
+            "0104_comparison_chain_stop"
         )
         assert await session.scalar(text("SELECT count(*) FROM job_attempts")) == 1
         assert await session.scalar(text("SELECT count(*) FROM job_leases")) == 1

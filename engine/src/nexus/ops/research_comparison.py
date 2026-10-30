@@ -56,12 +56,28 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                         {"id": route["scope_id"]},
                     )
                 )
+                chain_stopped = None
+                if (
+                    row is not None
+                    and await session.scalar(
+                        text("SELECT to_regclass('research_comparison_chain_stop')")
+                    )
+                    is not None
+                ):
+                    chain_stopped = await session.scalar(
+                        text(
+                            "SELECT EXISTS(SELECT 1 FROM research_comparison_chain_stop "
+                            "WHERE run_id=:run)"
+                        ),
+                        {"run": row["run_id"]},
+                    )
                 return {
                     "status": "position_not_admitted" if row is None else "position_registered",
                     "inspection_only": True,
                     "stage_route": None if route is None else route["kind"],
                     "stage_version": None if route is None else route["version"],
                     "stage_scope_stopped": stopped,
+                    "stage_chain_stopped": chain_stopped,
                     "dispatch_authority": False,
                     **(
                         {}

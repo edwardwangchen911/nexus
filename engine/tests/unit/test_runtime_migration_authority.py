@@ -13,4 +13,4 @@ def test_runtime_authority_matches_installed_migration_chain():
 
 
 def test_comparison_routes_revision_is_current_authority():
-    assert CURRENT_MIGRATION_HEAD == "0103_comparison_claim"
+    assert CURRENT_MIGRATION_HEAD == "0104_comparison_chain_stop"

@@ -326,9 +326,11 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
 
                 mapped = _agent_result(result.status)
                 if result.status != "completed":
-                    await target.execute(
-                        text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
-                        {"id": scope},
+                    await protocol.stop_terminal_in_transaction(
+                        target,
+                        scope_id=scope,
+                        run_id=run_id,
+                        rows=rows,
                     )
                 closed_at = clock()
                 await target.execute(

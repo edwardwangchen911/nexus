@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nexus.agents.persistence import require_reserved_daily_budget
 from nexus.agents.research_maintenance import require_research_open
 from nexus.agents.research_stages.proof import read_terminal_proof
-from nexus.agents.research_stages.protocol import StagedProtocol
+from nexus.agents.research_stages.protocol import ProtocolRejected, StagedProtocol
 from nexus.agents.research_stages.routes import selected_route
 from nexus.jobs.repository import ClaimedJob, _claim_selected_job, _worker_id
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
@@ -31,6 +31,11 @@ async def claim_comparison_position(
     protocol = StagedProtocol(factory)
     async with factory() as session:
         await session.begin()
+        if (
+            await session.scalar(text("SELECT to_regclass('research_comparison_chain_stop')"))
+            is None
+        ):
+            raise ValueError("COMPARISON_CHAIN_STOP_SCHEMA_REQUIRED")
         scope = (
             (
                 await session.execute(
@@ -62,7 +67,10 @@ async def claim_comparison_position(
             raise ValueError("COMPARISON_PREDECESSOR_UNCONFIRMED")
         now = await session.scalar(text("SELECT clock_timestamp()"))
         for prior in rows[:-1]:
-            proof = await read_terminal_proof(session, run_id=prior["run_id"], now=now)
+            try:
+                proof = await read_terminal_proof(session, run_id=prior["run_id"], now=now)
+            except ProtocolRejected:
+                raise ValueError("COMPARISON_PREDECESSOR_UNCONFIRMED") from None
             if proof is None or not proof.known or not proof.cleanup_confirmed or proof.orphan:
                 raise ValueError("COMPARISON_PREDECESSOR_UNCONFIRMED")
         job = await session.get(Job, rows[-1]["job_id"], with_for_update=True)

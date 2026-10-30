@@ -136,6 +136,7 @@ class StagedProtocol:
         self.clock = clock
         self.claims: dict[UUID, ClaimedJob] = {}
         self.local_stopped = False
+        self.comparison_stop_binding: tuple[UUID, UUID] | None = None
 
     def _now(self, supplied: datetime) -> datetime:
         return supplied if self.clock is None else max(supplied, self.clock())
@@ -154,9 +155,18 @@ class StagedProtocol:
     ) -> None:
         if sum((increment, independent, comparison)) > 1:
             raise ProtocolRejected("STAGED_SCOPE_KIND_INVALID")
+        if comparison and len(claims) != 1:
+            raise ProtocolRejected("COMPARISON_SINGLE_CHAIN_REQUIRED")
         async with self.factory.begin() as session:
             await ensure_schema(session)
             if comparison:
+                if (
+                    await session.scalar(
+                        text("SELECT to_regclass('research_comparison_chain_stop')")
+                    )
+                    is None
+                ):
+                    raise ProtocolRejected("COMPARISON_CHAIN_STOP_SCHEMA_REQUIRED")
                 # Preparation owns registration; installation never creates a
                 # new experimental identity or changes its selected route.
                 bound = await session.scalar(
@@ -202,6 +212,9 @@ class StagedProtocol:
         # Only this first in-process native-claim owner may authorize. A newly
         # constructed reader does not acquire send rights by loading old rows.
         self.claims = {claim.job_id: claim for claim in claims}
+        self.comparison_stop_binding = (
+            (scope_id, UUID(str(claims[0].payload["run_id"]))) if comparison else None
+        )
 
     async def _member(self, session: AsyncSession, claim: ClaimedJob) -> Mapping[str, Any]:
         row = (
@@ -547,11 +560,35 @@ class StagedProtocol:
 
     async def stop(self, scope_id: UUID) -> None:
         self.local_stopped = True
+        if self.comparison_stop_binding is not None:
+            scope, run = self.comparison_stop_binding
+            if scope != scope_id:
+                raise ProtocolRejected("STAGED_BINDING_MISSING")
+            async with self.factory.begin() as session:
+                await self._stop_comparison_chain(session, scope_id=scope, run_id=run)
+            return
+        await self._stop_scope(scope_id)
+
+    async def _stop_scope(self, scope_id: UUID) -> None:
+        """Global safety fence, including every commit-result-unknown path."""
+        self.local_stopped = True
         async with self.factory.begin() as session:
             await session.execute(
                 text("UPDATE research_stage_scope SET stopped=true WHERE id=:scope"),
                 {"scope": scope_id},
             )
+
+    @staticmethod
+    async def _stop_comparison_chain(
+        session: AsyncSession, *, scope_id: UUID, run_id: UUID
+    ) -> None:
+        await session.execute(
+            text(
+                "INSERT INTO research_comparison_chain_stop(run_id,scope_id) "
+                "VALUES(:run,:scope) ON CONFLICT(run_id) DO NOTHING"
+            ),
+            {"run": run_id, "scope": scope_id},
+        )
 
     async def _commit(self, session: AsyncSession, scope_id: UUID) -> None:
         try:
@@ -562,12 +599,47 @@ class StagedProtocol:
                 self.on_failure(error)
             try:
                 await session.rollback()
-                await self.stop(scope_id)
+                await self._stop_scope(scope_id)
             except BaseException:
                 # Preserve original ambiguity. Failure to persist the stop is
                 # an explicit remaining condition, not permission to dispatch.
                 error.add_note("SCOPE_STOP_UNCONFIRMED")
             raise
+
+    async def stop_terminal_in_transaction(
+        self,
+        session: AsyncSession,
+        *,
+        scope_id: UUID,
+        run_id: UUID,
+        rows: Sequence[Mapping[str, Any]],
+        orphan: bool = False,
+    ) -> None:
+        """One stop classification for normal publication and public/orphan closeout.
+
+        Callers hold the scope lock and own the complete native terminal transaction.
+        This never clears an existing global stop, accepts unknown impact or grants
+        send rights. The next position must independently verify its predecessors.
+        """
+        comparison = (
+            await session.scalar(
+                text("SELECT comparison_id FROM research_stage_scope WHERE id=:id"),
+                {"id": scope_id},
+            )
+            is not None
+        )
+        if comparison:
+            await self._stop_comparison_chain(session, scope_id=scope_id, run_id=run_id)
+        if (
+            not comparison
+            or orphan
+            or not usage_known(rows)
+            or not all(row["confirmed"] is True for row in rows)
+        ):
+            await session.execute(
+                text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
+                {"id": scope_id},
+            )
 
     async def close(self, claim: ClaimedJob, *, now: datetime, orphan: bool = False) -> bool:
         async with self.factory() as session:
@@ -598,9 +670,8 @@ class StagedProtocol:
         model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
 
         async def terminal(session: AsyncSession) -> JobCompletion:
-            await session.execute(
-                text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
-                {"id": member["scope_id"]},
+            await self.stop_terminal_in_transaction(
+                session, scope_id=member["scope_id"], run_id=run.id, rows=rows, orphan=orphan
             )
             if known:
                 usage = UsageSnapshot(
