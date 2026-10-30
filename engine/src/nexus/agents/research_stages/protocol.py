@@ -217,6 +217,14 @@ class StagedProtocol:
         async with self.factory() as session:
             await session.begin()
             member = await self._member(session, claim)
+            from nexus.agents.research_stages.routes import selected_route
+            from nexus.paper.independent_unknown_acceptance import (
+                require_independent_execution_open,
+            )
+
+            route = await selected_route(session, claim.job_id)
+            if route is not None and route["kind"] == "independent":
+                await require_independent_execution_open(session, request_id=route["scope_id"])
             if await session.scalar(
                 text(
                     "SELECT 1 FROM research_stage_authorization WHERE run_id=:run AND stage=:stage"

@@ -3846,6 +3846,8 @@ export interface components {
              * @constant
              */
             execution_locked: true;
+            /** Independent Disposition */
+            independent_disposition?: ("unknown_acknowledged" | "recheck_required") | null;
             /**
              * Mode
              * @enum {string}

@@ -76,7 +76,12 @@ async def assert_shared_day_preserved(session, originals, day, used, child_hold)
     ],
 )
 async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three_calls(
-    migrated_database_url, monkeypatch, tmp_path, unknown, independent=False
+    migrated_database_url,
+    monkeypatch,
+    tmp_path,
+    unknown,
+    independent=False,
+    accepted_unknown_root=None,
 ):
     frozen_without_price = unknown == "superseded_unfrozen_price"
     if frozen_without_price:
@@ -118,22 +123,47 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     async with factory() as session:
         roots = tuple(await session.scalars(select(AgentResearchRunRecord)))
         assert len(roots) == len({r.instrument_id for r in roots}) == 3
-        assert all(
-            r.status == "completed"
-            and r.input_tokens is not None
-            and r.output_tokens is not None
-            and r.settled_cost_usd is not None
-            for r in roots
-        )
+        if accepted_unknown_root is None:
+            assert all(
+                r.status == "completed"
+                and r.input_tokens is not None
+                and r.output_tokens is not None
+                and r.settled_cost_usd is not None
+                for r in roots
+            )
+        else:
+            assert independent and unknown is True
+            assert sorted(r.status for r in roots) == ["abstained", "completed", "failed"]
+            assert {r.id for r in roots if r.settled_cost_usd is None} == {accepted_unknown_root}
+            assert parent.status == "completed" and parent.settled_cost_usd is not None
+
         root_ids = {r.id for r in roots}
         budget_day = parent.decision_time.date()
         assert later.date() == budget_day
         budgets_before = await budget_rows(session)
         for model in _BUDGET_MODELS:
-            assert all(
-                r.business_date == budget_day and r.state == "settled" and r.settled_usd is not None
-                for r in await session.scalars(select(model))
-            )
+            if accepted_unknown_root is None:
+                assert all(
+                    r.business_date == budget_day
+                    and r.state == "settled"
+                    and r.settled_usd is not None
+                    for r in await session.scalars(select(model))
+                )
+            else:
+                for reservation in await session.scalars(select(model)):
+                    is_unknown = (
+                        model is AgentDailyBudgetReservationRecord
+                        and reservation.run_id == accepted_unknown_root
+                    )
+                    cancelled = model is AgentDailyBudgetReservationRecord and any(
+                        r.id == reservation.run_id and r.status == "abstained" for r in roots
+                    )
+                    assert reservation.business_date == budget_day
+                    assert reservation.state == (
+                        "reserved" if is_unknown else "released" if cancelled else "settled"
+                    )
+                    assert (reservation.settled_usd is None) is (is_unknown or cancelled)
+
         assert {
             r.run_id for r in await session.scalars(select(AgentDailyBudgetReservationRecord))
         } == root_ids

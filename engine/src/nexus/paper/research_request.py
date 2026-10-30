@@ -197,6 +197,10 @@ async def prepare_research_request(
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
     await lock_portfolio_account(session, row.account_id)
+    if row.contract_version == 3:
+        from nexus.paper.independent_unknown_acceptance import require_independent_execution_open
+
+        await require_independent_execution_open(session, request_id=row.id)
     view = await read_manual_request(session, row)
     if view.status != "preparing":
         return view
@@ -520,6 +524,22 @@ async def require_research_jobs_settled(
 ) -> None:
     from nexus.agents.research_stages.public import _research_settled
 
+    # A historical admission exception validates the complete original manifest.
+    # It never changes financial facts or authorizes unrelated/substituted members.
+    # The proof builder uses allow_unknown_usage=True to validate native closure
+    # without recursively consulting the historical disposition.
+    if (
+        not allow_unknown_usage
+        and row.contract_version == 3
+        and any(not member.usage_known for member in view.members)
+    ):
+        from nexus.paper.independent_unknown_acceptance import independent_unknown_accepted
+
+        if await independent_unknown_accepted(session, row, now=now):
+            current = await read_manual_request(session, row)
+            if current.research != view:
+                raise ValueError("INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED")
+            return
     await _research_settled(
         session, row=row, view=view, now=now, allow_unknown_usage=allow_unknown_usage
     )

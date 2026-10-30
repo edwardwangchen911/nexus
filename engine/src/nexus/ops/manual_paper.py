@@ -37,6 +37,11 @@ from nexus.paper.history_seal import (
     ResearchProcessDiagnosticError,
     seal_failed_research,
 )
+from nexus.paper.independent_unknown_acceptance import (
+    IndependentAcceptanceCheck,
+    IndependentAcceptanceReceipt,
+    inspect_or_accept_independent_unknown,
+)
 from nexus.paper.manual_cancel import (
     TerminalCycleCancelReceipt,
     close_terminal_cycle_unused_research,
@@ -259,6 +264,12 @@ def parser() -> argparse.ArgumentParser:
         scheduled.add_argument("--claim-id", type=UUID, required=True)
         if action == "accept-scheduled-unknown":
             scheduled.add_argument("--accept-unknown-effects", action="store_true", required=True)
+    for action in ("check-independent-acceptance", "accept-independent-unknown"):
+        independent = commands.add_parser(action)
+        independent.add_argument("--request-id", type=UUID, required=True)
+        if action == "accept-independent-unknown":
+            independent.add_argument("--accept-unknown-effects", action="store_true", required=True)
+            independent.add_argument("--expected-proof-hash", required=True)
     return result
 
 
@@ -276,12 +287,50 @@ async def run(
     | SynthesisUsageReceipt
     | ScheduledAcceptanceCheck
     | ScheduledAcceptanceReceipt
+    | IndependentAcceptanceCheck
+    | IndependentAcceptanceReceipt
 ):
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     lifecycle_guards = ExitStack()
     diagnostic = _OperationDiagnostic()
     try:
+        if args.action in {"check-independent-acceptance", "accept-independent-unknown"}:
+            _require_maintenance_code(args.repo_root, settings.release_revision)
+            lifecycle_guards.enter_context(
+                preparation_service_control_lock(args.repo_root, settings.release_revision)
+            )
+            async with diagnostic.transaction(factory) as session:
+                if not await session.scalar(
+                    text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key,0))"),
+                    {"key": SCHEMA_ADMISSION_LOCK_KEY},
+                ):
+                    raise ValueError("INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED")
+                await session.execute(
+                    text("LOCK TABLE public.alembic_version IN SHARE MODE NOWAIT")
+                )
+                if (
+                    await session.scalar(
+                        text(
+                            "SELECT CASE WHEN count(*)=1 THEN min(version_num) END "
+                            "FROM alembic_version"
+                        )
+                    )
+                    != CURRENT_MIGRATION_HEAD
+                ):
+                    raise ValueError("INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED")
+                independent_receipt = await inspect_or_accept_independent_unknown(
+                    session,
+                    settings=settings,
+                    request_id=args.request_id,
+                    repo_root=args.repo_root,
+                    env_file=args.env_file,
+                    accept=args.action == "accept-independent-unknown",
+                    accept_unknown_effects=getattr(args, "accept_unknown_effects", False),
+                    expected_proof_hash=getattr(args, "expected_proof_hash", None),
+                )
+                _require_maintenance_code(args.repo_root, settings.release_revision)
+                return independent_receipt
         if args.action == "run-research":
             from nexus.ops.manual_paper_host import run_pure_research_once
 

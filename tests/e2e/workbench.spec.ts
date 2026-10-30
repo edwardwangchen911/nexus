@@ -358,3 +358,33 @@ for (const width of [390, 1440]) {
     await page.screenshot({ path: `test-results/precycle-quote-${width}.png`, fullPage: true });
   });
 }
+
+for (const width of [390, 1280]) {
+  for (const independent_disposition of ["unknown_acknowledged", "recheck_required"]) {
+    test(`independent disposition ${independent_disposition} at width ${width} is read-only`, async ({ page }) => {
+      const { independentUnknownReceipt } = await import("../unit/manual-paper/research-fixture");
+      await page.setViewportSize({ width, height: 900 });
+      await installFixtures(page, readyWorkbench(), []);
+      await page.addInitScript(() => sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "independent-unknown", mode: "research_and_monitor" })));
+      const methods: string[] = [];
+      await page.route("**/api/v1/paper/manual-requests", async (route) => {
+        methods.push(route.request().method());
+        await route.fulfill({ json: { data: { ...independentUnknownReceipt, independent_disposition }, meta: meta() } });
+      });
+      await page.goto("/workspace");
+      await expect(page.getByText(independent_disposition === "unknown_acknowledged" ? /独立研究未知影响已明确接受/ : /独立研究的接受记录需要重新核验/)).toBeVisible();
+      await expect(page.getByText("研究结果尚未确认", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "研究并持续监控", exact: true })).toBeDisabled();
+      await expect(page.getByText("用量未知，保留预算占用", { exact: true })).toBeVisible();
+      expect(methods).toEqual(["GET"]);
+      await page.screenshot({ path: `test-results/independent-disposition-${independent_disposition}-${width}.png`, fullPage: true });
+      if (independent_disposition === "unknown_acknowledged") {
+        await page.getByRole("button", { name: "开始新的请求", exact: true }).click();
+        await expect(page.getByRole("button", { name: "研究并持续监控", exact: true })).toBeEnabled();
+        expect(methods).toEqual(["GET"]);
+      } else {
+        await expect(page.getByRole("button", { name: "开始新的请求", exact: true })).toHaveCount(0);
+      }
+    });
+  }
+}

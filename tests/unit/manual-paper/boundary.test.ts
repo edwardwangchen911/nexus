@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { rebuildAllowedEngineResponse } from "../../../app/lib/engine/errors";
-import { researchReceipt } from "./research-fixture";
+import { independentUnknownReceipt, researchReceipt } from "./research-fixture";
 const id = "0198f7a0-1111-7777-8111-111111111111";
 const meta = { request_id: id, schema_version: "1", as_of: "2026-10-09T14:00:00Z" };
 const data = { request_id: id, mode: "research_only", requested_at: meta.as_of, status: "queued", code: "MANUAL_REQUEST_QUEUED", cycle_id: null, execution_locked: true };
@@ -89,4 +89,14 @@ it("accepts the independent lineage only with its exact mode and no formal cycle
     { ...independent, research_contract: "research_only_v2" }, { ...independent, research_contract: null },
     { ...independent, cycle_id: id }, { ...independent, execution_locked: false },
   ]) expect(rebuildAllowedEngineResponse(200, { data: invalid, meta }, undefined, path, undefined, "GET")).toBeNull();
+});
+
+it("preserves independent disposition only on the original unknown v3 receipt", () => {
+  const accepted = { ...independentUnknownReceipt, independent_disposition: "unknown_acknowledged" };
+  for (const independent_disposition of ["unknown_acknowledged", "recheck_required"]) {
+    expect(rebuildAllowedEngineResponse(200, { data: { ...accepted, independent_disposition }, meta }, undefined, path, undefined, "GET")).not.toBeNull();
+  }
+  for (const invalid of [{ ...accepted, status: "completed", code: "MANUAL_RESEARCH_FINISHED" }, { ...accepted, research: null }, { ...researchReceipt, independent_disposition: "unknown_acknowledged" }, { ...data, independent_disposition: "unknown_acknowledged" }, { ...accepted, independent_disposition: "ready" }]) {
+    expect(rebuildAllowedEngineResponse(200, { data: invalid, meta }, undefined, path, undefined, "GET")).toBeNull();
+  }
 });

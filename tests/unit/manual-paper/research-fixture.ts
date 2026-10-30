@@ -20,3 +20,17 @@ export const researchReceipt = {
     ],
   },
 };
+
+export const independentUnknownReceipt = {
+  ...researchReceipt,
+  mode: "research_and_monitor",
+  research_contract: "independent_monitor_research_v1",
+  status: "unknown",
+  code: "MANUAL_RESULT_UNKNOWN",
+  research: {
+    ...researchReceipt.research,
+    members: researchReceipt.research.members.map((member, index) => ({
+      ...member, status: index === 0 ? "failed" : "abstained", quality: null, usage_known: index !== 0,
+    })),
+  },
+};

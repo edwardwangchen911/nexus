@@ -6071,6 +6071,21 @@ export const runtimeContractSchemas = {
         "title": "Execution Locked",
         "type": "boolean"
       },
+      "independent_disposition": {
+        "anyOf": [
+          {
+            "enum": [
+              "unknown_acknowledged",
+              "recheck_required"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Independent Disposition"
+      },
       "mode": {
         "enum": [
           "research_only",

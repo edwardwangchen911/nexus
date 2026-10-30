@@ -127,6 +127,12 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
     clock = anchored_clock
     async with factory() as session:
         route = await selected_route(session, claim.job_id)
+        if route is not None and route["kind"] == "independent":
+            from nexus.paper.independent_unknown_acceptance import (
+                require_independent_execution_open,
+            )
+
+            await require_independent_execution_open(session, request_id=route["scope_id"])
     if route is None:
         raise ProtocolRejected("STAGED_ROUTE_REQUIRED")
 
