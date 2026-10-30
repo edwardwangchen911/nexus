@@ -156,6 +156,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_comparison_claim_pg.py",
     "engine/tests/integration/test_comparison_sequence_pg.py",
     "engine/tests/integration/test_comparison_execution_pg.py",
+    "engine/tests/integration/test_comparison_preclaim_pg.py",
     "engine/tests/integration/test_http_stage_lifecycle_pg.py",
     "engine/tests/integration/test_research_occupancy_pg.py",
     "engine/tests/integration/test_research_known_held_pg.py",

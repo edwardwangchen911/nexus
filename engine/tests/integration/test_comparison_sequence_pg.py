@@ -311,7 +311,7 @@ async def test_chain_stop_migration_round_trip_and_populated_rollback_fence(
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0104_comparison_chain_stop"
+            == "0105_comparison_preclaim"
         )
         assert (
             await session.scalar(text("SELECT count(*) FROM research_comparison_chain_stop")) == 1

@@ -10,6 +10,45 @@ from nexus.domain.evidence import EvidenceRef
 from unit.agents.test_comparison_inputs import archive_source
 
 
+def test_preclaim_cli_commit_unknown_is_safe_and_never_replayed(monkeypatch, tmp_path, capsys):
+    from nexus.ops import research_comparison as cli
+
+    calls = 0
+
+    async def lost_ack(_):
+        nonlocal calls
+        calls += 1
+        try:
+            raise OSError("private-driver-ack-canary")
+        except OSError as cause:
+            raise cli.PreclaimCommitUnknown() from cause
+
+    monkeypatch.setattr(cli, "native_command", lost_ack)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "nexus-research-comparison",
+            "close-preclaim",
+            "--repo-root",
+            str(tmp_path),
+            "--source",
+            str(tmp_path / "source.json"),
+            "--prepared",
+            str(tmp_path / "prepared.json"),
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+        ],
+    )
+    assert cli.main() == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "status": "unknown",
+        "reason": "COMPARISON_PRECLOSE_RESULT_UNKNOWN",
+        "replay_allowed": False,
+    }
+    assert calls == 1 and "private-driver" not in captured.out + captured.err
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("member_index", [0, 2])
 async def test_old_first_stage_artifact_is_rejected_before_any_native_write(

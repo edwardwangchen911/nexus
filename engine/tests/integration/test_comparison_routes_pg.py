@@ -3,7 +3,7 @@
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
-from uuid import uuid4, uuid5
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -127,7 +127,7 @@ async def test_comparison_scope_stop_is_permanent_and_blocks_later_positions(mig
             daily_limit_usd=Decimal(6),
         )
     await StagedProtocol(factory).stop(manifest.experiment_id)
-    with pytest.raises(DBAPIError, match="preparation route binding invalid"):
+    with pytest.raises(ValueError, match="^COMPARISON_STOPPED$"):
         async with factory.begin() as session:
             await admit_comparison_position(
                 session,
@@ -198,25 +198,23 @@ async def test_concurrent_stop_serializes_with_route_registration(
             )
 
     await admit(1)
-    at_route, stopped, release = (asyncio.Event() for _ in range(3))
+    at_registration, stopped, release = (asyncio.Event() for _ in range(3))
     pids = {}
-    execute = AsyncSession.execute
+    scalar = AsyncSession.scalar
 
-    async def hold_before_route(session, statement, params=None, **kwargs):
-        if str(statement).startswith("INSERT INTO research_stage_route") and (
-            params["run"] == uuid5(manifest.experiment_id, "run:3")
-        ):
-            pids["producer"] = (
-                await execute(session, text("SELECT pg_backend_pid()"))
-            ).scalar_one()
-            at_route.set()
+    async def hold_before_scope(session, statement, params=None, **kwargs):
+        # Admission now locks/rejects a stopped scope before creating Run/Job/budget.
+        # Put the same stop-first race immediately before that first scope lock.
+        if str(statement).startswith("SELECT stopped FROM research_stage_scope"):
+            pids["producer"] = await scalar(session, text("SELECT pg_backend_pid()"))
+            at_registration.set()
             await stopped.wait()
-        return await execute(session, statement, params, **kwargs)
+        return await scalar(session, statement, params, **kwargs)
 
-    monkeypatch.setattr(AsyncSession, "execute", hold_before_route)
+    monkeypatch.setattr(AsyncSession, "scalar", hold_before_scope)
 
     async def stop():
-        await at_route.wait()
+        await at_registration.wait()
         async with factory.begin() as session:
             pids["stop"] = await session.scalar(text("SELECT pg_backend_pid()"))
             await session.execute(
@@ -242,13 +240,25 @@ async def test_concurrent_stop_serializes_with_route_registration(
                 await asyncio.sleep(0)
         release.set()
         await stopper
-        with pytest.raises(DBAPIError, match="preparation route binding invalid"):
+        with pytest.raises(ValueError, match="^COMPARISON_STOPPED$"):
             await producer
     finally:
         release.set()
+        for task in (producer, stopper):
+            if not task.done():
+                task.cancel()
         await asyncio.gather(producer, stopper, return_exceptions=True)
     async with factory() as session:
         assert await session.scalar(text("SELECT count(*) FROM research_comparison_chain")) == 1
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM jobs WHERE job_type='agent.research.comparison'")
+            )
+            == 1
+        )
+        assert await session.scalar(
+            text("SELECT sum(reserved_usd) FROM agent_daily_budget_reservations")
+        ) == Decimal("3.2")
 
 
 @pytest.mark.asyncio

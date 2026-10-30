@@ -645,7 +645,7 @@ async def test_exact_context_binding_and_compatible_reader_rollback(migrated_dat
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0104_comparison_chain_stop"
+            == "0105_comparison_preclaim"
         )
         assert await session.scalar(text("SELECT count(*) FROM research_comparison_chain")) == 1
 

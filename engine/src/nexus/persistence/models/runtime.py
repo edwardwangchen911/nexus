@@ -94,7 +94,9 @@ class Job(ImmutableCreatedAt, Base):
             "(status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL) OR "
             "(status IN ('succeeded','failed','skipped','dead_letter') "
             "AND started_at IS NOT NULL AND finished_at IS NOT NULL "
-            "AND finished_at >= started_at)",
+            "AND finished_at >= started_at) OR "
+            "(job_type = 'agent.research.comparison' AND status = 'failed' "
+            "AND attempt_count = 0 AND started_at IS NULL AND finished_at IS NOT NULL)",
             name="jobs_time_shape",
         ),
         Index(

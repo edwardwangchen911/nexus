@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,9 +15,30 @@ from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted, ResearchAccountingBusy
 from nexus.agents.comparison_preparation import prepare_archive
+
+
+class PreclaimCommitUnknown(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("COMPARISON_PRECLOSE_RESULT_UNKNOWN")
+
+
+@asynccontextmanager
+async def _preclaim_transaction(session: AsyncSession) -> AsyncIterator[None]:
+    transaction = await session.begin()
+    try:
+        yield
+    except BaseException:
+        await transaction.rollback()
+        raise
+    else:
+        try:
+            await transaction.commit()
+        except Exception as error:
+            raise PreclaimCommitUnknown() from error
 
 
 async def native_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -58,10 +81,36 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                 "readback_required": True,
                 "replay_allowed": False,
             }
-        async with factory() as session, session.begin():
-            if args.command in {"inspect-profile", "register-profile"}:
+        async with (
+            factory() as session,
+            _preclaim_transaction(session) if args.command == "close-preclaim" else session.begin(),
+        ):
+            if args.command in {
+                "inspect-profile",
+                "register-profile",
+                "inspect-preclaim",
+                "close-preclaim",
+            }:
                 await session.execute(text("SET LOCAL statement_timeout='5s'"))
                 await session.execute(text("SET LOCAL lock_timeout='1s'"))
+            if args.command in {"inspect-preclaim", "close-preclaim"}:
+                from nexus.agents.comparison_preclaim import capacity_refusal, preclaim_close
+
+                if args.command == "inspect-preclaim":
+                    await session.execute(
+                        text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    )
+                manifest = ComparisonManifest.model_validate_json(args.manifest.read_bytes())
+                with args.source.open("rb") as stream:
+                    source = stream.read(8 * 1024 * 1024 + 1)
+                with args.prepared.open("rb") as stream:
+                    prepared = json.loads(stream.read(8 * 1024 * 1024 + 1))
+                return await preclaim_close(
+                    session,
+                    manifest=manifest,
+                    refusal=capacity_refusal(source, prepared, manifest),
+                    close=args.command == "close-preclaim",
+                )
             if args.command == "inspect-profile":
                 from nexus.agents.comparison_profile import read_api_profile
 
@@ -226,6 +275,10 @@ def main() -> int:
     profile.add_argument("--sdk-model-config-id", type=UUID, required=True)
     profile_inspect = subcommands.add_parser("inspect-profile")
     profile_inspect.add_argument("--repo-root", type=Path, required=True)
+    for name in ("inspect-preclaim", "close-preclaim"):
+        command = subcommands.add_parser(name)
+        for flag in ("repo-root", "source", "prepared", "manifest"):
+            command.add_argument("--" + flag, type=Path, required=True)
     for subcommand in (admit, inspect, run):
         subcommand.add_argument("--repo-root", type=Path, required=True)
         subcommand.add_argument("--position", type=int, choices=range(1, 13), required=True)
@@ -293,7 +346,10 @@ def main() -> int:
                     if args.command == "register-profile"
                     else "COMPARISON_EXECUTION_RESULT_UNKNOWN"
                     if args.command == "run-position"
+                    else "COMPARISON_PRECLOSE_RESULT_UNKNOWN"
+                    if args.command == "close-preclaim"
                     else "COMPARISON_READ_FAILED",
+                    **({"replay_allowed": False} if args.command == "close-preclaim" else {}),
                 }
             )
         )
@@ -316,13 +372,15 @@ def main() -> int:
         print(json.dumps({"status": "rejected", "reason": code, **details}))
         return 1
     except Exception:
-        if args.command != "run-position":
+        if args.command not in {"run-position", "close-preclaim"}:
             raise
         print(
             json.dumps(
                 {
                     "status": "unknown",
-                    "reason": "COMPARISON_EXECUTION_RESULT_UNKNOWN",
+                    "reason": "COMPARISON_PRECLOSE_RESULT_UNKNOWN"
+                    if args.command == "close-preclaim"
+                    else "COMPARISON_EXECUTION_RESULT_UNKNOWN",
                     "replay_allowed": False,
                 }
             )
