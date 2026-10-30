@@ -84,6 +84,7 @@ class HttpCleanupResult:
     confirmed: bool
     error: BaseException | None = None
     pending: tuple[asyncio.Task[object], ...] = ()
+    interrupted: BaseException | None = None
 
 
 class OwnedHttpStream(Protocol):
@@ -123,11 +124,17 @@ async def close_owned_stream(
     owned = {request_task, close_task}
     try:
         _, pending = await asyncio.wait(owned, timeout=max(0, deadline - loop.time()))
-    except BaseException:
+    except BaseException as interrupted:
         for task in owned:
             if not task.done():
                 task.cancel()
-        raise
+        error = close_task.exception() if close_task.done() and not close_task.cancelled() else None
+        return HttpCleanupResult(
+            False,
+            error or interrupted,
+            tuple(task for task in owned if not task.done()),
+            interrupted,
+        )
     for task in pending:
         task.cancel()
     error = None
