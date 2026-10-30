@@ -60,6 +60,7 @@ nexus-engine-research-budget-diagnostic = "nexus.ops.research_budget_diagnostic:
 nexus-engine-research-budget-case = "nexus.ops.research_budget_case:main"
 nexus-engine-research-workload-inspection = "nexus.ops.research_workload_inspection:main"
 nexus-engine-historical-pool = "nexus.ops.historical_pool_diagnostic:main"
+nexus-engine-research-comparison = "nexus.ops.research_comparison:main"
 nexus-engine-full-input-timing-diagnostic = "nexus.ops.full_input_timing_diagnostic:main"
 nexus-engine-portfolio-economic-preflight = "nexus.ops.portfolio_economic_preflight:main"
 nexus-engine-portfolio-economic-protocol = "nexus.ops.portfolio_economic_protocol:main"
