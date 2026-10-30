@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION, ROLE_ORDER
 from nexus.agents.comparison_compiler import compile_comparison_stage
 from nexus.agents.comparison_inputs import TOOLS, assert_outbound_safe, prepare_comparison_input
@@ -340,3 +341,43 @@ def test_cli_failure_does_not_print_original_private_values(tmp_path, monkeypatc
     captured = capsys.readouterr()
     assert "sensitive-synthetic-value" not in captured.out + captured.err
     assert json.loads(captured.out)["status"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    "error,reason",
+    [
+        (BudgetExhausted("private diagnostic"), "COMPARISON_BUDGET_EXHAUSTED"),
+        (ValueError("FORMAL_BUDGET_COVERAGE_UNKNOWN"), "FORMAL_BUDGET_COVERAGE_UNKNOWN"),
+        (ValueError("private diagnostic"), "COMPARISON_PREPARATION_FAILED"),
+    ],
+)
+def test_native_cli_preserves_safe_budget_reason_without_raw_diagnostics(
+    error, reason, tmp_path, monkeypatch, capsys
+):
+    async def refuse(args):
+        raise error
+
+    monkeypatch.setattr("nexus.ops.research_comparison.native_command", refuse)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "nexus-engine-research-comparison",
+            "admit-position",
+            "--repo-root",
+            str(tmp_path),
+            "--position",
+            "1",
+            "--source",
+            "unused",
+            "--prepared",
+            "unused",
+            "--manifest",
+            "unused",
+            "--model-config-id",
+            str(uuid4()),
+        ],
+    )
+    assert main() == 1
+    output = capsys.readouterr().out
+    assert json.loads(output)["reason"] == reason
+    assert "private diagnostic" not in output

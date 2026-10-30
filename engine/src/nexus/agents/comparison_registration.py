@@ -114,6 +114,7 @@ async def reserve_comparison_chain(
         or job.manual_retry_count != 0
         or job.input_hash != job_input_hash(job.payload)
         or run.instrument_id != instrument_id
+        or run.input_hash != expected_input
     ):
         raise ValueError("COMPARISON_NATIVE_BINDING_INVALID")
     model = await session.get(AgentModelConfigRecord, run.model_config_id)

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nexus.jobs.models import job_input_hash
+from nexus.persistence.models.data import DataSnapshot
 
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 ACTOR = "research-comparison:direct-responses-terra-v11"
@@ -72,6 +73,15 @@ class ComparisonManifest(BaseModel):
         )
 
 
-def require_business_run(actor_id: str) -> None:
-    if actor_id == ACTOR:
+def require_business_run(actor_id: str, snapshot: DataSnapshot | None = None) -> None:
+    if (
+        actor_id == ACTOR
+        or snapshot is not None
+        and (
+            snapshot.source == "nexus_research_comparison"
+            or snapshot.schema_version == "comparison-input-v1"
+            or isinstance(snapshot.payload, dict)
+            and snapshot.payload.get("purpose") == PURPOSE
+        )
+    ):
         raise ValueError("COMPARISON_BUSINESS_CONSUMPTION_FORBIDDEN")

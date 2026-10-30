@@ -1,7 +1,8 @@
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from nexus.agents.comparison_manifest import ComparisonManifest
+from nexus.agents.comparison_manifest import PURPOSE, ComparisonManifest, require_business_run
 from pydantic import ValidationError
 
 
@@ -63,3 +64,18 @@ def test_input_identity_and_hash_change_are_detectable():
     for invalid in (0, 13):
         with pytest.raises(ValueError, match="COMPARISON_POSITION_INVALID"):
             manifest.input_hash_for(invalid)
+
+
+@pytest.mark.parametrize("marker", ["source", "schema_version", "purpose"])
+def test_snapshot_marker_cannot_be_consumed_under_a_different_actor(marker):
+    snapshot = SimpleNamespace(source="business", schema_version="1", payload={})
+    if marker == "purpose":
+        snapshot.payload["purpose"] = PURPOSE
+    else:
+        setattr(
+            snapshot,
+            marker,
+            "nexus_research_comparison" if marker == "source" else "comparison-input-v1",
+        )
+    with pytest.raises(ValueError, match="COMPARISON_BUSINESS_CONSUMPTION_FORBIDDEN"):
+        require_business_run("ordinary-business-actor", snapshot)

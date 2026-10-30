@@ -976,6 +976,9 @@ async def _admit_research_run(
         )
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
+    from nexus.agents.comparison_manifest import require_business_run
+
+    require_business_run(actor_id, snapshot)
     from nexus.agents.research_only import (
         is_research_only,
         require_research_only_snapshot,

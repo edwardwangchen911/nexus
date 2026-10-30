@@ -64,6 +64,7 @@ async def test_comparison_registry_shares_native_budget_and_preserves_unknown(
             pricing_version=model.version,
             reserved_cost_usd=Decimal("1.2"),
             created_at=now,
+            input_hash="2" * 64,
         )
         session.add(AgentResearchRunRecord(**values))
         payload = {"run_id": str(run_id)}

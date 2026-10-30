@@ -78,6 +78,7 @@ async def _qualify_source(
     require_business_run(run.actor_id)
     invalid = "MONITOR_SOURCE_INVALID"
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    require_business_run(run.actor_id, snapshot)
     if snapshot is None:
         raise ValueError(invalid)
     context: (
