@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -150,26 +150,44 @@ class StagedProtocol:
         cleanup_deadline: datetime,
         increment: bool = False,
         independent: bool = False,
+        comparison: bool = False,
     ) -> None:
+        if sum((increment, independent, comparison)) > 1:
+            raise ProtocolRejected("STAGED_SCOPE_KIND_INVALID")
         async with self.factory.begin() as session:
             await ensure_schema(session)
-            await session.execute(
-                text(
-                    "INSERT INTO research_stage_scope(id,cycle_id,increment_id,request_id) "
-                    "VALUES (:id,:cycle,:inc,:request) ON CONFLICT(id) DO NOTHING"
-                ),
-                {
-                    "id": scope_id,
-                    "cycle": None if increment or independent else scope_id,
-                    "inc": scope_id if increment else None,
-                    "request": scope_id if independent else None,
-                },
-            )
+            if comparison:
+                # Preparation owns registration; installation never creates a
+                # new experimental identity or changes its selected route.
+                bound = await session.scalar(
+                    text("SELECT comparison_id FROM research_stage_scope WHERE id=:id"),
+                    {"id": scope_id},
+                )
+                if bound != scope_id:
+                    raise ProtocolRejected("STAGED_BINDING_MISSING")
+            else:
+                await session.execute(
+                    text(
+                        "INSERT INTO research_stage_scope(id,cycle_id,increment_id,request_id) "
+                        "VALUES (:id,:cycle,:inc,:request) ON CONFLICT(id) DO NOTHING"
+                    ),
+                    {
+                        "id": scope_id,
+                        "cycle": None if increment or independent else scope_id,
+                        "inc": scope_id if increment else None,
+                        "request": scope_id if independent else None,
+                    },
+                )
             for claim in claims:
                 job, lease, _ = await _lock_active_claim(session, claim=claim, now=self._now(now))
                 now = self._now(now)
                 if not now < work_deadline < cleanup_deadline <= lease.expires_at:
                     raise ProtocolRejected("DEADLINE_INVALID")
+                if comparison and (
+                    work_deadline > lease.acquired_at + timedelta(seconds=300)
+                    or cleanup_deadline > lease.acquired_at + timedelta(seconds=315)
+                ):
+                    raise ProtocolRejected("COMPARISON_DEADLINE_INVALID")
                 await session.execute(
                     text("""INSERT INTO research_stage_member
                     VALUES(:run,:job,:scope,:work,:cleanup)"""),

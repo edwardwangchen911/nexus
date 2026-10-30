@@ -20,7 +20,7 @@ from nexus.agents.research_stages.protocol import (
     usage_known,
 )
 from nexus.agents.research_stages.routes import owner, selected_route
-from nexus.jobs.models import JOB_PRIORITIES, JobKeyV1, JobType, canonical_job_key
+from nexus.jobs.models import JOB_PRIORITIES, JobKeyV1, JobType, canonical_job_key, job_input_hash
 from nexus.jobs.repository import job_lease_consumed
 from nexus.monitoring import admission
 from nexus.persistence.models.agents import (
@@ -118,28 +118,36 @@ async def read_terminal_proof(
         or budget.reserved_usd != run.reserved_cost_usd
         or run.retry_count != 0
         or run.status not in {"completed", "failed", "abstained"}
-        or job.job_type != "agent.paper.research"
-        or job.queue != "general"
-        or job.schema_version != "agent_research_job_v1"
+        or job.job_type
+        != ("agent.research.comparison" if kind == "comparison" else "agent.paper.research")
+        or job.queue != ("strategy_rnd" if kind == "comparison" else "general")
+        or job.schema_version
+        != ("comparison-v1" if kind == "comparison" else "agent_research_job_v1")
         or job.scope_kind != "instrument"
         or job.scope_id != str(run.instrument_id)
         or job.effective_at != run.decision_time
-        or job.priority != JOB_PRIORITIES[JobType.AGENT_PAPER_RESEARCH]
+        or job.priority
+        != (0 if kind == "comparison" else JOB_PRIORITIES[JobType.AGENT_PAPER_RESEARCH])
         or job.payload != {"run_id": str(run.id)}
-        or job.input_hash != _formal_stage_job_hash(run)
+        or job.input_hash
+        != (job_input_hash(job.payload) if kind == "comparison" else _formal_stage_job_hash(run))
         or job.max_attempts != 1
         or job.manual_retry_count != 0
         or job.attempt_count != 1
-        or job.retry_policy != "automatic_safe"
+        or job.retry_policy != ("never" if kind == "comparison" else "automatic_safe")
         or job.finished_at != terminal["closed_at"]
         or job.job_key
-        != canonical_job_key(
-            JobKeyV1(
-                job_type=JobType.AGENT_PAPER_RESEARCH,
-                scope_kind="instrument",
-                scope_id=job.scope_id,
-                effective_at=job.effective_at,
-                input_hash=job.input_hash,
+        != (
+            run.idempotency_key
+            if kind == "comparison"
+            else canonical_job_key(
+                JobKeyV1(
+                    job_type=JobType.AGENT_PAPER_RESEARCH,
+                    scope_kind="instrument",
+                    scope_id=job.scope_id,
+                    effective_at=job.effective_at,
+                    input_hash=job.input_hash,
+                )
             )
         )
     ):

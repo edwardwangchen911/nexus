@@ -287,6 +287,10 @@ async def test_wrong_owner_and_route_mutation_refused_without_dispatch(migrated_
 
 @pytest.mark.asyncio
 async def test_empty_route_migration_roundtrip_preserves_all_old_functions(migrated_database_url):
+    # Exercise 0102 at its exact historical boundary, excluding later guards.
+    await asyncio.to_thread(
+        command.downgrade, Config("engine/alembic.ini"), "0102_comparison_routes"
+    )
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     names = (
         "research_stage_route_guard",
@@ -316,5 +320,5 @@ async def test_empty_route_migration_roundtrip_preserves_all_old_functions(migra
     assert "'comparison'" not in before["research_stage_route_guard"]
     for name in ("research_stage_authorize_guard", "research_comparison_claim_guard"):
         assert before[name] == after[name]
-    await asyncio.to_thread(command.upgrade, Config("engine/alembic.ini"), "head")
+    await asyncio.to_thread(command.upgrade, Config("engine/alembic.ini"), "0102_comparison_routes")
     assert await definitions() == after

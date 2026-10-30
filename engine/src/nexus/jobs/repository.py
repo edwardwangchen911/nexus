@@ -476,6 +476,16 @@ async def claim_next_job(
             raise ValueError("LOCKED_JOB_GUARD_RESULT_INVALID")
         if not qualified:
             return None
+    return await _claim_selected_job(
+        session, job=job, worker_id=worker_id, now=now, lease_seconds=lease_seconds
+    )
+
+
+async def _claim_selected_job(
+    session: AsyncSession, *, job: Job, worker_id: str, now: datetime, lease_seconds: int
+) -> ClaimedJob:
+    """Write the same native lease/attempt after the caller locks and qualifies its Job."""
+    parent = aliased(Job)
     dependency_rows = tuple(
         (
             await session.execute(
