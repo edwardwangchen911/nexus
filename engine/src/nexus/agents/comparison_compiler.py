@@ -2,10 +2,11 @@
 
 import copy
 from time import monotonic
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from nexus.agents.codex_capacity import qualify_capacity_input
 from nexus.agents.codex_sdk import codex_output_schema
 from nexus.agents.codex_staged import StructuredStagedCodexCommittee
 from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
@@ -14,6 +15,35 @@ from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbo
 from nexus.agents.models import ResearchRequest
 from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
+
+
+def _compiler(member: dict[str, Any]) -> StructuredStagedCodexCommittee:
+    return StructuredStagedCodexCommittee(
+        prompts={role: PromptAsset.model_validate(member["prompts"][role]) for role in ROLE_ORDER},
+        tools=ReadOnlyTools(executors={}),
+        # Required by the v11 compiler constructor. No execution occurs here;
+        # the native claim/deadline remains the runner's separate authority.
+        deadline=monotonic() + 300,
+        aggregate_input_tokens=96000,
+        max_wire_bytes=100479,
+        inline_citations=True,
+        paper_stage_scope=True,
+        stage_time_budget=True,
+        stage_budget_version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+    )
+
+
+def validate_comparison_capacity(prepared: PreparedComparisonInput) -> None:
+    """Reject before native admission; this proof never authorizes a model call."""
+    if prepared.input_hash != prepared.proof["input_hash"]:
+        raise ValueError("COMPARISON_INPUT_CHANGED")
+    member = copy.deepcopy(prepared.payload)
+    qualify_capacity_input(
+        _compiler(member),
+        request=ResearchRequest.model_validate(member["request"]),
+        evidence_refs=tuple(EvidenceRef.model_validate(row) for row in member["evidence"]),
+        inputs=member["inputs"],
+    )
 
 
 def compile_comparison_stage(
@@ -35,19 +65,7 @@ def compile_comparison_stage(
         raise ValueError("COMPARISON_INPUT_CHANGED")
     assert_outbound_safe(previous, prepared.forbidden)
     member = copy.deepcopy(prepared.payload)
-    compiler = StructuredStagedCodexCommittee(
-        prompts={role: PromptAsset.model_validate(member["prompts"][role]) for role in ROLE_ORDER},
-        tools=ReadOnlyTools(executors={}),
-        # Required by the v11 compiler constructor. No execution occurs here;
-        # the native claim/deadline remains the runner's separate authority.
-        deadline=monotonic() + 300,
-        aggregate_input_tokens=96000,
-        max_wire_bytes=100479,
-        inline_citations=True,
-        paper_stage_scope=True,
-        stage_time_budget=True,
-        stage_budget_version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
-    )
+    compiler = _compiler(member)
     payload, output_model = compiler.build_stage_request(
         stage=stage,
         request=ResearchRequest.model_validate(member["request"]),
