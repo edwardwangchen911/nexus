@@ -7,6 +7,8 @@ from decimal import Decimal
 import pytest
 from alembic import command
 from alembic.config import Config
+from integration.test_comparison_producer_pg import seed
+from integration.test_comparison_routes_pg import prepared_position
 from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.agents.research_stages.protocol import StagedProtocol
@@ -16,8 +18,6 @@ from nexus.settings import EngineSettings
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_comparison_producer_pg import seed
-from test_comparison_routes_pg import prepared_position
 
 
 @pytest.mark.asyncio

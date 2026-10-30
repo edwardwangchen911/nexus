@@ -5,12 +5,12 @@ from decimal import Decimal
 
 import pytest
 from helpers.paper_batch import INSTRUMENTS
+from integration.test_portfolio_synthesis_persistence_pg import seed_synthesis
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.persistence import reserve_portfolio_decision_budget
 from nexus.paper.formal_budget_protection import apply_protection, protected_demand
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from sqlalchemy import text
-from test_portfolio_synthesis_persistence_pg import seed_synthesis
 
 
 def controlled_clock(session, monkeypatch, now):

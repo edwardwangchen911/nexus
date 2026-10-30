@@ -5,7 +5,7 @@ import copy
 import hashlib
 import json
 from argparse import Namespace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -37,7 +37,7 @@ from sqlalchemy.exc import DBAPIError
 from unit.agents.test_comparison_inputs import archive_source, digest
 
 
-async def seed(factory, *, source_kind="fixture"):
+async def seed(factory, *, source_kind="fixture", protect_unknown=True):
     archive = archive_source()
     # Native references are content addressed; no personal or live data is used.
     for member in archive["members"]:
@@ -72,7 +72,6 @@ async def seed(factory, *, source_kind="fixture"):
     prepared = prepare_archive(
         source, expected_source_hash=hashlib.sha256(source).hexdigest(), experiment_id=uuid4()
     )
-    prepared["rebuilt_at"] = datetime.now(UTC).isoformat()
     manifest = ComparisonManifest(
         experiment_id=prepared["experiment_id"],
         sdk_config_hash=SDK_HASH,
@@ -88,6 +87,9 @@ async def seed(factory, *, source_kind="fixture"):
     )
     async with factory() as session, session.begin():
         now = await session.scalar(text("SELECT clock_timestamp()"))
+        # Synthetic preparation and admission use the same authoritative clock;
+        # host/VM drift must not turn unrelated financial tests into future input.
+        prepared["rebuilt_at"] = now.isoformat()
         models = [
             AgentModelConfigRecord(
                 id=uuid4(),
@@ -240,16 +242,18 @@ async def seed(factory, *, source_kind="fixture"):
                 )
             )
         await session.flush()
-        old = await reserve_daily_budget(
-            session,
-            run_id=UUID(archive["members"][0]["run_id"]),
-            now=now,
-            daily_limit_usd=Decimal(4),
-            worst_case_usd=Decimal(2),
-            pricing_version=models[0].version,
-            pricing_fresh=True,
-        )
-    return source, prepared, manifest, models[0].id, old.id
+        old = None
+        if protect_unknown:
+            old = await reserve_daily_budget(
+                session,
+                run_id=UUID(archive["members"][0]["run_id"]),
+                now=now,
+                daily_limit_usd=Decimal(4),
+                worst_case_usd=Decimal(2),
+                pricing_version=models[0].version,
+                pricing_fresh=True,
+            )
+    return source, prepared, manifest, models[0].id, None if old is None else old.id
 
 
 @pytest.mark.asyncio
@@ -499,3 +503,28 @@ async def test_empty_input_migration_roundtrip_preserves_original_guard(migrated
     await asyncio.to_thread(command.upgrade, Config("engine/alembic.ini"), "head")
     async with factory() as session:
         assert await session.scalar(query) == new
+
+
+@pytest.mark.asyncio
+async def test_future_preparation_is_rejected_without_consuming_position(migrated_database_url):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    source, prepared, manifest, model_id, old_id = await seed(factory)
+    async with factory() as session:
+        now = await session.scalar(text("SELECT clock_timestamp()"))
+    prepared["rebuilt_at"] = (now + timedelta(days=1)).isoformat()
+    with pytest.raises(ValueError, match="COMPARISON_PREPARATION_CLOCK_INVALID"):
+        async with factory.begin() as session:
+            await admit_comparison_position(
+                session,
+                source=source,
+                prepared=prepared,
+                manifest=manifest,
+                ordinal=1,
+                model_config_id=model_id,
+                daily_limit_usd=Decimal(4),
+            )
+    async with factory() as session:
+        assert await session.scalar(text("SELECT count(*) FROM research_comparison_chain")) == 0
+        old = await session.get(AgentDailyBudgetReservationRecord, old_id)
+        assert (old.state, old.reserved_usd, old.settled_usd) == ("reserved", Decimal(2), None)
+    await factory.kw["bind"].dispose()

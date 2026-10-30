@@ -250,7 +250,7 @@ class StagedProtocol:
         require_research_open()
         if self.local_stopped or self.claims.get(claim.job_id) != claim:
             raise ProtocolRejected("ORIGIN_STOPPED_OR_UNAVAILABLE")
-        async with self.factory() as session:
+        async with self.factory() as session, dispatch_failure_boundary(session):
             await session.begin()
             member = await self._member(session, claim)
             from nexus.agents.research_stages.routes import selected_route
@@ -279,7 +279,7 @@ class StagedProtocol:
             job, lease, _ = await _lock_active_claim(session, claim=claim, now=now)
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
-            budget = await require_reserved_daily_budget(session, run_id=run.id)
+            budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
             prior = await session.scalar(
                 text(
                     "SELECT response_hash FROM research_stage_observation WHERE run_id=:run AND "
@@ -549,6 +549,13 @@ class StagedProtocol:
             > budget.reserved_usd
         ):
             self.local_stopped = True
+            # A sibling may already own a Ticket. Stop its synchronous final
+            # transport guard before yielding to the persisted scope write.
+            from nexus.agents.research_dispatch import stop_current_dispatch
+
+            (self.on_failure or stop_current_dispatch)(
+                ProtocolRejected("STAGED_USAGE_LIMIT_EXCEEDED")
+            )
             await session.execute(
                 text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
                 {"id": member["scope_id"]},
@@ -680,12 +687,21 @@ class StagedProtocol:
         )
         if comparison:
             await self._stop_comparison_chain(session, scope_id=scope_id, run_id=run_id)
+        budget = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == run_id
+            )
+        )
         if (
-            not comparison
+            budget is None
+            or budget.state != "settled"
+            or budget.settled_usd is None
+            or not comparison
             or orphan
             or not usage_known(rows)
             or not all(row["confirmed"] is True for row in rows)
         ):
+            self.local_stopped = True
             await session.execute(
                 text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
                 {"id": scope_id},
@@ -710,8 +726,36 @@ class StagedProtocol:
         if await session.scalar(
             text("SELECT 1 FROM research_stage_terminal WHERE run_id=:run"), {"run": run.id}
         ):
-            raise ProtocolRejected("ALREADY_TERMINAL")
-        await require_reserved_daily_budget(session, run_id=run.id)
+            from nexus.agents.research_stages.proof import read_terminal_proof
+
+            proof = await read_terminal_proof(session, run_id=run.id, now=now)
+            lease = await session.scalar(select(JobLease).where(JobLease.job_id == claim.job_id))
+            attempt = await session.scalar(
+                select(JobAttempt).where(JobAttempt.job_id == claim.job_id)
+            )
+            if (
+                proof is None
+                or proof.orphan != orphan
+                or lease is None
+                or attempt is None
+                or (
+                    lease.worker_id,
+                    lease.lease_token,
+                    lease.fence_token,
+                    lease.expires_at,
+                    attempt.attempt_no,
+                )
+                != (
+                    claim.worker_id,
+                    claim.lease_token,
+                    claim.fence_token,
+                    claim.expires_at,
+                    claim.attempt_no,
+                )
+            ):
+                raise ProtocolRejected("TERMINAL_READBACK_BINDING_INVALID")
+            return proof.known
+        await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
         rows = await stage_evidence(session, run.id)
         if not rows:
             raise ProtocolRejected("NO_ZERO_CALL_PROOF")
@@ -720,28 +764,28 @@ class StagedProtocol:
         model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
 
         async def terminal(session: AsyncSession) -> JobCompletion:
-            await self.stop_terminal_in_transaction(
-                session, scope_id=member["scope_id"], run_id=run.id, rows=rows, orphan=orphan
-            )
+            accounted = False
             if known:
                 usage = UsageSnapshot(
                     input_tokens=sum(r["input_tokens"] for r in rows),
                     output_tokens=sum(r["output_tokens"] for r in rows),
                 )
-                if not await _settle_or_hold_usage(session, run, model=model, usage=usage):
-                    raise ProtocolRejected("USAGE_NOT_SETTLED")
+                accounted = await _settle_or_hold_usage(session, run, model=model, usage=usage)
             else:
                 lower_bound = known_usage_lower_bound(rows)
                 if lower_bound.input_tokens or lower_bound.output_tokens:
                     run.input_tokens = lower_bound.input_tokens
                     run.output_tokens = lower_bound.output_tokens
+            await self.stop_terminal_in_transaction(
+                session, scope_id=member["scope_id"], run_id=run.id, rows=rows, orphan=orphan
+            )
             await _persist_terminal(
                 session,
                 run,
                 output_sequence=1,
                 event_sequence=1,
                 status="failed",
-                reason="STAGED_RESEARCH_CLOSED"
+                reason=("STAGED_RESEARCH_CLOSED" if accounted else "usage_accounting_failed")
                 if known
                 else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN",
             )

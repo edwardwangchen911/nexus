@@ -65,6 +65,7 @@ def test_error_codes_include_all_stable_client_branches() -> None:
         "DRAWDOWN_LOCKED",
         "RECONCILIATION_REQUIRED",
         "BUDGET_EXHAUSTED",
+        "RESEARCH_ACCOUNTING_BUSY",
         "PROVIDER_UNAVAILABLE",
         "AUTHORITY_UNAVAILABLE",
         "EVOLUTION_BLOCKED",

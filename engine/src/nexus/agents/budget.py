@@ -9,6 +9,13 @@ class BudgetExhausted(ValueError):
     """A cost guard that must resolve work to watch/abstention."""
 
 
+class ResearchAccountingBusy(RuntimeError):
+    """Concurrency refusal: the owning transaction must exit, without model retry."""
+
+    def __init__(self) -> None:
+        super().__init__("RESEARCH_ACCOUNTING_BUSY")
+
+
 class DailyBudget(BaseModel):
     """One process-local daily budget ledger; persistence records final usage separately."""
 

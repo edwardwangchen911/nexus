@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from integration.test_comparison_routes_pg import prepared_position
 from nexus.agents.chatgpt_grant import Grant
 from nexus.agents.comparison_claim import claim_comparison_position
 from nexus.agents.research_stages.http_lifecycle import (
@@ -18,7 +19,6 @@ from nexus.agents.research_stages.protocol import StagedProtocol
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import text
-from test_comparison_routes_pg import prepared_position
 from unit.agents.test_http_stage_lifecycle import Answer, Body, terminal
 
 

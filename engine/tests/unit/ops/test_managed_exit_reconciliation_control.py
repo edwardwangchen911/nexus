@@ -8,6 +8,7 @@ import sysconfig
 from pathlib import Path
 
 import pytest
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from unit.ops.test_agent_paper_host_service import _invoke, _register
 from unit.ops.test_agent_paper_recovery_control import (
     add_activation,
@@ -45,7 +46,8 @@ def ended_activated_host(tmp_path):
             + "    async def inspect(settings):\n"
             + "        return {'status':options.get('recovery_status','ready'), "
             + "'blocking_codes':options.get('blocking_codes',[]), "
-            + "'migration_head':'0099_research_stages','scope_hash':manual_host_scope(config), "
+            + f"'migration_head':{CURRENT_MIGRATION_HEAD!r},"
+            + "'scope_hash':manual_host_scope(config), "
             + "'execution_locked':True,'external_requests':0,'checked_at':'2026-10-27T14:00:00Z'}\n"
             + "    checks.inspect_recovery_readiness=inspect\n"
             + "    checks.require_recovery_process_quiescence=lambda:None\n"

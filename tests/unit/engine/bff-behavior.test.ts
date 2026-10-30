@@ -12,6 +12,7 @@ vi.mock("../../../app/lib/auth/nexus-user", () => ({
 }));
 
 import { NexusApiAuthError } from "../../../app/lib/auth/nexus-user";
+import { rebuildAllowedEngineResponse } from "../../../app/lib/engine/errors";
 import { withNexusBff } from "../../../app/lib/engine/with-nexus-bff";
 
 const actor = { userId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114" };
@@ -155,4 +156,17 @@ describe("withNexusBff", () => {
     expect(cancelAttempted).toBe(true);
     expect(handler).not.toHaveBeenCalled();
   });
+});
+
+it("preserves accounting busy as a sanitized conflict rather than an internal error", async () => {
+  const response = rebuildAllowedEngineResponse(409, { error: {
+    code: "RESEARCH_ACCOUNTING_BUSY", message: "private-lock-canary", request_id: actor.requestId,
+    details: {},
+  } }, new Headers(), "http://engine/internal/v1/research-runs");
+  expect(response).not.toBeNull();
+  expect(response!.status).toBe(409);
+  const payload = await response!.json();
+  expect(payload.error.code).toBe("RESEARCH_ACCOUNTING_BUSY");
+  expect(payload.error.message).not.toContain("private-lock-canary");
+  expect(payload.error.details).toEqual({});
 });

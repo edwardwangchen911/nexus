@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import select, text
 
 from nexus.agents import codex_sdk, codex_staged
+from nexus.agents.budget import ResearchAccountingBusy
 from nexus.agents.committee import ROLE_ORDER
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import execute_research_run
@@ -262,7 +263,7 @@ async def execute_staged_claim(
             ticket = await protocol.authorize(
                 claim, stage=stage_number, now=clock(), wire=wire, not_after=stage_deadline
             )
-        except (ProtocolRejected, LeaseLostError):
+        except (ProtocolRejected, LeaseLostError, ResearchAccountingBusy):
             raise
         except Exception as error:
             await stop_preserving_error(protocol, scope, error)
@@ -320,6 +321,9 @@ async def execute_staged_claim(
     for role in ROLE_ORDER:
         try:
             outputs[role] = await committee.analyze(role, request, refs, committee._prompts[role])
+        except ResearchAccountingBusy as error:
+            await stop_preserving_error(protocol, scope, error)
+            raise
         except Exception:
             break
     assert committee._deadline == original_deadline
@@ -355,6 +359,12 @@ async def execute_staged_claim(
             frozen.usage = known_usage_lower_bound(rows)
 
             async def finalize(target: Any) -> Any:
+                from nexus.agents.persistence import require_reserved_daily_budget
+
+                # This callback owns a short final transaction, not a legacy
+                # provider wait. Acquire its financial boundary before the
+                # shared executor can take the legacy blocking date check.
+                await require_reserved_daily_budget(target, run_id=run_id, accounting=True)
                 result = await execute_research_run(target, **{**args, "committee": frozen})
                 from nexus.jobs.repository import JobCompletion
                 from nexus.worker import _agent_result
@@ -402,6 +412,11 @@ async def execute_staged_claim(
             except Exception as error:
                 raise StagedCommitUnconfirmed("TERMINAL_COMMIT_UNCONFIRMED") from error
     except StagedCommitUnconfirmed:
+        raise
+    except ResearchAccountingBusy as error:
+        # The final transaction has exited. Preserve the explicit busy cause
+        # and all previously committed provider/cleanup evidence, without retry.
+        await stop_preserving_error(protocol, scope, error)
         raise
     except BaseException as error:
         await stop_preserving_error(protocol, scope, error)

@@ -577,7 +577,7 @@ async def test_research_rejects_reserved_consumer_config_at_read_and_write_admis
     reserved_model_version,
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory, model_version=reserved_model_version)
+    await _seed_authority(factory, public_snapshot=True, model_version=reserved_model_version)
     monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: _NOW)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url, now=_NOW)),
@@ -1278,10 +1278,12 @@ async def test_research_and_brief_apis_bind_as_of_url_and_authority_only(
 @pytest.mark.asyncio
 async def test_research_post_api_is_atomic_idempotent_and_returns_one_safe_location(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The authenticated POST must replay one run and reject a changed body for the same key."""
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory)
+    await _seed_authority(factory, public_snapshot=True)
+    monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: _NOW + timedelta(seconds=2))
     path = "/internal/v1/research-runs"
     body = json.dumps(
         {
@@ -1327,10 +1329,12 @@ async def test_research_post_api_is_atomic_idempotent_and_returns_one_safe_locat
 @pytest.mark.asyncio
 async def test_posted_fixture_run_reaches_terminal_through_worker_composition(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The production POST/worker composition must not leave admitted work permanently prepared."""
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory)
+    await _seed_authority(factory, public_snapshot=True)
+    monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: _NOW)
     path = "/internal/v1/research-runs"
     body = json.dumps(
         {
@@ -1937,22 +1941,8 @@ async def test_completed_v4_output_is_reloaded_through_current_postgres_authorit
             allow_fixture_evidence=False,
         )
         assert result.status == "completed"
-        await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
-        await session.execute(text("ALTER TABLE agent_research_outputs DISABLE TRIGGER USER"))
-        try:
-            await session.execute(
-                text("UPDATE agent_research_runs SET created_at=:created_at WHERE id=:run_id"),
-                {"created_at": _NOW, "run_id": admission.run_id},
-            )
-            await session.execute(
-                text(
-                    "UPDATE agent_research_outputs SET created_at=:created_at WHERE run_id=:run_id"
-                ),
-                {"created_at": _NOW, "run_id": admission.run_id},
-            )
-        finally:
-            await session.execute(text("ALTER TABLE agent_research_outputs ENABLE TRIGGER USER"))
-            await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+        # The isolated database fixture already freezes created_at before _NOW.
+        # Keep the real deferred guards enabled and read the committed result.
     async with factory() as session:
         decision = await load_actionable_research_output(
             session,
@@ -3251,7 +3241,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
         assert held_run.instrument_id == _INSTRUMENT_ID
 
         async def tamper() -> None:
-            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
+            await session.execute(text("SET LOCAL session_replication_role = replica"))
             try:
                 await session.execute(
                     text(
@@ -3276,7 +3266,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
                 assert raw_run["instrument_id"] == _DRIFT_INSTRUMENT_ID
                 assert held_run.instrument_id == _INSTRUMENT_ID
             finally:
-                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+                await session.execute(text("SET LOCAL session_replication_role = origin"))
 
         committee = _SingleTamperingCommittee(tamper)
         result = await execute_research_run(
@@ -3854,7 +3844,7 @@ async def test_server_authoritative_first_run_admission_selects_frozen_snapshot_
 ) -> None:
     """A first-run client must obtain snapshot and decision authority instead of inventing IDs."""
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory)
+    await _seed_authority(factory, public_snapshot=True)
     path = (
         f"/internal/v1/instruments/{_INSTRUMENT_ID}/research-admission"
         "?as_of=2026-08-24T12%3A00%3A00Z"
@@ -3894,7 +3884,7 @@ async def test_admission_rejects_incomplete_eight_role_prompt_authority(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory, omitted_role="bear")
+    await _seed_authority(factory, public_snapshot=True, omitted_role="bear")
     path = (
         f"/internal/v1/instruments/{_INSTRUMENT_ID}/research-admission"
         "?as_of=2026-08-24T12%3A00%3A00Z"
@@ -3913,19 +3903,19 @@ async def test_admission_ignores_newer_snapshot_without_instrument_evidence_auth
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await _seed_authority(factory)
+    await _seed_authority(factory, public_snapshot=True)
     unrelated = UUID("0198d500-1000-7000-8000-000000001699")
     async with factory() as session, session.begin():
         session.add(
             DataSnapshot(
                 id=unrelated,
-                source="fixture",
+                source="nexus_research",
                 provider_object_id="unrelated-newer",
                 revision="v1",
                 observed_at=_NOW,
                 available_at=_NOW,
                 received_at=_NOW,
-                schema_version="1",
+                schema_version="research_filings_v1",
                 payload={},
             )
         )
@@ -3987,6 +3977,7 @@ async def _seed_authority(
     omitted_role: AgentRole | None = None,
     include_base_evidence: bool = True,
     model_version: str = "fixture-pricing-v1",
+    public_snapshot: bool = False,
 ) -> dict[str, UUID]:
     prompts = load_prompt_assets()
     prompt_ids = {
@@ -4012,13 +4003,13 @@ async def _seed_authority(
             ),
             DataSnapshot(
                 id=_SNAPSHOT_ID,
-                source="fixture",
+                source="nexus_research" if public_snapshot else "fixture",
                 provider_object_id="execution-snapshot",
                 revision="v1",
                 observed_at=_NOW,
                 available_at=_NOW,
                 received_at=_NOW,
-                schema_version="1",
+                schema_version="research_filings_v1" if public_snapshot else "1",
                 payload={},
             ),
             AgentModelConfigRecord(
@@ -4740,6 +4731,18 @@ async def test_native_sdk_invocation_failure_keeps_safe_diagnostic_and_usage(
             "validation_kind": None,
             "invocation_phase": "turn_run",
             "invocation_kind": "timeout" if timeout else "unexpected_exception",
+            **(
+                {
+                    "failure_facts": {
+                        "exception_kind": "runtime_error",
+                        "terminal_status": None,
+                        "provider_reason": None,
+                        "cleanup_kind": None,
+                    }
+                }
+                if not timeout
+                else {}
+            ),
         }
         stage_input = terminal.payload["stage_input"]
         assert stage_input["stage"] == failure_stage
@@ -4826,8 +4829,11 @@ async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_r
     invoke = AsyncMock(return_value=(raw, UsageSnapshot(input_tokens=300, output_tokens=80)))
     if assessment_rejection:
 
-        async def staged_invoke(payload, *, output_model):
+        async def staged_invoke(payload, *, output_model, **options):
             nonlocal raw
+            from unit.agents.test_codex_sdk import _restore_view
+
+            payload = _restore_view(payload)
             if payload["stage"] == "synthesis":
                 response = {
                     "synthesis_assessment": {

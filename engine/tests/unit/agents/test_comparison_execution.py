@@ -104,3 +104,50 @@ def test_run_command_does_not_report_unconfirmed_execution_as_unclaimed(
     assert "private-provider-canary" not in output
     assert json.loads(output)["status"] == "unknown"
     assert json.loads(output)["reason"] == "COMPARISON_EXECUTION_RESULT_UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    "command,status", [("admit-position", "rejected"), ("run-position", "unknown")]
+)
+def test_comparison_busy_is_distinct_and_preserves_post_claim_uncertainty(
+    monkeypatch, capsys, tmp_path, command, status
+):
+    import json
+
+    from nexus.agents.budget import ResearchAccountingBusy
+    from nexus.ops.research_comparison import main
+
+    calls = []
+
+    async def busy(args):
+        calls.append(args.command)
+        raise ResearchAccountingBusy()
+
+    monkeypatch.setattr("nexus.ops.research_comparison.native_command", busy)
+    argv = [
+        "comparison",
+        command,
+        "--repo-root",
+        str(tmp_path),
+        "--position",
+        "1",
+        "--source",
+        str(tmp_path / "source"),
+        "--prepared",
+        str(tmp_path / "prepared"),
+        "--manifest",
+        str(tmp_path / "manifest"),
+    ]
+    argv += (
+        ["--worker-id", "offline-test"]
+        if command == "run-position"
+        else ["--model-config-id", "00000000-0000-4000-8000-000000000001"]
+    )
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": status,
+        "reason": "RESEARCH_ACCOUNTING_BUSY",
+        "replay_allowed": False,
+    }
+    assert calls == [command]

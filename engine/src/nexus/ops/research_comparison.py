@@ -14,7 +14,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from nexus.agents.budget import BudgetExhausted
+from nexus.agents.budget import BudgetExhausted, ResearchAccountingBusy
 from nexus.agents.comparison_preparation import prepare_archive
 
 
@@ -228,6 +228,19 @@ def main() -> int:
             experiment_id=args.experiment_id,
             output=args.output,
         )
+    except ResearchAccountingBusy:
+        # native_command has exited its owning transaction. An executing
+        # position may already have called the provider; never label it unclaimed.
+        print(
+            json.dumps(
+                {
+                    "status": "unknown" if args.command == "run-position" else "rejected",
+                    "reason": "RESEARCH_ACCOUNTING_BUSY",
+                    "replay_allowed": False,
+                }
+            )
+        )
+        return 1
     except SQLAlchemyError:
         print(
             json.dumps(

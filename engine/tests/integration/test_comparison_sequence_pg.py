@@ -5,6 +5,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
+from integration.test_comparison_producer_pg import seed
 from nexus.agents.comparison_claim import claim_comparison_position
 from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.research_stages.protocol import StagedProtocol
@@ -12,7 +13,6 @@ from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import select, text
-from test_comparison_producer_pg import seed
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_next_exact_position_after_failed_chain_requires_complete_safe_pro
 
 
 async def first_stage(factory, prepared=None):
-    from test_comparison_routes_pg import prepared_position
+    from integration.test_comparison_routes_pg import prepared_position
 
     result, manifest, old = prepared if prepared is not None else await prepared_position(factory)
     claim = await claim_comparison_position(
@@ -271,9 +271,9 @@ async def test_chain_stop_migration_round_trip_and_populated_rollback_fence(
 
     from alembic import command
     from alembic.config import Config
+    from integration.test_comparison_routes_pg import prepared_position
     from nexus.ops import openai_local
     from nexus.ops.research_comparison import native_command
-    from test_comparison_routes_pg import prepared_position
 
     monkeypatch.setenv("DATABASE_URL", migrated_database_url)
     config = Config("engine/alembic.ini")

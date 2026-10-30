@@ -1,7 +1,7 @@
 """Native facts for one already-authorized HTTP stage, not a dispatch entry point.
 
 The comparison runner must select its registered transport, claim and authorize
-once before calling this adapter. No producer selects it yet. It owns the HTTP
+once before calling this adapter. The frozen comparison route selects it. It owns the HTTP
 client/tasks, publishes terminal usage during stream cleanup, and never turns
 local closure into remote cancellation or zero usage.
 """
@@ -307,9 +307,11 @@ async def invoke_http_stage(
         )
         failure.owned = tuple(owned)
         failure.proof_error = proof_error
-        if isinstance(primary, asyncio.CancelledError):
-            primary.http_stage_failure = failure  # type: ignore[attr-defined]
-            raise primary
+        from nexus.agents.budget import ResearchAccountingBusy
+
+        if isinstance(cause, asyncio.CancelledError | ResearchAccountingBusy):
+            cause.http_stage_failure = failure  # type: ignore[union-attr]
+            raise cause
         raise failure from None
     assert raw is not None and usage is not None
     return raw, usage

@@ -570,6 +570,9 @@ async def require_protected_admission(
     No caller may declare a formal credit: only an exactly pinned stored run
     can consume its own future obligation.
     """
+    from nexus.agents.research_usage import require_research_accounting_clear
+
+    await require_research_accounting_clear(session)
     demand = await protected_demand(session, business_date=now.date(), now=now)
     if demand is None:
         return False

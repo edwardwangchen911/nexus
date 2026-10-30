@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from integration.test_agent_persistence_pg import _RUN_IDS, _seed_authority, _seed_runs
 from nexus.agents.comparison_manifest import ACTOR, ComparisonManifest
 from nexus.agents.comparison_registration import register_comparison, reserve_comparison_chain
 from nexus.agents.persistence import BudgetExhausted, reserve_daily_budget
@@ -21,7 +22,6 @@ from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
-from test_agent_persistence_pg import _RUN_IDS, _seed_authority, _seed_runs
 
 
 @pytest.mark.asyncio

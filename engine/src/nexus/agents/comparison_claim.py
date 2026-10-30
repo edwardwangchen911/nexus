@@ -71,7 +71,13 @@ async def claim_comparison_position(
                 proof = await read_terminal_proof(session, run_id=prior["run_id"], now=now)
             except ProtocolRejected:
                 raise ValueError("COMPARISON_PREDECESSOR_UNCONFIRMED") from None
-            if proof is None or not proof.known or not proof.cleanup_confirmed or proof.orphan:
+            if (
+                proof is None
+                or not proof.known
+                or not proof.budget_settled
+                or not proof.cleanup_confirmed
+                or proof.orphan
+            ):
                 raise ValueError("COMPARISON_PREDECESSOR_UNCONFIRMED")
         job = await session.get(Job, rows[-1]["job_id"], with_for_update=True)
         if job is None or job.status != "queued" or job.attempt_count != 0:

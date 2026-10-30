@@ -229,6 +229,7 @@ async def test_nonfinite_deadline_never_sends_and_keeps_unclosed_owner(bad_clean
 @pytest.mark.asyncio
 async def test_submission_guard_cannot_extend_original_send_window(monkeypatch):
     from types import SimpleNamespace
+
     from nexus.agents import responses_request
 
     real = asyncio.get_running_loop().time()

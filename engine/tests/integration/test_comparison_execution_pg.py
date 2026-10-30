@@ -10,6 +10,7 @@ from decimal import Decimal
 import httpx
 import pytest
 from helpers.formal_sdk import controlled_sdk
+from integration.test_comparison_producer_pg import seed
 from nexus.agents.chatgpt_grant import Grant
 from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.independent_input_view import restore_independent_input
@@ -19,7 +20,6 @@ from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearc
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import select, text
-from test_comparison_producer_pg import seed
 from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _staged_batch
 from unit.agents.test_http_stage_lifecycle import Body, terminal
 
@@ -54,7 +54,7 @@ def stage_response(wire, route, seen):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api_failure", [False, True, "overrun"])
+@pytest.mark.parametrize("api_failure", [False, True, "overrun", "sdk_overrun", "zero_failed"])
 async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persistence(
     migrated_database_url, monkeypatch, api_failure, tmp_path
 ):
@@ -86,7 +86,11 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
         await no_held_transaction()
         body = stage_response(payload, "sdk", seen)
         kwargs["output_model"].model_validate(body)
-        return json.dumps(body), UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+        return json.dumps(body), UsageSnapshot(
+            input_tokens=20_000_000 if api_failure == "sdk_overrun" else 300,
+            output_tokens=80,
+            provider_calls=1,
+        )
 
     monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
     bodies = []
@@ -98,10 +102,14 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
         assert request.headers["authorization"] == "Bearer fixture-token"
         payload = json.loads(envelope["input"][1]["content"])
         body = stage_response(payload, "responses", seen)
-        fail = api_failure is True and restore_independent_input(payload)["stage"] == "critique"
+        fail = (
+            api_failure is True and restore_independent_input(payload)["stage"] == "critique"
+        ) or api_failure == "zero_failed"
         event = terminal("failed" if fail else "completed")
         event["response"]["output"][0]["content"][0]["text"] = json.dumps(body)
         event["response"]["usage"].update(input_tokens=300, output_tokens=80, total_tokens=380)
+        if api_failure == "zero_failed":
+            event["response"]["usage"].update(input_tokens=0, output_tokens=0, total_tokens=0)
         if api_failure == "overrun":
             event["response"]["usage"].update(
                 input_tokens=20_000_000, output_tokens=80, total_tokens=20_000_080
@@ -196,12 +204,19 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
         )
         if ordinal == 1:
             before = tuple(seen)
-            with pytest.raises(ValueError, match="COMPARISON_POSITION_CONSUMED"):
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "COMPARISON_STOPPED"
+                    if api_failure == "sdk_overrun"
+                    else "COMPARISON_POSITION_CONSUMED"
+                ),
+            ):
                 await native_command(args)
             assert tuple(seen) == before
         async with factory() as session:
             run = await session.get(AgentResearchRunRecord, admitted.run_id)
-            if ordinal == 2 and api_failure == "overrun":
+            if (ordinal == 2 and api_failure == "overrun") or api_failure == "sdk_overrun":
                 from nexus.agents.persistence import _shared_daily_budget_used
                 from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
 
@@ -223,9 +238,12 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
                 assert (run.input_tokens, run.output_tokens) == (20_000_000, 80)
                 assert budget.state == "reserved" and budget.settled_usd is None
                 assert run.settled_cost_usd is None and cost > budget.reserved_usd
-                assert seen == [("sdk", s) for s in ("research", "critique", "synthesis")] + [
-                    ("responses", "research")
-                ]
+                assert seen == (
+                    [("sdk", "research")]
+                    if api_failure == "sdk_overrun"
+                    else [("sdk", s) for s in ("research", "critique", "synthesis")]
+                    + [("responses", "research")]
+                )
                 assert all(c.is_closed for c in clients) and all(b.closed == 1 for b in bodies)
                 assert (stopped, charged >= cost + Decimal(2)) == (True, True), {
                     "scope_stopped": stopped,
@@ -233,6 +251,12 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
                     "known_cost": str(cost),
                     "reservation": str(budget.reserved_usd),
                 }
+                proof = await read_terminal_proof(
+                    session,
+                    run_id=run.id,
+                    now=await session.scalar(text("SELECT clock_timestamp()")),
+                )
+                assert proof.known and not proof.budget_settled and proof.cleanup_confirmed
                 return
             assert run.status == ("failed" if ordinal == 2 and api_failure else "completed"), (
                 seen,
@@ -244,7 +268,8 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
                     {"run": run.id},
                 ),
             )
-            count = 2 if ordinal == 2 and api_failure else 3
+            zero_failed = ordinal == 2 and api_failure == "zero_failed"
+            count = 1 if zero_failed else (2 if ordinal == 2 and api_failure else 3)
             if run.status == "completed":
                 assert (
                     await session.scalar(
@@ -253,7 +278,9 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
                     )
                     == 10
                 )
-            assert (run.input_tokens, run.output_tokens) == (count * 300, count * 80)
+            assert (run.input_tokens, run.output_tokens) == (
+                (0, 0) if zero_failed else (count * 300, count * 80)
+            )
             proof = await read_terminal_proof(session, run_id=run.id, now=datetime.now(UTC))
             assert proof.known and proof.cleanup_confirmed and not proof.orphan
             assert (
@@ -280,7 +307,11 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
     assert seen == [("sdk", s) for s in ("research", "critique", "synthesis")] + [
         ("responses", s)
         for s in (
-            ("research", "critique") if api_failure else ("research", "critique", "synthesis")
+            ("research",)
+            if api_failure == "zero_failed"
+            else (
+                ("research", "critique") if api_failure else ("research", "critique", "synthesis")
+            )
         )
     ]
     assert len(sdk_calls) == 3 and all(close.await_count == 1 for close, _ in sdk_calls)

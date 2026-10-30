@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, text
 
+from nexus.agents.research_usage import require_research_accounting_clear
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
 from nexus.paper.manual_entry import manual_host_scope
@@ -27,6 +28,7 @@ _KNOWN_CODES = frozenset(
         "MANUAL_PREPARATION_ACK_BLOCKED",
         "MANUAL_PREPARATION_RECOVERY_BLOCKED",
         "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+        "RESEARCH_ACCOUNTING_UNSETTLED",
         "INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN",
         "INITIAL_PROJECTION_OCCUPANCY_AUTHORITY_CONFLICT",
     }
@@ -111,6 +113,9 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     allow_scheduled_completion=True,
                     read_only=True,
                 )
+                # Experimental runs have no business request to enumerate above.
+                # Known-but-unsettled costs still prohibit resuming new work.
+                await require_research_accounting_clear(session)
     except Exception as error:
         code = str(error) if isinstance(error, ValueError) else None
         if code not in _KNOWN_CODES:

@@ -4,11 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 from helpers.paper_batch import INSTRUMENTS
+from integration.test_portfolio_synthesis_persistence_pg import seed_synthesis
 from nexus.paper.formal_budget_inventory import inspect_inventory
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import AuditEvent, Job
 from sqlalchemy import func, select, text
-from test_portfolio_synthesis_persistence_pg import seed_synthesis
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from nexus.agents.budget import ResearchAccountingBusy
 from nexus.agents.chatgpt_grant import Grant
 from nexus.agents.codex_capacity import CapacityPoolMember, preflight_capacity_pool
 from nexus.agents.codex_sdk import (
@@ -244,6 +245,10 @@ async def execute_comparison_position(
             execute=execute,
             comparison=context,
         )
+    except ResearchAccountingBusy:
+        # The CLI retains unknown + no replay for an already claimed position,
+        # while exposing the fixed accounting cause instead of erasing it.
+        raise
     except Exception as error:
         # A durable attempt already exists. Do not advertise a later validation
         # error as an unclaimed rejection that could be retried.

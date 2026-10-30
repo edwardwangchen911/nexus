@@ -596,9 +596,10 @@ async def _terminal_after_committee(
             run.input_tokens = usage.input_tokens
             run.output_tokens = usage.output_tokens
             await session.flush()
-    elif usage.input_tokens or usage.output_tokens:
+    elif usage.input_tokens or usage.output_tokens or usage.provider_calls:
         accounted = await _settle_or_hold_usage(session, run, model=model, usage=usage)
         if not accounted:
+            status = "failed"
             reason = "usage_accounting_failed"
     else:
         await release_daily_budget_if_reserved(session, run_id=run.id)
@@ -662,27 +663,38 @@ async def _settle_or_hold_usage(
     """Settle known usage, retaining the full reservation if exact settlement rejects."""
     from nexus.agents.research_dispatch import dispatch_failure_boundary, stop_current_dispatch
 
+    # Include deterministic pricing refusal (even zero cost) in the same short
+    # financial boundary as verification and new money admission, across dates.
+    await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
     try:
-        async with (
-            dispatch_failure_boundary(session),
-            session.begin_nested(),
-            dispatch_failure_boundary(),
-        ):
-            actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
-            await settle_daily_budget(
-                session,
-                run_id=run.id,
-                actual_usd=actual_usd,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-            )
-    except Exception:
-        stop_current_dispatch()
-        run.input_tokens = usage.input_tokens
-        run.output_tokens = usage.output_tokens
-        await session.flush()
-        return False
-    return True
+        actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
+    except ValueError:
+        # A local pricing/limit rejection is deterministic. Do not classify a
+        # ValueError from a database hook or savepoint as that same outcome.
+        pass
+    else:
+        try:
+            async with (
+                dispatch_failure_boundary(session),
+                session.begin_nested(),
+                dispatch_failure_boundary(),
+            ):
+                await settle_daily_budget(
+                    session,
+                    run_id=run.id,
+                    actual_usd=actual_usd,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                )
+        except BudgetExhausted:
+            pass
+        else:
+            return True
+    stop_current_dispatch()
+    run.input_tokens = usage.input_tokens
+    run.output_tokens = usage.output_tokens
+    await session.flush()
+    return False
 
 
 async def _persist_terminal(

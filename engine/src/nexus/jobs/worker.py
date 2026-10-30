@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.agents.budget import ResearchAccountingBusy
 from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
 from nexus.jobs.errors import RetryableJobError, UnsafeJobError
 from nexus.jobs.models import QueueName
@@ -289,6 +290,11 @@ async def run_job_worker_once(
             now=clock(),
             error_code="HANDLER_TIMEOUT",
         )
+    except ResearchAccountingBusy as error:
+        # The handler's owning transaction has exited. Keep its exact claim and
+        # reservation for readback/recovery; generic failure can schedule retry.
+        stop_current_dispatch(error)
+        raise
     except RetryableJobError as error:
         stop_current_dispatch()
         await _fail(

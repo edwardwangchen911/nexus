@@ -8,6 +8,7 @@ from uuid import uuid4, uuid5
 import pytest
 from alembic import command
 from alembic.config import Config
+from integration.test_comparison_producer_pg import seed
 from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.research_stages.protocol import StagedProtocol
 from nexus.agents.research_stages.routes import register_prepared_runs, selected_route
@@ -19,11 +20,12 @@ from nexus.settings import EngineSettings
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_comparison_producer_pg import seed
 
 
-async def prepared_position(factory):
-    source, prepared, manifest, model_id, old_id = await seed(factory)
+async def prepared_position(factory, *, protect_unknown=True):
+    source, prepared, manifest, model_id, old_id = await seed(
+        factory, protect_unknown=protect_unknown
+    )
     async with factory.begin() as session:
         result = await admit_comparison_position(
             session,

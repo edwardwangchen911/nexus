@@ -7,6 +7,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from integration.test_comparison_claim_pg import prepared_position
 from nexus.agents.comparison_claim import claim_comparison_position
 from nexus.agents.persistence import (
     _lock_budget_day,
@@ -23,11 +24,10 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import select, text
-from test_comparison_claim_pg import prepared_position
 
 
-async def observed(factory, *, valid=False):
-    result, manifest, old = await prepared_position(factory)
+async def observed(factory, *, valid=False, tokens=(20_000_000, 0), protect_unknown=True):
+    result, manifest, old = await prepared_position(factory, protect_unknown=protect_unknown)
     claim = await claim_comparison_position(
         factory, experiment_id=manifest.experiment_id, ordinal=1, worker_id="occupancy-offline"
     )
@@ -42,17 +42,17 @@ async def observed(factory, *, valid=False):
         comparison=True,
     )
     ticket = await p.authorize(claim, stage=1, now=now, wire=b"own")
-    await p.observe(ticket, now=now, payload=b"failed-known", tokens=(20_000_000, 0), valid=valid)
+    await p.observe(ticket, now=now, payload=b"failed-known", tokens=tokens, valid=valid)
     return result, manifest, old, claim, now, p, ticket
 
 
-async def verify(p, ticket, now):
+async def verify(p, ticket, now, *, tokens=(20_000_000, 0)):
     return await p.verify(
         ticket,
         now=now,
         wire_hash=hashlib.sha256(b"own").hexdigest(),
         payload=b"failed-known",
-        tokens=(20_000_000, 0),
+        tokens=tokens,
     )
 
 

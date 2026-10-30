@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from nexus.agents.budget import ResearchAccountingBusy
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.briefs import router as briefs_router
 from nexus.api.routes.broker_simulation import router as broker_simulation_router
@@ -67,6 +68,19 @@ def create_engine_app(
         return JSONResponse(
             status_code=error.status_code,
             content=error.to_envelope(new_uuid7()),
+        )
+
+    @app.exception_handler(ResearchAccountingBusy)
+    async def accounting_busy_handler(_: Request, error: ResearchAccountingBusy) -> JSONResponse:
+        # Dependency teardown has rolled back the entire admission transaction.
+        # No quota, terminal result, or permission to retry is implied.
+        return JSONResponse(
+            status_code=409,
+            content=NexusError(
+                ErrorCode.RESEARCH_ACCOUNTING_BUSY,
+                "Research accounting is busy. Existing usage and reservations remain protected.",
+                status_code=409,
+            ).to_envelope(new_uuid7()),
         )
 
     @app.exception_handler(StarletteHTTPException)

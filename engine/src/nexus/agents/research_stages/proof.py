@@ -37,6 +37,7 @@ from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 class TerminalProof:
     run_id: UUID
     known: bool
+    budget_settled: bool
     cleanup_confirmed: bool
     orphan: bool
     evidence_hash: str
@@ -229,20 +230,62 @@ async def read_terminal_proof(
     ):
         raise ProtocolRejected(invalid)
     known = terminal["known"]
+    settled = budget.state == "settled"
+    held = (
+        budget.state == "reserved" and budget.settled_usd is None and run.settled_cost_usd is None
+    )
     if known:
         tokens = (sum(r["input_tokens"] for r in rows), sum(r["output_tokens"] for r in rows))
-        if (
-            (run.input_tokens, run.output_tokens) != tokens
-            or budget.state != "settled"
-            or run.settled_cost_usd != budget.settled_usd
-            or run.settled_cost_usd != usage_cost(model, *tokens)
-        ):
+        if (run.input_tokens, run.output_tokens) != tokens:
             raise ProtocolRejected(invalid)
-    elif (
-        budget.state != "reserved"
-        or budget.settled_usd is not None
-        or run.settled_cost_usd is not None
-    ):
+        if settled:
+            if run.settled_cost_usd != budget.settled_usd or run.settled_cost_usd != usage_cost(
+                model, *tokens
+            ):
+                raise ProtocolRejected(invalid)
+        elif (
+            held
+            and run.status == "failed"
+            and member["stopped"]
+            and job.status == ("dead_letter" if orphan else "failed")
+        ):
+            from nexus.agents.synthesis import observed_usage_cost
+
+            observed_usage_cost(model, *tokens)
+            output = await session.scalar(
+                select(AgentResearchOutputRecord)
+                .where(AgentResearchOutputRecord.run_id == run.id)
+                .order_by(AgentResearchOutputRecord.sequence.desc())
+                .limit(1)
+            )
+            event = await session.scalar(
+                select(AgentResearchEventRecord)
+                .where(AgentResearchEventRecord.run_id == run.id)
+                .order_by(AgentResearchEventRecord.sequence.desc())
+                .limit(1)
+            )
+            if (
+                output is None
+                or event is None
+                or output.status != "failed"
+                or output.role is not None
+                or output.prompt_hash is not None
+                or output.intent is not None
+                or output.payload.get("reason") != "usage_accounting_failed"
+                or output.content_hash
+                != _hash(
+                    {"status": "failed", "role": None, "payload": output.payload, "intent": None}
+                )
+                or event.state != "failed"
+                or event.details != {"reason": "usage_accounting_failed"}
+                or event.event_hash != _hash({"state": "failed", "details": event.details})
+                or output.created_at > terminal["closed_at"]
+                or event.created_at > terminal["closed_at"]
+            ):
+                raise ProtocolRejected(invalid)
+        else:
+            raise ProtocolRejected(invalid)
+    elif not held:
         raise ProtocolRejected(invalid)
     if not known:
         lower_bound = known_usage_lower_bound(rows)
@@ -274,7 +317,9 @@ async def read_terminal_proof(
             )
         )
         reason = {
-            "reason": "STAGED_RESEARCH_CLOSED" if known else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"
+            "reason": ("STAGED_RESEARCH_CLOSED" if settled else "usage_accounting_failed")
+            if known
+            else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"
         }
         if len(outputs) != 1 or len(events) != 1:
             raise ProtocolRejected(invalid)
@@ -327,5 +372,11 @@ async def read_terminal_proof(
         c["confirmed"] is True for c in cleanup_rows
     )
     return TerminalProof(
-        run.id, known, confirmed, orphan, terminal["chain_hash"], evidence_digest(cleanup_facts)
+        run.id,
+        known,
+        settled,
+        confirmed,
+        orphan,
+        terminal["chain_hash"],
+        evidence_digest(cleanup_facts),
     )
