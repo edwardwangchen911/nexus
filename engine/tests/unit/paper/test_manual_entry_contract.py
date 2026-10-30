@@ -142,3 +142,24 @@ def test_preparation_disposition_is_read_metadata_not_a_terminal_or_execution_st
             ManualRequestView.model_validate(
                 data | {"preparation_disposition": "unknown_acknowledged"} | changed
             )
+
+
+def test_independent_disposition_is_only_an_unknown_v3_read_projection():
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    import pytest
+    from nexus.paper.manual_request import ManualRequestView
+
+    base = dict(
+        request_id=UUID(int=1),
+        mode="research_and_monitor",
+        requested_at=datetime(2026, 10, 30, tzinfo=UTC),
+        status="unknown",
+        code="MANUAL_RESULT_UNKNOWN",
+        cycle_id=None,
+        research_contract="independent_monitor_research_v1",
+    )
+    # A disposition without the original complete manifest is never presentable.
+    with pytest.raises(ValueError):
+        ManualRequestView(**base, independent_disposition="unknown_acknowledged")

@@ -166,3 +166,21 @@ uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" \
 
 无 schema 变更。尚未实际接受时可回退到前一镜像；实际接受后，运行写入者必须保留本节执行
 拦截能力。不得在旧版本宿主中恢复已接受槽，也不得删除审计、清零费用或释放未知预算来回退。
+
+## 独立 v3 研究的未知历史占用
+
+已进入 active 并终结为 unknown 的 research_and_monitor v3，使用正式维护入口检查完整原 manifest；v2、准备期 unknown、旧路由和其他未知不适用。首次检查和接受要求受控维护窗口，所有生产者停止，全库没有 queued/running Job、投递中通知或未消费有效租约。该入口不支持与任意后台作业并发接受。
+
+```sh
+uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" --env-file infra/.env.local check-independent-acceptance --request-id <指定原请求ID>
+```
+
+只有用户明确接受该指定请求的未知影响后，才使用本次返回的 proof_hash 执行：
+
+```sh
+uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" --env-file infra/.env.local accept-independent-unknown --request-id <同一原请求ID> --accept-unknown-effects --expected-proof-hash <本次检查摘要>
+```
+
+接受只追加一条审计，仅解除该精确历史占用；原 unknown、用量、费用、预算及结果不变。证据变化拒绝，旧身份永久禁止重放。提交确认丢失先沿原身份只读检查，不能因暂时查不到而重发。重复读回返回原接受时间，不追加审计，也不要求后续合法业务停下。
+
+页面显示原未知及独立处置；清除浏览器旧标识不提交新研究。只读恢复检查是观察性校验；下一次可写准入重新检查并持锁，新的未知增量、预算、时效及风控仍独立拒绝。接受不恢复服务、不启动研究、不授权交易。本次实现交付不代表接受任何真实请求。

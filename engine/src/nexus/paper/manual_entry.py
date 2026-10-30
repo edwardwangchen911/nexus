@@ -44,6 +44,7 @@ SAFE_ENTRY_CODES = frozenset(
         "MANUAL_PREPARATION_RECOVERY_BLOCKED",
         "MANUAL_PREPARATION_ACK_BLOCKED",
         "SCHEDULED_UNKNOWN_ACCEPTANCE_BLOCKED",
+        "INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED",
     }
 )
 
@@ -104,6 +105,16 @@ async def _read_presented_manual_request(
     # Keep the canonical event reader independent: acknowledgement validation
     # uses it to verify the original unknown facts and must never recurse.
     view = await read_manual_request(session, row)
+    if row.contract_version == 3 and view.status == "unknown" and view.research is not None:
+        from nexus.paper.independent_unknown_acceptance import read_independent_disposition
+
+        now = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
+        disposition = await read_independent_disposition(session, row, now=now)
+        return ManualRequestView.model_validate(
+            {**view.model_dump(), "independent_disposition": disposition}
+        )
     if row.contract_version in {2, 3}:
         return view
     from nexus.paper.current_preparation_acceptance import current_unknown_accepted

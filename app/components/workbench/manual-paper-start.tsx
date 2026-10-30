@@ -98,7 +98,8 @@ export function ManualPaperStart(): React.ReactElement {
     void send(original, "POST");
   };
   const resetAllowed = rejected || receipt?.status === "completed" || receipt?.status === "unavailable"
-    || receipt?.status === "unknown" && receipt.preparation_disposition === "unknown_acknowledged";
+    || receipt?.status === "unknown" && (receipt.preparation_disposition === "unknown_acknowledged"
+      || receipt.independent_disposition === "unknown_acknowledged");
   const reset = () => {
     if (busy || !resetAllowed) return;
     try { sessionStorage.removeItem(STORAGE_KEY); }
@@ -131,6 +132,8 @@ export function ManualPaperStart(): React.ReactElement {
             </ul>
           </> : <p>研究资料尚未冻结；请求时间不代表研究资料截止时间。</p>}
         </>}
+        {receipt.independent_disposition === "unknown_acknowledged" && <p>独立研究未知影响已明确接受。原结果、未知费用和预算保留；历史占用的接受不代表下一轮已获准，开始前仍须重新核验。</p>}
+        {receipt.independent_disposition === "recheck_required" && <p>独立研究的接受记录需要重新核验，当前不能据此解除历史占用。原未知费用和预算继续保留。</p>}
         {receipt.preparation_disposition === "unknown_acknowledged" && <p>准备结果未知已明确接受，调度占用已解除。历史调用、费用和预算保持原样；新请求仍需重新通过准入。</p>}
         {receipt.preparation_recovery?.disposition === "cancelled_before_call" && <p>已确认未开始外部操作，本次准备已取消。新请求仍需重新通过全部准入。</p>}
         {receipt.preparation_recovery?.disposition === "unknown_preserved" && <p>准备已收尾，但外部结果仍未知，费用和预算继续保留；当前不能开始新请求。</p>}

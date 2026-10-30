@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ManualPaperStart } from "../../../app/components/workbench/manual-paper-start";
-import { researchReceipt } from "./research-fixture";
+import { independentUnknownReceipt, researchReceipt } from "./research-fixture";
 const id = "0198f7a0-1111-7777-8111-111111111111";
 const receipt = { request_id: id, mode: "research_only", requested_at: "2026-10-09T14:00:00Z", status: "queued", code: "MANUAL_REQUEST_QUEUED", cycle_id: null, execution_locked: true };
 const fetchMock = vi.fn();
@@ -209,4 +209,23 @@ it("starts independent research once and retains unknown identity across refresh
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   expect(fetchMock.mock.calls[1][1].method).toBe("GET");
   expect(screen.getByRole("button", { name: "研究并持续监控" })).toBeDisabled();
+});
+
+it.each(["unknown_acknowledged", "recheck_required"])("shows independent disposition %s without releasing an unknown attempt", async (independent_disposition) => {
+  sessionStorage.setItem("nexus-manual-paper-attempt-v1", JSON.stringify({ key: "independent-unknown", mode: "research_and_monitor" }));
+  fetchMock.mockResolvedValue(Response.json({ data: { ...independentUnknownReceipt, independent_disposition } }));
+  render(<ManualPaperStart />);
+  await screen.findByText(independent_disposition === "unknown_acknowledged" ? /独立研究未知影响已明确接受/ : /独立研究的接受记录需要重新核验/);
+  expect(screen.getByText("研究结果尚未确认")).toBeVisible();
+  expect(screen.getByRole("button", { name: "研究并持续监控" })).toBeDisabled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][1].method).toBe("GET");
+  if (independent_disposition === "unknown_acknowledged") {
+    fireEvent.click(screen.getByRole("button", { name: "开始新的请求" }));
+    expect(sessionStorage.getItem("nexus-manual-paper-attempt-v1")).toBeNull();
+    expect(screen.getByRole("button", { name: "研究并持续监控" })).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  } else {
+    expect(screen.queryByRole("button", { name: "开始新的请求" })).toBeNull();
+  }
 });
