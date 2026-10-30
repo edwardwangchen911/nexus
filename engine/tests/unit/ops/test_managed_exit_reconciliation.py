@@ -180,7 +180,7 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
     # readers use isolated doubles. The adapter cannot substitute a weaker check.
     monkeypatch.setattr(recovery, "inspect_recovery_readiness", _CANONICAL)
     at = datetime(2026, 10, 27, 14, tzinfo=UTC)
-    values = iter([at, CURRENT_MIGRATION_HEAD, None])
+    values = iter([at, CURRENT_MIGRATION_HEAD, None, None])
     statements = []
 
     class Session:
@@ -195,6 +195,10 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
 
         async def scalar(self, statement):
             return next(values)
+
+        async def scalars(self, statement):
+            statements.append(str(statement))
+            return ()  # No unresolved research reservations in this ready fixture.
 
         async def get(self, *args):
             return SimpleNamespace(created_at=at)

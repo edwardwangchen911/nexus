@@ -63,7 +63,11 @@ def require_research_only_snapshot(snapshot: DataSnapshot | None) -> None:
 
 
 async def require_formal_research(session: AsyncSession, run: AgentResearchRunRecord) -> None:
+    from nexus.agents.comparison_manifest import require_business_run
+
+    require_business_run(run.actor_id)
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    require_business_run(run.actor_id, snapshot)
     from nexus.monitoring.context import is_monitor_snapshot
     from nexus.monitoring.independent_context import is_independent_snapshot
 

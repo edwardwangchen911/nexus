@@ -18,21 +18,43 @@ _RUN_ID = UUID("018f0000-0000-7000-8000-000000000001")
 
 class _BudgetSession:
     def __init__(self, usage: tuple[Decimal, ...]) -> None:
-        self._usage = iter(usage)
+        self._usage = usage
         self.queries: list[str] = []
         self.added: list[object] = []
 
     async def execute(self, statement: object, parameters: object = None) -> None:
         return None
 
-    async def scalar(self, statement: object) -> Decimal | None:
-        self.queries.append(str(statement))
-        if "formal_budget_bindings" in str(statement):
+    async def scalar(self, statement: object, parameters: object = None) -> Decimal | bool | None:
+        query = str(statement)
+        self.queries.append(query)
+        if "pg_try_advisory_xact_lock" in query:
+            return True
+        if "to_regclass" in query:
+            return None  # Legacy, non-staged research in this fixture.
+        if "formal_budget_bindings" in query:
             return None  # This legacy budget case has no protected formal binding.
-        return next(self._usage)
+        if "portfolio_decision_budget_reservations" in query:
+            return self._usage[1]
+        if "agent_portfolio_synthesis_budget_reservations" in query:
+            return self._usage[2]
+        raise AssertionError(f"Unexpected scalar query: {query}")
 
     async def scalars(self, statement: object) -> tuple[object, ...]:
         self.queries.append(str(statement))
+        if "agent_daily_budget_reservations.business_date =" in str(statement):
+            # Research now reads per-reservation facts so verified overrun can
+            # contribute its lower bound; this case has ordinary settled usage.
+            return (
+                AgentDailyBudgetReservationRecord(
+                    run_id=UUID(int=99),
+                    business_date=_NOW.date(),
+                    pricing_version="pricing-v1",
+                    reserved_usd=self._usage[0],
+                    settled_usd=self._usage[0],
+                    state="settled",
+                ),
+            )
         return ()  # This legacy case has no economic pair holds.
 
     def add(self, value: object) -> None:

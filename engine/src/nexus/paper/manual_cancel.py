@@ -1,7 +1,6 @@
 """Cancel untouched research via native fenced Job finalization, with no provider call."""
 
 from datetime import datetime
-from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
@@ -214,9 +213,9 @@ async def _legacy_cancel_unused_manual_research(
         )
         if claim is None:
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
-        run.settled_cost_usd = Decimal("0")
-        run.input_tokens = run.output_tokens = 0
-        await session.flush()
+        # The existing zero-call terminal owns release followed by the zero
+        # receipt, in this same transaction. Do not prewrite observed-usage
+        # fields before its unused-reservation check.
         await _terminal_without_usage(
             session,
             run,

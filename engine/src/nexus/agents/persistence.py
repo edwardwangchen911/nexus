@@ -548,16 +548,23 @@ async def settle_daily_budget(
 
 
 async def require_reserved_daily_budget(
-    session: AsyncSession, *, run_id: UUID
+    session: AsyncSession, *, run_id: UUID, accounting: bool = False
 ) -> AgentDailyBudgetReservationRecord:
     """Lock and require the exact open reservation before any provider work starts."""
     reservation = await _locked_reservation(session, run_id)
     from nexus.agents.research_dispatch import current_dispatch
 
     dispatch = current_dispatch(run_id)
-    if dispatch is None:
+    if accounting:
         await _lock_budget_day(session, reservation.business_date.isoformat())
-    else:
+    elif dispatch is None:
+        # Legacy external work retains its original date protection, but cannot
+        # hold the cross-day accounting boundary while awaiting the provider.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"agent-budget:{reservation.business_date.isoformat()}"},
+        )
+    if dispatch is not None:
         # This is only a check of an already committed, whole-batch reservation.
         # Keep the exact row locked; monetary mutations still take the day lock.
         run = await session.get(AgentResearchRunRecord, run_id)
@@ -581,6 +588,9 @@ async def release_daily_budget(
     await _lock_budget_day(session, reservation.business_date.isoformat())
     if reservation.state != "reserved":
         raise BudgetExhausted("only an open reservation can be released")
+    from nexus.agents.research_usage import require_unspent_research_reservation
+
+    await require_unspent_research_reservation(session, run_id=run_id)
     reservation.state = "released"
     reservation.settled_usd = None
     await session.flush()
@@ -594,6 +604,9 @@ async def release_daily_budget_if_reserved(
     reservation = await _locked_reservation(session, run_id)
     await _lock_budget_day(session, reservation.business_date.isoformat())
     if reservation.state == "reserved":
+        from nexus.agents.research_usage import require_unspent_research_reservation
+
+        await require_unspent_research_reservation(session, run_id=run_id)
         reservation.state = "released"
         reservation.settled_usd = None
         await session.flush()
@@ -976,6 +989,9 @@ async def _admit_research_run(
         )
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
+    from nexus.agents.comparison_manifest import require_business_run
+
+    require_business_run(actor_id, snapshot)
     from nexus.agents.research_only import (
         is_research_only,
         require_research_only_snapshot,
@@ -1473,11 +1489,22 @@ async def _locked_portfolio_decision_budget(
 
 
 async def _shared_daily_budget_used(session: AsyncSession, *, business_date: date) -> Decimal:
+    from nexus.agents.research_usage import research_reserved_occupancy
     from nexus.persistence.models.agents import AgentPortfolioSynthesisBudgetReservationRecord
 
     totals: list[Decimal] = []
+    for reservation in await session.scalars(
+        select(AgentDailyBudgetReservationRecord).where(
+            AgentDailyBudgetReservationRecord.business_date == business_date
+        )
+    ):
+        if reservation.state == "reserved":
+            totals.append(await research_reserved_occupancy(session, reservation))
+        elif reservation.state == "settled":
+            if reservation.settled_usd is None:
+                raise ValueError("RESEARCH_USAGE_SETTLEMENT_INVALID")
+            totals.append(reservation.settled_usd)
     for model in (
-        AgentDailyBudgetReservationRecord,
         PortfolioDecisionBudgetReservationRecord,
         AgentPortfolioSynthesisBudgetReservationRecord,
     ):
@@ -1503,19 +1530,32 @@ async def _shared_daily_budget_used(session: AsyncSession, *, business_date: dat
 
 async def try_lock_budget_day(session: AsyncSession, business_date: str) -> bool:
     """Use the native budget lock without delaying terminal failure reporting."""
-    return bool(
-        await session.scalar(
+    for key in ("agent-budget:accounting", f"agent-budget:{business_date}"):
+        if not await session.scalar(
             text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
-            {"key": f"agent-budget:{business_date}"},
-        )
-    )
+            {"key": key},
+        ):
+            return False
+    return True
 
 
 async def _lock_budget_day(session: AsyncSession, business_date: str) -> None:
+    # An old-day result can block today's admission. Serialize its publication
+    # with the existing short budget transaction, without moving its costs.
+    # Legacy may already own its date while awaiting G to finish. Never wait
+    # for another owner's D with G held: the caller must leave the full outer
+    # transaction on busy, not classify it as financial exhaustion/known-held.
+    from nexus.agents.budget import ResearchAccountingBusy
+
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-        {"key": f"agent-budget:{business_date}"},
+        {"key": "agent-budget:accounting"},
     )
+    if not await session.scalar(
+        text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"agent-budget:{business_date}"},
+    ):
+        raise ResearchAccountingBusy()
 
 
 def _validate_budget_inputs(

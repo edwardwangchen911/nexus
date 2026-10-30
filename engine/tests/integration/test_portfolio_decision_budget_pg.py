@@ -35,20 +35,18 @@ async def test_portfolio_decision_reservation_counts_instrument_research_usage(
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     decision_run_id = uuid4()
     existing_research_run_id = uuid4()
-    await _seed_runs(factory, research_run_ids=(), decision_run_ids=(decision_run_id,))
+    await _seed_runs(
+        factory, research_run_ids=(existing_research_run_id,), decision_run_ids=(decision_run_id,)
+    )
     async with factory() as session, session.begin():
-        await session.execute(text("SET LOCAL session_replication_role = replica"))
-        await session.execute(
-            text(
-                "INSERT INTO agent_daily_budget_reservations ("
-                "id,business_date,run_id,pricing_version,reserved_usd,settled_usd,state) "
-                "VALUES (:id,:day,:run,'pricing-v1',1.00,NULL,'reserved')"
-            ),
-            {
-                "id": uuid4(),
-                "day": _NOW.date(),
-                "run": existing_research_run_id,
-            },
+        await reserve_daily_budget(
+            session,
+            run_id=existing_research_run_id,
+            now=_NOW,
+            daily_limit_usd=Decimal("1.50"),
+            worst_case_usd=Decimal("1.00"),
+            pricing_version="pricing-v1",
+            pricing_fresh=True,
         )
 
     async with factory() as session, session.begin():
@@ -141,9 +139,7 @@ async def test_concurrent_cross_type_reservations_cannot_oversubscribe(
                 PortfolioDecisionBudgetReservationRecord.run_id == decision_run_id
             )
         )
-    assert sum(
-        record is not None for record in (research_reservation, decision_reservation)
-    ) == 1
+    assert sum(record is not None for record in (research_reservation, decision_reservation)) == 1
 
 
 @pytest.mark.asyncio

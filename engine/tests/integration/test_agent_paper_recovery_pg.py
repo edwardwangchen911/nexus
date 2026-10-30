@@ -2,7 +2,7 @@
 
 import importlib.util
 from contextlib import nullcontext
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -26,6 +26,9 @@ from unit.ops.test_formal_stage_registration import OPTIONS
     "shape, expected_code",
     [
         ("ready", None),
+        ("comparison_settled", None),
+        ("comparison_held", "RESEARCH_ACCOUNTING_UNSETTLED"),
+        ("comparison_held_zero", "RESEARCH_ACCOUNTING_UNSETTLED"),
         ("old_unknown_claim", "MANUAL_PREPARATION_ACK_BLOCKED"),
         ("fresh_host", "AGENT_PAPER_RECOVERY_HOST_PRESENT"),
         ("bad_schema", "AGENT_PAPER_RECOVERY_SCHEMA_MISMATCH"),
@@ -38,6 +41,7 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
     migrated_database_url, monkeypatch, shape, expected_code
 ):
+    at = datetime.now(UTC) if shape.startswith("comparison_") else AT
     assert importlib.util.find_spec("nexus.ops.agent_paper_recovery") is not None
     from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
 
@@ -46,13 +50,13 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
         **OPTIONS,
     )
     engine, sessions, authority, manifest = await seed_normal_path(
-        migrated_database_url, monkeypatch, decision_time=AT, occupied=shape == "occupied"
+        migrated_database_url, monkeypatch, decision_time=at, occupied=shape == "occupied"
     )
     original_scalar = AsyncSession.scalar
 
     async def clock(self, statement, *args, **kwargs):
         if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
-            return AT
+            return at
         return await original_scalar(self, statement, *args, **kwargs)
 
     monkeypatch.setattr(AsyncSession, "scalar", clock)
@@ -69,18 +73,18 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
                 universe_snapshot_id=authority.universe_snapshot_id,
                 instrument_ids=tuple(item.instrument_id for item in manifest),
                 idempotency_key="recovery-batch",
-                created_at=AT,
+                created_at=at,
             )
             if shape == "old_unknown_claim":
                 session.add(
                     IdempotencyRecord(
                         actor_id=f"local-agent-paper-schwab:{authority.account_id}",
                         route="agent-paper-schwab-trigger-v2",
-                        idempotency_key=(AT - timedelta(days=1)).isoformat(),
+                        idempotency_key=(at - timedelta(days=1)).isoformat(),
                         request_hash="a" * 64,
                         schema_version="agent_paper_schwab_trigger_v2",
                         response_payload={},
-                        created_at=AT - timedelta(days=1),
+                        created_at=at - timedelta(days=1),
                     )
                 )
             if shape == "fresh_host":
@@ -88,8 +92,8 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
                     WorkerHeartbeat(
                         queue="agent_paper",
                         worker_id="other-host",
-                        started_at=AT,
-                        seen_at=AT,
+                        started_at=at,
+                        seen_at=at,
                         process_version="other-version",
                         migration_head="other-schema",
                     )
@@ -148,6 +152,40 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
                     repo_root=Path.cwd(),
                     recovery_guard=guard,
                 )
+        if shape.startswith("comparison_"):
+            from integration.test_research_occupancy_pg import observed, verify
+            from nexus.agents import execution
+            from nexus.agents.budget import BudgetExhausted
+
+            tokens = (20_000_000, 0) if shape == "comparison_held" else (0, 0)
+            _, _, old, claim, now, protocol, ticket = await observed(
+                sessions, tokens=tokens, protect_unknown=False
+            )
+            assert old is None
+            assert await verify(protocol, ticket, now, tokens=tokens)
+            await protocol.cleanup(ticket, now=now, confirmed=True)
+            if shape == "comparison_held_zero":
+
+                async def refusal(*args, **kwargs):
+                    raise BudgetExhausted("synthetic deterministic refusal")
+
+                monkeypatch.setattr(execution, "settle_daily_budget", refusal)
+            assert await protocol.close(claim, now=now)
+            async with sessions() as session:
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM agent_daily_budget_reservations")
+                    )
+                    == 1
+                )
+                assert await session.scalar(text("SELECT count(*) FROM manual_paper_requests")) == 0
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM research_stage_terminal WHERE known")
+                    )
+                    == 1
+                )
+            at = max(at, now + timedelta(seconds=1))
         writes = []
 
         def observe(_conn, _cursor, statement, _parameters, _context, _executemany):
@@ -160,7 +198,7 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
         finally:
             event.remove(Engine, "before_cursor_execute", observe)
         assert writes == []
-        assert result["checked_at"] == AT.isoformat()
+        assert result["checked_at"] == at.isoformat()
         assert result["execution_locked"] is True and result["external_requests"] == 0
         assert result["status"] == ("ready" if expected_code is None else "blocked")
         assert result["blocking_codes"] == ([] if expected_code is None else [expected_code])
@@ -176,6 +214,6 @@ async def test_recovery_reads_actual_schema_host_and_cross_day_claims(
             assert len(claims) == (1 if shape == "old_unknown_claim" else 0)
             if claims:
                 assert claims[0].response_payload == {}
-                assert claims[0].idempotency_key == (AT - timedelta(days=1)).isoformat()
+                assert claims[0].idempotency_key == (at - timedelta(days=1)).isoformat()
     finally:
         await engine.dispose()

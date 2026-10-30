@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import select, text
 
 from nexus.agents import codex_sdk, codex_staged
+from nexus.agents.budget import ResearchAccountingBusy
 from nexus.agents.committee import ROLE_ORDER
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import execute_research_run
@@ -110,7 +111,9 @@ class FrozenCommittee:
         return self.outputs[role]
 
 
-async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute: Any) -> Any:
+async def execute_staged_claim(
+    *, factory: Any, claim: Any, clock: Any, execute: Any, comparison: Any = None
+) -> Any:
     from nexus.agents.research_maintenance import require_research_open
 
     require_research_open()
@@ -135,6 +138,8 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             await require_independent_execution_open(session, request_id=route["scope_id"])
     if route is None:
         raise ProtocolRejected("STAGED_ROUTE_REQUIRED")
+    if (route["kind"] == "comparison") != (comparison is not None):
+        raise ProtocolRejected("COMPARISON_EXECUTION_BINDING_REQUIRED")
 
     captured_preparation = False
     with capture_preparation():
@@ -146,6 +151,8 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
                     {"scope": route["scope_id"]},
                 )
                 await _lock_active_claim(preparation, claim=claim, now=clock())
+                if comparison is not None:
+                    await comparison.validate(preparation, claim, route)
                 try:
                     result = await execute_and_finalize_job(
                         preparation, claim=claim, checked_at=clock(), execute=execute
@@ -216,6 +223,7 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
         now=clock(),
         increment=route["kind"] == "increment",
         independent=route["kind"] == "independent",
+        comparison=route["kind"] == "comparison",
         work_deadline=work_deadline,
         cleanup_deadline=min(original_expiry, work_deadline + timedelta(seconds=7)),
     )
@@ -232,14 +240,18 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             seconds=min(original_deadline, options.get("deadline_at", original_deadline))
             - monotonic_anchor
         )
-        wire = json.dumps(
-            {
-                "wire": codex_sdk.codex_request_wire(payload),
-                "schema": codex_sdk.codex_output_schema(options["output_model"]),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+        wire = (
+            comparison.wire(payload, options["output_model"])
+            if comparison is not None
+            else json.dumps(
+                {
+                    "wire": codex_sdk.codex_request_wire(payload),
+                    "schema": codex_sdk.codex_output_schema(options["output_model"]),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
         if stage_number > 1:
             async with factory.begin() as check:
                 await _lock_active_claim(check, claim=claim, now=clock())
@@ -251,7 +263,7 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             ticket = await protocol.authorize(
                 claim, stage=stage_number, now=clock(), wire=wire, not_after=stage_deadline
             )
-        except (ProtocolRejected, LeaseLostError):
+        except (ProtocolRejected, LeaseLostError, ResearchAccountingBusy):
             raise
         except Exception as error:
             await stop_preserving_error(protocol, scope, error)
@@ -267,6 +279,30 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
                 old_guard()
 
         options["dispatch_guard"] = guard
+        if comparison is not None and comparison.transport == "responses":
+            from nexus.agents.research_stages.http_lifecycle import invoke_http_stage
+
+            work = min(original_deadline, options.get("deadline_at", original_deadline))
+            cleanup = min(
+                work + 7,
+                original_deadline,
+                monotonic_anchor + (original_expiry - wall_anchor).total_seconds(),
+            )
+            return await invoke_http_stage(
+                protocol=protocol,
+                scope=scope,
+                ticket=ticket,
+                wire=wire,
+                output_model=options["output_model"],
+                grant=comparison.grant,
+                clock=clock,
+                wall_anchor=wall_anchor,
+                monotonic_anchor=monotonic_anchor,
+                work_deadline=work,
+                cleanup_deadline=cleanup,
+                client=comparison.client_factory(),
+                dispatch_guard=guard,
+            )
         return await invoke_stage(
             protocol,
             scope,
@@ -285,6 +321,9 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
     for role in ROLE_ORDER:
         try:
             outputs[role] = await committee.analyze(role, request, refs, committee._prompts[role])
+        except ResearchAccountingBusy as error:
+            await stop_preserving_error(protocol, scope, error)
+            raise
         except Exception:
             break
     assert committee._deadline == original_deadline
@@ -320,15 +359,23 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             frozen.usage = known_usage_lower_bound(rows)
 
             async def finalize(target: Any) -> Any:
+                from nexus.agents.persistence import require_reserved_daily_budget
+
+                # This callback owns a short final transaction, not a legacy
+                # provider wait. Acquire its financial boundary before the
+                # shared executor can take the legacy blocking date check.
+                await require_reserved_daily_budget(target, run_id=run_id, accounting=True)
                 result = await execute_research_run(target, **{**args, "committee": frozen})
                 from nexus.jobs.repository import JobCompletion
                 from nexus.worker import _agent_result
 
                 mapped = _agent_result(result.status)
                 if result.status != "completed":
-                    await target.execute(
-                        text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
-                        {"id": scope},
+                    await protocol.stop_terminal_in_transaction(
+                        target,
+                        scope_id=scope,
+                        run_id=run_id,
+                        rows=rows,
                     )
                 closed_at = clock()
                 await target.execute(
@@ -365,6 +412,11 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             except Exception as error:
                 raise StagedCommitUnconfirmed("TERMINAL_COMMIT_UNCONFIRMED") from error
     except StagedCommitUnconfirmed:
+        raise
+    except ResearchAccountingBusy as error:
+        # The final transaction has exited. Preserve the explicit busy cause
+        # and all previously committed provider/cleanup evidence, without retry.
+        await stop_preserving_error(protocol, scope, error)
         raise
     except BaseException as error:
         await stop_preserving_error(protocol, scope, error)

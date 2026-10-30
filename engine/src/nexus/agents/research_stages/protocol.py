@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from nexus.agents.execution import _persist_terminal, _settle_or_hold_usage
 from nexus.agents.persistence import require_reserved_daily_budget
 from nexus.agents.research_dispatch import dispatch_failure_boundary
 from nexus.agents.responses_budget import UsageSnapshot
+from nexus.agents.synthesis import observed_usage_cost
 from nexus.jobs.repository import (
     ClaimedJob,
     JobCompletion,
@@ -28,7 +29,11 @@ from nexus.jobs.repository import (
     _lock_active_claim,
     execute_and_finalize_job,
 )
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
+    AgentModelConfigRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
 
@@ -136,6 +141,7 @@ class StagedProtocol:
         self.clock = clock
         self.claims: dict[UUID, ClaimedJob] = {}
         self.local_stopped = False
+        self.comparison_stop_binding: tuple[UUID, UUID] | None = None
 
     def _now(self, supplied: datetime) -> datetime:
         return supplied if self.clock is None else max(supplied, self.clock())
@@ -150,26 +156,53 @@ class StagedProtocol:
         cleanup_deadline: datetime,
         increment: bool = False,
         independent: bool = False,
+        comparison: bool = False,
     ) -> None:
+        if sum((increment, independent, comparison)) > 1:
+            raise ProtocolRejected("STAGED_SCOPE_KIND_INVALID")
+        if comparison and len(claims) != 1:
+            raise ProtocolRejected("COMPARISON_SINGLE_CHAIN_REQUIRED")
         async with self.factory.begin() as session:
             await ensure_schema(session)
-            await session.execute(
-                text(
-                    "INSERT INTO research_stage_scope(id,cycle_id,increment_id,request_id) "
-                    "VALUES (:id,:cycle,:inc,:request) ON CONFLICT(id) DO NOTHING"
-                ),
-                {
-                    "id": scope_id,
-                    "cycle": None if increment or independent else scope_id,
-                    "inc": scope_id if increment else None,
-                    "request": scope_id if independent else None,
-                },
-            )
+            if comparison:
+                if (
+                    await session.scalar(
+                        text("SELECT to_regclass('research_comparison_chain_stop')")
+                    )
+                    is None
+                ):
+                    raise ProtocolRejected("COMPARISON_CHAIN_STOP_SCHEMA_REQUIRED")
+                # Preparation owns registration; installation never creates a
+                # new experimental identity or changes its selected route.
+                bound = await session.scalar(
+                    text("SELECT comparison_id FROM research_stage_scope WHERE id=:id"),
+                    {"id": scope_id},
+                )
+                if bound != scope_id:
+                    raise ProtocolRejected("STAGED_BINDING_MISSING")
+            else:
+                await session.execute(
+                    text(
+                        "INSERT INTO research_stage_scope(id,cycle_id,increment_id,request_id) "
+                        "VALUES (:id,:cycle,:inc,:request) ON CONFLICT(id) DO NOTHING"
+                    ),
+                    {
+                        "id": scope_id,
+                        "cycle": None if increment or independent else scope_id,
+                        "inc": scope_id if increment else None,
+                        "request": scope_id if independent else None,
+                    },
+                )
             for claim in claims:
                 job, lease, _ = await _lock_active_claim(session, claim=claim, now=self._now(now))
                 now = self._now(now)
                 if not now < work_deadline < cleanup_deadline <= lease.expires_at:
                     raise ProtocolRejected("DEADLINE_INVALID")
+                if comparison and (
+                    work_deadline > lease.acquired_at + timedelta(seconds=300)
+                    or cleanup_deadline > lease.acquired_at + timedelta(seconds=315)
+                ):
+                    raise ProtocolRejected("COMPARISON_DEADLINE_INVALID")
                 await session.execute(
                     text("""INSERT INTO research_stage_member
                     VALUES(:run,:job,:scope,:work,:cleanup)"""),
@@ -184,6 +217,9 @@ class StagedProtocol:
         # Only this first in-process native-claim owner may authorize. A newly
         # constructed reader does not acquire send rights by loading old rows.
         self.claims = {claim.job_id: claim for claim in claims}
+        self.comparison_stop_binding = (
+            (scope_id, UUID(str(claims[0].payload["run_id"]))) if comparison else None
+        )
 
     async def _member(self, session: AsyncSession, claim: ClaimedJob) -> Mapping[str, Any]:
         row = (
@@ -214,7 +250,7 @@ class StagedProtocol:
         require_research_open()
         if self.local_stopped or self.claims.get(claim.job_id) != claim:
             raise ProtocolRejected("ORIGIN_STOPPED_OR_UNAVAILABLE")
-        async with self.factory() as session:
+        async with self.factory() as session, dispatch_failure_boundary(session):
             await session.begin()
             member = await self._member(session, claim)
             from nexus.agents.research_stages.routes import selected_route
@@ -243,7 +279,7 @@ class StagedProtocol:
             job, lease, _ = await _lock_active_claim(session, claim=claim, now=now)
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
-            budget = await require_reserved_daily_budget(session, run_id=run.id)
+            budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
             prior = await session.scalar(
                 text(
                     "SELECT response_hash FROM research_stage_observation WHERE run_id=:run AND "
@@ -461,17 +497,69 @@ class StagedProtocol:
             else:
                 if self._now(now) >= member["cleanup_deadline"]:
                     raise ProtocolRejected("VERIFICATION_WINDOW_CLOSED")
+                # Scope -> exact claim -> original budget day. Publishing trusted
+                # costs and new reservations share this existing short mutex.
+                from nexus.agents.persistence import _lock_budget_day
+
+                budget_day = required(
+                    await session.scalar(
+                        select(AgentDailyBudgetReservationRecord.business_date).where(
+                            AgentDailyBudgetReservationRecord.run_id == ticket.run_id
+                        )
+                    )
+                )
+                await _lock_budget_day(session, budget_day.isoformat())
+                check_window()
                 await session.execute(
                     text("INSERT INTO research_stage_verification VALUES(:run,:stage,:verified)"),
                     {"run": ticket.run_id, "stage": ticket.stage, "verified": matched},
                 )
-                check_window()
-                await self._commit(session, member["scope_id"])
-                check_window()
+            if matched:
+                await self._fence_exceeded_usage(session, member=member, run_id=ticket.run_id)
+            check_window()
+            await self._commit(session, member["scope_id"])
+            check_window()
         # A commit already issued before cutoff may be found by original-identity
         # readback; a late acknowledgement does not grant new execution time.
         check_window()
         return matched
+
+    async def _fence_exceeded_usage(
+        self, session: AsyncSession, *, member: Mapping[str, Any], run_id: UUID
+    ) -> None:
+        """Commit the shared stop with trusted usage, before terminal accounting.
+
+        Cleanup failure or a later settlement rollback cannot erase this fence.
+        Scope ownership is already locked by verify; all authorization shares it.
+        """
+        usage = known_usage_lower_bound(await stage_evidence(session, run_id))
+        run = required(await session.get(AgentResearchRunRecord, run_id))
+        model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
+        budget = required(
+            await session.scalar(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id == run_id
+                )
+            )
+        )
+        if (
+            usage.input_tokens > model.max_input_tokens
+            or usage.output_tokens > model.max_output_tokens
+            or observed_usage_cost(model, usage.input_tokens, usage.output_tokens)
+            > budget.reserved_usd
+        ):
+            self.local_stopped = True
+            # A sibling may already own a Ticket. Stop its synchronous final
+            # transport guard before yielding to the persisted scope write.
+            from nexus.agents.research_dispatch import stop_current_dispatch
+
+            (self.on_failure or stop_current_dispatch)(
+                ProtocolRejected("STAGED_USAGE_LIMIT_EXCEEDED")
+            )
+            await session.execute(
+                text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
+                {"id": member["scope_id"]},
+            )
 
     async def cleanup(
         self, ticket: Ticket, *, now: datetime, confirmed: bool, not_after: datetime | None = None
@@ -529,11 +617,35 @@ class StagedProtocol:
 
     async def stop(self, scope_id: UUID) -> None:
         self.local_stopped = True
+        if self.comparison_stop_binding is not None:
+            scope, run = self.comparison_stop_binding
+            if scope != scope_id:
+                raise ProtocolRejected("STAGED_BINDING_MISSING")
+            async with self.factory.begin() as session:
+                await self._stop_comparison_chain(session, scope_id=scope, run_id=run)
+            return
+        await self._stop_scope(scope_id)
+
+    async def _stop_scope(self, scope_id: UUID) -> None:
+        """Global safety fence, including every commit-result-unknown path."""
+        self.local_stopped = True
         async with self.factory.begin() as session:
             await session.execute(
                 text("UPDATE research_stage_scope SET stopped=true WHERE id=:scope"),
                 {"scope": scope_id},
             )
+
+    @staticmethod
+    async def _stop_comparison_chain(
+        session: AsyncSession, *, scope_id: UUID, run_id: UUID
+    ) -> None:
+        await session.execute(
+            text(
+                "INSERT INTO research_comparison_chain_stop(run_id,scope_id) "
+                "VALUES(:run,:scope) ON CONFLICT(run_id) DO NOTHING"
+            ),
+            {"run": run_id, "scope": scope_id},
+        )
 
     async def _commit(self, session: AsyncSession, scope_id: UUID) -> None:
         try:
@@ -544,12 +656,56 @@ class StagedProtocol:
                 self.on_failure(error)
             try:
                 await session.rollback()
-                await self.stop(scope_id)
+                await self._stop_scope(scope_id)
             except BaseException:
                 # Preserve original ambiguity. Failure to persist the stop is
                 # an explicit remaining condition, not permission to dispatch.
                 error.add_note("SCOPE_STOP_UNCONFIRMED")
             raise
+
+    async def stop_terminal_in_transaction(
+        self,
+        session: AsyncSession,
+        *,
+        scope_id: UUID,
+        run_id: UUID,
+        rows: Sequence[Mapping[str, Any]],
+        orphan: bool = False,
+    ) -> None:
+        """One stop classification for normal publication and public/orphan closeout.
+
+        Callers hold the scope lock and own the complete native terminal transaction.
+        This never clears an existing global stop, accepts unknown impact or grants
+        send rights. The next position must independently verify its predecessors.
+        """
+        comparison = (
+            await session.scalar(
+                text("SELECT comparison_id FROM research_stage_scope WHERE id=:id"),
+                {"id": scope_id},
+            )
+            is not None
+        )
+        if comparison:
+            await self._stop_comparison_chain(session, scope_id=scope_id, run_id=run_id)
+        budget = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == run_id
+            )
+        )
+        if (
+            budget is None
+            or budget.state != "settled"
+            or budget.settled_usd is None
+            or not comparison
+            or orphan
+            or not usage_known(rows)
+            or not all(row["confirmed"] is True for row in rows)
+        ):
+            self.local_stopped = True
+            await session.execute(
+                text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
+                {"id": scope_id},
+            )
 
     async def close(self, claim: ClaimedJob, *, now: datetime, orphan: bool = False) -> bool:
         async with self.factory() as session:
@@ -570,8 +726,36 @@ class StagedProtocol:
         if await session.scalar(
             text("SELECT 1 FROM research_stage_terminal WHERE run_id=:run"), {"run": run.id}
         ):
-            raise ProtocolRejected("ALREADY_TERMINAL")
-        await require_reserved_daily_budget(session, run_id=run.id)
+            from nexus.agents.research_stages.proof import read_terminal_proof
+
+            proof = await read_terminal_proof(session, run_id=run.id, now=now)
+            lease = await session.scalar(select(JobLease).where(JobLease.job_id == claim.job_id))
+            attempt = await session.scalar(
+                select(JobAttempt).where(JobAttempt.job_id == claim.job_id)
+            )
+            if (
+                proof is None
+                or proof.orphan != orphan
+                or lease is None
+                or attempt is None
+                or (
+                    lease.worker_id,
+                    lease.lease_token,
+                    lease.fence_token,
+                    lease.expires_at,
+                    attempt.attempt_no,
+                )
+                != (
+                    claim.worker_id,
+                    claim.lease_token,
+                    claim.fence_token,
+                    claim.expires_at,
+                    claim.attempt_no,
+                )
+            ):
+                raise ProtocolRejected("TERMINAL_READBACK_BINDING_INVALID")
+            return proof.known
+        await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
         rows = await stage_evidence(session, run.id)
         if not rows:
             raise ProtocolRejected("NO_ZERO_CALL_PROOF")
@@ -580,29 +764,28 @@ class StagedProtocol:
         model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
 
         async def terminal(session: AsyncSession) -> JobCompletion:
-            await session.execute(
-                text("UPDATE research_stage_scope SET stopped=true WHERE id=:id"),
-                {"id": member["scope_id"]},
-            )
+            accounted = False
             if known:
                 usage = UsageSnapshot(
                     input_tokens=sum(r["input_tokens"] for r in rows),
                     output_tokens=sum(r["output_tokens"] for r in rows),
                 )
-                if not await _settle_or_hold_usage(session, run, model=model, usage=usage):
-                    raise ProtocolRejected("USAGE_NOT_SETTLED")
+                accounted = await _settle_or_hold_usage(session, run, model=model, usage=usage)
             else:
                 lower_bound = known_usage_lower_bound(rows)
                 if lower_bound.input_tokens or lower_bound.output_tokens:
                     run.input_tokens = lower_bound.input_tokens
                     run.output_tokens = lower_bound.output_tokens
+            await self.stop_terminal_in_transaction(
+                session, scope_id=member["scope_id"], run_id=run.id, rows=rows, orphan=orphan
+            )
             await _persist_terminal(
                 session,
                 run,
                 output_sequence=1,
                 event_sequence=1,
                 status="failed",
-                reason="STAGED_RESEARCH_CLOSED"
+                reason=("STAGED_RESEARCH_CLOSED" if accounted else "usage_accounting_failed")
                 if known
                 else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN",
             )

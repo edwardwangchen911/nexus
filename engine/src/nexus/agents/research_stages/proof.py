@@ -20,7 +20,7 @@ from nexus.agents.research_stages.protocol import (
     usage_known,
 )
 from nexus.agents.research_stages.routes import owner, selected_route
-from nexus.jobs.models import JOB_PRIORITIES, JobKeyV1, JobType, canonical_job_key
+from nexus.jobs.models import JOB_PRIORITIES, JobKeyV1, JobType, canonical_job_key, job_input_hash
 from nexus.jobs.repository import job_lease_consumed
 from nexus.monitoring import admission
 from nexus.persistence.models.agents import (
@@ -37,6 +37,7 @@ from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 class TerminalProof:
     run_id: UUID
     known: bool
+    budget_settled: bool
     cleanup_confirmed: bool
     orphan: bool
     evidence_hash: str
@@ -118,28 +119,36 @@ async def read_terminal_proof(
         or budget.reserved_usd != run.reserved_cost_usd
         or run.retry_count != 0
         or run.status not in {"completed", "failed", "abstained"}
-        or job.job_type != "agent.paper.research"
-        or job.queue != "general"
-        or job.schema_version != "agent_research_job_v1"
+        or job.job_type
+        != ("agent.research.comparison" if kind == "comparison" else "agent.paper.research")
+        or job.queue != ("strategy_rnd" if kind == "comparison" else "general")
+        or job.schema_version
+        != ("comparison-v1" if kind == "comparison" else "agent_research_job_v1")
         or job.scope_kind != "instrument"
         or job.scope_id != str(run.instrument_id)
         or job.effective_at != run.decision_time
-        or job.priority != JOB_PRIORITIES[JobType.AGENT_PAPER_RESEARCH]
+        or job.priority
+        != (0 if kind == "comparison" else JOB_PRIORITIES[JobType.AGENT_PAPER_RESEARCH])
         or job.payload != {"run_id": str(run.id)}
-        or job.input_hash != _formal_stage_job_hash(run)
+        or job.input_hash
+        != (job_input_hash(job.payload) if kind == "comparison" else _formal_stage_job_hash(run))
         or job.max_attempts != 1
         or job.manual_retry_count != 0
         or job.attempt_count != 1
-        or job.retry_policy != "automatic_safe"
+        or job.retry_policy != ("never" if kind == "comparison" else "automatic_safe")
         or job.finished_at != terminal["closed_at"]
         or job.job_key
-        != canonical_job_key(
-            JobKeyV1(
-                job_type=JobType.AGENT_PAPER_RESEARCH,
-                scope_kind="instrument",
-                scope_id=job.scope_id,
-                effective_at=job.effective_at,
-                input_hash=job.input_hash,
+        != (
+            run.idempotency_key
+            if kind == "comparison"
+            else canonical_job_key(
+                JobKeyV1(
+                    job_type=JobType.AGENT_PAPER_RESEARCH,
+                    scope_kind="instrument",
+                    scope_id=job.scope_id,
+                    effective_at=job.effective_at,
+                    input_hash=job.input_hash,
+                )
             )
         )
     ):
@@ -221,20 +230,62 @@ async def read_terminal_proof(
     ):
         raise ProtocolRejected(invalid)
     known = terminal["known"]
+    settled = budget.state == "settled"
+    held = (
+        budget.state == "reserved" and budget.settled_usd is None and run.settled_cost_usd is None
+    )
     if known:
         tokens = (sum(r["input_tokens"] for r in rows), sum(r["output_tokens"] for r in rows))
-        if (
-            (run.input_tokens, run.output_tokens) != tokens
-            or budget.state != "settled"
-            or run.settled_cost_usd != budget.settled_usd
-            or run.settled_cost_usd != usage_cost(model, *tokens)
-        ):
+        if (run.input_tokens, run.output_tokens) != tokens:
             raise ProtocolRejected(invalid)
-    elif (
-        budget.state != "reserved"
-        or budget.settled_usd is not None
-        or run.settled_cost_usd is not None
-    ):
+        if settled:
+            if run.settled_cost_usd != budget.settled_usd or run.settled_cost_usd != usage_cost(
+                model, *tokens
+            ):
+                raise ProtocolRejected(invalid)
+        elif (
+            held
+            and run.status == "failed"
+            and member["stopped"]
+            and job.status == ("dead_letter" if orphan else "failed")
+        ):
+            from nexus.agents.synthesis import observed_usage_cost
+
+            observed_usage_cost(model, *tokens)
+            output = await session.scalar(
+                select(AgentResearchOutputRecord)
+                .where(AgentResearchOutputRecord.run_id == run.id)
+                .order_by(AgentResearchOutputRecord.sequence.desc())
+                .limit(1)
+            )
+            event = await session.scalar(
+                select(AgentResearchEventRecord)
+                .where(AgentResearchEventRecord.run_id == run.id)
+                .order_by(AgentResearchEventRecord.sequence.desc())
+                .limit(1)
+            )
+            if (
+                output is None
+                or event is None
+                or output.status != "failed"
+                or output.role is not None
+                or output.prompt_hash is not None
+                or output.intent is not None
+                or output.payload.get("reason") != "usage_accounting_failed"
+                or output.content_hash
+                != _hash(
+                    {"status": "failed", "role": None, "payload": output.payload, "intent": None}
+                )
+                or event.state != "failed"
+                or event.details != {"reason": "usage_accounting_failed"}
+                or event.event_hash != _hash({"state": "failed", "details": event.details})
+                or output.created_at > terminal["closed_at"]
+                or event.created_at > terminal["closed_at"]
+            ):
+                raise ProtocolRejected(invalid)
+        else:
+            raise ProtocolRejected(invalid)
+    elif not held:
         raise ProtocolRejected(invalid)
     if not known:
         lower_bound = known_usage_lower_bound(rows)
@@ -244,6 +295,15 @@ async def read_terminal_proof(
             else (None, None)
         )
         if (run.input_tokens, run.output_tokens) != expected:
+            raise ProtocolRejected(invalid)
+        from nexus.agents.synthesis import observed_usage_cost
+
+        if (
+            observed_usage_cost(model, lower_bound.input_tokens, lower_bound.output_tokens)
+            > budget.reserved_usd
+        ):
+            # Unknown-history acceptance cannot waive a separately known cost
+            # overrun, including after the original reservation's business day.
             raise ProtocolRejected(invalid)
     if orphan:
         outputs = tuple(
@@ -257,7 +317,9 @@ async def read_terminal_proof(
             )
         )
         reason = {
-            "reason": "STAGED_RESEARCH_CLOSED" if known else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"
+            "reason": ("STAGED_RESEARCH_CLOSED" if settled else "usage_accounting_failed")
+            if known
+            else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"
         }
         if len(outputs) != 1 or len(events) != 1:
             raise ProtocolRejected(invalid)
@@ -310,5 +372,11 @@ async def read_terminal_proof(
         c["confirmed"] is True for c in cleanup_rows
     )
     return TerminalProof(
-        run.id, known, confirmed, orphan, terminal["chain_hash"], evidence_digest(cleanup_facts)
+        run.id,
+        known,
+        settled,
+        confirmed,
+        orphan,
+        terminal["chain_hash"],
+        evidence_digest(cleanup_facts),
     )

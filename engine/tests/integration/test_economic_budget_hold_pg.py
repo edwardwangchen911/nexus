@@ -67,8 +67,8 @@ async def test_transfer_uses_own_hold_with_multiple_priced_groups(
 ):
     from uuid import uuid4
 
+    from integration.test_portfolio_decision_budget_pg import _seed_runs
     from nexus.paper.economic_budget_hold import AllocationRequest
-    from test_portfolio_decision_budget_pg import _seed_runs
 
     factory = session_factory(settings(migrated_database_url))
     async with factory.begin() as session:
@@ -116,9 +116,9 @@ async def test_transfer_failure_rolls_back_child_and_credit(
 ):
     from uuid import uuid4
 
+    from integration.test_portfolio_decision_budget_pg import _seed_runs
     from nexus.paper.economic_budget_hold import TRANSFER_ACTION, AllocationRequest
     from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
-    from test_portfolio_decision_budget_pg import _seed_runs
 
     factory = session_factory(settings(migrated_database_url))
     async with factory.begin() as session:
@@ -176,8 +176,8 @@ async def test_native_research_transfer_never_double_counts_and_unknown_stays_he
 ):
     from uuid import uuid4
 
+    from integration.test_portfolio_decision_budget_pg import _seed_runs
     from nexus.paper.economic_budget_hold import AllocationRequest
-    from test_portfolio_decision_budget_pg import _seed_runs
 
     factory = session_factory(settings(migrated_database_url))
     async with factory.begin() as session:
@@ -520,10 +520,10 @@ async def test_transfer_entry_rejects_future_protocol_slot_without_budget_writes
     from types import SimpleNamespace
     from uuid import uuid4
 
+    from integration.test_portfolio_economic_protocol_pg import protocol_request
     from nexus.ops import economic_budget_transfer as entry
     from nexus.paper.portfolio_economic_protocol import decode_protocol, register_protocol
     from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
-    from test_portfolio_economic_protocol_pg import protocol_request
 
     factory = session_factory(settings(migrated_database_url))
     async with factory.begin() as session:
@@ -591,6 +591,8 @@ async def test_direct_native_transfer_cannot_bypass_protocol_slot_authority(
 ):
     from uuid import uuid4
 
+    from integration.test_portfolio_decision_budget_pg import _seed_runs
+    from integration.test_portfolio_economic_protocol_pg import protocol_request
     from nexus.agents.portfolio_synthesis_persistence import reserve_portfolio_synthesis_budget
     from nexus.paper.economic_budget_hold import TRANSFER_ACTION, AllocationRequest
     from nexus.paper.portfolio_economic_protocol import decode_protocol, register_protocol
@@ -598,8 +600,6 @@ async def test_direct_native_transfer_cannot_bypass_protocol_slot_authority(
         AgentDailyBudgetReservationRecord,
         AgentPortfolioSynthesisBudgetReservationRecord,
     )
-    from test_portfolio_decision_budget_pg import _seed_runs
-    from test_portfolio_economic_protocol_pg import protocol_request
 
     factory = session_factory(settings(migrated_database_url))
     async with factory.begin() as session:
@@ -673,10 +673,10 @@ async def test_existing_native_receipt_readback_never_requalifies_or_releases(
     from unittest.mock import AsyncMock
     from uuid import uuid4
 
+    from integration.test_portfolio_decision_budget_pg import _seed_runs
     from nexus.agents.portfolio_synthesis_persistence import reserve_portfolio_synthesis_budget
     from nexus.paper import economic_budget_hold
     from nexus.paper.economic_budget_hold import AllocationRequest
-    from test_portfolio_decision_budget_pg import _seed_runs
 
     factory = session_factory(settings(migrated_database_url))
     async with factory.begin() as session:

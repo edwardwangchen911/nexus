@@ -83,6 +83,20 @@ def citations_bound(
 def usage_cost(model: AgentModelConfigRecord, input_tokens: int, output_tokens: int) -> Decimal:
     if input_tokens > model.max_input_tokens or output_tokens > model.max_output_tokens:
         raise ValueError("committee token usage exceeded immutable model limits")
+    return observed_usage_cost(model, input_tokens, output_tokens)
+
+
+def observed_usage_cost(
+    model: AgentModelConfigRecord, input_tokens: int, output_tokens: int
+) -> Decimal:
+    """Price a verified count without granting execution or settlement permission."""
+    if any(type(n) is not int or n < 0 for n in (input_tokens, output_tokens)):
+        raise ValueError("observed usage requires nonnegative token counts")
+    if any(
+        not price.is_finite() or price < 0
+        for price in (model.input_usd_per_million, model.output_usd_per_million)
+    ):
+        raise ValueError("observed usage pricing is invalid")
     return (
         Decimal(input_tokens) * model.input_usd_per_million
         + Decimal(output_tokens) * model.output_usd_per_million

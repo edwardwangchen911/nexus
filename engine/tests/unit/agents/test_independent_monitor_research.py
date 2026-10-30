@@ -34,7 +34,9 @@ async def test_independent_source_cannot_enter_formal_execution_even_if_other_ma
         snapshot.payload["purpose"] = PURPOSE
     else:
         setattr(snapshot, marker, SOURCE if marker == "source" else PURPOSE)
-    run = SimpleNamespace(data_snapshot_id=UUID(int=1), evidence_manifest=[])
+    run = SimpleNamespace(
+        actor_id="local-research", data_snapshot_id=UUID(int=1), evidence_manifest=[]
+    )
     with pytest.raises(ValueError, match="INDEPENDENT_MONITOR_FORMAL_CONSUMPTION_FORBIDDEN"):
         await require_formal_research(SnapshotSession(snapshot), run)
 

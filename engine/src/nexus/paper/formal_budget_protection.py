@@ -108,6 +108,10 @@ async def _native_usage(
         or (row.state != "reserved" and run.status not in {"completed", "failed", "abstained"})
     ):
         raise ValueError("FORMAL_BUDGET_COVERAGE_UNKNOWN")
+    if isinstance(row, AgentDailyBudgetReservationRecord) and row.state == "reserved":
+        from nexus.agents.research_usage import research_reserved_occupancy
+
+        return await research_reserved_occupancy(session, row)
     return usage
 
 
@@ -566,6 +570,9 @@ async def require_protected_admission(
     No caller may declare a formal credit: only an exactly pinned stored run
     can consume its own future obligation.
     """
+    from nexus.agents.research_usage import require_research_accounting_clear
+
+    await require_research_accounting_clear(session)
     demand = await protected_demand(session, business_date=now.date(), now=now)
     if demand is None:
         return False

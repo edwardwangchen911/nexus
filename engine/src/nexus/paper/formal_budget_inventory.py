@@ -167,6 +167,7 @@ async def inspect_inventory(
     }
     native: dict[tuple[str, UUID], Reservation] = {}
     native_ids: dict[tuple[str, UUID], UUID] = {}
+    native_occupancy: dict[tuple[str, UUID], Decimal] = {}
     native_total = Decimal(0)
     for kind, table in (
         ("research", AgentDailyBudgetReservationRecord),
@@ -181,11 +182,19 @@ async def inspect_inventory(
                 raw,
             )
             usage, valid = reservation_usage(row)
+            if isinstance(row, AgentDailyBudgetReservationRecord) and row.state == "reserved":
+                from nexus.agents.research_usage import research_reserved_occupancy
+
+                try:
+                    usage = await research_reserved_occupancy(session, row)
+                except ValueError:
+                    valid = False
             native_total += usage
             if not valid:
                 codes.add("NATIVE_USAGE_UNKNOWN")
             native[kind, row.run_id] = row
             native_ids[kind, row.run_id] = row.id
+            native_occupancy[kind, row.run_id] = usage
     try:
         remaining_hold = await held_pair_budget(session, business_date=day)
     except ValueError:
@@ -344,6 +353,8 @@ async def inspect_inventory(
             reservation=reservation,
             no_start_confirmed=cycle is None and claim is None,
         )
+        if reservation is not None and run is not None:
+            occupied = native_occupancy[kind, run.id]
         if not exact or (run is None and cycle is not None):
             state, uncovered = "unknown", None
             codes.add("TASK_ASSOCIATION_UNKNOWN")

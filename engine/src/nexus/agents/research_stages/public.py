@@ -70,6 +70,7 @@ async def _member_available(session: Any, *, member: Any, now: Any) -> Any:
     trigger = await session.get(MonitorTrigger, member.trigger_id)
     if (
         not proof.known
+        or not proof.budget_settled
         or not proof.cleanup_confirmed
         or trigger is None
         or (trigger.status not in {"completed", "failed"})
@@ -86,7 +87,7 @@ async def _finished(session: Any, **kwargs: Any) -> Any:
         return False
     if proof is None:
         return await admission._legacy_monitor_job_finished(session, **kwargs)
-    return proof.cleanup_confirmed
+    return proof.cleanup_confirmed and (not proof.known or proof.budget_settled)
 
 
 async def _lock_orphans(session: Any, *, run_ids: Any, now: Any) -> Any:
@@ -287,6 +288,7 @@ async def _selected_member_settled(
     if (
         proof is None
         or not proof.cleanup_confirmed
+        or (proof.known and not proof.budget_settled)
         or (not allow_unknown_usage and (not proof.known))
     ):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")

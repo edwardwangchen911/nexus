@@ -485,6 +485,9 @@ async def hold_pair_budget(
         if decode_hold(events[0]).request != request:
             raise ValueError("ECONOMIC_HOLD_CONFLICT")
         return events[0]
+    from nexus.agents.research_usage import require_research_accounting_clear
+
+    await require_research_accounting_clear(session)
     now = await _require_budget_day(session, expected=now.date(), code="ECONOMIC_HOLD_DAY_MISMATCH")
     await require_hold_isolation(
         session, request=request, expected_database=expected_database, now=now

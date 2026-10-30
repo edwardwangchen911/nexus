@@ -133,17 +133,29 @@ async def load_frozen_evidence(
         ):
             return ()
     if any(ref.source == "nexus_independent_monitor_research" for ref in ordered):
+        from nexus.agents.comparison_authority import comparison_context_qualified
         from nexus.monitoring.independent_storage import read_independent_context
 
-        independent = await read_independent_context(
-            session,
-            snapshot_id=run.data_snapshot_id,
-            instrument_id=run.instrument_id,
-            as_of=run.decision_time,
+        comparison = await comparison_context_qualified(session, run)
+        independent = (
+            None
+            if comparison is not None
+            else await read_independent_context(
+                session,
+                snapshot_id=run.data_snapshot_id,
+                instrument_id=run.instrument_id,
+                as_of=run.decision_time,
+            )
         )
-        if independent is None or {
-            r.id for r in ordered if r.source == "nexus_independent_monitor_research"
-        } != {independent[1].id}:
+        if (
+            comparison is False
+            or comparison is None
+            and (
+                independent is None
+                or {r.id for r in ordered if r.source == "nexus_independent_monitor_research"}
+                != {independent[1].id}
+            )
+        ):
             return ()
     if any(
         ref.source in {"nexus_price_monitor_increment", "nexus_monitor_increment_v2"}

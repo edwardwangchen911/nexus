@@ -27,6 +27,7 @@ from openai_codex.generated.v2_all import ChatgptAccount, ConfigReadResponse, Tu
 from openai_codex.models import JsonObject
 from pydantic import BaseModel, ConfigDict, Field
 
+from nexus.agents.budget import ResearchAccountingBusy
 from nexus.agents.codex_token_budget import input_preflight_units
 from nexus.agents.codex_versions import (
     BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
@@ -312,6 +313,13 @@ def _invocation_boundary(
                 error.failure_facts = state.stream_observer.failure_facts
             if state.measured_usage is not None:
                 error.usage = state.measured_usage
+        raise
+    except ResearchAccountingBusy as error:
+        # A local financial publication refusal is not a provider failure.
+        # Resource cleanup already unwound; preserve it for the owning transaction.
+        from nexus.agents.research_dispatch import stop_current_dispatch
+
+        stop_current_dispatch(error)
         raise
     except TimeoutError:
         from nexus.agents.research_dispatch import stop_current_dispatch

@@ -164,7 +164,9 @@ async def _require_research_orphan_binding(
         is not None
     ):
         raise ValueError("AGENT_PAPER_RESEARCH_ORPHAN_BINDING_INVALID")
-    await require_reserved_daily_budget(session, run_id=run.id)
+    # Recovery is a short financial transaction, never a legacy provider wait.
+    # Reject contention before the shared public/protocol closeout can block.
+    await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
     return run, attempts[0]
 
 

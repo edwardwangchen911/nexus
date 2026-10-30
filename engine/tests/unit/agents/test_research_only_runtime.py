@@ -49,7 +49,9 @@ async def test_pure_admission_requires_exact_formal_scope_before_access(extra):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("marker", ["purpose", "source", "schema", "evidence"])
 async def test_formal_consumer_rejects_pure_output_before_requalification(marker, monkeypatch):
-    run = SimpleNamespace(data_snapshot_id=UUID(int=2), evidence_manifest=[])
+    run = SimpleNamespace(
+        actor_id="fixture-research-only", data_snapshot_id=UUID(int=2), evidence_manifest=[]
+    )
     snapshot = SimpleNamespace(
         source="nexus_research", schema_version="research_filings_v1", payload={}
     )
@@ -78,7 +80,9 @@ async def test_formal_consumer_rejects_pure_output_before_requalification(marker
 async def test_optimizer_direct_consumer_rejects_pure_run():
     from nexus.optimizer.formal_inputs import FormalResearchOutputReference, freeze_formal_research
 
-    run = SimpleNamespace(data_snapshot_id=UUID(int=2), evidence_manifest=[])
+    run = SimpleNamespace(
+        actor_id="fixture-research-only", data_snapshot_id=UUID(int=2), evidence_manifest=[]
+    )
     snapshot = SimpleNamespace(
         source="nexus_research_only",
         schema_version="research_only_v2",

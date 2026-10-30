@@ -73,8 +73,12 @@ async def _qualify_source(
     | IndependentMonitorContext,
     tuple[EvidenceRef, ...],
 ]:
+    from nexus.agents.comparison_manifest import require_business_run
+
+    require_business_run(run.actor_id)
     invalid = "MONITOR_SOURCE_INVALID"
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    require_business_run(run.actor_id, snapshot)
     if snapshot is None:
         raise ValueError(invalid)
     context: (

@@ -4,11 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 from helpers.paper_batch import INSTRUMENTS
+from integration.test_portfolio_synthesis_persistence_pg import seed_synthesis
 from nexus.paper.formal_budget_inventory import inspect_inventory
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import AuditEvent, Job
 from sqlalchemy import func, select, text
-from test_portfolio_synthesis_persistence_pg import seed_synthesis
 
 
 @pytest.mark.asyncio
@@ -105,11 +105,12 @@ async def test_native_coverage_is_exact_and_global_usage_is_retained(
                         input_tokens=1,
                         output_tokens=1,
                     )
-                # Match the existing synthetic terminal fixture, but settle usage
-                # first: normal terminal runs cannot be modified afterwards.
-                await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
-                await session.execute(text("UPDATE agent_research_runs SET status='completed'"))
-                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
+                # Settle before terminal immutability, then traverse the existing
+                # state contract without disabling its (now deferred) guards.
+                for state in ("running", "validated", "audited", "synthesized", "completed"):
+                    await session.execute(
+                        text("UPDATE agent_research_runs SET status=:state"), {"state": state}
+                    )
             if break_association:
                 # Isolated damaged association: do not repair/relabel runtime evidence.
                 await session.execute(
