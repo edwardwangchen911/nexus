@@ -37,17 +37,17 @@ from sqlalchemy.exc import DBAPIError
 from unit.agents.test_comparison_inputs import archive_source, digest
 
 
-async def seed(factory):
+async def seed(factory, *, source_kind="fixture"):
     archive = archive_source()
     # Native references are content addressed; no personal or live data is used.
     for member in archive["members"]:
         company = member["evidence"][0]
-        company["source"] = "fixture"
+        company["source"] = source_kind
         company["object_id"] += ":" + member["request"]["instrument_id"]
         company["location"] = "memory://sha256/" + company["content_hash"]
         security = member["inputs"]["security_snapshot"]
         security["items"][0]["provider_object_id"] = company["object_id"]
-        security["items"][0]["source"] = "fixture"
+        security["items"][0]["source"] = source_kind
         ctx = security["independent_monitor_context"]
         when = datetime.fromisoformat(member["request"]["decision_time"])
         base_payload = {
@@ -183,6 +183,32 @@ async def seed(factory):
                     )
                 )
         await session.flush()
+        if source_kind != "fixture":
+            from nexus.persistence.models.market import InstrumentAlias
+            from nexus.persistence.models.research import Filing
+
+            for member in archive["members"]:
+                when = datetime.fromisoformat(member["request"]["decision_time"])
+                item = _manifest(member)[0]
+                instrument = UUID(member["request"]["instrument_id"])
+                symbol = member["inputs"]["price_close"]["items"][0]["symbol"]
+                session.add(
+                    InstrumentAlias(instrument_id=instrument, symbol=symbol, valid_from=when.date())
+                )
+                session.add(
+                    Filing(
+                        instrument_id=instrument,
+                        evidence_ref_id=UUID(item["id"]),
+                        source=item["source"],
+                        provider_object_id=item["provider_object_id"],
+                        accession_number=instrument.hex,
+                        form="10-K",
+                        filed_at=when,
+                        accepted_at=when,
+                        revision=item["revision"],
+                    )
+                )
+            await session.flush()
         for member in archive["members"]:
             request = member["request"]
             evidence = _manifest(member)

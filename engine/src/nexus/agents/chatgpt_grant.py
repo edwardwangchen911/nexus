@@ -344,6 +344,20 @@ class GrantStore:
     async def inspect(
         self, *, clock: Callable[[], datetime], transport: httpx.AsyncBaseTransport | None = None
     ) -> dict[str, Any]:
+        grant = await self.load_verified(clock=clock, transport=transport)
+        return {
+            "status": "refresh_required" if grant.expired(clock()) else "access_ready",
+            "signature_verified": True,
+            "inspection_only": True,
+            "dispatch_authority": False,
+            "model_calls": 0,
+            "credential_writes": 0,
+        }
+
+    async def load_verified(
+        self, *, clock: Callable[[], datetime], transport: httpx.AsyncBaseTransport | None = None
+    ) -> Grant:
+        """Read the existing signed grant; never register, rotate or refresh it."""
         try:
             async with (
                 asyncio.timeout(10),
@@ -357,14 +371,7 @@ class GrantStore:
             ):
                 jwks = await _response(client, "GET", JWKS_URL)
                 grant = self.read(jwks=jwks, now=clock())
-            return {
-                "status": "refresh_required" if grant.expired(clock()) else "access_ready",
-                "signature_verified": True,
-                "inspection_only": True,
-                "dispatch_authority": False,
-                "model_calls": 0,
-                "credential_writes": 0,
-            }
+            return grant
         except GrantError:
             raise
         except Exception as error:

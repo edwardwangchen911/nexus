@@ -110,7 +110,9 @@ class FrozenCommittee:
         return self.outputs[role]
 
 
-async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute: Any) -> Any:
+async def execute_staged_claim(
+    *, factory: Any, claim: Any, clock: Any, execute: Any, comparison: Any = None
+) -> Any:
     from nexus.agents.research_maintenance import require_research_open
 
     require_research_open()
@@ -135,6 +137,8 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             await require_independent_execution_open(session, request_id=route["scope_id"])
     if route is None:
         raise ProtocolRejected("STAGED_ROUTE_REQUIRED")
+    if (route["kind"] == "comparison") != (comparison is not None):
+        raise ProtocolRejected("COMPARISON_EXECUTION_BINDING_REQUIRED")
 
     captured_preparation = False
     with capture_preparation():
@@ -146,6 +150,8 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
                     {"scope": route["scope_id"]},
                 )
                 await _lock_active_claim(preparation, claim=claim, now=clock())
+                if comparison is not None:
+                    await comparison.validate(preparation, claim, route)
                 try:
                     result = await execute_and_finalize_job(
                         preparation, claim=claim, checked_at=clock(), execute=execute
@@ -216,6 +222,7 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
         now=clock(),
         increment=route["kind"] == "increment",
         independent=route["kind"] == "independent",
+        comparison=route["kind"] == "comparison",
         work_deadline=work_deadline,
         cleanup_deadline=min(original_expiry, work_deadline + timedelta(seconds=7)),
     )
@@ -232,14 +239,18 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
             seconds=min(original_deadline, options.get("deadline_at", original_deadline))
             - monotonic_anchor
         )
-        wire = json.dumps(
-            {
-                "wire": codex_sdk.codex_request_wire(payload),
-                "schema": codex_sdk.codex_output_schema(options["output_model"]),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+        wire = (
+            comparison.wire(payload, options["output_model"])
+            if comparison is not None
+            else json.dumps(
+                {
+                    "wire": codex_sdk.codex_request_wire(payload),
+                    "schema": codex_sdk.codex_output_schema(options["output_model"]),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
         if stage_number > 1:
             async with factory.begin() as check:
                 await _lock_active_claim(check, claim=claim, now=clock())
@@ -267,6 +278,30 @@ async def execute_staged_claim(*, factory: Any, claim: Any, clock: Any, execute:
                 old_guard()
 
         options["dispatch_guard"] = guard
+        if comparison is not None and comparison.transport == "responses":
+            from nexus.agents.research_stages.http_lifecycle import invoke_http_stage
+
+            work = min(original_deadline, options.get("deadline_at", original_deadline))
+            cleanup = min(
+                work + 7,
+                original_deadline,
+                monotonic_anchor + (original_expiry - wall_anchor).total_seconds(),
+            )
+            return await invoke_http_stage(
+                protocol=protocol,
+                scope=scope,
+                ticket=ticket,
+                wire=wire,
+                output_model=options["output_model"],
+                grant=comparison.grant,
+                clock=clock,
+                wall_anchor=wall_anchor,
+                monotonic_anchor=monotonic_anchor,
+                work_deadline=work,
+                cleanup_deadline=cleanup,
+                client=comparison.client_factory(),
+                dispatch_guard=guard,
+            )
         return await invoke_stage(
             protocol,
             scope,

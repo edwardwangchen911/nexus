@@ -1,4 +1,4 @@
-"""Normal comparison preparation/admission/readback entries; never dispatch."""
+"""Isolated comparison preparation, exact once-only execution and readback."""
 
 import argparse
 import asyncio
@@ -28,6 +28,36 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
     settings = local_settings(args.repo_root, load_model_key=False)
     factory = session_factory(settings)
     try:
+        if args.command == "run-position":
+            from nexus.agents.chatgpt_grant import GrantStore
+            from nexus.agents.comparison_execution import execute_comparison_position
+
+            manifest = ComparisonManifest.model_validate_json(args.manifest.read_bytes())
+            with args.source.open("rb") as stream:
+                source = stream.read(8 * 1024 * 1024 + 1)
+            with args.prepared.open("rb") as stream:
+                prepared = json.loads(stream.read(8 * 1024 * 1024 + 1))
+            grant = await GrantStore(args.credentials_dir).load_verified(
+                clock=lambda: datetime.now(UTC)
+            )
+            # The executor owns short transactions and the once-only claim.
+            # Never hold this command's admission transaction around inference.
+            await execute_comparison_position(
+                factory=factory,
+                source=source,
+                prepared=prepared,
+                manifest=manifest,
+                ordinal=args.position,
+                worker_id=args.worker_id,
+                grant=grant,
+            )
+            return {
+                "status": "position_executor_returned",
+                "experiment_id": str(manifest.experiment_id),
+                "position": args.position,
+                "readback_required": True,
+                "replay_allowed": False,
+            }
         async with factory() as session, session.begin():
             if args.command == "inspect-position":
                 await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -154,12 +184,20 @@ def main() -> int:
         )
     admit = subcommands.add_parser("admit-position")
     inspect = subcommands.add_parser("inspect-position")
-    for subcommand in (admit, inspect):
+    run = subcommands.add_parser("run-position")
+    for subcommand in (admit, inspect, run):
         subcommand.add_argument("--repo-root", type=Path, required=True)
         subcommand.add_argument("--position", type=int, choices=range(1, 13), required=True)
-    admit.add_argument("--source", type=Path, required=True)
-    admit.add_argument("--prepared", type=Path, required=True)
-    admit.add_argument("--manifest", type=Path, required=True)
+    for subcommand in (admit, run):
+        subcommand.add_argument("--source", type=Path, required=True)
+        subcommand.add_argument("--prepared", type=Path, required=True)
+        subcommand.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--worker-id", required=True)
+    run.add_argument(
+        "--credentials-dir",
+        type=Path,
+        default=Path.home() / ".config" / "nexus-chatgpt-latency-probe",
+    )
     admit.add_argument("--model-config-id", type=UUID, required=True)
     inspect.add_argument("--experiment-id", type=UUID, required=True)
     args = parser.parse_args()
@@ -197,6 +235,8 @@ def main() -> int:
                     "status": "unknown",
                     "reason": "COMPARISON_ADMISSION_RESULT_UNKNOWN"
                     if args.command == "admit-position"
+                    else "COMPARISON_EXECUTION_RESULT_UNKNOWN"
+                    if args.command == "run-position"
                     else "COMPARISON_READ_FAILED",
                 }
             )
@@ -218,6 +258,19 @@ def main() -> int:
             if isinstance(error, GrantError):
                 details = {"phase": error.phase, "http_status": error.http_status}
         print(json.dumps({"status": "rejected", "reason": code, **details}))
+        return 1
+    except Exception:
+        if args.command != "run-position":
+            raise
+        print(
+            json.dumps(
+                {
+                    "status": "unknown",
+                    "reason": "COMPARISON_EXECUTION_RESULT_UNKNOWN",
+                    "replay_allowed": False,
+                }
+            )
+        )
         return 1
     print(json.dumps(result))
     return 0
