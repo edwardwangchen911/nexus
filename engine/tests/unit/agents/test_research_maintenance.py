@@ -168,6 +168,15 @@ async def test_unprepared_independent_request_cannot_create_manifest(monkeypatch
     settings = SimpleNamespace(agent_paper_account_id=row.account_id)
     session = AsyncMock()
     session.get.return_value = row
+
+    # The v3 replay guard reads isolation and existing acceptance tombstones
+    # before preparation. Model these database facts without bypassing the guard.
+    async def scalar(statement):
+        assert str(statement) == "SHOW transaction_isolation"
+        return "read committed"
+
+    session.scalar.side_effect = scalar
+    session.scalars.return_value = []
     monkeypatch.setattr(research_request, "lock_portfolio_account", AsyncMock())
     monkeypatch.setattr(
         research_request,
