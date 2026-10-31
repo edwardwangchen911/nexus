@@ -224,6 +224,11 @@ async def invoke_http_stage(
                 or checked_credential.binding_hash != credential_binding
             ):
                 raise ProtocolRejected("PLATFORM_HTTP_STOPPED_OR_CREDENTIAL_CHANGED")
+            if checked_credential.key_scope_only and any(
+                name in request.headers or name in client.headers
+                for name in ("openai-organization", "openai-project")
+            ):
+                raise ProtocolRejected("PLATFORM_HTTP_SCOPE_CHANGED")
             request.headers.update(checked_credential.request_headers())
             return
         if protocol.local_stopped or grant is None or not grant.identity_verified:

@@ -1,4 +1,4 @@
-"""Local Platform key and manual gift-only evidence; never contact a provider or DB.
+"""Local Platform key and explicit funding authority; never contact a provider or DB.
 
 Manual console evidence is an operator attestation, not a remote balance query.
 Admission callers must freeze both hashes, reread the same private evidence at
@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, Inexact, localcontext
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from dotenv import dotenv_values
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
@@ -42,6 +43,7 @@ _ERRORS = frozenset(
         "PLATFORM_FUNDING_UNQUALIFIED",
         "PLATFORM_WINDOW_INVALID",
         "PLATFORM_BALANCE_INSUFFICIENT",
+        "PLATFORM_SPEND_LIMIT_EXCEEDED",
         "PLATFORM_OCCUPANCY_INVALID",
         "PLATFORM_KEY_ALREADY_EXISTS",
         "PLATFORM_KEY_SAVE_FAILED",
@@ -76,10 +78,11 @@ def credential_fingerprint(key: str) -> str:
 class PlatformCredential:
     api_key: SecretStr = field(repr=False)
     fingerprint: str
-    organization_id: str = field(repr=False)
-    project_id: str = field(repr=False)
+    organization_id: str | None = field(repr=False)
+    project_id: str | None = field(repr=False)
     endpoint: str = PLATFORM_ENDPOINT
     credential_kind: str = "platform_project_key"
+    key_scope_only: bool = False
 
     @property
     def binding_hash(self) -> str:
@@ -100,6 +103,9 @@ class PlatformCredential:
     def request_headers(self) -> dict[str, str]:
         """Only the final HTTP sender consumes these; never log this dictionary."""
         _validate_credential(self)
+        if self.key_scope_only:
+            return {"Authorization": "Bearer " + self.api_key.get_secret_value()}
+        assert self.organization_id is not None and self.project_id is not None
         return {
             "Authorization": "Bearer " + self.api_key.get_secret_value(),
             "OpenAI-Organization": self.organization_id,
@@ -108,11 +114,18 @@ class PlatformCredential:
 
 
 def _validate_credential(credential: PlatformCredential) -> None:
+    scope_valid = (
+        credential.organization_id is None and credential.project_id is None
+        if credential.key_scope_only
+        else isinstance(credential.organization_id, str)
+        and isinstance(credential.project_id, str)
+        and bool(_IDENTITY.fullmatch(credential.organization_id))
+        and bool(_IDENTITY.fullmatch(credential.project_id))
+    )
     if (
         credential.credential_kind != "platform_project_key"
         or credential.endpoint != PLATFORM_ENDPOINT
-        or not _IDENTITY.fullmatch(credential.organization_id)
-        or not _IDENTITY.fullmatch(credential.project_id)
+        or not scope_valid
         or credential.fingerprint != credential_fingerprint(credential.api_key.get_secret_value())
     ):
         _reject("PLATFORM_CREDENTIAL_BINDING_MISMATCH")
@@ -136,9 +149,10 @@ def resolve_platform_credential(
     root: Path,
     *,
     expected_fingerprint: str,
-    organization_id: str,
-    project_id: str,
+    organization_id: str | None,
+    project_id: str | None,
     endpoint: str = PLATFORM_ENDPOINT,
+    key_scope_only: bool = False,
 ) -> PlatformCredential:
     """Resolve the actual key, including normal .env/process overrides, then bind it."""
     if endpoint != PLATFORM_ENDPOINT:
@@ -151,6 +165,11 @@ def resolve_platform_credential(
         name: value for name, value in dotenv_values(root / "infra/.env.local").items() if value
     }
     environment.update({name: value for name, value in os.environ.items() if value})
+    if key_scope_only and any(
+        environment.get(name)
+        for name in ("OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_PROJECT")
+    ):
+        _reject("PLATFORM_CREDENTIAL_BINDING_MISMATCH")
     expected = {
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
         "OPENAI_API_BASE": "https://api.openai.com/v1",
@@ -161,7 +180,9 @@ def resolve_platform_credential(
     }
     if any(environment.get(name, value) != value for name, value in expected.items()):
         _reject("PLATFORM_DESTINATION_MISMATCH")
-    result = PlatformCredential(key, actual, organization_id, project_id, endpoint)
+    result = PlatformCredential(
+        key, actual, organization_id, project_id, endpoint, key_scope_only=key_scope_only
+    )
     _validate_credential(result)
     return result
 
@@ -195,10 +216,37 @@ class _FundingRecord(BaseModel):
     console_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ExplicitPlatformSpendAuthorization(BaseModel):
+    """Exact local record of an already verified user instruction, never a balance."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True, allow_inf_nan=False)
+    version: int = Field(ge=1, le=1)
+    kind: Literal["explicit_platform_spend_authorization"]
+    purpose: str
+    endpoint: str
+    credential_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    organization_id: None = None
+    project_id: None = None
+    experiment_id: UUID
+    input_hashes: tuple[str, str, str]
+    max_total_usd: Decimal = Field(gt=0, le=Decimal("6.42"))
+    authorized_at: AwareDatetime
+    window_start: AwareDatetime
+    window_end: AwareDatetime
+    authorization_file: str = Field(repr=False)
+    authorization_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 @dataclass(frozen=True)
 class PlatformFundingProof:
-    record: _FundingRecord = field(repr=False)
+    record: _FundingRecord | ExplicitPlatformSpendAuthorization = field(repr=False)
     proof_hash: str
+
+    @property
+    def valid_until(self) -> datetime:
+        if isinstance(self.record, ExplicitPlatformSpendAuthorization):
+            return self.record.window_end
+        return min(self.record.window_end, self.record.gift_expires_at)
 
 
 def _private_bytes(path: Path, limit: int) -> bytes:
@@ -236,11 +284,26 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def load_platform_funding_proof(path: Path) -> PlatformFundingProof:
-    """Read one private attestation and verify its original console evidence hash."""
+    """Read a private gift attestation or an explicit, experiment-bound authorization."""
     raw = _private_bytes(path, 65536)
     try:
         payload = json.loads(raw, object_pairs_hook=_unique_object)
-        if not isinstance(payload, dict) or any(
+        if not isinstance(payload, dict):
+            _reject("PLATFORM_PROOF_INVALID")
+        if payload.get("kind") == "explicit_platform_spend_authorization":
+            if not isinstance(payload.get("max_total_usd"), str):
+                _reject("PLATFORM_PROOF_INVALID")
+            authorization = ExplicitPlatformSpendAuthorization.model_validate_json(raw)
+            if not all(_HASH.fullmatch(value) for value in authorization.input_hashes):
+                _reject("PLATFORM_PROOF_INVALID")
+            name = authorization.authorization_file
+            if not name or Path(name).name != name or name in {".", ".."}:
+                _reject("PLATFORM_PROOF_INVALID")
+            original = _private_bytes(path.parent / name, 16 * 1024 * 1024)
+            if not original.strip() or _sha256(original) != authorization.authorization_sha256:
+                _reject("PLATFORM_PROOF_INVALID")
+            return PlatformFundingProof(authorization, _sha256(raw))
+        if any(
             not isinstance(payload.get(name), str)
             for name in (
                 "gift_balance_usd",
@@ -271,7 +334,7 @@ class PlatformEligibility:
     purpose: str
     endpoint: str
     valid_until: datetime
-    available_gift_usd: Decimal = field(repr=False)
+    available_gift_usd: Decimal | None = field(repr=False)
 
 
 def _money(value: Decimal) -> bool:
@@ -288,6 +351,8 @@ def check_platform_eligibility(
     local_held_usd: Decimal,
     local_spent_since_proof_usd: Decimal,
     required_valid_until: datetime,
+    experiment_id: UUID | None = None,
+    input_hashes: tuple[str, ...] | None = None,
 ) -> PlatformEligibility:
     """Pure qualification. Occupancy must come from the shared ledger, never this file.
 
@@ -306,6 +371,39 @@ def check_platform_eligibility(
         or record.project_id != credential.project_id
         or not _HASH.fullmatch(proof.proof_hash)
     ):
+        _reject("PLATFORM_PROOF_BINDING_MISMATCH")
+    if isinstance(record, ExplicitPlatformSpendAuthorization):
+        if not credential.key_scope_only or (
+            record.experiment_id != experiment_id or record.input_hashes != input_hashes
+        ):
+            _reject("PLATFORM_PROOF_BINDING_MISMATCH")
+        if (
+            not isinstance(now, datetime)
+            or now.utcoffset() is None
+            or not isinstance(required_valid_until, datetime)
+            or required_valid_until.utcoffset() is None
+            or not record.window_start
+            <= record.authorized_at
+            <= now
+            < required_valid_until
+            <= record.window_end
+        ):
+            _reject("PLATFORM_WINDOW_INVALID")
+        if not all(
+            _money(value) for value in (required_usd, local_held_usd, local_spent_since_proof_usd)
+        ):
+            _reject("PLATFORM_OCCUPANCY_INVALID")
+        if required_usd > record.max_total_usd:
+            _reject("PLATFORM_SPEND_LIMIT_EXCEEDED")
+        return PlatformEligibility(
+            proof.proof_hash,
+            credential.binding_hash,
+            purpose,
+            credential.endpoint,
+            required_valid_until,
+            None,
+        )
+    if credential.key_scope_only:
         _reject("PLATFORM_PROOF_BINDING_MISMATCH")
     if (
         not record.key_ownership_confirmed
@@ -403,6 +501,8 @@ def main() -> int:
     check.add_argument("--local-held-usd", required=True)
     check.add_argument("--local-spent-since-proof-usd", required=True)
     check.add_argument("--valid-until", required=True)
+    check.add_argument("--experiment-id", type=UUID)
+    check.add_argument("--input-hash", action="append")
     args = parser.parse_args()
     try:
         root = Path.cwd()
@@ -436,6 +536,7 @@ def main() -> int:
                 organization_id=record.organization_id,
                 project_id=record.project_id,
                 endpoint=record.endpoint,
+                key_scope_only=isinstance(record, ExplicitPlatformSpendAuthorization),
             )
             eligibility = check_platform_eligibility(
                 credential,
@@ -446,12 +547,16 @@ def main() -> int:
                 local_held_usd=Decimal(args.local_held_usd),
                 local_spent_since_proof_usd=Decimal(args.local_spent_since_proof_usd),
                 required_valid_until=datetime.fromisoformat(args.valid_until),
+                experiment_id=args.experiment_id,
+                input_hashes=tuple(args.input_hash) if args.input_hash is not None else None,
             )
             result.update(
                 status="PLATFORM_ELIGIBLE_AT_CHECK",
                 funding_proof_hash=eligibility.funding_proof_hash,
                 credential_binding_hash=eligibility.credential_binding_hash,
             )
+            if isinstance(record, ExplicitPlatformSpendAuthorization):
+                result.update(funding_kind=record.kind, balance_verified=False)
         print(json.dumps(result))
         return 0
     except (Exception, KeyboardInterrupt) as error:

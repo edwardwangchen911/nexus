@@ -20,7 +20,9 @@ from nexus.settings import EngineSettings
 from sqlalchemy import text
 
 
-async def funding_fixture(factory, manifest, tmp_path, monkeypatch, *, balance=None):
+async def funding_fixture(
+    factory, manifest, tmp_path, monkeypatch, *, balance=None, explicit_spend=False
+):
     key = "synthetic-platform-native-funding"
     for name in (
         "OPENAI_API_KEY",
@@ -41,8 +43,9 @@ async def funding_fixture(factory, manifest, tmp_path, monkeypatch, *, balance=N
     credential = resolve_platform_credential(
         tmp_path,
         expected_fingerprint=credential_fingerprint(key),
-        organization_id="org-fixture",
-        project_id="proj-fixture",
+        organization_id=None if explicit_spend else "org-fixture",
+        project_id=None if explicit_spend else "proj-fixture",
+        key_scope_only=explicit_spend,
     )
     async with factory() as s:
         now = await s.scalar(text("SELECT clock_timestamp()"))
@@ -76,6 +79,22 @@ async def funding_fixture(factory, manifest, tmp_path, monkeypatch, *, balance=N
         console_evidence_file=original.name,
         console_evidence_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
     )
+    if explicit_spend:
+        body = dict(
+            version=1,
+            kind="explicit_platform_spend_authorization",
+            purpose=manifest.purpose,
+            endpoint=credential.endpoint,
+            credential_fingerprint=credential.fingerprint,
+            experiment_id=str(manifest.experiment_id),
+            input_hashes=manifest.input_hashes,
+            max_total_usd="6.42",
+            authorized_at=now.isoformat(),
+            window_start=now.isoformat(),
+            window_end=(now + timedelta(minutes=30)).isoformat(),
+            authorization_file=original.name,
+            authorization_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
+        )
     path = tmp_path / "funding.json"
     path.write_text(json.dumps(body))
     path.chmod(0o600)
@@ -116,12 +135,13 @@ async def test_missing_funding_cannot_create_manifest_run_or_reservation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_spend", [False, True], ids=["gift", "explicit-spend"])
 async def test_same_frozen_total_remains_covered_after_native_reservations(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, explicit_spend
 ):
     f = session_factory(EngineSettings(database_url=migrated_database_url))
     source, prepared, m, model, _, _ = await setup(f, monkeypatch)
-    m, funding = await funding_fixture(f, m, tmp_path, monkeypatch)
+    m, funding = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
     try:
         for i in (1, 2, 3):
             async with f() as s, s.begin():
@@ -150,8 +170,9 @@ async def test_same_frozen_total_remains_covered_after_native_reservations(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_spend", [False, True], ids=["gift", "explicit-spend"])
 async def test_normal_cli_admission_consumes_real_bound_funding_and_never_grant(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, explicit_spend
 ):
     from nexus.agents.chatgpt_grant import GrantStore
     from nexus.ops import openai_local
@@ -164,7 +185,7 @@ async def test_normal_cli_admission_consumes_real_bound_funding_and_never_grant(
     )
     f = session_factory(settings)
     source, prepared, m, model, _, _ = await setup(f, monkeypatch)
-    m, _ = await funding_fixture(f, m, tmp_path, monkeypatch)
+    m, _ = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
     paths = {}
     for name, content in {
         "source": source,
