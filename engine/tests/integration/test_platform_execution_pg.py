@@ -2,7 +2,7 @@
 
 import json
 from argparse import Namespace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -21,7 +21,18 @@ from unit.agents.test_http_stage_lifecycle import Body, terminal
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["complete", "changed_key", "missing_cache"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "complete",
+        "changed_key",
+        "missing_cache",
+        "wait_key",
+        "wait_proof",
+        "wait_console",
+        "wait_price",
+    ],
+)
 async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
@@ -37,6 +48,40 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         raise AssertionError("Platform must never fall back to SDK")
 
     monkeypatch.setattr(codex_staged, "invoke_codex", forbidden)
+    if mode.startswith("wait_"):
+        from nexus.agents import platform_funding
+        from nexus.ops.platform_credentials import PLATFORM_KEY_PATH
+
+        check_funding = platform_funding.require_platform_funding
+        expired_at_send = [False]
+        if mode == "wait_price":
+            from nexus.agents import comparison_execution as execution_clock
+
+            class SendBoundaryClock:
+                @staticmethod
+                def now(tz):
+                    value = datetime.now(tz)
+                    if expired_at_send[0]:
+                        expired_at_send[0] = False
+                        return value + timedelta(days=2)
+                    return value
+
+            monkeypatch.setattr(execution_clock, "datetime", SendBoundaryClock)
+
+        async def change_while_qualifying(session, manifest, funding, **kwargs):
+            await check_funding(session, manifest, funding, **kwargs)
+            if kwargs.get("required_valid_until") is not None:
+                # This is after the native pre-send loader and its async DB
+                # checks, before the owning transaction exits and HTTP sends.
+                if mode == "wait_price":
+                    expired_at_send[0] = True
+                elif mode == "wait_key":
+                    (tmp_path / PLATFORM_KEY_PATH).write_text("synthetic-key-changed-during-wait")
+                else:
+                    path = tmp_path / ("funding.json" if mode == "wait_proof" else "console.txt")
+                    path.write_text(path.read_text() + "\n")
+
+        monkeypatch.setattr(platform_funding, "require_platform_funding", change_while_qualifying)
     seen = []
     clients = []
     wires = []
@@ -171,7 +216,7 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                         )
                         == protected
                     )
-                    assert seen == [("platform", "research")]
+                    assert seen == ([] if mode.startswith("wait_") else [("platform", "research")])
                     assert all(c.is_closed for c in clients)
                     return
                 assert (

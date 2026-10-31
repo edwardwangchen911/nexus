@@ -33,7 +33,7 @@ from nexus.agents.research_stages.support import stop_preserving_error
 from nexus.agents.synthesis import domain_evidence
 from nexus.agents.tools import ReadOnlyTools
 from nexus.jobs.repository import LeaseLostError, _lock_active_claim, execute_and_finalize_job
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import JobLease
 
 
@@ -205,6 +205,11 @@ async def execute_staged_claim(
         lease = await session.scalar(select(JobLease).where(JobLease.job_id == claim.job_id))
         original_expiry = lease.expires_at
         run = await session.get(AgentResearchRunRecord, run_id)
+        platform_model = (
+            await session.get(AgentModelConfigRecord, run.model_config_id)
+            if comparison is not None and comparison.platform_funding_loader is not None
+            else None
+        )
         refs = tuple(
             domain_evidence(r)
             for r in await load_frozen_evidence(session, run, allow_fixture_evidence=False)
@@ -288,6 +293,26 @@ async def execute_staged_claim(
                 raise codex_sdk.CodexInvocationError(
                     "CODEX_RESEARCH_STOPPED", provider_call_started=False
                 )
+            if platform_wire is not None:
+                from nexus.agents.platform_funding import require_funding_binding
+
+                assert comparison.platform_funding_loader is not None
+                # This guard runs after the final async qualification/transaction
+                # exit, with no further await before send. Re-read actual local
+                # identity and both proof originals, not two cached objects.
+                fresh = comparison.platform_funding_loader()
+                require_funding_binding(comparison.manifest, fresh)
+                at = clock()
+                if (
+                    platform_model is None
+                    or not platform_model.pricing_available_at
+                    <= at
+                    < platform_model.pricing_expires_at
+                ):
+                    raise ProtocolRejected("PLATFORM_PRICE_WINDOW_INVALID")
+                record = fresh.proof.record
+                if not record.window_start <= at < min(record.window_end, record.gift_expires_at):
+                    raise ProtocolRejected("PLATFORM_FUNDING_WINDOW_INVALID")
             if old_guard is not None:
                 old_guard()
 
