@@ -52,13 +52,18 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
     from nexus.agents.comparison_producer import admit_comparison_position
     from nexus.agents.platform_funding import load_bound_platform_funding
     from nexus.agents.platform_manifest import PlatformManifest
-    from nexus.agents.research_stages.routes import selected_route
     from nexus.ops.openai_local import local_settings
     from nexus.persistence.session import session_factory
 
     settings = local_settings(args.repo_root, load_model_key=False)
     factory = session_factory(settings)
     try:
+        if args.command == "close-expired-position":
+            from nexus.agents.comparison_closeout import close_expired_comparison_position
+
+            return await close_expired_comparison_position(
+                factory, args.experiment_id, args.position
+            )
         if args.command == "run-position":
             from nexus.agents.chatgpt_grant import GrantStore
             from nexus.agents.comparison_execution import execute_comparison_position
@@ -175,61 +180,10 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                     "model_calls": 0,
                 }
             if args.command == "inspect-position":
+                from nexus.agents.comparison_closeout import inspect_comparison_terminal
+
                 await session.execute(text("SET TRANSACTION READ ONLY"))
-                row = (
-                    (
-                        await session.execute(
-                            text("""SELECT c.run_id,c.job_id,c.reserved_id,
-                    r.status AS run_status,j.status AS job_status,
-                    j.attempt_count,b.state AS budget_state
-                    FROM research_comparison_chain c JOIN agent_research_runs r ON r.id=c.run_id
-                    JOIN jobs j ON j.id=c.job_id
-                    JOIN agent_daily_budget_reservations b ON b.id=c.reserved_id
-                    WHERE c.experiment_id=:id AND c.ordinal=:ordinal"""),
-                            {"id": args.experiment_id, "ordinal": args.position},
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
-                )
-                route = None if row is None else await selected_route(session, row["job_id"])
-                stopped = (
-                    None
-                    if route is None
-                    else await session.scalar(
-                        text("SELECT stopped FROM research_stage_scope WHERE id=:id"),
-                        {"id": route["scope_id"]},
-                    )
-                )
-                chain_stopped = None
-                if (
-                    row is not None
-                    and await session.scalar(
-                        text("SELECT to_regclass('research_comparison_chain_stop')")
-                    )
-                    is not None
-                ):
-                    chain_stopped = await session.scalar(
-                        text(
-                            "SELECT EXISTS(SELECT 1 FROM research_comparison_chain_stop "
-                            "WHERE run_id=:run)"
-                        ),
-                        {"run": row["run_id"]},
-                    )
-                return {
-                    "status": "position_not_admitted" if row is None else "position_registered",
-                    "inspection_only": True,
-                    "stage_route": None if route is None else route["kind"],
-                    "stage_version": None if route is None else route["version"],
-                    "stage_scope_stopped": stopped,
-                    "stage_chain_stopped": chain_stopped,
-                    "dispatch_authority": False,
-                    **(
-                        {}
-                        if row is None
-                        else {k: str(v) if isinstance(v, UUID) else v for k, v in row.items()}
-                    ),
-                }
+                return await inspect_comparison_terminal(session, args.experiment_id, args.position)
             manifest = parse_comparison_manifest(json.loads(args.manifest.read_bytes()))
             with args.source.open("rb") as stream:
                 source = stream.read(8 * 1024 * 1024 + 1)
@@ -312,6 +266,7 @@ def main() -> int:
     admit = subcommands.add_parser("admit-position")
     inspect = subcommands.add_parser("inspect-position")
     run = subcommands.add_parser("run-position")
+    close_expired = subcommands.add_parser("close-expired-position")
     profile = subcommands.add_parser("register-profile")
     profile.add_argument("--repo-root", type=Path, required=True)
     profile.add_argument("--sdk-model-config-id", type=UUID)
@@ -323,7 +278,7 @@ def main() -> int:
         command = subcommands.add_parser(name)
         for flag in ("repo-root", "source", "prepared", "manifest"):
             command.add_argument("--" + flag, type=Path, required=True)
-    for subcommand in (admit, inspect, run):
+    for subcommand in (admit, inspect, run, close_expired):
         subcommand.add_argument("--repo-root", type=Path, required=True)
         subcommand.add_argument("--position", type=int, choices=range(1, 13), required=True)
     for subcommand in (admit, run):
@@ -339,6 +294,7 @@ def main() -> int:
     )
     admit.add_argument("--model-config-id", type=UUID, required=True)
     inspect.add_argument("--experiment-id", type=UUID, required=True)
+    close_expired.add_argument("--experiment-id", type=UUID, required=True)
     args = parser.parse_args()
     if (
         args.command == "register-profile"
@@ -380,7 +336,9 @@ def main() -> int:
         print(
             json.dumps(
                 {
-                    "status": "unknown" if args.command == "run-position" else "rejected",
+                    "status": "unknown"
+                    if args.command in {"run-position", "close-expired-position"}
+                    else "rejected",
                     "reason": "RESEARCH_ACCOUNTING_BUSY",
                     "replay_allowed": False,
                 }
@@ -400,8 +358,15 @@ def main() -> int:
                     if args.command == "run-position"
                     else "COMPARISON_PRECLOSE_RESULT_UNKNOWN"
                     if args.command == "close-preclaim"
+                    else "COMPARISON_CLOSEOUT_RESULT_UNKNOWN"
+                    if args.command == "close-expired-position"
                     else "COMPARISON_READ_FAILED",
-                    **({"replay_allowed": False} if args.command == "close-preclaim" else {}),
+                    **(
+                        {"replay_allowed": False}
+                        if args.command
+                        in {"run-position", "close-preclaim", "close-expired-position"}
+                        else {}
+                    ),
                 }
             )
         )
@@ -429,7 +394,11 @@ def main() -> int:
             }
         ):
             code = "COMPARISON_PREPARATION_FAILED"
-        details = {}
+        details: dict[str, Any] = (
+            {"replay_allowed": False}
+            if args.command in {"run-position", "close-preclaim", "close-expired-position"}
+            else {}
+        )
         if args.command in {"inspect-grant", "refresh-grant"}:
             from nexus.agents.chatgpt_grant import GrantError
 
@@ -438,7 +407,7 @@ def main() -> int:
         print(json.dumps({"status": "rejected", "reason": code, **details}))
         return 1
     except Exception:
-        if args.command not in {"run-position", "close-preclaim"}:
+        if args.command not in {"run-position", "close-preclaim", "close-expired-position"}:
             raise
         print(
             json.dumps(
@@ -446,6 +415,8 @@ def main() -> int:
                     "status": "unknown",
                     "reason": "COMPARISON_PRECLOSE_RESULT_UNKNOWN"
                     if args.command == "close-preclaim"
+                    else "COMPARISON_CLOSEOUT_RESULT_UNKNOWN"
+                    if args.command == "close-expired-position"
                     else "COMPARISON_EXECUTION_RESULT_UNKNOWN",
                     "replay_allowed": False,
                 }

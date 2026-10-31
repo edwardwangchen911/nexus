@@ -136,6 +136,18 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                 with pytest.raises(ValueError, match="COMPARISON_POSITION_CONSUMED"):
                     await native_command(args)
                 assert tuple(seen) == before
+            read_args = Namespace(
+                command="inspect-position",
+                repo_root=tmp_path,
+                experiment_id=m.experiment_id,
+                position=ordinal,
+            )
+            readback = await native_command(read_args)
+            assert readback["status"] == "position_registered"
+            assert readback["attempt_count"] == 1 and not readback["replay_allowed"]
+            assert readback["terminal_proof"]["known"] is (mode == "complete")
+            read_args.command = "close-expired-position"
+            assert await native_command(read_args) == readback
             async with f() as s:
                 proof = await read_terminal_proof(
                     s, run_id=UUID(admitted["run_id"]), now=datetime.now(UTC)
