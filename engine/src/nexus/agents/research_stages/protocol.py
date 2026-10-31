@@ -88,14 +88,22 @@ async def stage_evidence(
     result = await session.execute(
         text(
             "SELECT a.stage,a.wire_hash,a.schema_hash,o.response_hash,o.input_tokens,"
-            "o.output_tokens,o.eligible,o.valid,v.verified,c.confirmed "
+            "o.output_tokens,o.eligible,o.valid,v.verified,c.confirmed, "
+            "to_jsonb(a)->'platform_binding' AS platform_binding, "
+            "to_jsonb(o)->>'platform_response' AS platform_response "
             "FROM research_stage_authorization a "
             + " ".join(joins)
             + " WHERE a.run_id=:run ORDER BY a.stage"
         ),
         params,
     )
-    return [dict(r) for r in result.mappings()]
+    rows = [dict(r) for r in result.mappings()]
+    for row in rows:
+        if row["platform_binding"] is None:
+            # Preserve the exact historical terminal projection and hash.
+            del row["platform_binding"]
+            del row["platform_response"]
+    return rows
 
 
 def evidence_digest(rows: Sequence[Mapping[str, Any]]) -> str:
@@ -105,14 +113,25 @@ def evidence_digest(rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def usage_known(rows: Sequence[Mapping[str, Any]]) -> bool:
-    return bool(rows) and all(
+    totals_known = bool(rows) and all(
         r["verified"] is True and r["eligible"] and r["input_tokens"] is not None for r in rows
     )
+    if totals_known and any(r.get("platform_binding") is not None for r in rows):
+        from nexus.agents.platform_stage_accounting import platform_stage_accounting
+
+        # Counts may be known while fees are not. Do not label this a known
+        # terminal/accounting failure or silently apply the reservation scalar.
+        return platform_stage_accounting(rows).exact_cost_usd is not None
+    return totals_known
 
 
 def known_usage_lower_bound(rows: Sequence[Mapping[str, Any]]) -> UsageSnapshot:
     """Preserve individually verified usage without declaring the whole run known."""
-    verified = [row for row in rows if usage_known((row,))]
+    verified = [
+        row
+        for row in rows
+        if row["verified"] is True and row["eligible"] and row["input_tokens"] is not None
+    ]
     return UsageSnapshot(
         input_tokens=sum(row["input_tokens"] for row in verified),
         output_tokens=sum(row["output_tokens"] for row in verified),
@@ -244,6 +263,7 @@ class StagedProtocol:
         now: datetime,
         wire: bytes,
         not_after: datetime | None = None,
+        platform_wire: Any = None,
     ) -> Ticket:
         from nexus.agents.research_maintenance import require_research_open
 
@@ -298,10 +318,30 @@ class StagedProtocol:
                     raise ProtocolRejected("PRICING_EXPIRED")
                 return checked
 
+            from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+
+            binding = None
+            if run.pricing_version == PLATFORM_PRICE_VERSION:
+                from nexus.agents.platform_stage_accounting import platform_authorization_binding
+
+                binding = await platform_authorization_binding(
+                    session, run, stage=stage, wire=wire, compiled=platform_wire
+                )
+            elif platform_wire is not None:
+                raise ProtocolRejected("PLATFORM_AUTHORIZATION_BINDING_INVALID")
+            columns = (
+                "run_id,stage,job_id,attempt_no,worker_id,lease_token,fence_token,"
+                "reserved_id,wire_hash,schema_hash,prior_hash,authorized_at"
+            )
+            values_sql = (
+                ":run,:stage,:job,:attempt,:worker,:token,:fence,:budget,:wire,:schema,:prior,:now"
+            )
+            if binding is not None:
+                columns += ",platform_binding"
+                values_sql += ",CAST(:platform_binding AS jsonb)"
             now = current_authority()
             await session.execute(
-                text("""INSERT INTO research_stage_authorization
-                VALUES(:run,:stage,:job,:attempt,:worker,:token,:fence,:budget,:wire,:schema,:prior,:now)"""),
+                text(f"INSERT INTO research_stage_authorization ({columns}) VALUES({values_sql})"),
                 {
                     "run": run.id,
                     "stage": stage,
@@ -314,6 +354,7 @@ class StagedProtocol:
                     "wire": hashlib.sha256(wire).hexdigest(),
                     "schema": run.schema_hash,
                     "prior": prior,
+                    "platform_binding": json.dumps(binding),
                     "now": now,
                 },
             )
@@ -407,11 +448,16 @@ class StagedProtocol:
                 ) != (digest, values["input"], values["output"], valid):
                     raise ProtocolRejected("OBSERVATION_CONFLICT")
                 return
+            columns = (
+                "run_id,stage,response_hash,input_tokens,output_tokens,valid,observed_at,eligible"
+            )
+            values_sql = ":run,:stage,:hash,:input,:output,:valid,:now,:eligible"
+            if auth.get("platform_binding") is not None:
+                columns += ",platform_response"
+                values_sql += ",:platform_response"
+                values["platform_response"] = payload.decode("utf-8")
             await session.execute(
-                text(
-                    "INSERT INTO research_stage_observation "
-                    "VALUES(:run,:stage,:hash,:input,:output,:valid,:now,:eligible)"
-                ),
+                text(f"INSERT INTO research_stage_observation ({columns}) VALUES({values_sql})"),
                 values,
             )
             await self._commit(session, member["scope_id"])
@@ -532,7 +578,8 @@ class StagedProtocol:
         Cleanup failure or a later settlement rollback cannot erase this fence.
         Scope ownership is already locked by verify; all authorization shares it.
         """
-        usage = known_usage_lower_bound(await stage_evidence(session, run_id))
+        rows = await stage_evidence(session, run_id)
+        usage = known_usage_lower_bound(rows)
         run = required(await session.get(AgentResearchRunRecord, run_id))
         model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
         budget = required(
@@ -542,11 +589,22 @@ class StagedProtocol:
                 )
             )
         )
+        from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+
+        platform_invalid = False
+        if model.version == PLATFORM_PRICE_VERSION:
+            from nexus.agents.platform_stage_accounting import platform_stage_accounting
+
+            accounting = platform_stage_accounting(rows)
+            cost = accounting.known_cost_usd
+            platform_invalid = accounting.exact_cost_usd is None or accounting.limit_exceeded
+        else:
+            cost = observed_usage_cost(model, usage.input_tokens, usage.output_tokens)
         if (
-            usage.input_tokens > model.max_input_tokens
+            platform_invalid
+            or usage.input_tokens > model.max_input_tokens
             or usage.output_tokens > model.max_output_tokens
-            or observed_usage_cost(model, usage.input_tokens, usage.output_tokens)
-            > budget.reserved_usd
+            or cost > budget.reserved_usd
         ):
             self.local_stopped = True
             # A sibling may already own a Ticket. Stop its synchronous final

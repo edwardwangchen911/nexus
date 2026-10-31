@@ -146,6 +146,35 @@ def _source_guard(old: str, new: str) -> None:
 
 
 def upgrade() -> None:
+    op.execute("ALTER TABLE research_stage_authorization ADD COLUMN platform_binding jsonb")
+    op.execute("ALTER TABLE research_stage_observation ADD COLUMN platform_response text")
+    op.execute("""CREATE FUNCTION research_platform_stage_fact_guard() RETURNS trigger
+      LANGUAGE plpgsql AS $$ DECLARE is_platform boolean; binding jsonb; BEGIN
+        IF TG_TABLE_NAME='research_stage_authorization' THEN
+          SELECT EXISTS(SELECT 1 FROM research_comparison_chain c
+            JOIN research_comparison_manifest m ON m.id=c.experiment_id
+            WHERE c.run_id=NEW.run_id AND m.purpose='platform-gifted-terra-v1-20261031') INTO is_platform;
+          IF is_platform != (NEW.platform_binding IS NOT NULL) THEN
+            RAISE EXCEPTION 'PLATFORM_STAGE_BINDING_REQUIRED'; END IF;
+          IF is_platform AND (NEW.platform_binding->>'body_sha256' IS DISTINCT FROM NEW.wire_hash
+            OR NEW.platform_binding->>'version' IS DISTINCT FROM '1'
+            OR NEW.platform_binding->>'price_version' IS DISTINCT FROM 'platform-terra-default-implicit30m-20261031-v1')
+          THEN RAISE EXCEPTION 'PLATFORM_STAGE_BINDING_INVALID'; END IF;
+        ELSE
+          SELECT platform_binding INTO binding FROM research_stage_authorization
+            WHERE run_id=NEW.run_id AND stage=NEW.stage;
+          IF (binding IS NOT NULL) != (NEW.platform_response IS NOT NULL) THEN
+            RAISE EXCEPTION 'PLATFORM_RAW_RESPONSE_REQUIRED'; END IF;
+          IF binding IS NOT NULL AND (octet_length(NEW.platform_response)>2097152
+            OR encode(sha256(convert_to(NEW.platform_response,'UTF8')),'hex') != NEW.response_hash)
+          THEN RAISE EXCEPTION 'PLATFORM_RAW_RESPONSE_INVALID'; END IF;
+        END IF;
+        RETURN NEW; END $$""")
+    for table in ("authorization", "observation"):
+        op.execute(
+            f"CREATE TRIGGER research_platform_stage_fact_guard BEFORE INSERT ON research_stage_{table} "
+            "FOR EACH ROW EXECUTE FUNCTION research_platform_stage_fact_guard()"
+        )
     op.execute(_VALID)
     op.execute("""ALTER TABLE research_comparison_manifest
       DROP CONSTRAINT research_comparison_manifest_purpose_check,
@@ -165,13 +194,14 @@ def upgrade() -> None:
     # AFTER insertion: the shared binding function must see this exact chain row.
     op.execute("""CREATE TRIGGER research_platform_position_guard AFTER INSERT ON research_comparison_chain
       FOR EACH ROW EXECUTE FUNCTION research_platform_position_guard()""")
-    # This partial implementation cannot dispatch through the old SIWC/zero-price reader.
-    # Replace only when raw usage, exact fees and real Key lifecycle are wired and verified.
+    # Only the normal native claim may enable this exact position, after fresh funding checks.
+    # The CLI execution gate remains closed until the entire executor is integrated.
     op.execute("""CREATE FUNCTION research_platform_dispatch_guard() RETURNS trigger
       LANGUAGE plpgsql AS $$ BEGIN
-        IF NEW.job_type='agent.research.comparison' AND NEW.attempt_count>0 AND EXISTS(
+        IF NEW.job_type='agent.research.comparison' AND NEW.attempt_count>OLD.attempt_count AND EXISTS(
           SELECT 1 FROM research_comparison_chain c JOIN research_comparison_manifest m ON m.id=c.experiment_id
-          WHERE c.job_id=NEW.id AND m.purpose='platform-gifted-terra-v1-20261031')
+          WHERE c.job_id=NEW.id AND m.purpose='platform-gifted-terra-v1-20261031'
+          AND current_setting('nexus.platform_execution',true) IS DISTINCT FROM (c.experiment_id::text||':'||c.ordinal::text))
         THEN RAISE EXCEPTION 'PLATFORM_NATIVE_EXECUTION_NOT_READY'; END IF;
         RETURN NEW; END $$""")
     op.execute("""CREATE TRIGGER research_platform_dispatch_guard BEFORE UPDATE ON jobs
@@ -189,6 +219,11 @@ def downgrade() -> None:
     )
     if op.get_bind().scalar(query):
         raise RuntimeError("PLATFORM_COMPATIBLE_READER_ROLLBACK_REQUIRED")
+    for table in ("authorization", "observation"):
+        op.execute(f"DROP TRIGGER research_platform_stage_fact_guard ON research_stage_{table}")
+    op.execute("DROP FUNCTION research_platform_stage_fact_guard()")
+    op.execute("ALTER TABLE research_stage_observation DROP COLUMN platform_response")
+    op.execute("ALTER TABLE research_stage_authorization DROP COLUMN platform_binding")
     op.execute("DROP TRIGGER research_platform_dispatch_guard ON jobs")
     op.execute("DROP FUNCTION research_platform_dispatch_guard()")
     op.execute("DROP TRIGGER research_platform_position_guard ON research_comparison_chain")

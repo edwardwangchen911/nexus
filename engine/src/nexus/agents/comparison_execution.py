@@ -31,6 +31,9 @@ from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbo
 from nexus.agents.comparison_manifest import ComparisonManifest
 from nexus.agents.comparison_preparation import prepare_archive
 from nexus.agents.models import ResearchRequest
+from nexus.agents.platform_funding import PlatformFunding, require_funding_binding
+from nexus.agents.platform_manifest import PlatformManifest
+from nexus.agents.platform_wire import PlatformAllocation
 from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import AgentResearchRunRecord
@@ -38,7 +41,13 @@ from nexus.persistence.models.data import DataSnapshot
 
 
 class FrozenComparisonCommittee(StructuredStagedCodexCommittee):
-    def __init__(self, prepared: PreparedComparisonInput, *, deadline: float) -> None:
+    def __init__(
+        self,
+        prepared: PreparedComparisonInput,
+        *,
+        deadline: float,
+        allocation: PlatformAllocation | None = None,
+    ) -> None:
         self.prepared_input = copy.deepcopy(prepared)
         self.frozen_request = ResearchRequest.model_validate(prepared.payload["request"])
         super().__init__(
@@ -47,8 +56,13 @@ class FrozenComparisonCommittee(StructuredStagedCodexCommittee):
             },
             tools=ReadOnlyTools(executors={}),
             deadline=deadline,
-            aggregate_input_tokens=96000,
-            max_wire_bytes=100479,
+            aggregate_input_tokens=96000
+            if allocation is None
+            else sum(allocation.stage_input_upper_bounds),
+            max_wire_bytes=100479
+            if allocation is None
+            else max(allocation.stage_input_upper_bounds) - 8192,
+            platform_allocation=allocation,
             inline_citations=True,
             paper_stage_scope=True,
             stage_time_budget=True,
@@ -71,6 +85,7 @@ async def prepare_execution_pool(
         source,
         expected_source_hash=manifest.source_manifest_hash,
         experiment_id=manifest.experiment_id,
+        purpose=manifest.purpose,
     )
     if (
         json.dumps({k: v for k, v in prepared.items() if k != "rebuilt_at"}, sort_keys=True)
@@ -87,9 +102,39 @@ async def prepare_execution_pool(
                 payload=m["payload"], proof=m["proof"], forbidden=tuple(m["forbidden"])
             ),
             deadline=deadline,
+            allocation=manifest.allocations[index]
+            if isinstance(manifest, PlatformManifest)
+            else None,
         )
-        for m in expected["members"]
+        for index, m in enumerate(expected["members"])
     )
+    if isinstance(manifest, PlatformManifest):
+        from nexus.agents.codex_sdk import codex_request_hash
+        from nexus.agents.platform_wire import freeze_platform_allocation
+
+        if (
+            tuple(freeze_platform_allocation(c.prepared_input) for c in pool)
+            != manifest.allocations
+        ):
+            raise ValueError("PLATFORM_ALLOCATION_CHANGED")
+        if tuple(c.frozen_request.instrument_id for c in pool) != manifest.instrument_ids:
+            raise ValueError("COMPARISON_INPUT_CHANGED")
+        for c in pool:
+            refs = tuple(
+                EvidenceRef.model_validate(r) for r in c.prepared_input.payload["evidence"]
+            )
+            payload, schema = c.build_stage_request(
+                stage="research",
+                request=c.frozen_request,
+                evidence_refs=refs,
+                frozen_inputs=c.prepared_input.payload["inputs"],
+                previous=[],
+            )
+            c._capacity_pool_manifest = manifest.digest
+            c._capacity_pool_request = c.frozen_request
+            c._capacity_pool_evidence = refs
+            c._capacity_research_hash = codex_request_hash(payload, schema)
+        return pool
     await preflight_capacity_pool(
         tuple(
             CapacityPoolMember(
@@ -111,7 +156,8 @@ class ComparisonInvocation:
         manifest: ComparisonManifest,
         ordinal: int,
         committee: FrozenComparisonCommittee,
-        grant: Grant,
+        grant: Grant | None,
+        platform_funding_loader: Callable[[], PlatformFunding] | None = None,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self.manifest, self.ordinal, self.committee, self.grant = (
@@ -120,6 +166,16 @@ class ComparisonInvocation:
             committee,
             grant,
         )
+        self.platform_funding_loader = platform_funding_loader
+        self.platform_funding = (
+            None if platform_funding_loader is None else platform_funding_loader()
+        )
+        if isinstance(manifest, PlatformManifest):
+            if grant is not None:
+                raise ValueError("PLATFORM_CREDENTIAL_BINDING_MISMATCH")
+            require_funding_binding(manifest, self.platform_funding)
+        elif platform_funding_loader is not None:
+            raise ValueError("COMPARISON_NATIVE_BINDING_INVALID")
         self.transport = manifest.positions[ordinal - 1][2]
         self.client_factory = client_factory or (
             lambda: httpx.AsyncClient(
@@ -155,6 +211,34 @@ class ComparisonInvocation:
         ):
             raise ValueError("COMPARISON_INPUT_CHANGED")
 
+    def platform_wire(self, payload: Any, output_model: type[BaseModel], rows: Any) -> Any:
+        from nexus.agents.platform_stage_accounting import platform_stage_accounting
+        from nexus.agents.platform_wire import PriorPlatformUsage, compile_platform_stage
+
+        assert isinstance(self.manifest, PlatformManifest)
+        prepared = self.committee.prepared_input
+        if rows and platform_stage_accounting(rows).exact_cost_usd is None:
+            raise ValueError("PLATFORM_PRIOR_USAGE_INVALID")
+        prior = tuple(
+            PriorPlatformUsage(
+                stage=r["stage"],
+                input_hash=r["platform_binding"]["input_hash"],
+                verified=r["verified"],
+                response=json.loads(r["platform_response"]),
+            )
+            for r in rows
+        )
+        a = self.manifest.allocations[self.ordinal - 1]
+        return compile_platform_stage(
+            prepared,
+            allocation=a,
+            expected_allocation_hash=a.allocation_hash,
+            stage=payload["stage"],
+            previous=[],
+            prior_usage=prior,
+            compiled_request=(payload, output_model),
+        )
+
     def wire(self, payload: Any, output_model: type[BaseModel]) -> bytes:
         from nexus.agents.research_stages.http_lifecycle import http_stage_wire
 
@@ -179,7 +263,8 @@ async def execute_comparison_position(
     manifest: ComparisonManifest,
     ordinal: int,
     worker_id: str,
-    grant: Grant,
+    grant: Grant | None = None,
+    platform_funding_loader: Callable[[], PlatformFunding] | None = None,
     client_factory: Callable[[], httpx.AsyncClient] | None = None,
 ) -> Any:
     """Run exactly one admitted position, never admit/replay or refresh credentials."""
@@ -189,9 +274,16 @@ async def execute_comparison_position(
     from nexus.agents.research_stages.executor import execute_or_capture, execute_staged_claim
 
     now = datetime.now(UTC)
-    grant.bearer(now)
-    if not grant.identity_verified or grant.expires_at <= now.timestamp() + 315:
-        raise ValueError("COMPARISON_GRANT_WINDOW_INVALID")
+    if isinstance(manifest, PlatformManifest):
+        if grant is not None or platform_funding_loader is None:
+            raise ValueError("PLATFORM_FUNDING_REQUIRED")
+        require_funding_binding(manifest, platform_funding_loader())
+    else:
+        if grant is None:
+            raise ValueError("COMPARISON_GRANT_WINDOW_INVALID")
+        grant.bearer(now)
+        if not grant.identity_verified or grant.expires_at <= now.timestamp() + 315:
+            raise ValueError("COMPARISON_GRANT_WINDOW_INVALID")
     manifest.input_hash_for(ordinal)
     pool = await prepare_execution_pool(
         source=source,
@@ -205,9 +297,10 @@ async def execute_comparison_position(
     # Pool validation may consume time. Do not take a once-only claim with an
     # already elapsed envelope or a grant that lost the required lifetime.
     now = datetime.now(UTC)
-    grant.bearer(now)
-    if grant.expires_at <= now.timestamp() + 315:
-        raise ValueError("COMPARISON_GRANT_WINDOW_INVALID")
+    if grant is not None:
+        grant.bearer(now)
+        if grant.expires_at <= now.timestamp() + 315:
+            raise ValueError("COMPARISON_GRANT_WINDOW_INVALID")
     if committee._deadline is None or asyncio.get_running_loop().time() >= committee._deadline:
         raise ValueError("COMPARISON_EXECUTION_WINDOW_ELAPSED")
     context = ComparisonInvocation(
@@ -215,6 +308,7 @@ async def execute_comparison_position(
         ordinal=ordinal,
         committee=committee,
         grant=grant,
+        platform_funding_loader=platform_funding_loader,
         client_factory=client_factory,
     )
     async with factory() as inspection:
@@ -226,7 +320,15 @@ async def execute_comparison_position(
         if registered != manifest.digest:
             raise ValueError("COMPARISON_REGISTERED_MANIFEST_CHANGED")
     claim = await claim_comparison_position(
-        factory, experiment_id=manifest.experiment_id, ordinal=ordinal, worker_id=worker_id
+        factory,
+        experiment_id=manifest.experiment_id,
+        ordinal=ordinal,
+        worker_id=worker_id,
+        **(
+            {"platform_funding_loader": platform_funding_loader}
+            if isinstance(manifest, PlatformManifest)
+            else {}
+        ),
     )
 
     async def execute(session: Any) -> Any:

@@ -229,6 +229,14 @@ async def read_terminal_proof(
         or terminal["known"] is not usage_known(rows)
     ):
         raise ProtocolRejected(invalid)
+    from nexus.agents.platform_stage_accounting import (
+        platform_stage_accounting,
+        require_platform_stage_cost,
+    )
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+
+    platform = model.version == PLATFORM_PRICE_VERSION
+    accounting = platform_stage_accounting(rows) if platform else None
     known = terminal["known"]
     settled = budget.state == "settled"
     held = (
@@ -239,9 +247,15 @@ async def read_terminal_proof(
         if (run.input_tokens, run.output_tokens) != tokens:
             raise ProtocolRejected(invalid)
         if settled:
-            if run.settled_cost_usd != budget.settled_usd or run.settled_cost_usd != usage_cost(
-                model, *tokens
-            ):
+            try:
+                expected_cost = (
+                    require_platform_stage_cost(model, rows, *tokens)
+                    if platform
+                    else usage_cost(model, *tokens)
+                )
+            except ValueError as error:
+                raise ProtocolRejected(invalid) from error
+            if run.settled_cost_usd != budget.settled_usd or run.settled_cost_usd != expected_cost:
                 raise ProtocolRejected(invalid)
         elif (
             held
@@ -251,7 +265,8 @@ async def read_terminal_proof(
         ):
             from nexus.agents.synthesis import observed_usage_cost
 
-            observed_usage_cost(model, *tokens)
+            if not platform:
+                observed_usage_cost(model, *tokens)
             output = await session.scalar(
                 select(AgentResearchOutputRecord)
                 .where(AgentResearchOutputRecord.run_id == run.id)
@@ -298,9 +313,13 @@ async def read_terminal_proof(
             raise ProtocolRejected(invalid)
         from nexus.agents.synthesis import observed_usage_cost
 
-        if (
-            observed_usage_cost(model, lower_bound.input_tokens, lower_bound.output_tokens)
-            > budget.reserved_usd
+        cost_lower_bound = (
+            accounting.known_cost_usd
+            if accounting is not None
+            else observed_usage_cost(model, lower_bound.input_tokens, lower_bound.output_tokens)
+        )
+        if cost_lower_bound > budget.reserved_usd or (
+            accounting is not None and accounting.limit_exceeded
         ):
             # Unknown-history acceptance cannot waive a separately known cost
             # overrun, including after the original reservation's business day.

@@ -282,6 +282,7 @@ def compile_platform_stage(
     stage: Stage,
     previous: list[dict[str, object]],
     prior_usage: Sequence[PriorPlatformUsage],
+    compiled_request: tuple[Mapping[str, object], type[BaseModel]] | None = None,
 ) -> PlatformStageWire:
     """The single future producer/claim/HTTP handoff: frozen bytes plus their binding.
 
@@ -317,12 +318,20 @@ def compile_platform_stage(
         profile=allocation.profile,
         input_bounds=allocation.stage_input_upper_bounds,
     )
-    payload, schema = compile_comparison_stage(
-        prepared,
-        expected_input_hash=allocation.input_hash,
-        stage=stage,
-        previous=previous,
-    )
+    if compiled_request is None:
+        payload, schema = compile_comparison_stage(
+            prepared,
+            expected_input_hash=allocation.input_hash,
+            stage=stage,
+            previous=previous,
+        )
+    else:
+        # The native committee includes prior monitoring proposals/reviews as
+        # well as claims. Preserve its actual schema and complete payload.
+        actual_payload, schema = compiled_request
+        payload = dict(actual_payload)
+        if payload.get("stage") != stage:
+            raise ValueError("PLATFORM_STAGE_INVALID")
     # Normal schemas bind actual prior claim IDs; their enums are subsets of
     # the maximal envelope. The exact current schema is bound by body_sha256.
     wire = _wire(

@@ -594,8 +594,34 @@ class StagedCodexCommittee(CodexCommittee):
         stage_time_budget: bool = False,
         stage_budget_version: str | None = None,
         diagnostic_profile: str | None = None,
+        platform_allocation: Any = None,
     ) -> None:
-        if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
+        platform_limits = None
+        if platform_allocation is not None:
+            from nexus.agents.platform_wire import PlatformAllocation, PlatformProfile
+
+            if (
+                not isinstance(platform_allocation, PlatformAllocation)
+                or platform_allocation.profile != PlatformProfile()
+                or len(platform_allocation.stage_input_upper_bounds) != 3
+                or any(
+                    type(n) is not int or not 8192 < n <= 272000
+                    for n in platform_allocation.stage_input_upper_bounds
+                )
+                or platform_allocation.output_limit != 8192
+                or stage_budget_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            ):
+                raise ValueError("PLATFORM_ALLOCATION_INVALID")
+            platform_limits = (
+                sum(platform_allocation.stage_input_upper_bounds),
+                max(platform_allocation.stage_input_upper_bounds) - 8192,
+            )
+            if (aggregate_input_tokens, max_wire_bytes) != platform_limits:
+                raise ValueError("PLATFORM_ALLOCATION_CHANGED")
+        self._platform_allocation = platform_allocation
+        if type(aggregate_input_tokens) is not int or (
+            platform_limits is None and aggregate_input_tokens not in {64000, 96000}
+        ):
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
         super().__init__(prompts=prompts, tools=tools)
         if (
@@ -606,8 +632,8 @@ class StagedCodexCommittee(CodexCommittee):
         full_capacity = stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS
         if full_capacity and (
             not self.structured_synthesis
-            or aggregate_input_tokens != 96000
-            or max_wire_bytes != FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
+            or (platform_limits is None and aggregate_input_tokens != 96000)
+            or (platform_limits is None and max_wire_bytes != FULL_INPUT_CAPACITY_MAX_WIRE_BYTES)
             or inline_citations is not True
             or paper_stage_scope is not True
             or stage_time_budget is not True
@@ -615,9 +641,16 @@ class StagedCodexCommittee(CodexCommittee):
             raise ValueError("CODEX_FULL_CAPACITY_PROFILE_INVALID")
         if (
             type(max_wire_bytes) is not int
-            or max_wire_bytes
-            not in ({FULL_INPUT_CAPACITY_MAX_WIRE_BYTES} if full_capacity else {55808, 64000})
-            or (max_wire_bytes == 64000 and aggregate_input_tokens != 96000)
+            or (
+                platform_limits is None
+                and max_wire_bytes
+                not in ({FULL_INPUT_CAPACITY_MAX_WIRE_BYTES} if full_capacity else {55808, 64000})
+            )
+            or (
+                platform_limits is None
+                and max_wire_bytes == 64000
+                and aggregate_input_tokens != 96000
+            )
         ):
             raise ValueError("CODEX_WIRE_LIMIT_INVALID")
         if type(inline_citations) is not bool:
@@ -1196,6 +1229,8 @@ class StagedCodexCommittee(CodexCommittee):
             and self._capacity_pool_manifest is None
         ):
             raise ValueError("CODEX_CAPACITY_POOL_REQUIRED")
+        if self._platform_allocation is not None and self.stage_invoker is None:
+            raise ValueError("PLATFORM_NATIVE_INVOKER_REQUIRED")
         if self._stage_budget_version in ISOLATED_CAPACITY_CONFIG_VERSIONS and (
             request != self._capacity_pool_request or evidence_refs != self._capacity_pool_evidence
         ):

@@ -34,8 +34,8 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
 
-async def setup(factory, monkeypatch):
-    source, _, old, _, held_id = await seed(factory)
+async def setup(factory, monkeypatch, *, source_kind="fixture"):
+    source, _, old, _, held_id = await seed(factory, source_kind=source_kind)
     prepared = prepare_archive(
         source,
         expected_source_hash=hashlib.sha256(source).hexdigest(),

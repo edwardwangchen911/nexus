@@ -233,6 +233,11 @@ async def test_comparison_install_cannot_extend_original_envelope(
 async def test_claimed_position_requires_compatible_reader_rollback(migrated_database_url):
     from nexus.agents.comparison_claim import claim_comparison_position
 
+    # Preserve this historical 0105 rollback contract and its original assertions.
+    await asyncio.to_thread(
+        command.downgrade, Config("engine/alembic.ini"), "0105_comparison_preclaim"
+    )
+
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     _, manifest, _ = await prepared_position(factory)
     await claim_comparison_position(

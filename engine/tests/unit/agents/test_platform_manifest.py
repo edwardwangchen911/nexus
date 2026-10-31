@@ -195,3 +195,25 @@ def test_normal_cli_retains_safe_platform_funding_reason(monkeypatch, capsys, tm
         "status": "rejected",
         "reason": "PLATFORM_BALANCE_INSUFFICIENT",
     }
+
+
+@pytest.mark.asyncio
+async def test_platform_normal_execution_pool_uses_complete_allocation_without_sdk_fallback():
+    import asyncio
+
+    from nexus.agents.comparison_execution import prepare_execution_pool
+    from nexus.agents.platform_wire import freeze_platform_allocation
+
+    source, prepared, data = platform_fixture()
+    m = PlatformManifest.model_validate(data)
+    pool = await prepare_execution_pool(
+        source=source,
+        prepared=prepared,
+        manifest=m,
+        deadline=asyncio.get_running_loop().time() + 300,
+    )
+    assert len(pool) == 3
+    for c, a in zip(pool, m.allocations, strict=True):
+        assert c._aggregate_input_tokens == sum(a.stage_input_upper_bounds)
+        assert c._capacity_pool_manifest == m.digest
+        assert freeze_platform_allocation(c.prepared_input) == a

@@ -667,7 +667,20 @@ async def _settle_or_hold_usage(
     # financial boundary as verification and new money admission, across dates.
     await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
     try:
-        actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
+        from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+
+        if model.version == PLATFORM_PRICE_VERSION:
+            from nexus.agents.platform_stage_accounting import require_platform_stage_cost
+            from nexus.agents.research_stages.protocol import stage_evidence
+
+            actual_usd = require_platform_stage_cost(
+                model,
+                await stage_evidence(session, run.id),
+                usage.input_tokens,
+                usage.output_tokens,
+            )
+        else:
+            actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
     except ValueError:
         # A local pricing/limit rejection is deterministic. Do not classify a
         # ValueError from a database hook or savepoint as that same outcome.
