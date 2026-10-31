@@ -1,6 +1,7 @@
 """The normal key-only entry saves one private file without activating a provider."""
 
 import getpass
+import io
 import json
 import os
 import socket
@@ -139,6 +140,34 @@ def test_save_key_only_errors_are_fixed_and_do_not_expose_input(
         "OPENAI_KEY_ENTRY_CANCELLED",
     }
     assert not key.exists()
+
+
+def test_save_key_only_preserves_partial_file_when_flush_fails(key_only_cli, monkeypatch, capsys):
+    key, _ = key_only_cli
+
+    class PartialDiskWrite(io.FileIO):
+        def write(self, data):
+            # The real exclusive-created file receives a prefix before the raw
+            # write fails during TextIOWrapper's context-exit flush.
+            if self.tell() == 0:
+                super().write(data[:12])
+            raise OSError("synthetic disk failure: " + KEY)
+
+    def failing_fdopen(descriptor, mode):
+        return io.TextIOWrapper(io.BufferedWriter(PartialDiskWrite(descriptor, mode)))
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+    assert openai_local.main() == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "status": "blocked",
+        "code": "OPENAI_KEY_SAVE_FAILED",
+        "execution_locked": True,
+    }
+    assert KEY not in captured.out + captured.err
+    assert "synthetic disk failure" not in captured.out + captured.err
+    assert key.read_bytes() == b"synthetic-pl"
+    assert key.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.parametrize(
