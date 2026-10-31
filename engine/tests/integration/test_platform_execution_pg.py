@@ -187,7 +187,14 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                 experiment_id=m.experiment_id,
                 position=ordinal,
             )
-            readback = await native_command(read_args)
+            try:
+                readback = await native_command(read_args)
+            except ValueError as error:
+                if str(error) == "COMPARISON_TERMINAL_PROOF_INVALID":
+                    # Synthetic fixtures only: retain the exact rejected proof
+                    # line without changing the public safe error or its object.
+                    raise error from error.__context__
+                raise
             assert readback["status"] == "position_registered"
             assert readback["attempt_count"] == 1 and not readback["replay_allowed"]
             assert readback["terminal_proof"]["known"] is (mode == "complete")
