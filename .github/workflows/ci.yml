@@ -278,6 +278,15 @@ jobs:
           --root .
           --inventory-output "$RUNNER_TEMP/nexus-dependency-inventory.json"
       - run: uv run python scripts/ci/npm_audit_gate.py --report "$RUNNER_TEMP/nexus-npm-audit.json"
+      - name: Preserve complete npm audit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nexus-npm-audit.json
+          if-no-files-found: warn
+          retention-days: 3
+          include-hidden-files: false
       - run: uv run pip-audit --local --skip-editable
       - name: Validate all Compose capability profiles
         env:

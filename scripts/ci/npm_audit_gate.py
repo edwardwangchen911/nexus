@@ -1,4 +1,4 @@
-"""Full npm audit with one explicitly approved, expiring braces risk acceptance."""
+"""Full npm audit with exact, separately approved and expiring exceptions."""
 
 from __future__ import annotations
 
@@ -15,6 +15,27 @@ APPROVED_AT = datetime(2026, 10, 15, tzinfo=UTC)
 ADVISORY = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"
 LOCK_SHA256 = "e4e329ece76151c267e88db423ea7e7973f21d37c3c96a5cb78e549dc676aa1c"
 SURFACE_SHA256 = "c605a2566dca905b93142dad3cd16962238c33d815d2ade0fcb931cb4caa67a0"
+# User accepted this exact residual scope for candidate 2a33aaa6 on 2026-10-31.
+# Effective after the recorded approval; never extend with a later build.
+MINIMATCH_ACTIVE_FROM = datetime(2026, 10, 31, 3, 34, 37, tzinfo=UTC)
+MINIMATCH_EXPIRES_AT = datetime(2026, 11, 1, tzinfo=UTC)
+MINIMATCH_ADVISORY = "https://github.com/advisories/GHSA-g3hv-75wg-m249"
+MINIMATCH_GRAPH_SHA256 = "0b0a5266fdf557f0297f1028da05736ea41a4f8b6d8b3de6dcd9a94140fadd80"
+MINIMATCH_LOCK_SHA256 = "2f7aec4834ba4069f52a20e7e312f5a49f6e3c857ff6bb2964c152dab3ae54cc"
+MINIMATCH_SURFACE_SHA256 = "e1525b46b53640258219c530ba1580fe4f3fb395b883c905d236b2d97d6cce48"
+MINIMATCH_TREE_SHA256 = {
+    "node_modules/minimatch": "c8690806d606597f04633171624e8266a579e5ed8da5b6a89016a621fa74e240",
+    "node_modules/@redocly/openapi-core/node_modules/minimatch": (
+        "6f63f3a46ea889d895892f1d073f47d57bbe82930fd0b58562282ad867c0c08a"
+    ),
+    # A patched lock alone must not certify an older, still-installed parser.
+    "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch": (
+        "ca5e627f2ea48f57b07deff39ffaa92af2f3293a04f769f9d852529db76b91d4"
+    ),
+    "node_modules/@isaacs/nonrecursive-glob-match": (
+        "456fbb3d95737f98d07a75d60877a64ee34132923cd889e87c126a0a88173714"
+    ),
+}
 # Node paths are part of the acceptance, including the second fast-glob installation.
 CHAIN = {
     "@next/eslint-plugin-next": ("fast-glob",),
@@ -91,6 +112,90 @@ def parse_report(raw: str) -> dict:
     return report
 
 
+def installed_tree_digest(root: Path, relative: str) -> str:
+    """Bind the inspected installed implementation, not just its package name."""
+    base = root / relative
+    if not base.is_dir() or base.is_symlink():
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    digest = hashlib.sha256()
+    files = 0
+    for path in sorted(base.rglob("*")):
+        name = path.relative_to(base)
+        if "node_modules" in name.parts:
+            continue
+        if path.is_symlink():
+            raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+        if path.is_file():
+            digest.update(name.as_posix().encode() + b"\0" + file_digest(path).encode() + b"\n")
+            files += 1
+    if not files:
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    return digest.hexdigest()
+
+
+def minimatch_surface_digest(root: Path) -> str:
+    # Normal generation uses a local for_test schema and no user config.
+    # New Redocly configuration is a new pattern/options source outside approval.
+    if any(
+        (root / name).exists() or (root / name).is_symlink()
+        for name in (
+            "redocly.yaml",
+            "redocly.yml",
+            ".redocly.yaml",
+            ".redocly.yml",
+        )
+    ):
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    return hashlib.sha256(
+        (surface_digest(root) + "\n" + file_digest(root / ".github/workflows/ci.yml")).encode()
+    ).hexdigest()
+
+
+def minimatch_graph_digest(vulnerabilities: dict) -> str:
+    # Suggestions and ordering are not authority; every actual edge, path and
+    # advisory identity is. A second advisory always changes this projection.
+    graph = {}
+    keys = ("url", "name", "dependency", "severity", "range")
+    for name, item in vulnerabilities.items():
+        via = [
+            {"package": entry} if isinstance(entry, str) else {key: entry[key] for key in keys}
+            for entry in item["via"]
+        ]
+        graph[name] = {
+            "name": item["name"],
+            "severity": item["severity"],
+            "nodes": sorted(item["nodes"]),
+            "via": sorted(via, key=lambda entry: json.dumps(entry, sort_keys=True)),
+        }
+    return hashlib.sha256(
+        json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def evaluate_minimatch(vulnerabilities, counts, exit_code, root, now):
+    expected = {"info": 0, "low": 0, "moderate": 14, "high": 0, "critical": 0, "total": 14}
+    # The unchanged normal command uses --audit-level=high: moderate-only is 0.
+    if (
+        exit_code != 0
+        or counts != expected
+        or minimatch_graph_digest(vulnerabilities) != MINIMATCH_GRAPH_SHA256
+    ):
+        raise AuditRejected("AUDIT_UNACCEPTED_FINDING")
+    if (
+        file_digest(root / "package-lock.json") != MINIMATCH_LOCK_SHA256
+        or minimatch_surface_digest(root) != MINIMATCH_SURFACE_SHA256
+        or any(
+            installed_tree_digest(root, path) != digest
+            for path, digest in MINIMATCH_TREE_SHA256.items()
+        )
+    ):
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    checked_at = now() if callable(now) else now
+    if not MINIMATCH_ACTIVE_FROM <= checked_at < MINIMATCH_EXPIRES_AT:
+        raise AuditRejected("AUDIT_ACCEPTANCE_EXPIRED")
+    return "risk_accepted_minimatch_until_2026-11-01T00:00:00Z"
+
+
 def evaluate(
     report: dict, exit_code: int, root: Path, now: datetime | Callable[[], datetime]
 ) -> str:
@@ -129,6 +234,8 @@ def evaluate(
             raise AuditRejected("AUDIT_REPORT_INVALID")
         if not vulnerabilities and counts == empty and exit_code == 0:
             return "clean"
+        if "minimatch" in vulnerabilities:
+            return evaluate_minimatch(vulnerabilities, counts, exit_code, root, now)
         if exit_code != 1 or set(vulnerabilities) != set(CHAIN):
             raise AuditRejected("AUDIT_UNACCEPTED_FINDING")
         if counts != {**empty, "high": 7, "total": 7}:
@@ -210,7 +317,8 @@ def main() -> int:
     except (OSError, subprocess.SubprocessError):
         print(json.dumps({"status": "blocked", "code": "AUDIT_EXECUTION_FAILED"}))
         return 1
-    print(json.dumps({"status": status, "advisory": ADVISORY if status != "clean" else None}))
+    advisory = MINIMATCH_ADVISORY if status.startswith("risk_accepted_minimatch_") else ADVISORY
+    print(json.dumps({"status": status, "advisory": advisory if status != "clean" else None}))
     return 0
 
 
