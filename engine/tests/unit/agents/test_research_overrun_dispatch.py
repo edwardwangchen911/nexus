@@ -26,6 +26,7 @@ async def test_overrun_signals_shared_dispatch_before_stop_write(monkeypatch):
     row = {"verified": True, "eligible": True, "input_tokens": 200, "output_tokens": 0}
     monkeypatch.setattr(native, "stage_evidence", AsyncMock(return_value=[row]))
     model = SimpleNamespace(
+        version="synthetic-legacy-overrun",
         max_input_tokens=100,
         max_output_tokens=10,
         input_usd_per_million=Decimal(1),
