@@ -11,6 +11,10 @@ from nexus.persistence.models.data import DataSnapshot
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 ACTOR = "research-comparison:direct-responses-terra-v11"
 PURPOSE = "direct-responses-terra-v11-20261030"
+PLATFORM_PURPOSE: Literal["platform-gifted-terra-v1-20261031"] = "platform-gifted-terra-v1-20261031"
+PLATFORM_ACTOR = "research-comparison:platform-gifted-terra-v1"
+PURPOSES = (PURPOSE, PLATFORM_PURPOSE)
+ACTORS = (ACTOR, PLATFORM_ACTOR)
 SDK_HASH = "cdf5e7d3b0cfd2a3e6fda267f74bc9b3d135f28e33f965431f17175b9f2a8720"
 Route = Literal["sdk", "responses"]
 
@@ -29,6 +33,8 @@ class ComparisonManifest(BaseModel):
     blinding_hash: Hash
     input_hashes: tuple[Hash, Hash, Hash]  # AAPL, AVGO, NVDA; shared by both routes.
     instrument_ids: tuple[UUID, UUID, UUID]
+    purpose: ClassVar[str] = PURPOSE
+    actor: ClassVar[str] = ACTOR
     stage_limit: ClassVar[int] = 36
     positions: ClassVar[tuple[tuple[int, str, Route], ...]] = (
         (1, "AAPL", "sdk"),
@@ -66,7 +72,7 @@ class ComparisonManifest(BaseModel):
         return job_input_hash(
             {
                 **self.model_dump(mode="json"),
-                "purpose": PURPOSE,
+                "purpose": self.purpose,
                 "positions": self.positions,
                 "stage_limit": self.stage_limit,
             }
@@ -75,13 +81,22 @@ class ComparisonManifest(BaseModel):
 
 def require_business_run(actor_id: str, snapshot: DataSnapshot | None = None) -> None:
     if (
-        actor_id == ACTOR
+        actor_id in ACTORS
         or snapshot is not None
         and (
             snapshot.source == "nexus_research_comparison"
             or snapshot.schema_version == "comparison-input-v1"
             or isinstance(snapshot.payload, dict)
-            and snapshot.payload.get("purpose") == PURPOSE
+            and snapshot.payload.get("purpose") in PURPOSES
         )
     ):
         raise ValueError("COMPARISON_BUSINESS_CONSUMPTION_FORBIDDEN")
+
+
+def parse_comparison_manifest(payload: object) -> ComparisonManifest:
+    """Old payload/hash stays exact; new purpose requires its full frozen contract."""
+    if isinstance(payload, dict) and payload.get("platform_contract") == PLATFORM_PURPOSE:
+        from nexus.agents.platform_manifest import PlatformManifest
+
+        return PlatformManifest.model_validate(payload)
+    return ComparisonManifest.model_validate(payload)

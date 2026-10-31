@@ -1,14 +1,15 @@
 """Bounded preparation only. No dispatch, consent, business admission or budget bypass."""
 
-import json
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.comparison_manifest import ACTOR, PURPOSE, ComparisonManifest
+from nexus.agents.comparison_manifest import ComparisonManifest, parse_comparison_manifest
 from nexus.agents.persistence import reserve_daily_budget
+from nexus.agents.platform_manifest import PlatformManifest
+from nexus.agents.platform_profile import platform_model_matches
 from nexus.jobs.models import job_input_hash
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -20,14 +21,14 @@ from nexus.persistence.models.runtime import Job
 
 async def register_comparison(session: AsyncSession, manifest: ComparisonManifest) -> None:
     """Caller owns commit. Same purpose/id/hash may be read back; never reset positions."""
-    manifest = ComparisonManifest.model_validate(manifest.model_dump())
+    manifest = parse_comparison_manifest(manifest.model_dump())
     await session.execute(
         text("""INSERT INTO research_comparison_manifest
       (id,purpose,manifest_hash,payload) VALUES (:id,:purpose,:hash,CAST(:payload AS jsonb))
       ON CONFLICT DO NOTHING"""),
         {
             "id": manifest.experiment_id,
-            "purpose": PURPOSE,
+            "purpose": manifest.purpose,
             "hash": manifest.digest,
             "payload": manifest.model_dump_json(),
         },
@@ -37,7 +38,7 @@ async def register_comparison(session: AsyncSession, manifest: ComparisonManifes
             await session.execute(
                 text("""SELECT id,manifest_hash FROM
       research_comparison_manifest WHERE purpose=:purpose FOR UPDATE"""),
-                {"purpose": PURPOSE},
+                {"purpose": manifest.purpose},
             )
         )
         .mappings()
@@ -87,7 +88,7 @@ async def reserve_comparison_chain(
         {"id": experiment_id},
     ):
         raise ValueError("COMPARISON_STOPPED")
-    manifest = ComparisonManifest.model_validate_json(json.dumps(stored["payload"]))
+    manifest = parse_comparison_manifest(stored["payload"])
     if manifest.experiment_id != experiment_id or manifest.digest != stored["manifest_hash"]:
         raise ValueError("COMPARISON_REGISTRATION_CONFLICT")
     expected_input = manifest.input_hash_for(ordinal)
@@ -105,7 +106,7 @@ async def reserve_comparison_chain(
     if (
         run is None
         or job is None
-        or run.actor_id != ACTOR
+        or run.actor_id != manifest.actor
         or run.status != "prepared"
         or run.retry_count != 0
         or run.idempotency_key != f"comparison:{experiment_id}:{ordinal}"
@@ -139,10 +140,17 @@ async def reserve_comparison_chain(
         or run.model_hash != expected_config
         or run.pricing_version != model.version
         or model.model_id != "gpt-5.6-terra"
-        or model.max_input_tokens != 96000
+        or model.max_input_tokens != (816000 if isinstance(manifest, PlatformManifest) else 96000)
         or model.max_output_tokens != 8192
         or model.max_tool_calls != 0
-        or run.reserved_cost_usd != model.worst_case_cost_usd
+        or run.reserved_cost_usd
+        != (
+            manifest.reservation_for(ordinal)
+            if isinstance(manifest, PlatformManifest)
+            else model.worst_case_cost_usd
+        )
+        or isinstance(manifest, PlatformManifest)
+        and not platform_model_matches(model)
     ):
         raise ValueError("COMPARISON_CONFIG_INVALID")
     if (
@@ -154,13 +162,22 @@ async def reserve_comparison_chain(
         is not None
     ):
         raise ValueError("COMPARISON_RESERVATION_ALREADY_PRESENT")
+    if isinstance(manifest, PlatformManifest):
+        prior_reserved = await session.scalar(
+            text("""SELECT COALESCE(sum(r.reserved_cost_usd),0)
+            FROM research_comparison_chain c JOIN agent_research_runs r ON r.id=c.run_id
+            WHERE c.experiment_id=:id"""),
+            {"id": experiment_id},
+        )
+        if prior_reserved + run.reserved_cost_usd > manifest.total_reservation_usd:
+            raise ValueError("PLATFORM_EXPERIMENT_BUDGET_EXCEEDED")
     now = await session.scalar(text("SELECT clock_timestamp()"))
     budget = await reserve_daily_budget(
         session,
         run_id=run_id,
         now=now,
         daily_limit_usd=daily_limit_usd,
-        worst_case_usd=model.worst_case_cost_usd,
+        worst_case_usd=run.reserved_cost_usd,
         pricing_version=run.pricing_version,
         pricing_fresh=model.pricing_available_at <= now < model.pricing_expires_at,
     )

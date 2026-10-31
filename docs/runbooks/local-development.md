@@ -66,20 +66,64 @@ cp infra/env.example infra/.env.local
 在要使用该凭据的仓库根目录，通过本机终端运行：
 
 ```bash
-.venv/bin/nexus-openai-local save-key --backend responses
+.venv/bin/nexus-platform-local save-key
 ```
 
 按隐藏提示输入项目 API Key，不放入命令参数、聊天或环境文件。命令只创建
-`.secrets/nexus-openai-local/api-key`（权限 `0600`），由现有本地配置 loader 读取；
+`.secrets/nexus-platform-local/api-key`（权限 `0600`），复用现有本地配置 loader 读取；
 不加载应用配置、不连接数据库、不登记模型、不发送网络或模型请求。已有文件或符号链接
 会拒绝覆盖；无法隐藏输入、输入无效或保存失败时只返回固定错误码，不输出凭据。
 保存异常或终端中断后，先在本机核对目标文件是否存在，不盲目重复保存或删除原件；
 文件存在不代表内容完整或凭据有效，不将内容贴回聊天。
 
-`OPENAI_KEY_SAVED` 只表示本机文件已保存，不证明赠额、组织/项目归属、模型访问或费用资格，
+`PLATFORM_KEY_SAVED` 只表示本机文件已保存，不证明赠额、组织/项目归属、模型访问或费用资格，
 也不启用研究、调度或执行。此凭据是 Platform API Key，与 SDK 登录和 SIWC Grant 分开；
 不要使用 `setup` 代替本动作，Responses 的 `setup` 会登记数据库并发送模型连接验证。
 无需数据库迁移；停用此入口不会改动 SDK 配置或删除已有凭据，凭据替换仍需单独确认。
+
+旧 `nexus-openai-local save-key --backend responses` 保留原通用路径，不能代替上述独立入口。
+`nexus-platform-local fingerprint` 只显示实际解析凭据的指纹，不显示 Key；仍按进程环境、
+`infra/.env.local`、独立文件的既有优先级解析。若环境覆盖后的实际 Key 与资金证明指纹不同，
+资格检查拒绝，不改写环境或借用旧通用 Key／Grant。
+
+人工控制台核验必须覆盖领取已生效、Key 所属组织／项目、赠额余额和到期时间、购买余额为零、
+自动充值关闭及无其他收费后备，并确认整个组织的有界独占窗口及其他项目／未入账在途的上界。
+私有证明 JSON 使用 `version=1`、`kind=manual_platform_console`、
+`purpose=platform-gifted-terra-v1-20261031` 和固定 `https://api.openai.com/v1/responses`；
+字段合同是 `nexus.ops.platform_credentials` 的 `_FundingRecord`，金额为 USD 十进制字符串，
+时间必须带时区，所有确认项必须显式提供。JSON 的 `console_evidence_file` 是同目录控制台
+原件的文件名，`console_evidence_sha256` 绑定原字节；二者均须当前用户独占读写（`0600`），
+不接受符号链接、硬链接、空原件或哈希变化。真实证明、截图和组织／项目事实不得进入 Git／聊天。
+
+`nexus-platform-local check --help` 列出离线检查参数；检查不写数据库、不联系账户或模型。
+`--local-held-usd` 包含未结算及 unknown 预留，`--local-spent-since-proof-usd` 是证明快照之后
+已确认支出，两者不得省略；真实 producer／claim／send 必须读取共享账本，不能采用手填值。
+`--required-usd` 是尚未覆盖的新增预留，已在 held 中的金额不得重复计入；零增量也重新核验全部资格。
+`--valid-until` 必须覆盖剩余请求及清理余量，且不越独占窗口或赠额到期。结算不会恢复证明快照余额。
+`PLATFORM_ELIGIBLE_AT_CHECK` 只表示本次本地条件核验通过，仍无派发权、模型权限或实时余额验证；
+主线须冻结两个绑定哈希，并在每次 claim／send 前重新读取同一证明、当前占用和实际凭据。
+
+新赠额目的使用 `nexus-engine-research-comparison prepare --purpose platform-gifted-terra-v1-20261031`
+冻结三股各三阶段的完整请求容量；`register-profile`／`inspect-profile` 同样须显式选择该目的。
+原目的默认值及 SDK 配置保持原样。新 `admit-position` 要求 `--funding-proof`，在共享账本锁内
+核对证明／实际凭据绑定及完整三股上界，跨日 unknown 和已结算 Platform 支出不会恢复额度。
+价格版本固定至 2026-11-01 00:00 UTC，过期须重新核对，不能顺延已有版本。
+
+当前候选已接原生 HTTP、原始响应及缓存分类结算；隔离验收只替换远端服务。
+新目的通过正常 `run-position --funding-proof <本机资格证明>` 执行，独立读取项目 Key，
+不读取或伪装旧 Grant。仅在候选终审、CI、部署及真实赠额／Key／模型资格均核验后执行，
+不能以离线替身通过代替真实资格。数据库仅允许正常 claim 完成资金重检后的精确领取跃迁；
+每次发送仍重新读取实际凭据及共享占用。重复执行同一位置不能获得第二次领取或发送。
+`inspect-position` 保留原状态字段，另返回原生 `terminal_proof`；命令返回不等于已完成，须读回原证明。
+`close-expired-position --repo-root <目录> --experiment-id <原身份> --position <原位置>`
+只按数据库时间关闭已过期、精确原 attempt 且已有阶段授权的孤儿，复用原生费用／清理／终态规则，
+不需要 Key，也不领取、发送或接受未知影响。正常或孤儿已有终态时仅核验原证明；提交不明时
+保留保护并改用只读检查，不自动再次调用处置入口。有效租约、无阶段授权和证据不全继续拒绝。
+历史 `close-preclaim` 仍仅支持原容量拒绝合同；新目的未领取取消未获得通用释放例外，
+不能以没有阶段记录推断零调用、释放预算或伪造容量拒绝。
+原始响应和授权绑定为不可变阶段事实，终态冻结其成员集合；迟到原件不能回写旧费用。
+token 总数已知但缓存分类缺失仍为未知终态，保留已验证 token 和全部预算，不用预留单价结算。
+0106 有新目的事实后不允许破坏性降级；后续部署须保留理解 0106 及新事实的兼容读取器／镜像，旧身份不迁写。
 
 Strategy R&D 独立 worker 支持显式 `fixture`、`responses`，以及必须带 `--once` 的
 `codex_sdk`。Codex 长驻模式在领取队列前拒绝；不会回退为 fixture。先通过现有本地配置入口

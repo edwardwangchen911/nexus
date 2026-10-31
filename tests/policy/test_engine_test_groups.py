@@ -270,6 +270,7 @@ def test_comparison_transports_and_accounting_regressions_are_in_merge_gate() ->
     selected = [selector for group in MERGE_GROUPS[1:] for selector in selectors_for(group)]
     integration = ROOT / "engine/tests/integration"
     paths = set(integration.glob("test_comparison_*_pg.py"))
+    paths.update(integration.glob("test_platform_*_pg.py"))
     paths.update(
         integration / name
         for name in (

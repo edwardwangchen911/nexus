@@ -10,6 +10,7 @@ from uuid import UUID
 
 import pytest
 from nexus.ops.agent_paper_recovery_activation import RecoveryActivation
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.settings import EngineSettings
 from unit.ops.test_agent_paper_host_service import _invoke, _register
 from unit.ops.test_agent_paper_recovery_control import options, register_pid, starts
@@ -36,11 +37,16 @@ def _upgrade(root):
     )
 
 
-def _ended_pending_consumer(tmp_path, *, cross_schema=False):
-    root, env, state_path, old_receipt = ended_activated_host(tmp_path)
+def _ended_pending_consumer(
+    tmp_path, *, cross_schema=False, source_schema="0099_research_stages", target_schema=None
+):
+    schema = target_schema or (
+        "0105_comparison_preclaim" if cross_schema else CURRENT_MIGRATION_HEAD
+    )
+    root, env, state_path, old_receipt = ended_activated_host(tmp_path, schema=schema)
     state = json.loads(state_path.read_text())
     if cross_schema:
-        state["schema"] = "0099_research_stages"
+        state["schema"] = source_schema
         state_path.write_text(json.dumps(state))
     original_active, original_instance = state["active_attempt"], state["instance"]
     published = _invoke(root, env, "reconcile-exit")

@@ -1,13 +1,13 @@
 """One owned HTTP attempt; caller must obtain native authorization before entry.
 
-No producer selects this adapter yet. It grants neither execution nor budget
+The caller selects its authorized transport; this grants no execution or budget
 permission and never retries or follows redirects. Resource handles remain owned
 after unconfirmed cleanup, including a response arriving after cancellation.
 """
 
 import asyncio
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -75,6 +75,7 @@ async def send_response_stage(
     *,
     work_deadline: float,
     cleanup_deadline: float,
+    pre_send: Callable[[], Awaitable[None]] | None = None,
     before_send: Callable[[], None] | None = None,
     on_terminal: Callable[[dict[str, Any], ResponsesStreamFacts], None] | None = None,
 ) -> HttpRequestObservation:
@@ -84,6 +85,8 @@ async def send_response_stage(
     without headers has no provider receipt; even confirmed local closure does
     not establish remote cancellation or zero usage. The caller persists these
     facts and retains any pending tasks before propagating the original error.
+    Async qualification and the final synchronous guard share the owned acquire
+    task and original work deadline; cancellation never creates a new send window.
     """
     owner = HttpRequestOwner(client)
     loop = asyncio.get_running_loop()
@@ -95,6 +98,14 @@ async def send_response_stage(
             or work_deadline >= cleanup_deadline
         ):
             raise StreamProtocolError("RESPONSES_DEADLINE_INVALID")
+        if loop.time() >= work_deadline:
+            raise TimeoutError("RESPONSES_WORK_DEADLINE")
+        if pre_send is not None:
+            await pre_send()
+        # A qualification callback may suppress cancellation. Its late return
+        # never revives a request whose owner has already begun cleanup.
+        if owner.abandoned:
+            raise StreamProtocolError("RESPONSES_REQUEST_ABANDONED")
         if loop.time() >= work_deadline:
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
         if before_send is not None:

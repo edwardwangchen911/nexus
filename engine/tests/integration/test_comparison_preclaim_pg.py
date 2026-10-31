@@ -463,7 +463,8 @@ async def test_empty_preclaim_migration_roundtrip(migrated_database_url):
             )
             is None
         )
-    await asyncio.to_thread(command.upgrade, config, "head")
+    # Preserve the original 0104 -> 0105 empty migration contract.
+    await asyncio.to_thread(command.upgrade, config, "0105_comparison_preclaim")
     async with factory() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
             "0105_comparison_preclaim"
@@ -485,6 +486,11 @@ async def test_downgrade_refuses_member_reader_before_any_ddl(migrated_database_
     from alembic.config import Config
     from sqlalchemy.exc import DBAPIError
 
+    # Keep this lock-order test on the historical 0105 migration it exercises;
+    # 0106 downgrade fences have separate current-schema regression coverage.
+    await asyncio.to_thread(
+        command.downgrade, Config("engine/alembic.ini"), "0105_comparison_preclaim"
+    )
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     statements = []
     execute = op.execute

@@ -18,7 +18,7 @@ from unit.ops.test_agent_paper_host_service import (
 )
 
 
-def recovery_root(tmp_path):
+def recovery_root(tmp_path, *, schema=CURRENT_MIGRATION_HEAD):
     root, environment = _service_root(tmp_path)
     source = ROOT / "scripts/macos/agent-paper-recovery.py"
     if source.exists():
@@ -62,12 +62,12 @@ def recovery_root(tmp_path):
             "    revision = subprocess.check_output(['git','-C',str(Path(__file__).parents[2]),"
             "'rev-parse','HEAD'],text=True).strip()\n"
             "    heartbeat = {'status':'fresh','release_revision':"
-            f"options.get('health_revision',revision),'migration_head':{CURRENT_MIGRATION_HEAD!r}}}\n"
+            f"options.get('health_revision',revision),'migration_head':{schema!r}}}\n"
             "    print(json.dumps({'heartbeat': heartbeat, 'preflight':{'status':'ready'}})); "
             "sys.exit(0)\n"
             "if '--service-recovery-check' in sys.argv:\n"
             "    print(json.dumps({'status':options.get('recovery_status','ready'), "
-            f"'migration_head':{CURRENT_MIGRATION_HEAD!r}, "
+            f"'migration_head':{schema!r}, "
             "'blocking_codes':options.get('blocking_codes',[])})); sys.exit(0)\n"
             "if '--service-startup-preflight' in sys.argv:",
         )

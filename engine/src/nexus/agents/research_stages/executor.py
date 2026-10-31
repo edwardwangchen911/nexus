@@ -33,7 +33,7 @@ from nexus.agents.research_stages.support import stop_preserving_error
 from nexus.agents.synthesis import domain_evidence
 from nexus.agents.tools import ReadOnlyTools
 from nexus.jobs.repository import LeaseLostError, _lock_active_claim, execute_and_finalize_job
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import JobLease
 
 
@@ -205,6 +205,11 @@ async def execute_staged_claim(
         lease = await session.scalar(select(JobLease).where(JobLease.job_id == claim.job_id))
         original_expiry = lease.expires_at
         run = await session.get(AgentResearchRunRecord, run_id)
+        platform_model = (
+            await session.get(AgentModelConfigRecord, run.model_config_id)
+            if comparison is not None and comparison.platform_funding_loader is not None
+            else None
+        )
         refs = tuple(
             domain_evidence(r)
             for r in await load_frozen_evidence(session, run, allow_fixture_evidence=False)
@@ -240,18 +245,7 @@ async def execute_staged_claim(
             seconds=min(original_deadline, options.get("deadline_at", original_deadline))
             - monotonic_anchor
         )
-        wire = (
-            comparison.wire(payload, options["output_model"])
-            if comparison is not None
-            else json.dumps(
-                {
-                    "wire": codex_sdk.codex_request_wire(payload),
-                    "schema": codex_sdk.codex_output_schema(options["output_model"]),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        )
+        chain = []
         if stage_number > 1:
             async with factory.begin() as check:
                 await _lock_active_claim(check, claim=claim, now=clock())
@@ -259,9 +253,33 @@ async def execute_staged_claim(
             if len(chain) != stage_number - 1 or not usage_known(chain):
                 await protocol.stop(scope)
                 raise ProtocolRejected("PERSISTED_PREDECESSOR_MISMATCH")
+        from nexus.agents.platform_manifest import PlatformManifest
+
+        platform_wire = None
+        if comparison is not None and isinstance(comparison.manifest, PlatformManifest):
+            platform_wire = comparison.platform_wire(payload, options["output_model"], chain)
+            wire = platform_wire.wire
+        else:
+            wire = (
+                comparison.wire(payload, options["output_model"])
+                if comparison is not None
+                else json.dumps(
+                    {
+                        "wire": codex_sdk.codex_request_wire(payload),
+                        "schema": codex_sdk.codex_output_schema(options["output_model"]),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
         try:
             ticket = await protocol.authorize(
-                claim, stage=stage_number, now=clock(), wire=wire, not_after=stage_deadline
+                claim,
+                stage=stage_number,
+                now=clock(),
+                wire=wire,
+                not_after=stage_deadline,
+                **({"platform_wire": platform_wire} if platform_wire is not None else {}),
             )
         except (ProtocolRejected, LeaseLostError, ResearchAccountingBusy):
             raise
@@ -275,6 +293,26 @@ async def execute_staged_claim(
                 raise codex_sdk.CodexInvocationError(
                     "CODEX_RESEARCH_STOPPED", provider_call_started=False
                 )
+            if platform_wire is not None:
+                from nexus.agents.platform_funding import require_funding_binding
+
+                assert comparison.platform_funding_loader is not None
+                # This guard runs after the final async qualification/transaction
+                # exit, with no further await before send. Re-read actual local
+                # identity and both proof originals, not two cached objects.
+                fresh = comparison.platform_funding_loader()
+                require_funding_binding(comparison.manifest, fresh)
+                at = clock()
+                if (
+                    platform_model is None
+                    or not platform_model.pricing_available_at
+                    <= at
+                    < platform_model.pricing_expires_at
+                ):
+                    raise ProtocolRejected("PLATFORM_PRICE_WINDOW_INVALID")
+                record = fresh.proof.record
+                if not record.window_start <= at < min(record.window_end, record.gift_expires_at):
+                    raise ProtocolRejected("PLATFORM_FUNDING_WINDOW_INVALID")
             if old_guard is not None:
                 old_guard()
 
@@ -288,6 +326,33 @@ async def execute_staged_claim(
                 original_deadline,
                 monotonic_anchor + (original_expiry - wall_anchor).total_seconds(),
             )
+            platform_options = {}
+            if platform_wire is not None:
+                from nexus.agents.platform_funding import require_platform_funding
+
+                async def pre_send() -> Any:
+                    assert comparison.platform_funding_loader is not None
+                    funding = comparison.platform_funding_loader()
+                    async with factory.begin() as check:
+                        member = await protocol._member(check, claim)
+                        await _lock_active_claim(check, claim=claim, now=clock())
+                        if member["stopped"] or protocol.local_stopped or clock() >= stage_deadline:
+                            raise ProtocolRejected("STOPPED_OR_DEADLINE")
+                        await require_platform_funding(
+                            check,
+                            comparison.manifest,
+                            funding,
+                            required_valid_until=wall_anchor
+                            + timedelta(seconds=cleanup - monotonic_anchor),
+                        )
+                    return funding.credential
+
+                assert comparison.platform_funding is not None
+                platform_options = dict(
+                    platform_credential=comparison.platform_funding.credential,
+                    platform_wire=platform_wire,
+                    platform_pre_send=pre_send,
+                )
             return await invoke_http_stage(
                 protocol=protocol,
                 scope=scope,
@@ -302,6 +367,7 @@ async def execute_staged_claim(
                 cleanup_deadline=cleanup,
                 client=comparison.client_factory(),
                 dispatch_guard=guard,
+                **platform_options,
             )
         return await invoke_stage(
             protocol,

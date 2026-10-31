@@ -666,8 +666,25 @@ async def _settle_or_hold_usage(
     # Include deterministic pricing refusal (even zero cost) in the same short
     # financial boundary as verification and new money admission, across dates.
     await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+
+    if model.version == PLATFORM_PRICE_VERSION:
+        from nexus.agents.platform_stage_accounting import require_platform_stage_cost
+        from nexus.agents.research_stages.protocol import stage_evidence
+
+        # A failed persistence read is not a deterministic pricing refusal.
+        # Preserve the original exception so the entire closeout rolls back.
+        platform_rows = await stage_evidence(session, run.id)
     try:
-        actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
+        if model.version == PLATFORM_PRICE_VERSION:
+            actual_usd = require_platform_stage_cost(
+                model,
+                platform_rows,
+                usage.input_tokens,
+                usage.output_tokens,
+            )
+        else:
+            actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
     except ValueError:
         # A local pricing/limit rejection is deterministic. Do not classify a
         # ValueError from a database hook or savepoint as that same outcome.

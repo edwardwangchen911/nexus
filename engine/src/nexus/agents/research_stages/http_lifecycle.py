@@ -11,9 +11,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -38,6 +38,10 @@ from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.responses_request import HttpRequestObservation, send_response_stage
 from nexus.agents.responses_stream import ResponsesStreamFacts
 from nexus.agents.responses_transport import normalize_response
+
+if TYPE_CHECKING:
+    from nexus.agents.platform_wire import PlatformStageWire
+    from nexus.ops.platform_credentials import PlatformCredential
 
 
 def http_stage_wire(
@@ -102,7 +106,7 @@ async def invoke_http_stage(
     ticket: Ticket,
     wire: bytes,
     output_model: type[BaseModel],
-    grant: Grant,
+    grant: Grant | None = None,
     clock: Callable[[], datetime],
     wall_anchor: datetime,
     monotonic_anchor: float,
@@ -110,12 +114,18 @@ async def invoke_http_stage(
     cleanup_deadline: float,
     client: httpx.AsyncClient,
     dispatch_guard: Callable[[], None] | None = None,
+    platform_credential: PlatformCredential | None = None,
+    platform_wire: PlatformStageWire | None = None,
+    platform_pre_send: Callable[[], Awaitable[PlatformCredential]] | None = None,
 ) -> tuple[str, UsageSnapshot]:
     """Consume one fresh native ticket; no retries, refreshed grants or deadlines.
 
     The caller supplies the existing stage/parent/lease minimum as the absolute
     cleanup bound. Terminal publication runs concurrently with owned transport
     closure, so a slow close cannot erase already-received trustworthy usage.
+    Platform calls require the frozen wire and an async qualification callback;
+    the returned credential must retain the initial identity binding. Native
+    authorization owns the allocation binding, not this transport adapter.
     """
     loop = asyncio.get_running_loop()
     publication: asyncio.Task[None] | None = None
@@ -134,9 +144,89 @@ async def invoke_http_stage(
         content=wire,
         headers={"content-type": "application/json"},
     )
+    platform_requested = any(
+        value is not None for value in (platform_credential, platform_wire, platform_pre_send)
+    )
+    checked_credential: PlatformCredential | None = None
+    credential_binding: str | None = None
+
+    def frozen_platform() -> PlatformCredential:
+        # Keep the old Grant path independent of Platform configuration loading.
+        from nexus.agents.platform_wire import PlatformStageWire
+        from nexus.ops.platform_credentials import PLATFORM_ENDPOINT, PlatformCredential
+
+        if (
+            grant is not None
+            or not isinstance(platform_credential, PlatformCredential)
+            or not isinstance(platform_wire, PlatformStageWire)
+            or platform_pre_send is None
+        ):
+            raise ProtocolRejected("PLATFORM_HTTP_AUTH_MISSING_OR_MIXED")
+        if (
+            platform_wire.endpoint != PLATFORM_ENDPOINT
+            or platform_credential.endpoint != PLATFORM_ENDPOINT
+            or platform_wire.credential_kind != "platform_project_key"
+            or platform_wire.wire != wire
+            or type(platform_wire.input_units) is not int
+            or platform_wire.input_units != len(wire) + 8192
+            or type(platform_wire.input_upper_bound) is not int
+            or not 0 < platform_wire.input_upper_bound <= 272000
+            or platform_wire.stage not in ("research", "critique", "synthesis")
+            or type(ticket.stage) is not int
+            or {"research": 1, "critique": 2, "synthesis": 3}.get(platform_wire.stage)
+            != ticket.stage
+        ):
+            raise ProtocolRejected("PLATFORM_HTTP_WIRE_BINDING_INVALID")
+        platform_wire.verify_wire(wire)
+        binding = hashlib.sha256(
+            json.dumps(
+                dict(
+                    allocation_hash=platform_wire.allocation_hash,
+                    stage=platform_wire.stage,
+                    body_sha256=platform_wire.body_sha256,
+                ),
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        if binding != platform_wire.binding_hash:
+            raise ProtocolRejected("PLATFORM_HTTP_WIRE_BINDING_INVALID")
+        platform_credential.request_headers()
+        return platform_credential
+
+    async def qualify_platform() -> None:
+        nonlocal checked_credential, credential_binding
+        from nexus.ops.platform_credentials import PlatformCredential
+
+        initial = frozen_platform()
+        if protocol.local_stopped:
+            raise ProtocolRejected("PLATFORM_HTTP_STOPPED")
+        credential_binding = initial.binding_hash
+        assert platform_pre_send is not None
+        checked_credential = await platform_pre_send()
+        if (
+            not isinstance(checked_credential, PlatformCredential)
+            or checked_credential.binding_hash != credential_binding
+        ):
+            raise ProtocolRejected("PLATFORM_HTTP_CREDENTIAL_CHANGED")
+        checked_credential.request_headers()
 
     def before_send() -> None:
-        if protocol.local_stopped or not grant.identity_verified:
+        if platform_requested:
+            initial = frozen_platform()
+            if dispatch_guard is not None:
+                dispatch_guard()
+            if (
+                protocol.local_stopped
+                or checked_credential is None
+                or initial.binding_hash != credential_binding
+                or checked_credential.binding_hash != credential_binding
+            ):
+                raise ProtocolRejected("PLATFORM_HTTP_STOPPED_OR_CREDENTIAL_CHANGED")
+            request.headers.update(checked_credential.request_headers())
+            return
+        if protocol.local_stopped or grant is None or not grant.identity_verified:
             raise ProtocolRejected("STOPPED_OR_GRANT_UNVERIFIED")
         if dispatch_guard is not None:
             dispatch_guard()
@@ -214,6 +304,7 @@ async def invoke_http_stage(
             request,
             work_deadline=work_deadline,
             cleanup_deadline=cleanup_deadline,
+            pre_send=qualify_platform if platform_requested else None,
             before_send=before_send,
             on_terminal=terminal,
         )

@@ -15,7 +15,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from nexus.agents.committee import INDEPENDENT_MONITOR_PROMPT_VERSIONS, ROLE_ORDER, PromptAsset
-from nexus.agents.comparison_manifest import PURPOSE
+from nexus.agents.comparison_manifest import PURPOSE, PURPOSES
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
 from nexus.monitoring.independent_context import SOURCE, IndependentMonitorContext, content
@@ -187,9 +187,11 @@ class PreparedComparisonInput:
 
 
 def prepare_comparison_input(
-    member: dict[str, Any], *, experiment_id: UUID
+    member: dict[str, Any], *, experiment_id: UUID, purpose: str = PURPOSE
 ) -> PreparedComparisonInput:
     """Rebuild only explicit private paths; verify both graphs and semantic equality."""
+    if purpose not in PURPOSES:
+        raise ValueError("COMPARISON_PURPOSE_INVALID")
     source = copy.deepcopy(
         {key: member[key] for key in ("profile", "request", "inputs", "evidence", "prompts")}
     )
@@ -199,7 +201,7 @@ def prepare_comparison_input(
     changes: list[dict[str, Any]] = []
 
     def alias(label: str) -> str:
-        return str(uuid5(experiment_id, f"{PURPOSE}:{label}"))
+        return str(uuid5(experiment_id, f"{purpose}:{label}"))
 
     def replace(path: tuple[str | int, ...], new: object) -> None:
         parent: Any = target
@@ -219,14 +221,14 @@ def prepare_comparison_input(
     }
     bindings["request_hash"] = _hash(
         {
-            "purpose": PURPOSE,
+            "purpose": purpose,
             "experiment_id": str(experiment_id),
             "request_id": bindings["request_id"],
         }
     )
     bindings["batch_hash"] = _hash(
         {
-            "purpose": PURPOSE,
+            "purpose": purpose,
             "account_id": bindings["account_id"],
             "candidate_batch_id": bindings["candidate_batch_id"],
             "candidate_ids": [str(i) for i in context.candidate_ids],
@@ -283,7 +285,7 @@ def prepare_comparison_input(
     return PreparedComparisonInput(
         target,
         {
-            "purpose": PURPOSE,
+            "purpose": purpose,
             "experiment_id": str(experiment_id),
             "source_manifest_hash": _hash(source),
             "input_hash": _hash(target),

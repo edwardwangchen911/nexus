@@ -118,6 +118,12 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_disclosure_context_pg.py",
     "engine/tests/integration/test_disclosure_producer_pg.py",
     "engine/tests/integration/test_disclosure_observations_pg.py",
+    # New Platform suites use the two shorter lanes from main run 41178091403
+    # (pg-c 958s, pg-f 1005s); existing selectors and boundaries stay in place.
+    "engine/tests/integration/test_platform_producer_pg.py",
+    "engine/tests/integration/test_platform_funding_pg.py",
+    "engine/tests/integration/test_platform_stage_accounting_pg.py",
+    "engine/tests/integration/test_platform_settlement_read_fault_pg.py",
     "engine/tests/integration/test_monitor_batches_pg.py",
     "engine/tests/integration/test_monitor_filing_content_pg.py",
     "engine/tests/integration/test_monitor_content_collector_pg.py",
@@ -145,6 +151,8 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_monitor_plan_replacement_pg.py",
     "engine/tests/integration/test_monitor_plan_clock_pg.py",
     "engine/tests/integration/test_monitor_receipt_competition_pg.py",
+    "engine/tests/integration/test_comparison_closeout_pg.py",
+    "engine/tests/integration/test_platform_execution_pg.py",
     "engine/tests/integration/test_monitor_validation_work_pg.py",
     "engine/tests/integration/test_research_monitor_notification_pg.py",
     "engine/tests/integration/test_monitor_single_delivery_pg.py",

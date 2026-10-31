@@ -108,7 +108,11 @@ async def prepare_tokenizer(*, allow_network: bool = True) -> dict[str, object]:
 
 
 def local_settings(
-    root: Path, *, load_model_key: bool = True, backend: str = "responses"
+    root: Path,
+    *,
+    load_model_key: bool = True,
+    backend: str = "responses",
+    key_path: Path = _KEY_PATH,
 ) -> EngineSettings:
     """Load only the local app configuration and OpenAI key, never broker credentials."""
     if backend not in {"responses", "codex_sdk"}:
@@ -123,7 +127,7 @@ def local_settings(
     if not load_model_key:
         environment.pop("OPENAI_API_KEY", None)
     key = environment.get("OPENAI_API_KEY", "").strip()
-    key_path = root / _KEY_PATH
+    key_path = root / key_path
     if load_model_key and not key and (key_path.exists() or key_path.is_symlink()):
         descriptor = os.open(key_path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor) as stream:
@@ -643,13 +647,13 @@ async def prepare_local_research(
         }
 
 
-def _save_key(root: Path) -> None:
+def _save_key(root: Path, *, key_path: Path = _KEY_PATH) -> None:
     if not sys.stdin.isatty():
         raise ValueError("OPENAI_KEY_REQUIRES_LOCAL_TERMINAL")
     key = getpass.getpass("OpenAI API Key（本机隐藏输入，不会发送到聊天）: ").strip()
     if not key or len(key) > 1024 or any(character.isspace() for character in key):
         raise ValueError("OPENAI_KEY_INVALID")
-    path = root / _KEY_PATH
+    path = root / key_path
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     if path.parent.resolve() != path.parent.absolute():
         raise ValueError("OPENAI_KEY_FILE_UNSAFE")

@@ -15,8 +15,17 @@ TARGET_SCHEMA = "0105_comparison_preclaim"
 _ended_host = existing.ended_activated_host
 
 
+@pytest.fixture(autouse=True)
+def historical_engine_version(monkeypatch):
+    # This suite proves the old 0099→0105 contract after the current head advances.
+    monkeypatch.setattr("nexus.persistence.migrations.CURRENT_MIGRATION_HEAD", TARGET_SCHEMA)
+    monkeypatch.setattr(
+        "nexus.ops.agent_paper_recovery_activation.CURRENT_MIGRATION_HEAD", TARGET_SCHEMA
+    )
+
+
 def cross_schema_host(tmp_path):
-    root, env, state_path, receipt_path = _ended_host(tmp_path)
+    root, env, state_path, receipt_path = _ended_host(tmp_path, schema=TARGET_SCHEMA)
     state = json.loads(state_path.read_text())
     state["schema"] = SOURCE_SCHEMA
     state_path.write_text(json.dumps(state))

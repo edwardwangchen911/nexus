@@ -13,6 +13,7 @@ from nexus.api.research_monitoring import read_monitoring_view
 from nexus.monitoring.pending import pending_stock
 from nexus.monitoring.storage import record_check
 from nexus.ops.research_monitor import parser, run
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentResearchOutputRecord,
@@ -277,6 +278,9 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
     from alembic.config import Config
 
     config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    async with factory() as session:
+        revision_before = await session.scalar(text("SELECT version_num FROM alembic_version"))
+        assert revision_before == CURRENT_MIGRATION_HEAD
     with pytest.raises(Exception, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
         await asyncio.to_thread(command.downgrade, config, "0092_monitor_daily_receipts")
     from helpers.migration_guard import historical_downgrade_guard
@@ -286,7 +290,7 @@ async def test_kind_scoped_plans_checks_events_and_legacy_entry_points(
     async with factory() as session:
         assert (
             await session.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0105_comparison_preclaim"
+            == revision_before
         )
         assert (await session.get(MonitorTrigger, scope[1])).kind == "disclosure"
     await factory.kw["bind"].dispose()

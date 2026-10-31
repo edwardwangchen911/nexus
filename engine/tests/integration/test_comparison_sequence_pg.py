@@ -80,12 +80,8 @@ async def test_next_exact_position_after_failed_chain_requires_complete_safe_pro
         await claim_comparison_position(
             factory, experiment_id=manifest.experiment_id, ordinal=2, worker_id="premature"
         )
-    assert (
-        await p.close(
-            claim, now=claim.expires_at + timedelta(seconds=1) if orphan else now, orphan=orphan
-        )
-        is known
-    )
+    closed_at = claim.expires_at + timedelta(seconds=1) if orphan else now
+    assert await p.close(claim, now=closed_at, orphan=orphan) is known
     safe = known and clean and not orphan
     from argparse import Namespace
     from pathlib import Path
@@ -98,14 +94,29 @@ async def test_next_exact_position_after_failed_chain_requires_complete_safe_pro
         "local_settings",
         lambda *args, **kwargs: EngineSettings(database_url=migrated_database_url),
     )
-    receipt = await native_command(
-        Namespace(
-            command="inspect-position",
-            repo_root=Path.cwd(),
-            experiment_id=manifest.experiment_id,
-            position=1,
-        )
+    args = Namespace(
+        command="inspect-position",
+        repo_root=Path.cwd(),
+        experiment_id=manifest.experiment_id,
+        position=1,
     )
+    if orphan:
+        from nexus.agents import comparison_closeout
+
+        async def before_close(_session):
+            return now
+
+        monkeypatch.setattr(comparison_closeout, "database_now", before_close)
+        with pytest.raises(ValueError, match="COMPARISON_TERMINAL_PROOF_INVALID"):
+            await native_command(args)
+
+        async def after_close(_session):
+            return closed_at
+
+        # The public proof reader must use the same controlled time as this
+        # expired-lease fixture; future evidence is not valid at the earlier time.
+        monkeypatch.setattr(comparison_closeout, "database_now", after_close)
+    receipt = await native_command(args)
     assert receipt["stage_chain_stopped"] is True
     assert receipt["stage_scope_stopped"] is (not safe)
     assert receipt["dispatch_authority"] is False
@@ -303,7 +314,9 @@ async def test_chain_stop_migration_round_trip_and_populated_rollback_fence(
         )
     async with factory() as session:
         assert await session.scalar(text("SELECT count(*) FROM job_attempts")) == 0
-    await asyncio.to_thread(command.upgrade, config, "head")
+    # This is the historical 0103 -> 0105 rollback fence; Platform 0106 has
+    # separate populated/empty downgrade coverage and must not redefine it.
+    await asyncio.to_thread(command.upgrade, config, "0105_comparison_preclaim")
     _, manifest, _, _, _, p = await first_stage(factory, prepared)
     await p.stop(manifest.experiment_id)
     with pytest.raises(RuntimeError, match="COMPARISON_COMPATIBLE_READER_ROLLBACK_REQUIRED"):

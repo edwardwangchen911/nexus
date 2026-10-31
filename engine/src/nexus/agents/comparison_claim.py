@@ -1,11 +1,13 @@
 """Exact native claim for the finite comparison; not an inference entry point."""
 
+from collections.abc import Callable
 from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.agents.persistence import require_reserved_daily_budget
+from nexus.agents.platform_funding import PlatformFunding
 from nexus.agents.research_maintenance import require_research_open
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.agents.research_stages.protocol import ProtocolRejected, StagedProtocol
@@ -16,7 +18,12 @@ from nexus.persistence.models.runtime import Job, JobAttempt, JobDependency, Job
 
 
 async def claim_comparison_position(
-    factory: async_sessionmaker[AsyncSession], *, experiment_id: UUID, ordinal: int, worker_id: str
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    experiment_id: UUID,
+    ordinal: int,
+    worker_id: str,
+    platform_funding_loader: Callable[[], PlatformFunding] | None = None,
 ) -> ClaimedJob:
     """Return only the first committed native claim, never recover send rights.
 
@@ -90,6 +97,25 @@ async def claim_comparison_position(
             raise ValueError("COMPARISON_NATIVE_BINDING_INVALID")
         model = await session.get(AgentModelConfigRecord, run.model_config_id)
         budget = await require_reserved_daily_budget(session, run_id=run.id)
+        from nexus.agents.comparison_manifest import parse_comparison_manifest
+        from nexus.agents.platform_funding import require_platform_funding
+        from nexus.agents.platform_manifest import PlatformManifest
+
+        manifest = parse_comparison_manifest(
+            await session.scalar(
+                text("SELECT payload FROM research_comparison_manifest WHERE id=:id"),
+                {"id": experiment_id},
+            )
+        )
+        manifest.input_hash_for(ordinal)
+        if isinstance(manifest, PlatformManifest):
+            if platform_funding_loader is None:
+                raise ValueError("PLATFORM_FUNDING_REQUIRED")
+            await require_platform_funding(session, manifest, platform_funding_loader())
+            await session.execute(
+                text("SELECT set_config('nexus.platform_execution',:position,true)"),
+                {"position": f"{experiment_id}:{ordinal}"},
+            )
         for record in (JobAttempt, JobLease, JobDependency):
             if await session.scalar(select(record.id).where(record.job_id == job.id)) is not None:
                 raise ValueError("COMPARISON_POSITION_CONSUMED")

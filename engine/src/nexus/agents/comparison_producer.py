@@ -12,10 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import ROLE_ORDER
 from nexus.agents.comparison_inputs import _hash, _manifest
-from nexus.agents.comparison_manifest import ACTOR, PURPOSE, ComparisonManifest
+from nexus.agents.comparison_manifest import ComparisonManifest, parse_comparison_manifest
 from nexus.agents.comparison_registration import register_comparison, reserve_comparison_chain
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import _schema_hash, _tool_hash
+from nexus.agents.platform_funding import (
+    PlatformFunding,
+    require_funding_binding,
+    require_platform_funding,
+)
+from nexus.agents.platform_manifest import PlatformManifest
+from nexus.agents.platform_profile import platform_model_matches
+from nexus.agents.research_maintenance import require_research_open
 from nexus.agents.research_only import require_research_only_snapshot
 from nexus.jobs.models import job_input_hash
 from nexus.monitoring.independent_context import (
@@ -130,6 +138,7 @@ async def admit_comparison_position(
     ordinal: int,
     model_config_id: UUID,
     daily_limit_usd: Decimal,
+    platform_funding: PlatformFunding | None = None,
 ) -> ComparisonAdmission:
     """Caller commits; a caught refusal rolls back every new native identity.
 
@@ -138,10 +147,15 @@ async def admit_comparison_position(
     """
     from nexus.agents.comparison_preparation import prepare_archive
 
+    require_research_open()
+    manifest = parse_comparison_manifest(manifest.model_dump())
+    if isinstance(manifest, PlatformManifest):
+        require_funding_binding(manifest, platform_funding)
     expected = prepare_archive(
         source,
         expected_source_hash=manifest.source_manifest_hash,
         experiment_id=manifest.experiment_id,
+        purpose=manifest.purpose,
     )
     if (
         json.dumps({k: v for k, v in prepared.items() if k != "rebuilt_at"}, sort_keys=True)
@@ -152,6 +166,11 @@ async def admit_comparison_position(
         or expected["outbound_safety_hash"] != manifest.outbound_safety_hash
     ):
         raise ValueError("COMPARISON_PREPARATION_CHANGED")
+    if (
+        isinstance(manifest, PlatformManifest)
+        and json.loads(manifest.model_dump_json())["allocations"] != expected["allocations"]
+    ):
+        raise ValueError("PLATFORM_ALLOCATION_CHANGED")
     input_hash = manifest.input_hash_for(ordinal)
     symbol = manifest.positions[ordinal - 1][1]
     member = next(row["payload"] for row in expected["members"] if row["symbol"] == symbol)
@@ -177,6 +196,8 @@ async def admit_comparison_position(
             or not request.decision_time <= datetime.fromisoformat(prepared["rebuilt_at"]) <= now
         ):
             raise ValueError("COMPARISON_PREPARATION_CLOCK_INVALID")
+        if isinstance(manifest, PlatformManifest):
+            await require_platform_funding(session, manifest, platform_funding)
         prompts = await _original_authority(session, original_member, manifest.sdk_config_hash)
         model = await session.get(AgentModelConfigRecord, model_config_id)
         expected_model = (
@@ -189,13 +210,15 @@ async def admit_comparison_position(
             or model.config_hash != expected_model
             or model.model_id != "gpt-5.6-terra"
             or (model.max_input_tokens, model.max_output_tokens, model.max_tool_calls)
-            != (96000, 8192, 0)
+            != (816000 if isinstance(manifest, PlatformManifest) else 96000, 8192, 0)
+            or isinstance(manifest, PlatformManifest)
+            and not platform_model_matches(model)
             or model.created_at > now
             or not model.pricing_available_at <= now < model.pricing_expires_at
         ):
             raise ValueError("COMPARISON_CONFIG_INVALID")
         frozen = {
-            "purpose": PURPOSE,
+            "purpose": manifest.purpose,
             "experiment_id": str(manifest.experiment_id),
             "input_hash": input_hash,
             "source_manifest_hash": manifest.source_manifest_hash,
@@ -320,7 +343,7 @@ async def admit_comparison_position(
             prompt_version_id=prompts["orchestrator"].id,
             model_config_id=model.id,
             decision_time=request.decision_time,
-            actor_id=ACTOR,
+            actor_id=manifest.actor,
             idempotency_key=key,
             status="prepared",
             retry_count=0,
@@ -332,7 +355,11 @@ async def admit_comparison_position(
             evidence_manifest=_manifest(member),
             tool_hash=_tool_hash(),
             input_hash=input_hash,
-            reserved_cost_usd=model.worst_case_cost_usd,
+            reserved_cost_usd=(
+                manifest.reservation_for(ordinal)
+                if isinstance(manifest, PlatformManifest)
+                else model.worst_case_cost_usd
+            ),
             settled_cost_usd=None,
             pricing_version=model.version,
             input_tokens=None,
