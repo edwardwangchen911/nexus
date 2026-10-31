@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.comparison_manifest import ACTOR, ComparisonManifest
+from nexus.agents.comparison_manifest import ACTORS, parse_comparison_manifest
 from nexus.jobs.models import job_input_hash
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job
@@ -14,7 +14,7 @@ from nexus.persistence.models.runtime import Job
 async def comparison_owner(
     session: AsyncSession, run: AgentResearchRunRecord, job: Job
 ) -> UUID | None:
-    if run.actor_id != ACTOR and job.job_type != "agent.research.comparison":
+    if run.actor_id not in ACTORS and job.job_type != "agent.research.comparison":
         return None
     row = (
         (
@@ -31,7 +31,7 @@ async def comparison_owner(
     )
     if row is None or not row["bound"] or job.input_hash != job_input_hash(job.payload):
         raise ValueError("COMPARISON_NATIVE_BINDING_INVALID")
-    manifest = ComparisonManifest.model_validate(row["payload"])
+    manifest = parse_comparison_manifest(row["payload"])
     if manifest.experiment_id != row["id"] or manifest.digest != row["manifest_hash"]:
         raise ValueError("COMPARISON_REGISTRATION_CONFLICT")
     return manifest.experiment_id

@@ -103,6 +103,16 @@ cp infra/env.example infra/.env.local
 `PLATFORM_ELIGIBLE_AT_CHECK` 只表示本次本地条件核验通过，仍无派发权、模型权限或实时余额验证；
 主线须冻结两个绑定哈希，并在每次 claim／send 前重新读取同一证明、当前占用和实际凭据。
 
+新赠额目的使用 `nexus-engine-research-comparison prepare --purpose platform-gifted-terra-v1-20261031`
+冻结三股各三阶段的完整请求容量；`register-profile`／`inspect-profile` 同样须显式选择该目的。
+原目的默认值及 SDK 配置保持原样。新 `admit-position` 要求 `--funding-proof`，在共享账本锁内
+核对证明／实际凭据绑定及完整三股上界，跨日 unknown 和已结算 Platform 支出不会恢复额度。
+价格版本固定至 2026-11-01 00:00 UTC，过期须重新核对，不能顺延已有版本。
+
+当前候选仅完成准备和准入：HTTP、原始用量与结算接线完成前，CLI 和迁移 0106 的派发保护
+均拒绝新目的实际执行，不得移除保护或部署半成品。0106 有新目的事实后不允许破坏性降级；
+后续部署须保留理解 0106 及新事实的兼容读取器／镜像，旧身份不迁写。
+
 Strategy R&D 独立 worker 支持显式 `fixture`、`responses`，以及必须带 `--once` 的
 `codex_sdk`。Codex 长驻模式在领取队列前拒绝；不会回退为 fixture。先通过现有本地配置入口
 登记专用提示词和模型版本，不重标通用研究 v1/v2：

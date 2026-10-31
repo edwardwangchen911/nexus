@@ -587,6 +587,11 @@ async def test_normal_admit_and_read_only_receipt_after_missing_client_ack(
 
 @pytest.mark.asyncio
 async def test_exact_context_binding_and_compatible_reader_rollback(migrated_database_url):
+    # Exercise the original 0105 reader contract unchanged. The new Platform
+    # migration has its own populated/empty rollback tests at the current head.
+    await asyncio.to_thread(
+        command.downgrade, Config("engine/alembic.ini"), "0105_comparison_preclaim"
+    )
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     source, prepared, manifest, model_id, _ = await seed(factory)
     async with factory() as session, session.begin():

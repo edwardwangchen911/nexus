@@ -18,6 +18,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted, ResearchAccountingBusy
+from nexus.agents.comparison_manifest import (
+    PLATFORM_PURPOSE,
+    PURPOSE,
+    PURPOSES,
+    parse_comparison_manifest,
+)
 from nexus.agents.comparison_preparation import prepare_archive
 
 
@@ -42,8 +48,9 @@ async def _preclaim_transaction(session: AsyncSession) -> AsyncIterator[None]:
 
 
 async def native_command(args: argparse.Namespace) -> dict[str, Any]:
-    from nexus.agents.comparison_manifest import ComparisonManifest
     from nexus.agents.comparison_producer import admit_comparison_position
+    from nexus.agents.platform_funding import load_bound_platform_funding
+    from nexus.agents.platform_manifest import PlatformManifest
     from nexus.agents.research_stages.routes import selected_route
     from nexus.ops.openai_local import local_settings
     from nexus.persistence.session import session_factory
@@ -55,7 +62,9 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
             from nexus.agents.chatgpt_grant import GrantStore
             from nexus.agents.comparison_execution import execute_comparison_position
 
-            manifest = ComparisonManifest.model_validate_json(args.manifest.read_bytes())
+            manifest = parse_comparison_manifest(json.loads(args.manifest.read_bytes()))
+            if manifest.purpose == PLATFORM_PURPOSE:
+                raise ValueError("PLATFORM_NATIVE_EXECUTION_NOT_READY")
             with args.source.open("rb") as stream:
                 source = stream.read(8 * 1024 * 1024 + 1)
             with args.prepared.open("rb") as stream:
@@ -100,7 +109,7 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                     await session.execute(
                         text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                     )
-                manifest = ComparisonManifest.model_validate_json(args.manifest.read_bytes())
+                manifest = parse_comparison_manifest(json.loads(args.manifest.read_bytes()))
                 with args.source.open("rb") as stream:
                     source = stream.read(8 * 1024 * 1024 + 1)
                 with args.prepared.open("rb") as stream:
@@ -115,7 +124,12 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                 from nexus.agents.comparison_profile import read_api_profile
 
                 await session.execute(text("SET TRANSACTION READ ONLY"))
-                profile = await read_api_profile(session)
+                if getattr(args, "purpose", PURPOSE) == PLATFORM_PURPOSE:
+                    from nexus.agents.platform_profile import read_platform_profile
+
+                    profile = await read_platform_profile(session)
+                else:
+                    profile = await read_api_profile(session)
                 return {
                     "status": "profile_not_registered" if profile is None else "profile_registered",
                     "inspection_only": True,
@@ -133,9 +147,14 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
             if args.command == "register-profile":
                 from nexus.agents.comparison_profile import register_api_profile
 
-                profile = await register_api_profile(
-                    session, sdk_model_config_id=args.sdk_model_config_id
-                )
+                if getattr(args, "purpose", PURPOSE) == PLATFORM_PURPOSE:
+                    from nexus.agents.platform_profile import register_platform_profile
+
+                    profile = await register_platform_profile(session)
+                else:
+                    profile = await register_api_profile(
+                        session, sdk_model_config_id=args.sdk_model_config_id
+                    )
                 return {
                     "status": "profile_registered",
                     "model_config_id": str(profile.id),
@@ -200,11 +219,16 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                         else {k: str(v) if isinstance(v, UUID) else v for k, v in row.items()}
                     ),
                 }
-            manifest = ComparisonManifest.model_validate_json(args.manifest.read_bytes())
+            manifest = parse_comparison_manifest(json.loads(args.manifest.read_bytes()))
             with args.source.open("rb") as stream:
                 source = stream.read(8 * 1024 * 1024 + 1)
             with args.prepared.open("rb") as stream:
                 prepared = json.loads(stream.read(8 * 1024 * 1024 + 1))
+            funding = None
+            if isinstance(manifest, PlatformManifest):
+                if getattr(args, "funding_proof", None) is None:
+                    raise ValueError("PLATFORM_FUNDING_REQUIRED")
+                funding = load_bound_platform_funding(args.repo_root, args.funding_proof, manifest)
             result = await admit_comparison_position(
                 session,
                 source=source,
@@ -213,6 +237,7 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                 ordinal=args.position,
                 model_config_id=args.model_config_id,
                 daily_limit_usd=settings.agent_daily_budget_usd,
+                platform_funding=funding,
             )
         return {
             "status": "position_prepared",
@@ -226,12 +251,17 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def prepare_file(
-    *, source: Path, expected_source_hash: str, experiment_id: UUID, output: Path
+    *,
+    source: Path,
+    expected_source_hash: str,
+    experiment_id: UUID,
+    output: Path,
+    purpose: str = PURPOSE,
 ) -> dict[str, Any]:
     with source.open("rb") as stream:
         raw = stream.read(8 * 1024 * 1024 + 1)
     artifact = prepare_archive(
-        raw, expected_source_hash=expected_source_hash, experiment_id=experiment_id
+        raw, expected_source_hash=expected_source_hash, experiment_id=experiment_id, purpose=purpose
     )
     artifact["rebuilt_at"] = datetime.now(UTC).isoformat()
     wire = json.dumps(artifact, sort_keys=True, allow_nan=False).encode()
@@ -260,6 +290,7 @@ def main() -> int:
     prepare.add_argument("--source-sha256", required=True)
     prepare.add_argument("--experiment-id", type=UUID, required=True)
     prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--purpose", choices=PURPOSES, default=PURPOSE)
     for name in ("inspect-grant", "refresh-grant"):
         grant = subcommands.add_parser(name)
         grant.add_argument(
@@ -272,9 +303,11 @@ def main() -> int:
     run = subcommands.add_parser("run-position")
     profile = subcommands.add_parser("register-profile")
     profile.add_argument("--repo-root", type=Path, required=True)
-    profile.add_argument("--sdk-model-config-id", type=UUID, required=True)
+    profile.add_argument("--sdk-model-config-id", type=UUID)
+    profile.add_argument("--purpose", choices=PURPOSES, default=PURPOSE)
     profile_inspect = subcommands.add_parser("inspect-profile")
     profile_inspect.add_argument("--repo-root", type=Path, required=True)
+    profile_inspect.add_argument("--purpose", choices=PURPOSES, default=PURPOSE)
     for name in ("inspect-preclaim", "close-preclaim"):
         command = subcommands.add_parser(name)
         for flag in ("repo-root", "source", "prepared", "manifest"):
@@ -286,6 +319,7 @@ def main() -> int:
         subcommand.add_argument("--source", type=Path, required=True)
         subcommand.add_argument("--prepared", type=Path, required=True)
         subcommand.add_argument("--manifest", type=Path, required=True)
+        subcommand.add_argument("--funding-proof", type=Path)
     run.add_argument("--worker-id", required=True)
     run.add_argument(
         "--credentials-dir",
@@ -295,6 +329,12 @@ def main() -> int:
     admit.add_argument("--model-config-id", type=UUID, required=True)
     inspect.add_argument("--experiment-id", type=UUID, required=True)
     args = parser.parse_args()
+    if (
+        args.command == "register-profile"
+        and args.purpose == PURPOSE
+        and args.sdk_model_config_id is None
+    ):
+        parser.error("--sdk-model-config-id is required for the original comparison purpose")
     try:
         if args.command in {"inspect-grant", "refresh-grant"}:
             from nexus.agents.chatgpt_grant import GrantStore
@@ -321,6 +361,7 @@ def main() -> int:
             expected_source_hash=args.source_sha256,
             experiment_id=args.experiment_id,
             output=args.output,
+            purpose=args.purpose,
         )
     except ResearchAccountingBusy:
         # native_command has exited its owning transaction. An executing
@@ -356,12 +397,27 @@ def main() -> int:
         return 1
     except (OSError, ValueError, KeyError, TypeError) as error:
         code = "COMPARISON_BUDGET_EXHAUSTED" if isinstance(error, BudgetExhausted) else str(error)
-        if not re.fullmatch(
-            r"(?:COMPARISON|FORMAL_BUDGET|CODEX|CHATGPT)_[A-Z_]+", code
-        ) and code not in {
-            "RESEARCH_ONLY_SNAPSHOT_INVALID",
-            "INDEPENDENT_MONITOR_CONTEXT_INVALID",
-        }:
+        from nexus.ops.platform_credentials import PlatformCredentialError
+
+        platform_safe = isinstance(error, PlatformCredentialError) or code in {
+            "PLATFORM_FUNDING_REQUIRED",
+            "PLATFORM_FUNDING_BINDING_CHANGED",
+            "PLATFORM_PRIOR_USAGE_UNCONFIRMED",
+            "PLATFORM_NATIVE_EXECUTION_NOT_READY",
+            "PLATFORM_ALLOCATION_CHANGED",
+            "PLATFORM_EXPERIMENT_BUDGET_EXCEEDED",
+            "PLATFORM_PRICE_WINDOW_INVALID",
+            "PLATFORM_PROFILE_EXISTING_INVALID",
+        }
+        if (
+            not platform_safe
+            and not re.fullmatch(r"(?:COMPARISON|FORMAL_BUDGET|CODEX|CHATGPT)_[A-Z_]+", code)
+            and code
+            not in {
+                "RESEARCH_ONLY_SNAPSHOT_INVALID",
+                "INDEPENDENT_MONITOR_CONTEXT_INVALID",
+            }
+        ):
             code = "COMPARISON_PREPARATION_FAILED"
         details = {}
         if args.command in {"inspect-grant", "refresh-grant"}:

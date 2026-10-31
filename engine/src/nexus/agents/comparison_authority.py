@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.comparison_inputs import _hash, _validate
-from nexus.agents.comparison_manifest import ACTOR, PURPOSE
+from nexus.agents.comparison_manifest import ACTORS, PURPOSES
 from nexus.agents.comparison_routes import comparison_owner
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
@@ -16,17 +16,17 @@ async def comparison_context_qualified(
 ) -> bool | None:
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
     marked = (
-        run.actor_id == ACTOR
+        run.actor_id in ACTORS
         or snapshot is not None
         and (
             snapshot.source == "nexus_research_comparison"
             or snapshot.schema_version == "comparison-input-v1"
-            or snapshot.payload.get("purpose") == PURPOSE
+            or snapshot.payload.get("purpose") in PURPOSES
         )
     )
     if not marked:
         return None
-    if snapshot is None or run.actor_id != ACTOR:
+    if snapshot is None or run.actor_id not in ACTORS:
         return False
     jobs = list(
         await session.scalars(select(Job).where(Job.payload["run_id"].astext == str(run.id)))

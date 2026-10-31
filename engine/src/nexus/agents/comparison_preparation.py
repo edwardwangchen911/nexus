@@ -13,7 +13,7 @@ from nexus.agents.comparison_inputs import (
     assert_outbound_safe,
     prepare_comparison_input,
 )
-from nexus.agents.comparison_manifest import PURPOSE
+from nexus.agents.comparison_manifest import PLATFORM_PURPOSE, PURPOSE, PURPOSES
 from nexus.agents.models import ResearchRequest
 from nexus.jobs.models import job_input_hash
 
@@ -21,11 +21,32 @@ SYMBOLS = ("AAPL", "AVGO", "NVDA")
 
 
 def prepare_archive(
-    source: bytes, *, expected_source_hash: str, experiment_id: UUID
+    source: bytes, *, expected_source_hash: str, experiment_id: UUID, purpose: str = PURPOSE
 ) -> dict[str, Any]:
     artifact = reconstruct_archive(
-        source, expected_source_hash=expected_source_hash, experiment_id=experiment_id
+        source,
+        expected_source_hash=expected_source_hash,
+        experiment_id=experiment_id,
+        purpose=purpose,
     )
+    if purpose == PLATFORM_PURPOSE:
+        from dataclasses import asdict
+
+        from nexus.agents.platform_wire import freeze_platform_allocation
+
+        artifact["allocations"] = [
+            json.loads(
+                json.dumps(
+                    asdict(
+                        freeze_platform_allocation(
+                            PreparedComparisonInput(m["payload"], m["proof"], tuple(m["forbidden"]))
+                        )
+                    )
+                )
+            )
+            for m in artifact["members"]
+        ]
+        return artifact
     for member in artifact["members"]:
         validate_comparison_capacity(
             PreparedComparisonInput(member["payload"], member["proof"], tuple(member["forbidden"]))
@@ -34,9 +55,11 @@ def prepare_archive(
 
 
 def reconstruct_archive(
-    source: bytes, *, expected_source_hash: str, experiment_id: UUID
+    source: bytes, *, expected_source_hash: str, experiment_id: UUID, purpose: str = PURPOSE
 ) -> dict[str, Any]:
     """Read/reconstruct frozen identity, including rejected archives; never admit or dispatch."""
+    if purpose not in PURPOSES:
+        raise ValueError("COMPARISON_PURPOSE_INVALID")
     if len(source) > 8 * 1024 * 1024 or hashlib.sha256(source).hexdigest() != expected_source_hash:
         raise ValueError("COMPARISON_SOURCE_HASH_INVALID")
     original = json.loads(source)
@@ -91,8 +114,8 @@ def reconstruct_archive(
             )
             + (tuple(context["candidate_ids"]),)
         )
-        prepared = prepare_comparison_input(member, experiment_id=experiment_id)
-        again = prepare_comparison_input(member, experiment_id=experiment_id)
+        prepared = prepare_comparison_input(member, experiment_id=experiment_id, purpose=purpose)
+        again = prepare_comparison_input(member, experiment_id=experiment_id, purpose=purpose)
         if prepared != again:
             raise ValueError("COMPARISON_RECONSTRUCTION_UNSTABLE")
         # Both routes receive this exact compiler result. No provider or SDK is called.
@@ -101,7 +124,7 @@ def reconstruct_archive(
         )
         wire = codex_request_wire(payload)
         assert_outbound_safe(wire, prepared.forbidden)
-        if len(wire.encode()) > 100479:
+        if purpose == PURPOSE and len(wire.encode()) > 100479:
             raise ValueError("COMPARISON_INPUT_CAPACITY_EXCEEDED")
         ordered[symbol] = {
             "symbol": symbol,
@@ -118,7 +141,7 @@ def reconstruct_archive(
     rows = [ordered[symbol] for symbol in SYMBOLS]
     return {
         "schema_version": "research-comparison-inputs-v1",
-        "purpose": PURPOSE,
+        "purpose": purpose,
         "experiment_id": str(experiment_id),
         "source_manifest_hash": expected_source_hash,
         "members": rows,
