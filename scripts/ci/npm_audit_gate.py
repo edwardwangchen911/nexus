@@ -23,7 +23,9 @@ MINIMATCH_EXPIRES_AT = datetime(2026, 11, 1, tzinfo=UTC)
 MINIMATCH_ADVISORY = "https://github.com/advisories/GHSA-g3hv-75wg-m249"
 MINIMATCH_GRAPH_SHA256 = "0b0a5266fdf557f0297f1028da05736ea41a4f8b6d8b3de6dcd9a94140fadd80"
 MINIMATCH_LOCK_SHA256 = "2f7aec4834ba4069f52a20e7e312f5a49f6e3c857ff6bb2964c152dab3ae54cc"
-MINIMATCH_SURFACE_SHA256 = "ae52e4dc9e6fcbb59a454ac781193b630e6aa0fa907fd8e29234a64c9f8e2d43"
+# Routine source binding refresh: only the registered Platform credential CLI
+# changed the generator inputs; accepted graph, paths and expiry remain fixed.
+MINIMATCH_SURFACE_SHA256 = "a51c68bbbd8d56ef3975aff596d3681dff371419af2bad41d14e7f19c60cb207"
 MINIMATCH_TREE_SHA256 = {
     "node_modules/minimatch": "c8690806d606597f04633171624e8266a579e5ed8da5b6a89016a621fa74e240",
     "node_modules/@redocly/openapi-core/node_modules/minimatch": (
