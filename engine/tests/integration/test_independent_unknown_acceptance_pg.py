@@ -61,6 +61,8 @@ def test_independent_acceptance_cli_requires_explicit_proof_and_consent():
         "concurrent_history_writer",
         "settled_consumer",
         "readonly_recovery",
+        "readonly_activity",
+        "readonly_activity_late",
         "new_request",
         "budget_preserved",
     ],
@@ -424,6 +426,60 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             case == "concurrent"
         )
         assert receipt.budget_preserved and receipt.execution_locked
+        if case in {"readonly_activity", "readonly_activity_late"}:
+            from contextlib import asynccontextmanager
+
+            from nexus.api.routes.workbench import workbench_read_session
+            from nexus.paper.manual_entry import read_configured_manual_request
+            from nexus.workbench.read_service import WorkbenchReadService
+
+            async def activity_snapshot():
+                async with asynccontextmanager(workbench_read_session)(factory) as session:
+                    assert await session.scalar(text("SHOW transaction_read_only")) == "on"
+                    assert (
+                        await session.scalar(text("SHOW transaction_isolation"))
+                        == "repeatable read"
+                    )
+                    session.info["engine_settings"] = settings
+                    response = await WorkbenchReadService(session, captured["clock"][0]).read()
+                    assert response.execution_locked
+                    scope = next(
+                        item
+                        for item in response.activity.scopes
+                        if item.mode == "research_and_monitor"
+                    )
+                    presented = await read_configured_manual_request(
+                        session, settings, request_id=row.id
+                    )
+                    return scope, presented
+
+            scope, presented = await activity_snapshot()
+            assert scope.request_id == row.id
+            assert scope.selection in {"today", "historical"}
+            assert scope.status == presented.status == "unknown"
+            assert scope.occupancy == "released"
+            assert presented.independent_disposition == "unknown_acknowledged"
+            assert len(scope.candidates) == len(result.research.members)
+            assert {item.run_id for item in scope.candidates} == {
+                item.run_id for item in result.research.members
+            }
+            assert presented.research == result.research
+            assert await facts(factory) == before
+            if case == "readonly_activity_late":
+                await late_observation()
+                after_late = await facts(factory)
+                scope, presented = await activity_snapshot()
+                assert scope.request_id == row.id
+                assert scope.selection in {"active", "historical_unresolved"}
+                assert scope.status == presented.status == "unknown"
+                assert scope.occupancy == "unresolved"
+                assert presented.independent_disposition == "recheck_required"
+                assert await facts(factory) == after_late
+            async with factory.begin() as session:
+                await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+                with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await require_independent_execution_open(session, request_id=row.id)
+            raise Observed
         if case == "normal":
             from nexus.paper.manual_entry import read_configured_manual_request
 

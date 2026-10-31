@@ -13,6 +13,7 @@ from sqlalchemy.sql.selectable import CompoundSelect
 
 from nexus.api.errors import NexusError
 from nexus.market.current_identity import identity_parse_scope
+from nexus.paper.independent_unknown_acceptance import read_independent_disposition
 from nexus.paper.manual_preparation_close import preparation_closed
 from nexus.paper.manual_request import ManualMode, _require_cycle_jobs_settled, read_manual_request
 from nexus.paper.read_service import PaperReadService
@@ -259,7 +260,16 @@ async def _scope(
         )
         if event_future:
             raise ValueError("WORKBENCH_ACTIVITY_UNVERIFIED")
-        closed = view.status == "unknown" and await preparation_closed(session, row, now=now)
+        disposition = (
+            await read_independent_disposition(session, row, now=now)
+            if row.contract_version == 3 and view.status == "unknown" and view.research is not None
+            else None
+        )
+        closed = view.status == "unknown" and (
+            disposition == "unknown_acknowledged"
+            or disposition is None
+            and await preparation_closed(session, row, now=now)
+        )
         unresolved = (
             view.status in {"queued", "preparing", "active"}
             or view.status == "unknown"
@@ -267,7 +277,10 @@ async def _scope(
         )
         if view.cycle_id is not None:
             unresolved = unresolved or not await _cycle_settled(session, view.cycle_id, now)
-        if view.research is not None:
+        # The display proof already checks the full manifest and native closure.
+        # A changed proof remains unresolved. Neither presentation result may
+        # enter the READ COMMITTED/locking admission exception from this snapshot.
+        if view.research is not None and disposition is None:
             try:
                 await require_research_jobs_settled(session, row=row, view=view.research, now=now)
             except ValueError as error:

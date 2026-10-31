@@ -26,7 +26,7 @@ const selections: Record<ActivityScope["selection"], string> = {
   none: "今日无可关注轮次", ambiguous: "存在多个待核对对象", unavailable: "当前状态待核对",
 };
 const occupancyCopy: Record<ActivityScope["occupancy"], string> = {
-  unresolved: "仍有未解除占用", released: "历史占用已按原合同处置；原结果与未知用量仍按原记录保留",
+  unresolved: "仍有未解除占用", released: "历史占用已按原合同处置，仅解除历史调度占用；原结果、未知用量、费用和预算预留仍按原记录保留，后续仍须重新通过准入",
   not_indicated: "未指示历史占用；不代表下一轮准入已通过", unverified: "占用状态尚未核验",
 };
 const statuses: Record<string, string> = {

@@ -24,6 +24,16 @@ const candidate = () => ({ instrument_id: instrumentId, symbol: "AAPL", run_id: 
 });
 
 describe("frozen round and research limits", () => {
+  it("keeps unknown money and admission separate from accepted historical occupancy", () => {
+    render(<ActivitySummary activity={activity(activityScope({ mode: "research_and_monitor", selection: "historical", occupancy: "released" }))} />);
+    const scope = screen.getByRole("region", { name: "独立研究与持续监控" });
+    expect(scope).toHaveTextContent("结果未知");
+    expect(scope).toHaveTextContent("仅解除历史调度占用");
+    expect(scope).toHaveTextContent("原结果、未知用量、费用和预算预留仍按原记录保留");
+    expect(scope).toHaveTextContent("后续仍须重新通过准入");
+    expect(scope).not.toHaveTextContent("本轮运行已完成");
+    expect(within(scope).queryByRole("button")).not.toBeInTheDocument();
+  });
   it("separates today's absence, historical unknown, occupancy and registration time", () => {
     render(<ActivitySummary activity={activity()} />);
     const scope = screen.getByRole("region", { name: "正式研究与内部模拟" });
