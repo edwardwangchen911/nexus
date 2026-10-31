@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
@@ -185,8 +186,18 @@ async def execute_research_run(
         data_snapshot_id=run.data_snapshot_id,
         decision_time=run.decision_time,
     )
+    from nexus.agents.research_stages.executor import (
+        capture_validated_preparation,
+        is_staged_preparation,
+    )
+
     try:
-        await require_reserved_daily_budget(session, run_id=run.id)
+        if is_staged_preparation(committee):
+            # Preparation rolls back before provider work: keep the existing
+            # short accounting boundary, never the legacy long-lived day lock.
+            await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
+        else:
+            await require_reserved_daily_budget(session, run_id=run.id)
     except BudgetExhausted:
         return await _terminal_without_usage(
             session,
@@ -196,6 +207,14 @@ async def execute_research_run(
             status="failed",
             reason="budget_reservation_unavailable",
         )
+    capture_validated_preparation(
+        request=request,
+        evidence=evidence_refs,
+        run_id=run_id,
+        committee=committee,
+        allow_fixture_evidence=allow_fixture_evidence,
+        allow_fixture_price_authority=allow_fixture_price_authority,
+    )
     await _advance(session, run, "running")
     event_sequence += 1
     await _append_event(session, run, event_sequence, "running", {})
@@ -552,6 +571,13 @@ async def _terminal_without_usage(
     from nexus.agents.research_dispatch import stop_current_dispatch
 
     stop_current_dispatch()
+    if await session.scalar(text("SELECT to_regclass('research_stage_member')")) is not None:
+        if await session.scalar(
+            text("SELECT 1 FROM research_stage_member WHERE run_id=:run"), {"run": run.id}
+        ):
+            # Stage installation is already beyond the uncalled preparation
+            # boundary, even if authorization/response persistence is absent.
+            raise BudgetExhausted("zero-call close conflicts with staged execution")
     if any(
         value not in (None, 0)
         for value in (run.settled_cost_usd, run.input_tokens, run.output_tokens)

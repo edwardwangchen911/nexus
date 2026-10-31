@@ -108,12 +108,20 @@ async def load_frozen_evidence(
         ref.id for ref in ordered if ref.source == "research_observation_identity"
     )
     if observation_ids:
+        from nexus.agents.comparison_authority import (
+            comparison_context_qualified,
+            require_comparison_observation_basis,
+        )
         from nexus.agents.research_only import require_observation_snapshot
         from nexus.persistence.models.data import DataSnapshot
 
         snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
         try:
-            require_observation_snapshot(snapshot)
+            comparison = await comparison_context_qualified(session, run)
+            if comparison is None:
+                require_observation_snapshot(snapshot)
+            else:
+                await require_comparison_observation_basis(session, run, observation_ids)
         except ValueError:
             return ()
         from nexus.research.observation_identity_storage import read_observation_identity_bindings

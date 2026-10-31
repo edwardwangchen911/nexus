@@ -332,11 +332,21 @@ async def execute_comparison_position(
     )
 
     async def execute(session: Any) -> Any:
-        return await execute_or_capture(
+        result = await execute_or_capture(
             session,
             run_id=UUID(str(claim.payload["run_id"])),
             committee=committee,
             allow_fixture_evidence=False,
+        )
+        from nexus.jobs.repository import JobCompletion
+        from nexus.worker import _agent_result
+
+        mapped = _agent_result(result.status)
+        return JobCompletion(
+            outcome=mapped.outcome,
+            result_code=mapped.result_code,
+            error_code=mapped.error_code,
+            finished_at=datetime.now(UTC),
         )
 
     try:

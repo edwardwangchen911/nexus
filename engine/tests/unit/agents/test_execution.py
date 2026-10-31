@@ -378,9 +378,11 @@ async def test_zero_call_close_cannot_erase_recorded_usage(monkeypatch, field):
     setattr(run, field, 1)
     release = AsyncMock()
     monkeypatch.setattr(execution, "release_daily_budget_if_reserved", release)
+    session = AsyncMock()
+    session.scalar.side_effect = ["research_stage_member", None]
     with pytest.raises(BudgetExhausted, match="recorded usage"):
         await execution._terminal_without_usage(
-            AsyncMock(),
+            session,
             run,
             output_sequence=1,
             event_sequence=2,
@@ -409,9 +411,11 @@ async def test_zero_call_close_cannot_replace_settled_budget(monkeypatch):
     )
     persist = AsyncMock()
     monkeypatch.setattr(execution, "_persist_terminal", persist)
+    session = AsyncMock()
+    session.scalar.side_effect = ["research_stage_member", None]
     with pytest.raises(BudgetExhausted, match="settled reservation"):
         await execution._terminal_without_usage(
-            AsyncMock(),
+            session,
             run,
             output_sequence=1,
             event_sequence=2,
