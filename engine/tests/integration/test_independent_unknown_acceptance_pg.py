@@ -67,6 +67,7 @@ def test_independent_acceptance_cli_requires_explicit_proof_and_consent():
         "readonly_manual_queue_late",
         "new_request",
         "budget_preserved",
+        "schema_upgrade",
     ],
 )
 @pytest.mark.asyncio
@@ -99,7 +100,8 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
     def sdk(config):
         client = create(config)
         if (
-            case not in {"mixed_completed", "mixed_plan", "mixed_increment_unknown"}
+            case
+            not in {"mixed_completed", "mixed_plan", "mixed_increment_unknown", "schema_upgrade"}
             or len(calls) >= 3
         ):
             client.thread_start.return_value.run.side_effect = RuntimeError("controlled failure")
@@ -183,7 +185,7 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
                     )
                 kwargs = {**kwargs, "job_ids": (first_job,)}
             assert await run(settings, **kwargs)
-        if case in {"mixed_completed", "mixed_plan", "mixed_increment_unknown"}:
+        if case in {"mixed_completed", "mixed_plan", "mixed_increment_unknown", "schema_upgrade"}:
             from nexus.persistence.models.runtime import Job
 
             async with factory() as session:
@@ -248,7 +250,12 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             assert sum(not m.usage_known for m in result.research.members) == (
                 2 if case == "two_unknown" else 1
             )
-            if case in {"mixed_completed", "mixed_plan", "mixed_increment_unknown"}:
+            if case in {
+                "mixed_completed",
+                "mixed_plan",
+                "mixed_increment_unknown",
+                "schema_upgrade",
+            }:
                 assert sorted(m.status for m in result.research.members) == [
                     "abstained",
                     "completed",
@@ -260,6 +267,22 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
                 with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
                     await require_independent_execution_open(session, request_id=row.id)
             raise Observed
+        if case == "schema_upgrade":
+            from alembic import command
+            from alembic.config import Config
+
+            upgraded_facts = await facts(factory)
+            async with factory() as session:
+                for table in ("research_stage_authorization", "research_stage_observation"):
+                    assert await session.scalar(text(f"SELECT count(*) FROM {table}")) > 0
+            await asyncio.to_thread(
+                command.downgrade, Config("engine/alembic.ini"), "0105_comparison_preclaim"
+            )
+            # Deployment restarts consumers after DDL; discard their old prepared statements.
+            await factory.kw["bind"].dispose()
+            # Reproduce the deployed reader's exact schema gate, not a skipped gate.
+            current_head = manual_paper.CURRENT_MIGRATION_HEAD
+            monkeypatch.setattr(manual_paper, "CURRENT_MIGRATION_HEAD", "0105_comparison_preclaim")
         before = await facts(factory)
 
         async def late_observation():
@@ -444,6 +467,79 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             case == "concurrent"
         )
         assert receipt.budget_preserved and receipt.execution_locked
+        if case == "schema_upgrade":
+            from nexus.ops import agent_paper_recovery
+            from nexus.paper.manual_entry import read_configured_manual_request
+            from nexus.settings import AgentRuntimeMode
+
+            async with factory() as session:
+                audit_before = tuple(
+                    await session.scalars(
+                        text(
+                            "SELECT to_jsonb(a)::text FROM audit_events a "
+                            "WHERE action='paper.independent_unknown.accepted'"
+                        )
+                    )
+                )
+            assert len(audit_before) == 1
+            await asyncio.to_thread(command.upgrade, Config("engine/alembic.ini"), "head")
+            await factory.kw["bind"].dispose()
+            monkeypatch.setattr(manual_paper, "CURRENT_MIGRATION_HEAD", current_head)
+            args.action = "check-independent-acceptance"
+            checked_after = await manual_paper.run(settings, args)
+            assert checked_after.status == "already_acknowledged"
+            assert checked_after.proof_hash == receipt.proof_hash
+            assert await facts(factory) == upgraded_facts
+            async with factory.begin() as session:
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                )
+                presented = await read_configured_manual_request(
+                    session, settings, request_id=row.id
+                )
+                assert presented.status == "unknown"
+                assert presented.independent_disposition == "unknown_acknowledged"
+            for readonly in (True, False):
+                async with factory.begin() as session:
+                    if readonly:
+                        await session.execute(text("SET TRANSACTION READ ONLY"))
+                    await require_manual_account_available(
+                        session,
+                        account_id=row.account_id,
+                        now=captured["clock"][0],
+                        read_only=readonly,
+                    )
+            ready = await agent_paper_recovery.inspect_recovery_readiness(
+                settings.model_copy(
+                    update={
+                        "agent_paper_cycle_enabled": True,
+                        "agent_paper_account_id": row.account_id,
+                        "agent_paper_candidate_batch_id": row.candidate_batch_id,
+                        "agent_paper_formal_model_config_id": row.model_config_id,
+                        "agent_runtime_mode": AgentRuntimeMode.CODEX_SDK,
+                        "release_revision": "a" * 40,
+                    }
+                )
+            )
+            assert ready["status"] == "ready", ready
+            assert ready["external_requests"] == 0
+            async with factory() as session:
+                assert (
+                    tuple(
+                        await session.scalars(
+                            text(
+                                "SELECT to_jsonb(a)::text FROM audit_events a "
+                                "WHERE action='paper.independent_unknown.accepted'"
+                            )
+                        )
+                    )
+                    == audit_before
+                )
+            assert await facts(factory) == upgraded_facts
+            assert len(calls) == 4
+            for client in calls:
+                client.thread_start.return_value.run.assert_awaited_once()
+            raise Observed
         if case in {"readonly_manual_queue", "readonly_manual_queue_late"}:
             from nexus.ops.agent_paper_loop import (
                 AgentPaperLoopAction,
@@ -861,7 +957,8 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             )
         assert len(calls) == (
             4
-            if case in {"mixed_completed", "mixed_plan", "mixed_increment_unknown"}
+            if case
+            in {"mixed_completed", "mixed_plan", "mixed_increment_unknown", "schema_upgrade"}
             else 2
             if case == "two_unknown"
             else 1
