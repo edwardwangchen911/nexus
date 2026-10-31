@@ -61,6 +61,26 @@ cp infra/env.example infra/.env.local
 
 `DATABASE_URL` 与 `OBJECT_STORE_ENDPOINT` 供容器使用，因此 host 分别应指向 Compose service 名 `postgres` 与 `minio`，而不是 `127.0.0.1`。
 
+### 仅保存 Platform API Key
+
+在要使用该凭据的仓库根目录，通过本机终端运行：
+
+```bash
+.venv/bin/nexus-openai-local save-key --backend responses
+```
+
+按隐藏提示输入项目 API Key，不放入命令参数、聊天或环境文件。命令只创建
+`.secrets/nexus-openai-local/api-key`（权限 `0600`），由现有本地配置 loader 读取；
+不加载应用配置、不连接数据库、不登记模型、不发送网络或模型请求。已有文件或符号链接
+会拒绝覆盖；无法隐藏输入、输入无效或保存失败时只返回固定错误码，不输出凭据。
+保存异常或终端中断后，先在本机核对目标文件是否存在，不盲目重复保存或删除原件；
+文件存在不代表内容完整或凭据有效，不将内容贴回聊天。
+
+`OPENAI_KEY_SAVED` 只表示本机文件已保存，不证明赠额、组织/项目归属、模型访问或费用资格，
+也不启用研究、调度或执行。此凭据是 Platform API Key，与 SDK 登录和 SIWC Grant 分开；
+不要使用 `setup` 代替本动作，Responses 的 `setup` 会登记数据库并发送模型连接验证。
+无需数据库迁移；停用此入口不会改动 SDK 配置或删除已有凭据，凭据替换仍需单独确认。
+
 Strategy R&D 独立 worker 支持显式 `fixture`、`responses`，以及必须带 `--once` 的
 `codex_sdk`。Codex 长驻模式在领取队列前拒绝；不会回退为 fixture。先通过现有本地配置入口
 登记专用提示词和模型版本，不重标通用研究 v1/v2：
