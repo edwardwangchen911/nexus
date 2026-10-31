@@ -9,6 +9,7 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -63,15 +64,24 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
             from nexus.agents.comparison_execution import execute_comparison_position
 
             manifest = parse_comparison_manifest(json.loads(args.manifest.read_bytes()))
-            if manifest.purpose == PLATFORM_PURPOSE:
-                raise ValueError("PLATFORM_NATIVE_EXECUTION_NOT_READY")
             with args.source.open("rb") as stream:
                 source = stream.read(8 * 1024 * 1024 + 1)
             with args.prepared.open("rb") as stream:
                 prepared = json.loads(stream.read(8 * 1024 * 1024 + 1))
-            grant = await GrantStore(args.credentials_dir).load_verified(
-                clock=lambda: datetime.now(UTC)
-            )
+            grant = None
+            platform_funding_loader = None
+            if isinstance(manifest, PlatformManifest):
+                if getattr(args, "funding_proof", None) is None:
+                    raise ValueError("PLATFORM_FUNDING_REQUIRED")
+                # Reload the same frozen proof and actual dedicated Key before
+                # claim and every send. Never disguise Platform as a Grant.
+                platform_funding_loader = partial(
+                    load_bound_platform_funding, args.repo_root, args.funding_proof, manifest
+                )
+            else:
+                grant = await GrantStore(args.credentials_dir).load_verified(
+                    clock=lambda: datetime.now(UTC)
+                )
             # The executor owns short transactions and the once-only claim.
             # Never hold this command's admission transaction around inference.
             await execute_comparison_position(
@@ -82,6 +92,7 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                 ordinal=args.position,
                 worker_id=args.worker_id,
                 grant=grant,
+                platform_funding_loader=platform_funding_loader,
             )
             return {
                 "status": "position_executor_returned",
@@ -403,7 +414,6 @@ def main() -> int:
             "PLATFORM_FUNDING_REQUIRED",
             "PLATFORM_FUNDING_BINDING_CHANGED",
             "PLATFORM_PRIOR_USAGE_UNCONFIRMED",
-            "PLATFORM_NATIVE_EXECUTION_NOT_READY",
             "PLATFORM_ALLOCATION_CHANGED",
             "PLATFORM_EXPERIMENT_BUDGET_EXCEEDED",
             "PLATFORM_PRICE_WINDOW_INVALID",

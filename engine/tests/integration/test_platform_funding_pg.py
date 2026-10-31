@@ -191,7 +191,8 @@ async def test_normal_cli_admission_consumes_real_bound_funding_and_never_grant(
         result = await native_command(args)
         assert result["status"] == "position_prepared" and result["dispatch_authority"] is False
         args.command = "run-position"
-        with pytest.raises(ValueError, match="PLATFORM_NATIVE_EXECUTION_NOT_READY"):
+        args.funding_proof = None
+        with pytest.raises(ValueError, match="PLATFORM_FUNDING_REQUIRED"):
             await native_command(args)
         async with f() as s:
             assert await s.scalar(text("SELECT count(*) FROM job_attempts")) == 0

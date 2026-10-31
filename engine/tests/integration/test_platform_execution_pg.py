@@ -1,8 +1,10 @@
 """Full normal native executor with only the HTTP provider replaced; no real calls."""
 
 import json
+from argparse import Namespace
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import UUID
 
 import httpx
 import pytest
@@ -10,8 +12,6 @@ from integration.test_comparison_execution_pg import stage_response
 from integration.test_platform_funding_pg import funding_fixture
 from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_execution import execute_comparison_position
-from nexus.agents.comparison_producer import admit_comparison_position
-from nexus.agents.platform_funding import load_bound_platform_funding
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
 from nexus.persistence.session import session_factory
@@ -25,7 +25,10 @@ from unit.agents.test_http_stage_lifecycle import Body, terminal
 async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
-    f = session_factory(EngineSettings(database_url=migrated_database_url))
+    settings = EngineSettings(
+        database_url=migrated_database_url, agent_daily_budget_usd=Decimal(20)
+    )
+    f = session_factory(settings)
     source, prepared, m, model, old, protected = await setup(f, monkeypatch, source_kind="SEC")
     m, funding = await funding_fixture(f, m, tmp_path, monkeypatch)
     from nexus.agents import codex_staged
@@ -86,40 +89,63 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         clients.append(c)
         return c
 
-    def loader():
-        return load_bound_platform_funding(tmp_path, tmp_path / "funding.json", m)
+    from nexus.agents import comparison_execution
+    from nexus.agents.chatgpt_grant import GrantStore
+    from nexus.ops import openai_local
+    from nexus.ops.research_comparison import native_command
 
+    async def with_mock_transport(**kwargs):
+        return await execute_comparison_position(**kwargs, client_factory=client_factory)
+
+    monkeypatch.setattr(comparison_execution, "execute_comparison_position", with_mock_transport)
+    real_settings = openai_local.local_settings
+
+    def settings_for_command(*a, **k):
+        return settings if k.get("load_model_key") is False else real_settings(*a, **k)
+
+    monkeypatch.setattr(openai_local, "local_settings", settings_for_command)
+    monkeypatch.setattr(GrantStore, "load_verified", forbidden)
+    paths = {}
+    for name, content in {
+        "source": source,
+        "prepared": json.dumps(prepared).encode(),
+        "manifest": m.model_dump_json().encode(),
+    }.items():
+        paths[name] = tmp_path / (name + ".json")
+        paths[name].write_bytes(content)
+    args = Namespace(
+        command="admit-position",
+        repo_root=tmp_path,
+        position=1,
+        model_config_id=model,
+        funding_proof=tmp_path / "funding.json",
+        worker_id="platform-native-nine",
+        **paths,
+    )
     try:
         for ordinal in (1, 2, 3):
-            async with f.begin() as s:
-                admitted = await admit_comparison_position(
-                    s,
-                    source=source,
-                    prepared=prepared,
-                    manifest=m,
-                    ordinal=ordinal,
-                    model_config_id=model,
-                    daily_limit_usd=Decimal(20),
-                    platform_funding=loader(),
-                )
-            await execute_comparison_position(
-                factory=f,
-                source=source,
-                prepared=prepared,
-                manifest=m,
-                ordinal=ordinal,
-                worker_id="platform-native-nine",
-                platform_funding_loader=loader,
-                client_factory=client_factory,
-            )
+            args.command, args.position = "admit-position", ordinal
+            admitted = await native_command(args)
+            assert admitted["status"] == "position_prepared"
+            args.command = "run-position"
+            reply = await native_command(args)
+            assert reply["status"] == "position_executor_returned"
+            assert reply["readback_required"] and not reply["replay_allowed"]
+            if mode == "complete":
+                before = tuple(seen)
+                with pytest.raises(ValueError, match="COMPARISON_POSITION_CONSUMED"):
+                    await native_command(args)
+                assert tuple(seen) == before
             async with f() as s:
-                proof = await read_terminal_proof(s, run_id=admitted.run_id, now=datetime.now(UTC))
+                proof = await read_terminal_proof(
+                    s, run_id=UUID(admitted["run_id"]), now=datetime.now(UTC)
+                )
                 if mode != "complete":
                     assert proof.known is False
                     assert not proof.budget_settled and proof.cleanup_confirmed
                     held = await s.scalar(
                         select(AgentDailyBudgetReservationRecord).where(
-                            AgentDailyBudgetReservationRecord.run_id == admitted.run_id
+                            AgentDailyBudgetReservationRecord.run_id == UUID(admitted["run_id"])
                         )
                     )
                     assert held.state == "reserved" and held.settled_usd is None
@@ -144,7 +170,7 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                 )
                 budget = await s.scalar(
                     select(AgentDailyBudgetReservationRecord).where(
-                        AgentDailyBudgetReservationRecord.run_id == admitted.run_id
+                        AgentDailyBudgetReservationRecord.run_id == UUID(admitted["run_id"])
                     )
                 )
                 assert budget.settled_usd == Decimal("0.00429")
