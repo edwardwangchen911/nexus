@@ -64,11 +64,13 @@ async def execute_or_capture(session: Any, **kwargs: Any) -> Any:
     return await execute_research_run(session, **kwargs)
 
 
+def is_staged_preparation(committee: Any) -> bool:
+    return _CAPTURE.get() and isinstance(committee, codex_staged.StructuredStagedCodexCommittee)
+
+
 def capture_validated_preparation(*, request: Any, evidence: Any, **kwargs: Any) -> None:
     """Capture only the common executor's fully validated, unsent preparation."""
-    if _CAPTURE.get() and isinstance(
-        kwargs["committee"], codex_staged.StructuredStagedCodexCommittee
-    ):
+    if is_staged_preparation(kwargs["committee"]):
         raise Prepared(kwargs, request, evidence)
 
 
@@ -190,7 +192,7 @@ async def execute_staged_claim(
                         await preparation.commit()
                     except Exception as error:
                         raise StagedCommitUnconfirmed("UNCALLED_COMMIT_UNCONFIRMED") from error
-        except StagedCommitUnconfirmed:
+        except (StagedCommitUnconfirmed, ResearchAccountingBusy):
             raise
         except Exception as error:
             raise StagedFinalizationFailed("UNCALLED_TRANSACTION_FAILED") from error

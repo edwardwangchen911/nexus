@@ -131,6 +131,7 @@ async def test_frozen_observation_rejects_forged_formal_snapshot(monkeypatch):
         }
     ]
     run = SimpleNamespace(
+        actor_id="unit-test",
         evidence_manifest=manifest,
         evidence_hash=hashlib.sha256(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()

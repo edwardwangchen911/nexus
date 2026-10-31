@@ -186,8 +186,18 @@ async def execute_research_run(
         data_snapshot_id=run.data_snapshot_id,
         decision_time=run.decision_time,
     )
+    from nexus.agents.research_stages.executor import (
+        capture_validated_preparation,
+        is_staged_preparation,
+    )
+
     try:
-        await require_reserved_daily_budget(session, run_id=run.id)
+        if is_staged_preparation(committee):
+            # Preparation rolls back before provider work: keep the existing
+            # short accounting boundary, never the legacy long-lived day lock.
+            await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
+        else:
+            await require_reserved_daily_budget(session, run_id=run.id)
     except BudgetExhausted:
         return await _terminal_without_usage(
             session,
@@ -197,8 +207,6 @@ async def execute_research_run(
             status="failed",
             reason="budget_reservation_unavailable",
         )
-    from nexus.agents.research_stages.executor import capture_validated_preparation
-
     capture_validated_preparation(
         request=request,
         evidence=evidence_refs,

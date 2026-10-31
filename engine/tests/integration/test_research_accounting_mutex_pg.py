@@ -564,7 +564,31 @@ async def test_native_transport_busy_cleans_once_and_escapes_full_finalization(
     original_route = executor.selected_route
     original_member = StagedProtocol._member
     original_verify = StagedProtocol.verify
+    original_budget = execution.require_reserved_daily_budget
+    original_install = StagedProtocol.install
+    original_authorize = StagedProtocol.authorize
     native = research_comparison.native_command
+
+    async def budget(session, **kwargs):
+        if phase == "authorization" and kwargs["run_id"] == state.get("run"):
+            assert executor._CAPTURE.get() and kwargs.get("accounting") is True
+            state["prepared_budget"] = True
+            try:
+                return await original_budget(session, **kwargs)
+            except ResearchAccountingBusy as error:
+                state["preparation_busy"] = error
+                raise
+        return await original_budget(session, **kwargs)
+
+    async def install(protocol, *args, **kwargs):
+        if phase == "authorization" and entered.is_set():
+            state["installed"] = True
+        return await original_install(protocol, *args, **kwargs)
+
+    async def authorize(protocol, *args, **kwargs):
+        if phase == "authorization" and entered.is_set():
+            state["authorized"] = True
+        return await original_authorize(protocol, *args, **kwargs)
 
     def controlled(patch):
         result = original_sdk(patch)
@@ -598,6 +622,7 @@ async def test_native_transport_busy_cleans_once_and_escapes_full_finalization(
                 text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"agent-budget:{day}"}
             )
             state["run"] = run_id
+            state["day"] = day
             entered.set()
 
     async def observe(protocol, ticket, **kwargs):
@@ -662,10 +687,41 @@ async def test_native_transport_busy_cleans_once_and_escapes_full_finalization(
                     pytest.fail(f"short {phase} path waited for the contended day")
                 with pytest.raises(ResearchAccountingBusy) as caught:
                     await task
+                if phase == "authorization":
+                    # The route-time day conflict now fails in native prepare,
+                    # before stage installation or protocol authorization.
+                    assert state["prepared_budget"] is True
+                    assert caught.value is state["preparation_busy"]
+                    assert "installed" not in state and "authorized" not in state
                 if phase == "verification_released":
                     assert caught.value is state["busy"]
                 async with factory() as probe:
                     assert not await accounting_locks(probe, "agent-budget:accounting")
+                    if phase == "authorization":
+                        assert holder.in_transaction()
+                        assert await accounting_locks(probe, f"agent-budget:{state['day']}") == [
+                            (state["holder_pid"], True)
+                        ]
+                        assert (
+                            await probe.scalar(
+                                text(
+                                    "SELECT count(*) FROM research_stage_member WHERE run_id=:run"
+                                ),
+                                {"run": state["run"]},
+                            )
+                            == 0
+                        )
+                        claim = (
+                            await probe.execute(
+                                text(
+                                    "SELECT j.status,j.attempt_count FROM jobs j "
+                                    "JOIN research_comparison_chain c ON c.job_id=j.id "
+                                    "WHERE c.run_id=:run"
+                                ),
+                                {"run": state["run"]},
+                            )
+                        ).one()
+                        assert tuple(claim) == ("running", 1)
                     for table, expected in (
                         (
                             "research_stage_authorization",
@@ -751,6 +807,9 @@ async def test_native_transport_busy_cleans_once_and_escapes_full_finalization(
     monkeypatch.setattr(executor, "selected_route", route)
     monkeypatch.setattr(StagedProtocol, "_member", member)
     monkeypatch.setattr(StagedProtocol, "verify", verify)
+    monkeypatch.setattr(execution, "require_reserved_daily_budget", budget)
+    monkeypatch.setattr(StagedProtocol, "install", install)
+    monkeypatch.setattr(StagedProtocol, "authorize", authorize)
     monkeypatch.setattr(research_comparison, "native_command", inspect)
     try:
         with pytest.raises(Observed):

@@ -13,6 +13,18 @@ from sqlalchemy import select
 from unit.agents.test_codex_sdk import _assessment_payload, _staged_batch
 
 
+@pytest.fixture(autouse=True)
+def isolated_host_lock(monkeypatch, tmp_path):
+    from nexus.ops import agent_paper_loop
+
+    native_lock = agent_paper_loop.acquire_agent_paper_lock
+    monkeypatch.setattr(
+        agent_paper_loop,
+        "acquire_agent_paper_lock",
+        lambda: native_lock(runtime_root=tmp_path / "isolated-runtime"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_two_flight_rejects_legacy_model_before_creating_request(
     migrated_database_url, tmp_path
