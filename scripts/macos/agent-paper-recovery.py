@@ -402,14 +402,36 @@ def enable(service, root, env_file, project, *, report=True):
             )
         if prior_active is not None:
             recheck_prior_boot_active(service, root, env_file, project, prior_active)
+        if reconciled:
+            service._reconciliation_module().validate_target_readiness(
+                service, root, previous, checked
+            )
         previous.update(binding(service, root, env_file, project))
         previous.update(
             desired="disabled", generation=str(uuid4()), schema=checked["migration_head"]
         )
         if reconciled:
             previous["exit_reconciliation"]["enable_generation"] = previous["generation"]
+            service._reconciliation_module().bind_enabled_target(root, previous)
         write(root, previous)
         install(service, root, env_file, project)
+        if reconciled:
+            if read(root) != previous:
+                raise ValueError("AGENT_PAPER_RECOVERY_BINDING_CHANGED")
+            observed_status, observed_exit = service._launchctl_inspection(
+                "launchctl", root, env_file, project
+            )
+            if not service._reconciliation_module().qualified_exit(
+                service,
+                service._recovery_module(),
+                root,
+                env_file,
+                project,
+                previous,
+                observed_status,
+                observed_exit,
+            ):
+                raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
         if prior_active is not None:
             recheck_prior_boot_active(service, root, env_file, project, prior_active)
         if prior_boot_unused:
@@ -805,6 +827,24 @@ def recover(service, root, env_file, project, *, report=True):
         return finish("INSPECTION_UNAVAILABLE")
     if check.get("status") != "ready" or check.get("migration_head") != state["schema"]:
         return finish("BUSINESS_OR_DEPENDENCY_BLOCKED")
+    if reconciled:
+        if read(root) != state:
+            raise ValueError("AGENT_PAPER_RECOVERY_BINDING_CHANGED")
+        observed_status, observed_exit = service._launchctl_inspection(
+            "launchctl", root, env_file, project
+        )
+        if not service._reconciliation_module().qualified_exit(
+            service,
+            service._recovery_module(),
+            root,
+            env_file,
+            project,
+            state,
+            observed_status,
+            observed_exit,
+            require_enable=True,
+        ):
+            raise ValueError("AGENT_PAPER_RECOVERY_EXIT_UNCONFIRMED")
     # A changed boot ends a local process lifetime, never its unknown business effects.
     # Only the successful full read-only admission above permits a new attempt.
     if pending is not None:
