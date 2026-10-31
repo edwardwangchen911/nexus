@@ -101,8 +101,28 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
             comparison_execution.FrozenComparisonCommittee, "_inputs", local_input_failure
         )
     original_loader = execution.load_frozen_evidence
+    before_final = {}
+
+    async def stage_facts(session, run_id):
+        return {
+            table: sorted(
+                json.dumps(row, sort_keys=True)
+                for row in await session.scalars(
+                    text(f"SELECT to_jsonb(t) FROM {table} t WHERE run_id=:run"), {"run": run_id}
+                )
+            )
+            for table in (
+                "research_stage_authorization",
+                "research_stage_observation",
+                "research_stage_verification",
+                "research_stage_cleanup",
+            )
+        }
 
     async def load(*args, **kwargs):
+        if invalid[0] and fault.startswith("after_send"):
+            async with factory() as snapshot:
+                before_final.update(await stage_facts(snapshot, args[1].id))
         return () if invalid[0] else await original_loader(*args, **kwargs)
 
     monkeypatch.setattr(execution, "load_frozen_evidence", load)
@@ -280,9 +300,48 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
         elif fault.startswith("after_send"):
             assert isinstance(error, executor.StagedFinalizationFailed)
             assert seen
-            assert state["budget_state"] != "released"
-            assert count["research_stage_authorization"] > 0
-            assert not (count["research_stage_terminal"] and state["input_tokens"] == 0)
+            assert state["status"] == "prepared" and state["budget_state"] == "reserved"
+            assert (
+                state["input_tokens"],
+                state["output_tokens"],
+                state["settled_cost_usd"],
+                state["settled_usd"],
+            ) == (None, None, None, None)
+            assert count["research_stage_authorization"] == len(seen)
+            assert count["research_stage_terminal"] == 0
+            async with factory() as session:
+                assert (
+                    before_final
+                    and await stage_facts(session, UUID(admitted["run_id"])) == before_final
+                )
+                for table in ("agent_research_outputs", "agent_research_events"):
+                    assert (
+                        await session.scalar(
+                            text(f"SELECT count(*) FROM {table} WHERE run_id=:run"),
+                            {"run": UUID(admitted["run_id"])},
+                        )
+                        == 0
+                    )
+                job = (
+                    await session.execute(
+                        text(
+                            "SELECT status,attempt_count,manual_retry_count FROM jobs WHERE id=:job"
+                        ),
+                        {"job": UUID(admitted["job_id"])},
+                    )
+                ).one()
+                assert tuple(job) == ("running", 1, 0)
+                assert (
+                    await session.scalar(
+                        text("SELECT count(*) FROM job_attempts WHERE job_id=:job"),
+                        {"job": UUID(admitted["job_id"])},
+                    )
+                    == 1
+                )
+            sent = tuple(seen)
+            with pytest.raises(ValueError, match="COMPARISON_POSITION_CONSUMED"):
+                await native_command(args)
+            assert tuple(seen) == sent
         else:
             assert error is None
             assert [stage for _, stage in seen] == ["research", "critique", "synthesis"]
