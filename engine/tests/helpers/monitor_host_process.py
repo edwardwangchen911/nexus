@@ -401,7 +401,11 @@ async def assert_reconstruction(
         receipts.append(rows)
     assert receipts[0][-1]["pid"] != receipts[1][-1]["pid"]
     assert len((await workers()) - before_workers) == 2
-    captured["clock"][0] += timedelta(minutes=5)
+    # Keep the next five-minute bucket strictly later while covering PostgreSQL
+    # JSON's trimmed fractional seconds instead of random wall-clock digits.
+    captured["clock"][0] = (captured["clock"][0] + timedelta(minutes=5, seconds=1)).replace(
+        microsecond=123450
+    )
     await _set_test_insert_clock(factory, captured["clock"][0])
     await pool.dispose()
     following = await run_process(settings, root, captured["clock"][0])
@@ -460,7 +464,10 @@ async def assert_reconstruction(
         assert {k: v for k, v in new.items() if k not in {"checked_at", "observed_false"}} == {
             k: v for k, v in old.items() if k not in {"checked_at", "observed_false"}
         }
-        assert new["checked_at"] == captured["clock"][0].isoformat()
+        assert datetime.fromisoformat(new["checked_at"]) == captured["clock"][0], (
+            new["checked_at"],
+            captured["clock"][0].isoformat(),
+        )
         assert new["observed_false"] == (
             old["observed_false"] or price_results[instrument] == "false"
         )
