@@ -258,3 +258,102 @@ async def test_submission_guard_cannot_extend_original_send_window(monkeypatch):
     assert not result.owner.send_started
     assert isinstance(result.error, TimeoutError)
     assert result.cleanup.confirmed and client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_async_pre_send_is_owned_and_runs_before_final_sync_guard():
+    events, tasks = [], []
+
+    async def pre_send():
+        tasks.append(asyncio.current_task())
+        events.append("pre")
+        await asyncio.sleep(0)
+
+    def guard():
+        events.append("guard")
+
+    def handle(req):
+        events.append("send")
+        return headers(Body(("data: " + json.dumps(event("response.completed")) + "\n\n").encode()))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    now = asyncio.get_running_loop().time()
+    result = await send_response_stage(
+        client,
+        request(),
+        work_deadline=now + 30,
+        cleanup_deadline=now + 37,
+        pre_send=pre_send,
+        before_send=guard,
+    )
+    assert events == ["pre", "guard", "send"]
+    assert tasks == [result.owner.request_task]
+    assert result.cleanup.confirmed and client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_async_precheck_failure_keeps_original_and_close_error_without_send():
+    primary, secondary = ValueError("private qualification"), RuntimeError("private close")
+
+    async def pre_send():
+        raise primary
+
+    class Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, req):
+            pytest.fail("a failed check must not send")
+
+        async def aclose(self):
+            raise secondary
+
+    client = httpx.AsyncClient(transport=Transport())
+    now = asyncio.get_running_loop().time()
+    result = await send_response_stage(
+        client, request(), work_deadline=now + 30, cleanup_deadline=now + 37, pre_send=pre_send
+    )
+    assert result.error is primary and result.cleanup.error is secondary
+    assert not result.owner.send_started and result.stage is None and client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_cancellation_resistant_precheck_cannot_send_after_owner_abandonment():
+    entered, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def pre_send():
+        entered.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                pass
+
+    class Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, req):
+            pytest.fail("late precheck must never dispatch")
+
+        async def aclose(self):
+            closed.set()
+
+    client = httpx.AsyncClient(transport=Transport())
+    now = asyncio.get_running_loop().time()
+    task = asyncio.create_task(
+        send_response_stage(
+            client, request(), work_deadline=now + 30, cleanup_deadline=now + 37, pre_send=pre_send
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel("original cancellation")
+        await asyncio.wait_for(closed.wait(), 5)
+        task.cancel("cleanup cancellation")
+        result = await asyncio.wait_for(task, 5)
+        assert result.error.args == ("original cancellation",)
+        assert not result.owner.send_started and result.cleanup.pending
+        assert result.owner.request_task in result.cleanup.pending
+        release.set()
+        await asyncio.gather(*result.cleanup.pending, return_exceptions=True)
+        assert not result.owner.send_started and result.stage is None
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
