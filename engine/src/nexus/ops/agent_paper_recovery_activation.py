@@ -104,7 +104,10 @@ class RecoveryActivation:
             or manual_host_scope(self.settings) != manual_host_scope(effective)
         ):
             raise ValueError(_BLOCKED)
-        if attempt.get("exit_reconciliation_sha256") is not None:
+        if (
+            attempt.get("exit_reconciliation_sha256") is not None
+            or value.get("exit_reconciliation") is not None
+        ):
             source = self.root / "scripts/macos/agent-paper-reconciliation.py"
             spec = importlib.util.spec_from_file_location("nexus_activation_reconciliation", source)
             if spec is None or spec.loader is None:

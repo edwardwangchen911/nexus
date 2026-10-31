@@ -5,12 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
+import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 _PREFIX = "AGENT_PAPER_EXIT_RECONCILIATION_"
+# A reviewed compatibility edge, not a numeric/ancestry-based permission.
+_CROSS_SCHEMA_EDGE = ("0099_research_stages", "0105_comparison_preclaim")
+_CROSS_SCHEMA_POLICY = "research_stages_0099_to_0105_v1"
 SAFE_CODES = frozenset(
     _PREFIX + suffix
     for suffix in (
@@ -28,6 +33,108 @@ SAFE_CODES = frozenset(
 
 def _reject(suffix):
     raise ValueError(_PREFIX + suffix)
+
+
+def _target(evidence):
+    if (
+        type(evidence.get("version")) is not int
+        or evidence["version"] not in {1, 2}
+        or evidence.get("historical_effects") != "not_determined"
+        or evidence.get("business_disposition") != "unchanged"
+        or evidence.get("execution_locked") is not True
+        or evidence.get("replay_authorized") is not False
+    ):
+        _reject("PROOF_INVALID")
+    if evidence["version"] == 1:
+        if "recovery_target" in evidence:
+            _reject("PROOF_INVALID")
+        return None
+    capture = evidence.get("capture", {})
+    target = evidence.get("recovery_target")
+    observed = evidence.get("observed_readiness", {})
+    if (
+        not isinstance(capture, dict)
+        or not isinstance(capture.get("producer"), dict)
+        or not isinstance(observed, dict)
+    ):
+        _reject("PROOF_INVALID")
+    revision = capture.get("reconciliation_revision")
+    if (
+        capture.get("producer", {}).get("schema") != _CROSS_SCHEMA_EDGE[0]
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or target
+        != {"schema": _CROSS_SCHEMA_EDGE[1], "revision": revision, "policy": _CROSS_SCHEMA_POLICY}
+        or observed.get("migration_head") != _CROSS_SCHEMA_EDGE[1]
+        or observed.get("status") != "ready"
+        or observed.get("blocking_codes") != []
+        or observed.get("execution_locked") is not True
+        or observed.get("external_requests") != 0
+    ):
+        _reject("PROOF_INVALID")
+    return target
+
+
+def _bound_proof(root, state):
+    pointer = state.get("exit_reconciliation")
+    if not isinstance(pointer, dict):
+        _reject("PROOF_INVALID")
+    evidence, digest = _read(_proof_path(root, pointer["attempt_id"]))
+    if digest != pointer.get("evidence_sha256"):
+        _reject("PROOF_INVALID")
+    _target(evidence)
+    return evidence
+
+
+def _check_schema_binding(evidence, state, pointer):
+    target = _target(evidence)
+    binding = pointer.get("target_binding")
+    if target is None or binding is None:
+        if binding is not None or state.get("schema") != evidence["capture"]["producer"]["schema"]:
+            _reject("BINDING_CHANGED")
+        return
+    # Only explicit enable records this transition, after current readiness.
+    # A later maintenance toggle revokes execution, not this historical witness.
+    generation = pointer.get("enable_generation")
+    try:
+        canonical_generation = isinstance(generation, str) and str(UUID(generation)) == generation
+    except ValueError:
+        canonical_generation = False
+    if (
+        not canonical_generation
+        or binding
+        != {"schema": target["schema"], "revision": target["revision"], "generation": generation}
+        or state.get("schema") != target["schema"]
+        or state.get("revision") != target["revision"]
+    ):
+        _reject("BINDING_CHANGED")
+
+
+def validate_target_readiness(service, root, state, checked):
+    target = _target(_bound_proof(root, state))
+    expected = state["schema"] if target is None else target["schema"]
+    if checked.get("status") != "ready" or checked.get("migration_head") != expected:
+        _reject("BUSINESS_BLOCKED")
+    if target is not None and service._checkout_revision(root) != target["revision"]:
+        _reject("BINDING_CHANGED")
+
+
+def bind_enabled_target(root, state):
+    target = _target(_bound_proof(root, state))
+    if target is None:
+        return
+    pointer = state["exit_reconciliation"]
+    if (
+        state.get("schema") != target["schema"]
+        or state.get("revision") != target["revision"]
+        or pointer.get("enable_generation") != state["generation"]
+    ):
+        _reject("BINDING_CHANGED")
+    pointer["target_binding"] = {
+        "schema": target["schema"],
+        "revision": target["revision"],
+        "generation": state["generation"],
+    }
 
 
 def _read(path):
@@ -100,6 +207,14 @@ def capture_exit(service, recovery, root, env_file, project):
     if state is None or state.get("desired") not in {"disabled", "maintenance"}:
         _reject("MAINTENANCE_REQUIRED")
     producer = _producer(service, recovery, root, env_file, project, state)
+    if state.get("exit_reconciliation") is not None:
+        evidence = _bound_proof(root, state)
+        target = _target(evidence)
+        if target is not None:
+            _validate_original(root, state, state["exit_reconciliation"])
+            if service._checkout_revision(root) != target["revision"]:
+                _reject("BINDING_CHANGED")
+            producer["schema"] = evidence["capture"]["producer"]["schema"]
     status, exit_code = service._launchctl_inspection("launchctl", root, env_file, project)
     if status != "inactive" or type(exit_code) is not int or exit_code in {0, 75}:
         _reject("STATE_INVALID")
@@ -142,10 +257,12 @@ def _publish(path, value):
 
 def _check_published_evidence(evidence, capture):
     historical = evidence.get("capture", {})
+    target = _target(evidence)
     if (
         historical.get("producer") != capture["producer"]
         or historical.get("exit_code") != capture["exit_code"]
-        or evidence.get("version") != 1
+        or target is not None
+        and target["revision"] != capture["reconciliation_revision"]
         or evidence.get("historical_effects") != "not_determined"
         or evidence.get("business_disposition") != "unchanged"
         or evidence.get("execution_locked") is not True
@@ -243,8 +360,16 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
         or readiness.get("external_requests") != 0
     ):
         _reject("BUSINESS_BLOCKED")
-    if readiness.get("migration_head") != capture["producer"]["schema"]:
-        _reject("SCHEMA_MISMATCH")
+    source_schema, current_schema = capture["producer"]["schema"], readiness.get("migration_head")
+    recovery_target = None
+    if source_schema != current_schema:
+        if (source_schema, current_schema) != _CROSS_SCHEMA_EDGE:
+            _reject("SCHEMA_MISMATCH")
+        recovery_target = {
+            "schema": current_schema,
+            "revision": capture["reconciliation_revision"],
+            "policy": _CROSS_SCHEMA_POLICY,
+        }
     if capture_exit(service, recovery, root, env_file, project) != capture:
         _reject("BINDING_CHANGED")
     attempt_id = capture["producer"]["active_attempt"]["id"]
@@ -263,6 +388,8 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
         _reject("PROOF_INVALID")
     if existing:
         evidence, digest = _read_publication(target, capture, repair=False)
+        if _target(evidence) != recovery_target:
+            _reject("SCHEMA_MISMATCH")
         _matching_pointer(state, attempt_id, digest)
     if check_only:
         return result
@@ -273,7 +400,7 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
         _sync(target.parent)
     else:
         evidence = {
-            "version": 1,
+            "version": 1 if recovery_target is None else 2,
             "capture": capture,
             "observed_readiness": readiness,
             "historical_effects": "not_determined",
@@ -281,6 +408,9 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
             "execution_locked": True,
             "replay_authorized": False,
         }
+        if recovery_target is not None:
+            evidence["recovery_target"] = recovery_target
+        _target(evidence)
         _publish(target, evidence)
         _, digest = _read(target)
     if capture_exit(service, recovery, root, env_file, project) != capture:
@@ -316,14 +446,23 @@ def qualified_exit(
         return False
     if not isinstance(pointer, dict):
         _reject("PROOF_INVALID")
+    evidence, digest = _read(_proof_path(root, pointer["attempt_id"]))
+    if digest != pointer.get("evidence_sha256"):
+        _reject("PROOF_INVALID")
+    target = _target(evidence)
     if pointer.get("consumed_by") is not None:
         return False
-    evidence, digest = _read(_proof_path(root, pointer["attempt_id"]))
-    if digest != pointer.get("evidence_sha256") or evidence.get("version") != 1:
-        _reject("PROOF_INVALID")
+    _validate_original(root, state, pointer)
+    if target is not None and service._checkout_revision(root) != target["revision"]:
+        _reject("BINDING_CHANGED")
     capture = evidence.get("capture", {})
+    producer = _producer(service, recovery, root, env_file, project, state)
+    if target is not None:
+        # _validate_original requires the explicit management-transition witness;
+        # retain the old schema solely for comparison with the frozen source.
+        producer["schema"] = capture["producer"]["schema"]
     if (
-        capture.get("producer") != _producer(service, recovery, root, env_file, project, state)
+        capture.get("producer") != producer
         or pointer["attempt_id"] != state["active_attempt"]["id"]
         or evidence.get("historical_effects") != "not_determined"
         or evidence.get("business_disposition") != "unchanged"
@@ -359,12 +498,23 @@ def authorize_retirement(service, recovery, root, env_file, project, status, exi
     ):
         return False
     checked = recovery.engine_check(service, root, env_file, "--service-recovery-check")
-    if checked.get("status") != "ready" or checked.get("migration_head") != state["schema"]:
-        _reject("BUSINESS_BLOCKED")
+    validate_target_readiness(service, root, state, checked)
     again, observed = service._launchctl_inspection("launchctl", root, env_file, project)
     if (again, observed) != (status, exit_code):
         _reject("BINDING_CHANGED")
     if recovery.read(root) != state:
+        _reject("BINDING_CHANGED")
+    if not qualified_exit(
+        service,
+        recovery,
+        root,
+        env_file,
+        project,
+        state,
+        status,
+        exit_code,
+        allow_retirement_pending=True,
+    ):
         _reject("BINDING_CHANGED")
     state["exit_reconciliation"]["retirement_requested"] = True
     recovery.write(root, state)
@@ -395,9 +545,13 @@ def confirm_retirement(service, recovery, root, env_file, project):
 def validate_pending_activation(root, state, attempt):
     """Recheck original evidence after the child owns the lifetime lock."""
     expected = attempt.get("exit_reconciliation_sha256")
-    if expected is None:
-        return
     pointer = state.get("exit_reconciliation")
+    if expected is None:
+        if pointer is not None and (
+            not isinstance(pointer, dict) or pointer.get("consumed_by") is not None
+        ):
+            _reject("PROOF_INVALID")
+        return
     if (
         not isinstance(pointer, dict)
         or pointer.get("evidence_sha256") != expected
@@ -407,11 +561,32 @@ def validate_pending_activation(root, state, attempt):
         _reject("PROOF_INVALID")
     if attempt.get("old_instance") != state.get("instance"):
         _reject("BINDING_CHANGED")
-    _validate_original(root, state, pointer)
+    evidence = _validate_original(root, state, pointer)
+    target = _target(evidence)
+    if target is not None and (
+        attempt.get("revision") != target["revision"] or pointer.get("target_binding") is None
+    ):
+        _reject("BINDING_CHANGED")
+    if target is not None:
+        # The child's environment can still contain the old release revision
+        # after a checkout changes. Recheck actual code after its lifetime lock.
+        try:
+            current = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            _reject("BINDING_CHANGED")
+        if current.returncode != 0 or current.stdout.strip() != target["revision"]:
+            _reject("BINDING_CHANGED")
 
 
 def _validate_original(root, state, pointer):
     evidence, digest = _read(_proof_path(root, pointer["attempt_id"]))
+    _check_schema_binding(evidence, state, pointer)
     producer = evidence.get("capture", {}).get("producer", {})
     if (
         digest != pointer.get("evidence_sha256")
@@ -419,7 +594,7 @@ def _validate_original(root, state, pointer):
         or producer.get("instance") != state.get("instance")
         or any(
             producer.get(k) != state.get(k)
-            for k in ("root", "env_file", "project", "config_hash", "schema", "boot")
+            for k in ("root", "env_file", "project", "config_hash", "boot")
         )
     ):
         _reject("BINDING_CHANGED")
@@ -434,6 +609,7 @@ def _validate_original(root, state, pointer):
     _, receipt_hash = _read(receipt_path)
     if pending.exists() or pending.is_symlink() or receipt_hash != producer.get("receipt_sha256"):
         _reject("BINDING_CHANGED")
+    return evidence
 
 
 def archive_consumed(root, state, attempt, *, reason, observed_at, confirmed_instance=None):
