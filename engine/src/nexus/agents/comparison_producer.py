@@ -23,6 +23,7 @@ from nexus.agents.platform_funding import (
 )
 from nexus.agents.platform_manifest import PlatformManifest
 from nexus.agents.platform_profile import platform_model_matches
+from nexus.agents.research_maintenance import require_research_open
 from nexus.agents.research_only import require_research_only_snapshot
 from nexus.jobs.models import job_input_hash
 from nexus.monitoring.independent_context import (
@@ -146,6 +147,7 @@ async def admit_comparison_position(
     """
     from nexus.agents.comparison_preparation import prepare_archive
 
+    require_research_open()
     manifest = parse_comparison_manifest(manifest.model_dump())
     if isinstance(manifest, PlatformManifest):
         require_funding_binding(manifest, platform_funding)

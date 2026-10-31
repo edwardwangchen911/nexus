@@ -85,10 +85,15 @@ async def facts(factory):
 async def test_public_expired_closeout_and_repeat_read_preserve_original(
     migrated_database_url, monkeypatch, tmp_path, platform, known
 ):
+    from nexus.agents import research_maintenance
+
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     result, manifest, claim, protocol, ticket, old = await arrange(
         factory, monkeypatch, tmp_path, platform=platform, known=known
     )
+    # The compatible rollback keeps original read/closeout/late-evidence paths,
+    # while its build-fixed guard prevents any new comparison admission.
+    monkeypatch.setattr(research_maintenance, "IMAGE_MAINTENANCE", True)
     before = await facts(factory)
     async with factory() as session:
         await session.execute(text("SET TRANSACTION READ ONLY"))

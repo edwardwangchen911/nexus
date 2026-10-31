@@ -82,6 +82,76 @@ async def setup(factory, monkeypatch, *, source_kind="fixture"):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [False, True], ids=["legacy", "platform"])
+async def test_maintenance_refuses_comparison_admission_without_any_new_identity(
+    migrated_database_url, monkeypatch, tmp_path, platform
+):
+    from nexus.agents import research_maintenance
+
+    f = session_factory(EngineSettings(database_url=migrated_database_url))
+    funding = None
+    if platform:
+        from integration.test_platform_funding_pg import funding_fixture
+
+        source, prepared, m, model, held, _ = await setup(f, monkeypatch)
+        m, funding = await funding_fixture(f, m, tmp_path, monkeypatch)
+    else:
+        source, prepared, m, model, held = await seed(f)
+
+    async def snapshot():
+        async with f() as s:
+            return {
+                table: (
+                    await s.execute(
+                        text(f"SELECT to_jsonb(t) FROM {table} t ORDER BY to_jsonb(t)::text")
+                    )
+                )
+                .scalars()
+                .all()
+                for table in (
+                    "research_comparison_manifest",
+                    "research_comparison_chain",
+                    "research_stage_scope",
+                    "research_stage_member",
+                    "jobs",
+                    "job_attempts",
+                    "job_leases",
+                    "agent_research_runs",
+                    "agent_daily_budget_reservations",
+                    "data_snapshots",
+                    "agent_data_snapshot_evidence",
+                    "agent_research_outputs",
+                    "agent_research_events",
+                )
+            }
+
+    try:
+        before = await snapshot()
+        monkeypatch.setattr(research_maintenance, "IMAGE_MAINTENANCE", True)
+        # Catch then commit: maintenance must refuse before even temporary writes.
+        async with f() as s, s.begin():
+            with pytest.raises(ValueError, match="^RESEARCH_MAINTENANCE$"):
+                await admit_comparison_position(
+                    s,
+                    source=source,
+                    prepared=prepared,
+                    manifest=m,
+                    ordinal=1,
+                    model_config_id=model,
+                    daily_limit_usd=Decimal(10),
+                    platform_funding=funding,
+                )
+        after = await snapshot()
+        assert after == before
+        assert after["research_comparison_manifest"] == []
+        assert after["research_comparison_chain"] == []
+        old = next(x for x in after["agent_daily_budget_reservations"] if x["id"] == str(held))
+        assert old["state"] == "reserved" and old["settled_usd"] is None
+    finally:
+        await f.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_normal_platform_producer_binds_three_allocations_and_preserves_unknown(
     migrated_database_url, monkeypatch, tmp_path
 ):
