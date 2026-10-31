@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from helpers.commit_ack_fault import CommitAcknowledgementLost, lose_commit_ack
 from integration.test_comparison_sequence_pg import first_stage
 from integration.test_platform_stage_accounting_pg import native_platform
 from nexus.agents import comparison_closeout
@@ -201,37 +202,89 @@ async def test_concurrent_closeout_one_terminal_and_one_original_attempt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("server_commits", [False, True], ids=["rolled-back", "committed"])
+@pytest.mark.parametrize("known", [False, True], ids=["unknown-usage", "known-fee"])
 async def test_commit_ack_unknown_is_fixed_and_never_retried(
-    migrated_database_url, monkeypatch, tmp_path, committed
+    migrated_database_url, monkeypatch, tmp_path, server_commits, known
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    _, manifest, _, _, _, _ = await arrange(factory, monkeypatch, tmp_path)
-    commit, calls = AsyncSession.commit, []
+    observer_factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    engine, observer_engine = factory.kw["bind"], observer_factory.kw["bind"]
+    assert engine is not observer_engine
+    try:
+        result, manifest, claim, _, _, old = await arrange(
+            factory, monkeypatch, tmp_path, known=known
+        )
+        before = await facts(observer_factory)
+        commit, calls, acknowledged = AsyncSession.commit, [], []
 
-    async def uncertain(session):
-        calls.append(1)
-        if committed:
+        async def record_commit(session):
+            calls.append(1)
             await commit(session)
-        raise OSError("SENSITIVE_DRIVER_DETAIL")
+            acknowledged.append(1)
 
-    monkeypatch.setattr(AsyncSession, "commit", uncertain)
-    with pytest.raises(
-        comparison_closeout.ComparisonCloseoutUnknown, match="^COMPARISON_CLOSEOUT_RESULT_UNKNOWN$"
-    ) as error:
-        await comparison_closeout.close_expired_comparison_position(
-            factory, manifest.experiment_id, 1
-        )
-    assert error.value.__suppress_context__ and calls == [1]
-    after = await facts(factory)
-    assert len(after["research_stage_terminal"]) == int(committed)
-    assert len(after["job_attempts"]) == 1
-    async with factory() as session:
-        receipt = await comparison_closeout.inspect_comparison_terminal(
-            session, manifest.experiment_id, 1
-        )
-    assert (receipt["terminal_proof"] is not None) is committed
-    assert calls == [1]
+        # This wrapper only observes Session acknowledgement. The actual fault is
+        # inside the dedicated engine's DBAPI commit, after server COMMIT/ROLLBACK.
+        monkeypatch.setattr(AsyncSession, "commit", record_commit)
+        with lose_commit_ack(engine, server_commits=server_commits) as fault:
+            with pytest.raises(
+                comparison_closeout.ComparisonCloseoutUnknown,
+                match="^COMPARISON_CLOSEOUT_RESULT_UNKNOWN$",
+            ) as error:
+                await comparison_closeout.close_expired_comparison_position(
+                    factory, manifest.experiment_id, 1
+                )
+        assert error.value.__suppress_context__
+        assert isinstance(error.value.__context__, CommitAcknowledgementLost)
+        assert str(error.value.__context__) == "COMMIT_OUTCOME_UNCONFIRMED"
+        assert fault.boundary_calls == 1 and fault.server_commit_completed is server_commits
+        assert calls == [1] and acknowledged == []
+
+        # Read only through a separately pooled engine, never the writer's Session
+        # state or its exception. Do not repeat the public close operation.
+        after = await facts(observer_factory)
+        assert len(after["research_stage_terminal"]) == int(server_commits)
+        assert len(after["research_comparison_chain_stop"]) == int(server_commits)
+        assert len(after["job_attempts"]) == 1
+        attempt, original = after["job_attempts"][0], before["job_attempts"][0]
+        for key in ("id", "job_id", "attempt_no", "worker_id", "lease_token", "fence_token"):
+            assert attempt[key] == original[key]
+        assert attempt["job_id"] == str(claim.job_id)
+        assert attempt["outcome"] == ("lost" if server_commits else "running")
+        for table in (
+            "job_leases",
+            "research_stage_authorization",
+            "research_stage_observation",
+            "research_stage_verification",
+            "research_stage_cleanup",
+        ):
+            assert after[table] == before[table]
+        budgets = {row["id"]: row for row in after["agent_daily_budget_reservations"]}
+        for original_budget in before["agent_daily_budget_reservations"]:
+            if original_budget["run_id"] != str(result.run_id):
+                assert budgets[original_budget["id"]] == original_budget
+        assert budgets[str(old)]["state"] == "reserved"
+        current = next(row for row in budgets.values() if row["run_id"] == str(result.run_id))
+        assert current["state"] == ("settled" if server_commits and known else "reserved")
+        if server_commits and known:
+            assert Decimal(str(current["settled_usd"])) == Decimal("0.0323")
+        else:
+            assert current["settled_usd"] is None
+        if not server_commits:
+            assert after == before
+        async with observer_factory() as observer:
+            receipt = await comparison_closeout.inspect_comparison_terminal(
+                observer, manifest.experiment_id, 1
+            )
+        assert (receipt["terminal_proof"] is not None) is server_commits
+        if server_commits:
+            assert receipt["terminal_proof"]["known"] is known
+            assert receipt["terminal_proof"]["budget_settled"] is known
+        assert await facts(observer_factory) == after
+        assert calls == [1] and acknowledged == []
+    finally:
+        await engine.dispose()
+        await observer_engine.dispose()
 
 
 @pytest.mark.asyncio
