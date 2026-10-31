@@ -33,11 +33,14 @@ API/Worker 健康、源码一致和一次纯研究成功不代表已启用的正
 
 `scripts/ci/npm_audit_gate.py` 保留全量扫描，绑定公告依赖图、锁文件、源码与 CI
 工作流、两处残余代码以及修补后的实际安装树。正常生成入口仅使用本地测试 schema，
+同时核对同名安装集合和实际消费者的 Node 解析位置，拒绝嵌套副本、文件遮蔽及解析逃逸。
+生成入口已在 JS 摘要中；另绑定 Python 的 main/settings、两处 pyproject 及 uv.lock。
+schema 内容仍须通过正常 check:generated 与已绑定的签入契约一致核验，不宣称冻结全部 Python。
 不接收外部配置；新增根目录 Redocly 配置会拒绝。lint 的 pattern/options 来自仓库
 CLI、配置及插件选项，未审查源码不能视为可信输入。隔离完整工具链和构建 module graph
 已验证，构建应用图中不含这些工具模块；开发依赖目录仍含它们，不能宣称物理移除。
 CI 保存原始 npm 审计 artifact。部署前须在最终候选的独立、完整安装目录再次运行
-`python scripts/ci/npm_audit_gate.py --report <私有证据目录>/npm-audit.json`，检查真实
+`.venv/bin/python scripts/ci/npm_audit_gate.py --report <私有证据目录>/npm-audit.json`，检查真实
 当前时间仍在期限内；较早的绿色 CI 不替代部署时检查。输出必须明确为该项风险接受，
 不得称作 clean。到期、范围变化或任一身份不符均停止发布，不自动延期。
 

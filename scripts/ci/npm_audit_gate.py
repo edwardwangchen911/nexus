@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -22,7 +23,7 @@ MINIMATCH_EXPIRES_AT = datetime(2026, 11, 1, tzinfo=UTC)
 MINIMATCH_ADVISORY = "https://github.com/advisories/GHSA-g3hv-75wg-m249"
 MINIMATCH_GRAPH_SHA256 = "0b0a5266fdf557f0297f1028da05736ea41a4f8b6d8b3de6dcd9a94140fadd80"
 MINIMATCH_LOCK_SHA256 = "2f7aec4834ba4069f52a20e7e312f5a49f6e3c857ff6bb2964c152dab3ae54cc"
-MINIMATCH_SURFACE_SHA256 = "e1525b46b53640258219c530ba1580fe4f3fb395b883c905d236b2d97d6cce48"
+MINIMATCH_SURFACE_SHA256 = "ae52e4dc9e6fcbb59a454ac781193b630e6aa0fa907fd8e29234a64c9f8e2d43"
 MINIMATCH_TREE_SHA256 = {
     "node_modules/minimatch": "c8690806d606597f04633171624e8266a579e5ed8da5b6a89016a621fa74e240",
     "node_modules/@redocly/openapi-core/node_modules/minimatch": (
@@ -36,6 +37,84 @@ MINIMATCH_TREE_SHA256 = {
         "456fbb3d95737f98d07a75d60877a64ee34132923cd889e87c126a0a88173714"
     ),
 }
+MINIMATCH_GENERATOR_INPUTS = (
+    "engine/src/nexus/main.py",
+    "engine/src/nexus/settings.py",
+    "pyproject.toml",
+    "engine/pyproject.toml",
+    "uv.lock",
+)
+MINIMATCH_RESOLUTION_EDGES = (
+    ("node_modules/@eslint/config-array/dist/cjs/index.cjs", "minimatch", "node_modules/minimatch"),
+    ("node_modules/@eslint/config-array/dist/esm/index.js", "minimatch", "node_modules/minimatch"),
+    ("node_modules/@eslint/eslintrc/dist/eslintrc.cjs", "minimatch", "node_modules/minimatch"),
+    (
+        "node_modules/@eslint/eslintrc/lib/config-array/override-tester.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint/lib/cli-engine/file-enumerator.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    ("node_modules/eslint/lib/eslint/eslint-helpers.js", "minimatch", "node_modules/minimatch"),
+    (
+        "node_modules/eslint-plugin-jsx-a11y/lib/util/mayContainChildComponent.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint-plugin-jsx-a11y/lib/util/mayHaveAccessibleLabel.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint-plugin-react/lib/rules/forbid-component-props.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint-plugin-react/lib/rules/jsx-handler-names.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint-plugin-react/lib/rules/jsx-pascal-case.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint-plugin-react/lib/rules/no-danger.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/eslint-plugin-react/lib/rules/no-unstable-nested-components.js",
+        "minimatch",
+        "node_modules/minimatch",
+    ),
+    (
+        "node_modules/@redocly/openapi-core/lib/utils.js",
+        "minimatch",
+        "node_modules/@redocly/openapi-core/node_modules/minimatch",
+    ),
+    (
+        "node_modules/@typescript-eslint/typescript-estree/dist/useProgramFromProjectService.js",
+        "minimatch",
+        "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch",
+    ),
+    (
+        "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch/dist/commonjs/index.js",
+        "@isaacs/nonrecursive-glob-match",
+        "node_modules/@isaacs/nonrecursive-glob-match",
+    ),
+    (
+        "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch/dist/esm/index.js",
+        "@isaacs/nonrecursive-glob-match",
+        "node_modules/@isaacs/nonrecursive-glob-match",
+    ),
+)
 # Node paths are part of the acceptance, including the second fast-glob installation.
 CHAIN = {
     "@next/eslint-plugin-next": ("fast-glob",),
@@ -115,7 +194,7 @@ def parse_report(raw: str) -> dict:
 def installed_tree_digest(root: Path, relative: str) -> str:
     """Bind the inspected installed implementation, not just its package name."""
     base = root / relative
-    if not base.is_dir() or base.is_symlink():
+    if not base.is_dir() or base.is_symlink() or base.resolve() != base.absolute():
         raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
     digest = hashlib.sha256()
     files = 0
@@ -133,6 +212,69 @@ def installed_tree_digest(root: Path, relative: str) -> str:
     return digest.hexdigest()
 
 
+def verify_minimatch_resolution(root: Path) -> None:
+    """Check only the accepted packages, including ignored nested installations."""
+    base = root / "node_modules"
+    if base.is_symlink() or any(os.environ.get(key) for key in ("NODE_PATH", "NODE_OPTIONS")):
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    found = set()
+
+    def refuse_unreadable_tree(_error: OSError) -> None:
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+
+    for directory, directories, _ in os.walk(
+        base, followlinks=False, onerror=refuse_unreadable_tree
+    ):
+        for name in directories:
+            path = Path(directory) / name
+            if name == "node_modules" and path.is_symlink():
+                raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+            selected = (name == "minimatch" and path.parent.name == "node_modules") or (
+                name == "nonrecursive-glob-match"
+                and path.parent.name == "@isaacs"
+                and path.parent.parent.name == "node_modules"
+            )
+            if selected:
+                if path.is_symlink():
+                    raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+                found.add(path.relative_to(root).as_posix())
+    if found != set(MINIMATCH_TREE_SHA256):
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    # require.resolve checks real Node search precedence without executing packages.
+    script = """
+const fs = require('node:fs'), path = require('node:path');
+const edges = JSON.parse(process.argv[1]);
+console.log(JSON.stringify(edges.map(([caller, spec]) => {
+  if (fs.realpathSync(caller) !== path.resolve(caller)) throw new Error('identity');
+  return fs.realpathSync(require.resolve(spec, {paths:[path.dirname(caller)]}));
+})));
+"""
+    try:
+        result = subprocess.run(
+            [
+                "node",
+                "--input-type=commonjs",
+                "-e",
+                script,
+                json.dumps(
+                    [[str(root / caller), spec] for caller, spec, _ in MINIMATCH_RESOLUTION_EDGES]
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        resolved = json.loads(result.stdout)
+        if len(resolved) != len(MINIMATCH_RESOLUTION_EDGES) or any(
+            not Path(path).is_relative_to(root / expected)
+            for path, (_, _, expected) in zip(resolved, MINIMATCH_RESOLUTION_EDGES, strict=True)
+        ):
+            raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+        raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED") from exc
+
+
 def minimatch_surface_digest(root: Path) -> str:
     # Normal generation uses a local for_test schema and no user config.
     # New Redocly configuration is a new pattern/options source outside approval.
@@ -146,9 +288,10 @@ def minimatch_surface_digest(root: Path) -> str:
         )
     ):
         raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
-    return hashlib.sha256(
-        (surface_digest(root) + "\n" + file_digest(root / ".github/workflows/ci.yml")).encode()
-    ).hexdigest()
+    digest = hashlib.sha256(surface_digest(root).encode())
+    for name in (".github/workflows/ci.yml", *MINIMATCH_GENERATOR_INPUTS):
+        digest.update(name.encode() + b"\0" + file_digest(root / name).encode() + b"\n")
+    return digest.hexdigest()
 
 
 def minimatch_graph_digest(vulnerabilities: dict) -> str:
@@ -190,6 +333,7 @@ def evaluate_minimatch(vulnerabilities, counts, exit_code, root, now):
         )
     ):
         raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
+    verify_minimatch_resolution(root)
     checked_at = now() if callable(now) else now
     if not MINIMATCH_ACTIVE_FROM <= checked_at < MINIMATCH_EXPIRES_AT:
         raise AuditRejected("AUDIT_ACCEPTANCE_EXPIRED")
