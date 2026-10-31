@@ -67,6 +67,9 @@
     },
     "satori@0.33.5": {
       "fflate": "0.7.5"
+    },
+    "@typescript-eslint/typescript-estree@8.59.3": {
+      "minimatch": "11.0.1"
     }
   }
 }
