@@ -4,6 +4,8 @@ import hashlib
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from uuid import UUID
 
 import pytest
@@ -189,6 +191,72 @@ def test_pending_consumer_closes_once_and_next_enable_consumes_its_proof(tmp_pat
     assert len(starts(root)) == 2
     assert proof.read_bytes() == proof_bytes
 
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read(); sys.exit(1)"],
+        stdin=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        register_pid(root, child.pid)
+        started = subprocess.check_output(
+            ["/bin/ps", "-p", str(child.pid), "-o", "lstart="], text=True
+        ).strip()
+        activation = json.loads(old_receipt.read_text())
+        activation.update(
+            attempt_id=successor["id"],
+            generation=successor["generation"],
+            revision=successor["revision"],
+            boot=successor["boot"],
+            pid=child.pid,
+            process_started=started,
+            phase="activated",
+            reason="READY",
+        )
+        successor_receipt = receipt.with_name(f"recovery-activation-{successor['id']}.json")
+        successor_receipt.write_text(json.dumps(activation))
+        successor_receipt.chmod(0o600)
+        options(root)
+        healthy = _invoke(root, env, "recover")
+        assert healthy.returncode == 0, healthy.stdout + healthy.stderr
+        active = json.loads(state_path.read_text())
+        assert active["reason"] == "HEALTHY" and active["attempt"] is None
+        assert active["active_attempt"] == successor
+        assert active["instance"] == {"pid": child.pid, "started": started}
+        assert active.get("exit_reconciliation") is None
+        assert active["exit_reconciliation_history"][:-1] == history
+        archived_q = active["exit_reconciliation_history"][-1]
+        assert archived_q["attempt_id"] == pending["id"]
+        assert archived_q["evidence_sha256"] == proof_hash
+        assert archived_q["consumed_by"] == successor["id"]
+        assert archived_q["consumer_attempt"] == successor
+        assert archived_q["archive_reason"] == "SUCCESSOR_ACTIVATED"
+        assert archived_q["confirmed_instance"] == active["instance"]
+        assert proof.read_bytes() == proof_bytes
+        assert (old_receipt.read_bytes(), prior_proof.read_bytes(), receipt.read_bytes()) == frozen
+        child.communicate(input="", timeout=10)
+        assert child.returncode == 1
+        activation.update(phase="exited", reason="unclassified")
+        successor_receipt.write_text(json.dumps(activation))
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=10)
+    _register(root, state="inactive", exit_code=1)
+    assert _invoke(root, env, "maintenance").returncode == 0
+    before_check = {p.name: p.read_bytes() for p in receipt.parent.glob("recovery*.json")}
+    successor_check = _invoke(root, env, "reconcile-exit", "--check-only")
+    assert successor_check.returncode == 0, successor_check.stdout + successor_check.stderr
+    assert json.loads(successor_check.stdout)["status"] == "eligible_at_check"
+    assert {p.name: p.read_bytes() for p in receipt.parent.glob("recovery*.json")} == before_check
+    # The check API does not expose producer identity; the same normal apply
+    # makes its selected C identity observable without consulting a helper.
+    successor_closed = _invoke(root, env, "reconcile-exit")
+    assert successor_closed.returncode == 0, successor_closed.stdout + successor_closed.stderr
+    assert json.loads(successor_closed.stdout)["proof_id"] == successor["id"]
+    assert proof.read_bytes() == proof_bytes
+    assert (old_receipt.read_bytes(), prior_proof.read_bytes(), receipt.read_bytes()) == frozen
+    assert len(starts(root)) == 2
+
 
 @pytest.mark.parametrize("fault", ["enabled", "exit75", "write_pending", "unknown"])
 def test_pending_consumer_refusal_preserves_original_chain_and_does_not_start(tmp_path, fault):
@@ -265,3 +333,152 @@ def test_pending_end_proof_is_rechecked_by_successor_child(tmp_path, monkeypatch
     with pytest.raises(ValueError, match="BINDING_CHANGED"):
         guard._validate(config)
     assert len(starts(root)) == 2
+
+
+def _assert_single_pending_close(state_path, before, proof_hash):
+    after = json.loads(state_path.read_text())
+    pending = before["attempt"]
+    assert after["attempt"] is None and after["attempts"] == before["attempts"]
+    for field in (
+        "active_attempt",
+        "instance",
+        "desired",
+        "generation",
+        "failure_streak",
+        "next_start_at",
+    ):
+        assert after[field] == before[field], field
+    assert len(after["exit_reconciliation_history"]) == 1
+    archived = after["exit_reconciliation_history"][0]
+    assert archived["consumed_by"] == pending["id"]
+    assert archived["evidence_sha256"] == before["exit_reconciliation"]["evidence_sha256"]
+    assert archived["archive_reason"] == "PENDING_CONSUMER_EXIT_CONFIRMED"
+    assert len(after["attempt_resolutions"]) == len(before["attempt_resolutions"]) + 1
+    resolution = after["attempt_resolutions"][-1]
+    assert resolution["attempt_id"] == pending["id"]
+    assert resolution["code"] == "PENDING_EXIT_RECONCILED"
+    assert resolution["proof_hash"] == proof_hash
+    assert after["exit_reconciliation"]["attempt_id"] == pending["id"]
+    assert after["exit_reconciliation"]["evidence_sha256"] == proof_hash
+    assert after["exit_reconciliation"]["consumed_by"] is None
+
+
+@pytest.mark.parametrize("management_committed", [False, True])
+def test_pending_close_interrupted_management_requires_same_proof_readback(
+    tmp_path, management_committed
+):
+    root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(tmp_path)
+    before = json.loads(state_path.read_text())
+    original_state = state_path.read_bytes()
+    frozen_sources = (old_receipt.read_bytes(), prior_proof.read_bytes(), receipt.read_bytes())
+    engine = root / ".venv/bin/nexus-engine-agent-paper-loop"
+    source = engine.read_text()
+    injected = source.replace(
+        "    outcome=reconcile_managed_exit(",
+        "    if options.get('interrupt_management'):\n"
+        "        import os\n"
+        "        original_replace=os.replace\n"
+        "        def interrupted_replace(source, target):\n"
+        "            if Path(target).name == 'recovery.json':\n"
+        "                if options['interrupt_management']=='after':\n"
+        "                    original_replace(source,target)\n"
+        "                os._exit(86)\n"
+        "            return original_replace(source,target)\n"
+        "        os.replace=interrupted_replace\n"
+        "    outcome=reconcile_managed_exit(",
+    )
+    assert injected != source
+    engine.write_text(injected)
+    options(root, interrupt_management="after" if management_committed else "before")
+    interrupted = _invoke(root, env, "reconcile-exit")
+    assert interrupted.returncode == 86, interrupted.stdout + interrupted.stderr
+    proof = receipt.with_name(f"recovery-reconciliation-{before['attempt']['id']}.json")
+    proof_bytes, inode = proof.read_bytes(), proof.stat().st_ino
+    proof_hash = hashlib.sha256(proof_bytes).hexdigest()
+    assert json.loads(proof_bytes)["version"] == 3
+    assert (
+        old_receipt.read_bytes(),
+        prior_proof.read_bytes(),
+        receipt.read_bytes(),
+    ) == frozen_sources
+    assert len(starts(root)) == 1
+    if management_committed:
+        _assert_single_pending_close(state_path, before, proof_hash)
+    else:
+        assert state_path.read_bytes() == original_state
+    interrupted_state = state_path.read_bytes()
+    # An orphan Q is not a substitute for fresh business qualification; an
+    # already-committed Q also cannot bypass a newly observed unknown.
+    options(root, recovery_status="blocked", blocking_codes=["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"])
+    for flags in (("--check-only",), ()):
+        blocked = _invoke(root, env, "reconcile-exit", *flags)
+        assert blocked.returncode != 0
+        assert json.loads(blocked.stdout)["status"] == "blocked"
+        assert state_path.read_bytes() == interrupted_state
+        assert proof.read_bytes() == proof_bytes and proof.stat().st_ino == inode
+    options(root)
+    checked = _invoke(root, env, "reconcile-exit", "--check-only")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert json.loads(checked.stdout)["status"] == "eligible_at_check"
+    assert state_path.read_bytes() == interrupted_state
+    completed = _invoke(root, env, "reconcile-exit")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["status"] == "already_reconciled"
+    assert result["proof_id"] == before["attempt"]["id"] and result["proof_hash"] == proof_hash
+    _assert_single_pending_close(state_path, before, proof_hash)
+    completed_state = state_path.read_bytes()
+    if management_committed:
+        assert completed_state == interrupted_state
+    repeated = _invoke(root, env, "reconcile-exit")
+    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+    assert json.loads(repeated.stdout)["proof_hash"] == proof_hash
+    assert state_path.read_bytes() == completed_state
+    assert proof.read_bytes() == proof_bytes and proof.stat().st_ino == inode
+    assert (
+        old_receipt.read_bytes(),
+        prior_proof.read_bytes(),
+        receipt.read_bytes(),
+    ) == frozen_sources
+    assert len(starts(root)) == 1
+
+
+def test_concurrent_pending_close_produces_one_management_transition(tmp_path):
+    root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(tmp_path)
+    before = json.loads(state_path.read_text())
+    frozen_sources = (old_receipt.read_bytes(), prior_proof.read_bytes(), receipt.read_bytes())
+    gate = Barrier(2)
+
+    def close():
+        gate.wait(timeout=15)
+        return _invoke(root, env, "reconcile-exit")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(close) for _ in range(2)]
+        outcomes = [future.result(timeout=60) for future in futures]
+    successful = [json.loads(result.stdout) for result in outcomes if result.returncode == 0]
+    assert successful and sum(item["status"] == "reconciled" for item in successful) == 1
+    assert all(item["status"] in {"reconciled", "already_reconciled"} for item in successful)
+    for result in outcomes:
+        if result.returncode != 0:
+            assert json.loads(result.stdout)["blocking_codes"] == [
+                "AGENT_PAPER_EXIT_RECONCILIATION_LOCK_BUSY"
+            ]
+    proof = receipt.with_name(f"recovery-reconciliation-{before['attempt']['id']}.json")
+    proof_bytes, inode = proof.read_bytes(), proof.stat().st_ino
+    proof_hash = hashlib.sha256(proof_bytes).hexdigest()
+    assert {item["proof_hash"] for item in successful} == {proof_hash}
+    _assert_single_pending_close(state_path, before, proof_hash)
+    committed = state_path.read_bytes()
+    assert len(list(receipt.parent.glob("recovery-reconciliation-*.json"))) == 2
+    again = _invoke(root, env, "reconcile-exit")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert json.loads(again.stdout)["status"] == "already_reconciled"
+    assert state_path.read_bytes() == committed
+    assert proof.read_bytes() == proof_bytes and proof.stat().st_ino == inode
+    assert (
+        old_receipt.read_bytes(),
+        prior_proof.read_bytes(),
+        receipt.read_bytes(),
+    ) == frozen_sources
+    assert len(starts(root)) == 1
