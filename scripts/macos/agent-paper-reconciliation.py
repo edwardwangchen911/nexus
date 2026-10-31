@@ -14,10 +14,19 @@ from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 _PREFIX = "AGENT_PAPER_EXIT_RECONCILIATION_"
-# A reviewed compatibility edge, not a numeric/ancestry-based permission.
-_CROSS_SCHEMA_EDGE = ("0099_research_stages", "0105_comparison_preclaim")
-_CROSS_SCHEMA_POLICY = "research_stages_0099_to_0105_v1"
-_PENDING_POLICY = "pending_consumer_exit_0105_v1"
+# Exact reviewed edges only. Historical proofs keep their original policy;
+# neither numeric order nor migration ancestry confers a transitive permission.
+_CROSS_SCHEMA_POLICIES = {
+    ("0099_research_stages", "0105_comparison_preclaim"): "research_stages_0099_to_0105_v1",
+    (
+        "0105_comparison_preclaim",
+        "0106_platform_qualification",
+    ): "comparison_preclaim_0105_to_0106_v1",
+}
+_PENDING_POLICIES = {
+    "0105_comparison_preclaim": "pending_consumer_exit_0105_v1",
+    "0106_platform_qualification": "pending_consumer_exit_0106_v1",
+}
 SAFE_CODES = frozenset(
     _PREFIX + suffix
     for suffix in (
@@ -68,17 +77,28 @@ def _target(evidence):
         or not isinstance(capture["producer"].get("pending_attempt"), dict)
     ):
         _reject("PROOF_INVALID")
+    source_schema = capture["producer"].get("schema")
+    target_schema = target.get("schema") if isinstance(target, dict) else None
+    if not isinstance(source_schema, str) or not isinstance(target_schema, str):
+        _reject("PROOF_INVALID")
+    policy = (
+        _PENDING_POLICIES.get(source_schema)
+        if pending and source_schema == target_schema
+        else _CROSS_SCHEMA_POLICIES.get((source_schema, target_schema))
+        if not pending
+        else None
+    )
     if (
-        capture.get("producer", {}).get("schema") != _CROSS_SCHEMA_EDGE[1 if pending else 0]
+        policy is None
         or not isinstance(revision, str)
         or re.fullmatch(r"[0-9a-f]{40}", revision) is None
         or target
         != {
-            "schema": _CROSS_SCHEMA_EDGE[1],
+            "schema": target_schema,
             "revision": revision,
-            "policy": _PENDING_POLICY if pending else _CROSS_SCHEMA_POLICY,
+            "policy": policy,
         }
-        or observed.get("migration_head") != _CROSS_SCHEMA_EDGE[1]
+        or observed.get("migration_head") != target_schema
         or observed.get("status") != "ready"
         or observed.get("blocking_codes") != []
         or observed.get("execution_locked") is not True
@@ -408,14 +428,17 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
             check_only=check_only,
         )
     source_schema, current_schema = capture["producer"]["schema"], readiness.get("migration_head")
+    if not isinstance(source_schema, str) or not isinstance(current_schema, str):
+        _reject("SCHEMA_MISMATCH")
     recovery_target = None
     if source_schema != current_schema:
-        if (source_schema, current_schema) != _CROSS_SCHEMA_EDGE:
+        policy = _CROSS_SCHEMA_POLICIES.get((source_schema, current_schema))
+        if policy is None:
             _reject("SCHEMA_MISMATCH")
         recovery_target = {
             "schema": current_schema,
             "revision": capture["reconciliation_revision"],
-            "policy": _CROSS_SCHEMA_POLICY,
+            "policy": policy,
         }
     if capture_exit(service, recovery, root, env_file, project) != capture:
         _reject("BINDING_CHANGED")
@@ -703,7 +726,8 @@ def _capture_pending_exit(service, recovery, root, env_file, project, state):
     current = recovery.binding(service, root, env_file, project)
     if (
         state.get("unconfirmed_exit") is not None
-        or state.get("schema") != _CROSS_SCHEMA_EDGE[1]
+        or not isinstance(state.get("schema"), str)
+        or state["schema"] not in _PENDING_POLICIES
         or state.get("boot") != recovery.boot_id()
         or not isinstance(attempt, dict)
         or state["attempts"].count(attempt) != 1
@@ -780,7 +804,7 @@ def _validate_pending_proof(root, state, pointer, evidence, digest):
         or pointer.get("attempt_id") != attempt.get("id")
         or not isinstance(source, dict)
         or source.get("attempt") != attempt
-        or source.get("schema") != _CROSS_SCHEMA_EDGE[1]
+        or source.get("schema") != producer.get("schema")
         or source.get("revision") != attempt.get("revision")
         or source.get("attempts", []).count(attempt) != 1
         or any(
@@ -831,7 +855,12 @@ def _validate_pending_proof(root, state, pointer, evidence, digest):
 def _publish_pending_exit(
     service, recovery, root, env_file, project, *, capture, readiness, check_only
 ):
-    if readiness.get("migration_head") != _CROSS_SCHEMA_EDGE[1]:
+    source_schema = capture["producer"].get("schema")
+    if (
+        not isinstance(source_schema, str)
+        or source_schema not in _PENDING_POLICIES
+        or readiness.get("migration_head") != source_schema
+    ):
         _reject("SCHEMA_MISMATCH")
     if capture_exit(service, recovery, root, env_file, project) != capture:
         _reject("BINDING_CHANGED")
@@ -868,9 +897,9 @@ def _publish_pending_exit(
             "execution_locked": True,
             "replay_authorized": False,
             "recovery_target": {
-                "schema": _CROSS_SCHEMA_EDGE[1],
+                "schema": source_schema,
                 "revision": capture["reconciliation_revision"],
-                "policy": _PENDING_POLICY,
+                "policy": _PENDING_POLICIES[source_schema],
             },
         }
         _target(evidence)

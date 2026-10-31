@@ -18,8 +18,8 @@ from unit.ops.test_agent_paper_recovery_control import (
 )
 
 
-def ended_activated_host(tmp_path):
-    root, env = recovery_root(tmp_path)
+def ended_activated_host(tmp_path, *, schema=CURRENT_MIGRATION_HEAD):
+    root, env = recovery_root(tmp_path, schema=schema)
     (root / ".venv/bin/python3").symlink_to(Path(sys.executable).resolve())
     source = Path(__file__).resolve().parents[4]
     shutil.copy2(source / "scripts/macos/agent-paper-reconciliation.py", root / "scripts/macos")
@@ -37,6 +37,9 @@ def ended_activated_host(tmp_path):
             + "    from uuid import UUID\n"
             + "    from nexus.settings import EngineSettings\n"
             + "    from nexus.ops.managed_exit_reconciliation import reconcile_managed_exit\n"
+            # Simulate the installed engine version independently of the test runner.
+            + "    from nexus.ops import managed_exit_reconciliation as exit_checks\n"
+            + f"    exit_checks.CURRENT_MIGRATION_HEAD={schema!r}\n"
             + "    from nexus.ops import agent_paper_recovery as checks\n"
             + "    from nexus.paper.manual_entry import manual_host_scope\n"
             + "    config=EngineSettings(database_url='postgresql+asyncpg://local@127.0.0.1/test', "
@@ -46,7 +49,7 @@ def ended_activated_host(tmp_path):
             + "    async def inspect(settings):\n"
             + "        return {'status':options.get('recovery_status','ready'), "
             + "'blocking_codes':options.get('blocking_codes',[]), "
-            + f"'migration_head':{CURRENT_MIGRATION_HEAD!r},"
+            + f"'migration_head':{schema!r},"
             + "'scope_hash':manual_host_scope(config), "
             + "'execution_locked':True,'external_requests':0,'checked_at':'2026-10-27T14:00:00Z'}\n"
             + "    checks.inspect_recovery_readiness=inspect\n"
