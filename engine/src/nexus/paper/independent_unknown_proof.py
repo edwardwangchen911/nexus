@@ -85,9 +85,22 @@ async def independent_unknown_proof(
     }
     facts = {}
     for table, predicate in FACT_FILTERS.items():
+        projection = "to_jsonb(t)"
+        column = {
+            "research_stage_authorization": "platform_binding",
+            "research_stage_observation": "platform_response",
+        }.get(table)
+        if column is not None:
+            # 0106's absent Platform evidence must not rewrite a 0105 acceptance.
+            # Preserve every other NULL and every non-NULL new value: late facts
+            # must still invalidate the original proof rather than disappear.
+            projection = (
+                f"CASE WHEN to_jsonb(t)->'{column}'='null'::jsonb "
+                f"THEN to_jsonb(t)-'{column}' ELSE to_jsonb(t) END"
+            )
         rows = sorted(
             await session.scalars(
-                text(f"SELECT to_jsonb(t)::text FROM {table} t WHERE {predicate}"), params
+                text(f"SELECT ({projection})::text FROM {table} t WHERE {predicate}"), params
             )
         )
         facts[table] = job_input_hash({"rows": rows})
