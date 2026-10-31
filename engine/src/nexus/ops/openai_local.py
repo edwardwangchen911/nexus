@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import sys
+import warnings
 from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -663,6 +664,7 @@ def main() -> int:
         "action",
         choices=(
             "setup",
+            "save-key",
             "prepare-tokenizer",
             "status",
             "verify",
@@ -914,6 +916,31 @@ def main() -> int:
             return 0
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
+        if args.action == "save-key":
+            if args.backend != "responses" or args.skip_key:
+                raise ValueError("OPENAI_KEY_SAVE_ARGUMENT_INVALID")
+            # Key-only must precede settings/setup: neither database registration
+            # nor a connectivity probe is part of saving a Platform credential.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                try:
+                    _save_key(root)
+                except KeyboardInterrupt:
+                    raise ValueError("OPENAI_KEY_ENTRY_CANCELLED") from None
+            print(
+                json.dumps(
+                    {
+                        "status": "OPENAI_KEY_SAVED",
+                        "credential_kind": "platform_api_key",
+                        "model_requests": 0,
+                        "database_writes": 0,
+                        "provider_requests": 0,
+                        "dispatch_authority": False,
+                        "execution_locked": True,
+                    }
+                )
+            )
+            return 0
         settings = local_settings(
             root,
             load_model_key=args.action
@@ -1078,6 +1105,20 @@ def main() -> int:
             and str(error).startswith(("OPENAI_", "SEC_", "CODEX_"))
             else type(error).__name__
         )
+        if args.action == "save-key":
+            # Even a credential-bearing ValueError with an OPENAI_ prefix must
+            # not escape this entry. Only our fixed local refusal codes are safe.
+            if isinstance(error, FileExistsError):
+                code = "OPENAI_KEY_ALREADY_EXISTS"
+            elif not isinstance(error, ValueError) or code not in {
+                "OPENAI_KEY_REQUIRES_LOCAL_TERMINAL",
+                "OPENAI_KEY_INVALID",
+                "OPENAI_KEY_FILE_UNSAFE",
+                "OPENAI_REPOSITORY_ROOT_REQUIRED",
+                "OPENAI_KEY_SAVE_ARGUMENT_INVALID",
+                "OPENAI_KEY_ENTRY_CANCELLED",
+            }:
+                code = "OPENAI_KEY_SAVE_FAILED"
         print(json.dumps({"status": "blocked", "code": code, "execution_locked": True}))
         return 1
 
