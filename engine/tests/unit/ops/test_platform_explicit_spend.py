@@ -127,6 +127,27 @@ def test_old_credential_mode_still_requires_explicit_scope(pc, authorization):
         )
 
 
+def test_declared_window_cannot_exceed_fixed_cutoff_before_expiry(pc, authorization):
+    _, path, payload = authorization
+    payload["window_end"] = "2026-11-01T01:00:00Z"
+    private_file(path, json.dumps(payload).encode())
+    with pytest.raises(pc.PlatformCredentialError, match="PLATFORM_PROOF_INVALID"):
+        check_authorization(pc, authorization)
+
+
+def test_exact_fixed_cutoff_and_right_exclusive_check(pc, authorization):
+    cutoff = NOW + timedelta(hours=16)
+    result, _ = check_authorization(
+        pc, authorization, now=cutoff - timedelta(minutes=20), required_valid_until=cutoff
+    )
+    assert result.valid_until == cutoff
+    assert pc.load_platform_funding_proof(authorization[1]).valid_until == cutoff
+    with pytest.raises(pc.PlatformCredentialError, match="PLATFORM_WINDOW_INVALID"):
+        check_authorization(
+            pc, authorization, now=cutoff, required_valid_until=cutoff + timedelta(minutes=20)
+        )
+
+
 def test_source_replacement_and_ambient_scope_cannot_bypass_authorization(
     pc, authorization, monkeypatch
 ):

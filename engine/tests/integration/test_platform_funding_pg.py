@@ -80,6 +80,13 @@ async def funding_fixture(
         console_evidence_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
     )
     if explicit_spend:
+        from nexus.ops import platform_credentials
+
+        # Like the synthetic model price window, isolate lifecycle tests from
+        # today's date. Unit tests enforce the real fixed cutoff permanently.
+        monkeypatch.setattr(
+            platform_credentials, "EXPLICIT_SPEND_DEADLINE", now + timedelta(hours=1)
+        )
         body = dict(
             version=1,
             kind="explicit_platform_spend_authorization",

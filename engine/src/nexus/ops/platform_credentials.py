@@ -22,13 +22,14 @@ from typing import Literal
 from uuid import UUID
 
 from dotenv import dotenv_values
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from nexus.ops import openai_local
 
 PLATFORM_KEY_PATH = Path(".secrets/nexus-platform-local/api-key")
 PLATFORM_ENDPOINT = "https://api.openai.com/v1/responses"
 PLATFORM_PURPOSE = "platform-gifted-terra-v1-20261031"
+EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 1, tzinfo=UTC)
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _ERRORS = frozenset(
@@ -235,6 +236,13 @@ class ExplicitPlatformSpendAuthorization(BaseModel):
     window_end: AwareDatetime
     authorization_file: str = Field(repr=False)
     authorization_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("window_end")
+    @classmethod
+    def enforce_fixed_deadline(cls, value: datetime) -> datetime:
+        if value > EXPLICIT_SPEND_DEADLINE:
+            raise ValueError("PLATFORM_AUTHORIZATION_DEADLINE_EXCEEDED")
+        return value
 
 
 @dataclass(frozen=True)
