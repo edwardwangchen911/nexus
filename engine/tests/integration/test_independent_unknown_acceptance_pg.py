@@ -63,6 +63,8 @@ def test_independent_acceptance_cli_requires_explicit_proof_and_consent():
         "readonly_recovery",
         "readonly_activity",
         "readonly_activity_late",
+        "readonly_manual_queue",
+        "readonly_manual_queue_late",
         "new_request",
         "budget_preserved",
     ],
@@ -202,6 +204,22 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
 
                 if error.__context__ is not None:
                     error.add_note(repr(traceback.extract_tb(error.__context__.__traceback__)))
+                    frame = error.__context__.__traceback__
+                    while frame is not None:
+                        if frame.tb_frame.f_code.co_name == "read_terminal_proof":
+                            values = frame.tb_frame.f_locals
+                            terminal = values.get("terminal")
+                            error.add_note(
+                                repr(
+                                    {
+                                        "proof_now": values.get("now"),
+                                        "terminal_closed_at": terminal.get("closed_at")
+                                        if terminal is not None
+                                        else None,
+                                    }
+                                )
+                            )
+                        frame = frame.tb_next
                 diagnostics = (
                     (
                         await session.execute(
@@ -426,6 +444,55 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             case == "concurrent"
         )
         assert receipt.budget_preserved and receipt.execution_locked
+        if case in {"readonly_manual_queue", "readonly_manual_queue_late"}:
+            from nexus.ops.agent_paper_loop import (
+                AgentPaperLoopAction,
+                AgentPaperLoopSnapshot,
+                choose_loop_action,
+            )
+            from nexus.ops.manual_paper_host import (
+                inspect_manual_queue,
+                manual_work_pending,
+                peek_manual_request,
+            )
+
+            host_settings = settings.model_copy(update={"agent_paper_manual_enabled": True})
+            assert host_settings.agent_paper_account_id == row.account_id
+
+            async def queued():
+                async with factory.begin() as session:
+                    await session.execute(text("SET TRANSACTION READ ONLY"))
+                    assert await session.scalar(text("SHOW transaction_read_only")) == "on"
+                    return await peek_manual_request(session, account_id=row.account_id)
+
+            # Acceptance clears historical scheduling occupancy, never the unknown result.
+            assert await queued() is None
+            assert not await manual_work_pending(host_settings, account_id=row.account_id)
+            idle = AgentPaperLoopSnapshot(now=captured["clock"][0], enabled=True)
+            inspected = await inspect_manual_queue(
+                host_settings, account_id=row.account_id, snapshot=idle
+            )
+            assert inspected == idle
+            # The real planner advances to its unchanged calendar gate instead
+            # of stopping on the already-accepted historical unknown.
+            assert choose_loop_action(inspected) == AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
+            assert await facts(factory) == before
+            if case == "readonly_manual_queue_late":
+                await late_observation()
+                after_late = await facts(factory)
+                with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await queued()
+                with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await manual_work_pending(host_settings, account_id=row.account_id)
+                with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await inspect_manual_queue(
+                        host_settings, account_id=row.account_id, snapshot=idle
+                    )
+                assert await facts(factory) == after_late
+            async with factory.begin() as session:
+                with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await require_independent_execution_open(session, request_id=row.id)
+            raise Observed
         if case in {"readonly_activity", "readonly_activity_late"}:
             from contextlib import asynccontextmanager
 
