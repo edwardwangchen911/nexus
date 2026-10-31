@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.agents.comparison_manifest import parse_comparison_manifest
@@ -149,10 +150,14 @@ async def _inspect(session: AsyncSession, experiment_id: UUID, ordinal: int) -> 
                 text("SELECT stopped FROM research_stage_scope WHERE id=:id"), {"id": experiment_id}
             )
         )
-        chain_stopped = await session.scalar(
-            text("SELECT EXISTS(SELECT 1 FROM research_comparison_chain_stop WHERE run_id=:run)"),
-            {"run": row["run_id"]},
-        )
+        chain_stopped = None
+        if await session.scalar(text("SELECT to_regclass('research_comparison_chain_stop')")):
+            chain_stopped = await session.scalar(
+                text(
+                    "SELECT EXISTS(SELECT 1 FROM research_comparison_chain_stop WHERE run_id=:run)"
+                ),
+                {"run": row["run_id"]},
+            )
         return {
             "status": "position_registered",
             "inspection_only": True,
@@ -175,6 +180,10 @@ async def close_expired_comparison_position(
         return await _close_expired(factory, experiment_id, ordinal)
     except ProtocolRejected as error:
         raise _safe_protocol_error(error) from None
+    except DBAPIError as error:
+        if getattr(error.orig, "sqlstate", None) in {"55P03", "57014"}:
+            raise ValueError("COMPARISON_CLOSEOUT_BUSY") from None
+        raise
 
 
 async def _close_expired(
@@ -182,6 +191,8 @@ async def _close_expired(
 ) -> dict[str, Any]:
     async with factory() as session:
         await session.begin()
+        await session.execute(text("SET LOCAL statement_timeout='5s'"))
+        await session.execute(text("SET LOCAL lock_timeout='1s'"))
         # Same serialization point as authorize/observe/normal close. No scope creation.
         scope = await session.scalar(
             text("SELECT comparison_id FROM research_stage_scope WHERE id=:id FOR UPDATE"),

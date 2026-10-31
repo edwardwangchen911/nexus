@@ -388,3 +388,49 @@ async def test_concurrent_late_observation_cannot_change_terminal_membership(
             == receipt
         )
     assert await facts(factory) == before
+
+
+@pytest.mark.asyncio
+async def test_closeout_scope_lock_is_bounded_and_preserves_original_facts(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    _, manifest, _, _, _, _ = await arrange(factory, monkeypatch, tmp_path)
+    before = await facts(factory)
+    async with factory.begin() as blocker:
+        await blocker.execute(
+            text("SELECT id FROM research_stage_scope WHERE id=:id FOR UPDATE"),
+            {"id": manifest.experiment_id},
+        )
+        with pytest.raises(ValueError, match="^COMPARISON_CLOSEOUT_BUSY$"):
+            await asyncio.wait_for(
+                comparison_closeout.close_expired_comparison_position(
+                    factory, manifest.experiment_id, 1
+                ),
+                timeout=10,
+            )
+    assert await facts(factory) == before
+
+
+@pytest.mark.asyncio
+async def test_pre_chain_stop_schema_inspection_preserves_unknown_stop_field(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from alembic import command
+    from alembic.config import Config
+    from integration.test_comparison_preclaim_pg import legacy_unclaimed
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    _, _, manifest, _ = await legacy_unclaimed(factory, monkeypatch, tmp_path)
+    monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+    await asyncio.to_thread(
+        command.downgrade, Config("engine/alembic.ini"), "0103_comparison_claim"
+    )
+    async with factory() as session:
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        receipt = await comparison_closeout.inspect_comparison_terminal(
+            session, manifest.experiment_id, 1
+        )
+    assert receipt["stage_chain_stopped"] is None
+    assert receipt["status"] == "position_registered" and receipt["terminal_proof"] is None
+    assert receipt["attempt_count"] == 0 and not receipt["dispatch_authority"]
