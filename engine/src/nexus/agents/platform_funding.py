@@ -1,4 +1,4 @@
-"""Read the existing shared ledger for a single frozen gifted-credit qualification."""
+"""Read the existing shared ledger for a single frozen Platform qualification."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -13,6 +13,7 @@ from nexus.agents.platform_manifest import PlatformManifest
 from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
 from nexus.agents.research_usage import research_reserved_occupancy
 from nexus.ops.platform_credentials import (
+    ExplicitPlatformSpendAuthorization,
     PlatformCredential,
     PlatformFundingProof,
     check_platform_eligibility,
@@ -39,6 +40,15 @@ def require_funding_binding(manifest: PlatformManifest, funding: PlatformFunding
         or funding.credential.binding_hash != manifest.credential_binding_hash
     ):
         raise ValueError("PLATFORM_FUNDING_BINDING_CHANGED")
+    record = funding.proof.record
+    if isinstance(record, ExplicitPlatformSpendAuthorization):
+        if (
+            record.experiment_id != manifest.experiment_id
+            or record.input_hashes != manifest.input_hashes
+        ):
+            raise ValueError("PLATFORM_PROOF_BINDING_MISMATCH")
+        if manifest.total_reservation_usd > record.max_total_usd:
+            raise ValueError("PLATFORM_SPEND_LIMIT_EXCEEDED")
 
 
 def load_bound_platform_funding(
@@ -51,6 +61,7 @@ def load_bound_platform_funding(
         organization_id=proof.record.organization_id,
         project_id=proof.record.project_id,
         endpoint=proof.record.endpoint,
+        key_scope_only=isinstance(proof.record, ExplicitPlatformSpendAuthorization),
     )
     result = PlatformFunding(credential, proof)
     require_funding_binding(manifest, result)
@@ -72,6 +83,8 @@ async def require_platform_funding(
     without authoritative posting timestamps, do not assume historic local
     spend is reflected in the manual console snapshot. Normal daily-budget
     admission independently retains all SDK and business occupancy.
+    Explicit spend authorization caps only this experiment; it does not invent
+    a provider balance against which other activity could be subtracted.
     """
     require_funding_binding(manifest, funding)
     assert funding is not None
@@ -126,4 +139,6 @@ async def require_platform_funding(
         local_held_usd=held,
         local_spent_since_proof_usd=spent,
         required_valid_until=required_valid_until or now + timedelta(seconds=3 * 330),
+        experiment_id=manifest.experiment_id,
+        input_hashes=manifest.input_hashes,
     )

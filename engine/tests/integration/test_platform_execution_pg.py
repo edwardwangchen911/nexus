@@ -21,6 +21,7 @@ from unit.agents.test_http_stage_lifecycle import Body, terminal
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_spend", [False, True], ids=["gift", "explicit-spend"])
 @pytest.mark.parametrize(
     "mode",
     [
@@ -31,17 +32,18 @@ from unit.agents.test_http_stage_lifecycle import Body, terminal
         "wait_proof",
         "wait_console",
         "wait_price",
+        "wait_authorization",
     ],
 )
 async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
-    migrated_database_url, monkeypatch, tmp_path, mode
+    migrated_database_url, monkeypatch, tmp_path, mode, explicit_spend
 ):
     settings = EngineSettings(
         database_url=migrated_database_url, agent_daily_budget_usd=Decimal(20)
     )
     f = session_factory(settings)
     source, prepared, m, model, old, protected = await setup(f, monkeypatch, source_kind="SEC")
-    m, funding = await funding_fixture(f, m, tmp_path, monkeypatch)
+    m, funding = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
     from nexus.agents import codex_staged
 
     async def forbidden(*a, **k):
@@ -54,7 +56,7 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
 
         check_funding = platform_funding.require_platform_funding
         expired_at_send = [False]
-        if mode == "wait_price":
+        if mode in ("wait_price", "wait_authorization"):
             from nexus.agents import comparison_execution as execution_clock
 
             class SendBoundaryClock:
@@ -63,7 +65,9 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                     value = datetime.now(tz)
                     if expired_at_send[0]:
                         expired_at_send[0] = False
-                        return value + timedelta(days=2)
+                        return value + (
+                            timedelta(days=2) if mode == "wait_price" else timedelta(hours=1)
+                        )
                     return value
 
             monkeypatch.setattr(execution_clock, "datetime", SendBoundaryClock)
@@ -73,7 +77,7 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
             if kwargs.get("required_valid_until") is not None:
                 # This is after the native pre-send loader and its async DB
                 # checks, before the owning transaction exits and HTTP sends.
-                if mode == "wait_price":
+                if mode in ("wait_price", "wait_authorization"):
                     expired_at_send[0] = True
                 elif mode == "wait_key":
                     (tmp_path / PLATFORM_KEY_PATH).write_text("synthetic-key-changed-during-wait")
@@ -98,7 +102,11 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                 == 0
             )
         assert request.headers["authorization"] == "Bearer synthetic-platform-native-funding"
-        assert request.headers["openai-project"] == "proj-fixture"
+        if explicit_spend:
+            assert "openai-project" not in request.headers
+            assert "openai-organization" not in request.headers
+        else:
+            assert request.headers["openai-project"] == "proj-fixture"
         body = json.loads(request.content)
         wires.append(body)
         payload = json.loads(body["input"][1]["content"])
@@ -181,6 +189,12 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                 with pytest.raises(ValueError, match="COMPARISON_POSITION_CONSUMED"):
                     await native_command(args)
                 assert tuple(seen) == before
+            if explicit_spend and mode == "complete" and ordinal == 3:
+                # Revocation/expiry after all sends cannot block fact readback or closeout.
+                path = tmp_path / "funding.json"
+                record = json.loads(path.read_text())
+                record["window_end"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+                path.write_text(json.dumps(record))
             read_args = Namespace(
                 command="inspect-position",
                 repo_root=tmp_path,

@@ -20,6 +20,33 @@ from unit.agents.test_http_stage_lifecycle import Answer, Body, Protocol, termin
 KEY = "synthetic-platform-http-key"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["OpenAI-Project", "OpenAI-Organization"])
+async def test_key_scope_rejects_default_client_scope_on_actual_request(frozen, credential, header):
+    credential = replace(credential, organization_id=None, project_id=None, key_scope_only=True)
+    requests = []
+
+    async def check():
+        return credential
+
+    def handle(request):
+        requests.append(request)
+        value = terminal()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=Body(("data: " + json.dumps(value) + "\n\n").encode()),
+        )
+
+    client = httpx.AsyncClient(
+        headers={header: "unbound-scope"}, transport=httpx.MockTransport(handle)
+    )
+    with pytest.raises(HttpStageFailure):
+        await call(Protocol(), client, frozen, credential, check)
+    assert requests == []
+    assert client.is_closed
+
+
 @pytest.fixture
 def credential():
     return PlatformCredential(SecretStr(KEY), credential_fingerprint(KEY), "org-test", "proj-test")

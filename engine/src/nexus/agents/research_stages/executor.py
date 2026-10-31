@@ -311,7 +311,7 @@ async def execute_staged_claim(
                 ):
                     raise ProtocolRejected("PLATFORM_PRICE_WINDOW_INVALID")
                 record = fresh.proof.record
-                if not record.window_start <= at < min(record.window_end, record.gift_expires_at):
+                if not record.window_start <= at < fresh.proof.valid_until:
                     raise ProtocolRejected("PLATFORM_FUNDING_WINDOW_INVALID")
             if old_guard is not None:
                 old_guard()

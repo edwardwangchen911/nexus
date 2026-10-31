@@ -86,7 +86,7 @@ cp infra/env.example infra/.env.local
 `infra/.env.local`、独立文件的既有优先级解析。若环境覆盖后的实际 Key 与资金证明指纹不同，
 资格检查拒绝，不改写环境或借用旧通用 Key／Grant。
 
-人工控制台核验必须覆盖领取已生效、Key 所属组织／项目、赠额余额和到期时间、购买余额为零、
+选择原赠额专用分支时，人工控制台核验必须覆盖领取已生效、Key 所属组织／项目、赠额余额和到期时间、购买余额为零、
 自动充值关闭及无其他收费后备，并确认整个组织的有界独占窗口及其他项目／未入账在途的上界。
 私有证明 JSON 使用 `version=1`、`kind=manual_platform_console`、
 `purpose=platform-gifted-terra-v1-20261031` 和固定 `https://api.openai.com/v1/responses`；
@@ -111,7 +111,7 @@ cp infra/env.example infra/.env.local
 
 当前候选已接原生 HTTP、原始响应及缓存分类结算；隔离验收只替换远端服务。
 新目的通过正常 `run-position --funding-proof <本机资格证明>` 执行，独立读取项目 Key，
-不读取或伪装旧 Grant。仅在候选终审、CI、部署及真实赠额／Key／模型资格均核验后执行，
+不读取或伪装旧 Grant。仅在候选终审、CI、部署及对应资金授权／Key／模型资格均核验后执行，
 不能以离线替身通过代替真实资格。数据库仅允许正常 claim 完成资金重检后的精确领取跃迁；
 每次发送仍重新读取实际凭据及共享占用。重复执行同一位置不能获得第二次领取或发送。
 `inspect-position` 保留原状态字段，另返回原生 `terminal_proof`；命令返回不等于已完成，须读回原证明。
@@ -491,3 +491,26 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app d
 Agent 工具与页面；未完成会计复核的 EPS 不提供可用 trailing valuation。不把独立修订件
 称为完整替代，不从文本写会计 facts，不据此满足内部模拟执行准入。此入口不创建研究
 Job、周期或订单；研究、组合和执行仍走各自正常入口与风控校验。
+
+### 单轮 Platform 显式费用授权
+
+用户明确允许本轮正常 API 费用时，可使用不同的
+`kind=explicit_platform_spend_authorization`；不能把任意本地文件当成用户授权，先核验真实指令。
+这条分支不要求赠额或账单原件，也不声称供应商余额足够。字段见
+`nexus.ops.platform_credentials.ExplicitPlatformSpendAuthorization`：绑定唯一实验、三项有序输入哈希、
+实际 Key 指纹、官方 endpoint、原指令私有文件名及其 SHA256、授权时点和有效窗。
+`max_total_usd` 是十进制字符串，必须覆盖整个 manifest 的冻结保守预留且不超过 6.42；
+不是逐次额度，结算或跨日不补充次数。期限右端独占，本次最晚 2026-11-01T00:00Z，原价格门禁独立保留。
+真实费用不截断到授权上限；超额／未知照原规则全量留证并停止后续发送。
+
+组织／项目为 null 表示精确项目 Key 自身决定作用域，不是通配符。已有本机 Key 创建来源证据保留；
+模型 metadata 读取成功不证明生成权限。不额外填 ID 或扩大访问。非空环境、配置及客户端 scope 覆盖拒绝，
+实际请求不带这两个 header；旧赠额分支仍严格要求其原 ID。正常入口仍使用 `--funding-proof`，
+按明确 kind 分流，未知 kind 或赠额失败不回退为付费。不可变登记后的 manifest 不能换证明。
+只读 `nexus-platform-local check` 还须传匹配的 `--experiment-id` 和三次有序 `--input-hash`，
+成功回执明确 `funding_kind`、`balance_verified=false`，仍不授派发权。
+
+最终同步发送前重读 Key、授权及原文并核对绑定和期限；更改、撤销、到期只阻止新派发，
+已有响应、用量、清理、孤儿结案和只读证明不依赖有效授权，不能被阻断或抹除。
+共享预算、旧 unknown 和各位置真实预留保持。仍须全部 CI、兼容镜像和正常部署，真实轮不重试、不补样本、
+不充值或自动充值，不切换业务默认 SDK、不发送测试通知、不启动普通 Worker 或解除 execution_locked。
