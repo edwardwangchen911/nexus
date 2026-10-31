@@ -115,6 +115,13 @@ MINIMATCH_RESOLUTION_EDGES = (
         "node_modules/@isaacs/nonrecursive-glob-match",
     ),
 )
+MINIMATCH_IMPORT_CALLERS = frozenset(
+    {
+        "node_modules/@eslint/config-array/dist/esm/index.js",
+        "node_modules/@eslint/eslintrc/lib/config-array/override-tester.js",
+        "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch/dist/esm/index.js",
+    }
+)
 # Node paths are part of the acceptance, including the second fast-glob installation.
 CHAIN = {
     "@next/eslint-plugin-next": ("fast-glob",),
@@ -240,24 +247,38 @@ def verify_minimatch_resolution(root: Path) -> None:
                 found.add(path.relative_to(root).as_posix())
     if found != set(MINIMATCH_TREE_SHA256):
         raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
-    # require.resolve checks real Node search precedence without executing packages.
+    # Native caller-scoped CJS/ESM resolution; neither executes the target package.
     script = """
-const fs = require('node:fs'), path = require('node:path');
+import fs from 'node:fs';
+import path from 'node:path';
+import {createRequire} from 'node:module';
+import {pathToFileURL, fileURLToPath} from 'node:url';
 const edges = JSON.parse(process.argv[1]);
-console.log(JSON.stringify(edges.map(([caller, spec]) => {
+console.log(JSON.stringify(edges.map(([caller, spec, mode]) => {
   if (fs.realpathSync(caller) !== path.resolve(caller)) throw new Error('identity');
-  return fs.realpathSync(require.resolve(spec, {paths:[path.dirname(caller)]}));
+  const resolved = mode === 'import'
+    ? fileURLToPath(import.meta.resolve(spec, pathToFileURL(caller).href))
+    : createRequire(caller).resolve(spec);
+  return fs.realpathSync(resolved);
 })));
 """
     try:
         result = subprocess.run(
             [
                 "node",
-                "--input-type=commonjs",
+                "--experimental-import-meta-resolve",
+                "--input-type=module",
                 "-e",
                 script,
                 json.dumps(
-                    [[str(root / caller), spec] for caller, spec, _ in MINIMATCH_RESOLUTION_EDGES]
+                    [
+                        [
+                            str(root / caller),
+                            spec,
+                            "import" if caller in MINIMATCH_IMPORT_CALLERS else "require",
+                        ]
+                        for caller, spec, _ in MINIMATCH_RESOLUTION_EDGES
+                    ]
                 ),
             ],
             capture_output=True,

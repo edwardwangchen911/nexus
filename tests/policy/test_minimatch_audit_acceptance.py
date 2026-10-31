@@ -218,3 +218,55 @@ def test_node_file_shadow_rejected_even_when_package_location_set_is_unchanged(a
     shadow.write_text("module.exports = {};\n")
     with pytest.raises(gate.AuditRejected, match="AUDIT_ACCEPTANCE_IDENTITY_CHANGED"):
         gate.evaluate(report, 0, root, NOW)
+
+
+@pytest.mark.parametrize("mode", ["require", "import"])
+def test_real_caller_scope_and_import_conditions_cannot_escape_approved_root(accepted, mode):
+    root, report = accepted
+    relative = (
+        "node_modules/eslint/lib/eslint/eslint-helpers.js"
+        if mode == "require"
+        else "node_modules/@eslint/config-array/dist/esm/index.js"
+    )
+    caller = root / relative
+    scope = caller.parent
+    shadow = scope / "self-reference.mjs"
+    shadow.write_text("throw new Error('must never execute');\n")
+    require_target = "./self-reference.mjs"
+    if mode == "import":
+        (scope / "approved.cjs").symlink_to(root / "node_modules/minimatch/minimatch.js")
+        require_target = "./approved.cjs"
+    (scope / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "minimatch",
+                "type": "module" if mode == "import" else "commonjs",
+                "exports": {".": {"require": require_target, "import": "./self-reference.mjs"}},
+            }
+        )
+    )
+    script = """
+import {createRequire} from 'node:module';
+import {pathToFileURL, fileURLToPath} from 'node:url';
+const [caller, mode] = process.argv.slice(1);
+console.log(mode === 'import'
+  ? fileURLToPath(import.meta.resolve('minimatch', pathToFileURL(caller).href))
+  : createRequire(caller).resolve('minimatch'));
+"""
+    resolved = subprocess.run(
+        [
+            "node",
+            "--experimental-import-meta-resolve",
+            "--input-type=module",
+            "-e",
+            script,
+            str(caller),
+            mode,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert Path(resolved.stdout.strip()) == shadow
+    with pytest.raises(gate.AuditRejected, match="AUDIT_ACCEPTANCE_IDENTITY_CHANGED"):
+        gate.evaluate(report, 0, root, NOW)
