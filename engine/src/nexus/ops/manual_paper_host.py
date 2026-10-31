@@ -325,6 +325,7 @@ async def peek_manual_request(
             )
         )
     ).all()
+    from nexus.paper.independent_unknown_acceptance import independent_unknown_accepted
     from nexus.paper.manual_preparation_close import preparation_closed
 
     now = await session.scalar(select(func.clock_timestamp()))
@@ -333,7 +334,10 @@ async def peek_manual_request(
     pending = []
     for row in rows:
         view = await read_manual_request(session, row)
-        if view.status == "unknown" and await preparation_closed(session, row, now=now):
+        if view.status == "unknown" and (
+            await preparation_closed(session, row, now=now)
+            or await independent_unknown_accepted(session, row, now=now)
+        ):
             continue
         pending.append(view)
     from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
