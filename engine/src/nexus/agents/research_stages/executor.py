@@ -16,8 +16,6 @@ from nexus.agents.budget import ResearchAccountingBusy
 from nexus.agents.committee import ROLE_ORDER
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import execute_research_run
-from nexus.agents.execution_authority import load_frozen_evidence
-from nexus.agents.models import ResearchRequest
 from nexus.agents.research_dispatch import dispatch_failure_boundary
 from nexus.agents.research_stages.lifecycle import invoke_stage
 from nexus.agents.research_stages.protocol import (
@@ -30,7 +28,6 @@ from nexus.agents.research_stages.protocol import (
 )
 from nexus.agents.research_stages.routes import selected_route
 from nexus.agents.research_stages.support import stop_preserving_error
-from nexus.agents.synthesis import domain_evidence
 from nexus.agents.tools import ReadOnlyTools
 from nexus.jobs.repository import LeaseLostError, _lock_active_claim, execute_and_finalize_job
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
@@ -46,8 +43,9 @@ class StagedFinalizationFailed(BaseException):
 
 
 class Prepared(BaseException):
-    def __init__(self, kwargs: Any) -> None:
+    def __init__(self, kwargs: Any, request: Any, evidence: Any) -> None:
         self.kwargs = kwargs
+        self.request, self.evidence = request, evidence
 
 
 _CAPTURE: ContextVar[bool] = ContextVar("research_stage_prepare", default=False)
@@ -63,11 +61,15 @@ def capture_preparation() -> Any:
 
 
 async def execute_or_capture(session: Any, **kwargs: Any) -> Any:
+    return await execute_research_run(session, **kwargs)
+
+
+def capture_validated_preparation(*, request: Any, evidence: Any, **kwargs: Any) -> None:
+    """Capture only the common executor's fully validated, unsent preparation."""
     if _CAPTURE.get() and isinstance(
         kwargs["committee"], codex_staged.StructuredStagedCodexCommittee
     ):
-        raise Prepared(kwargs)
-    return await execute_research_run(session, **kwargs)
+        raise Prepared(kwargs, request, evidence)
 
 
 class ShortTools:
@@ -161,6 +163,7 @@ async def execute_staged_claim(
                     # This is intentional capture, not a dispatch failure. Remove
                     # the failure listener before session exit rolls it back.
                     args = prepared.kwargs
+                    request, refs = prepared.request, prepared.evidence
                     captured_preparation = True
                 else:
                     if await preparation.scalar(
@@ -209,15 +212,6 @@ async def execute_staged_claim(
             await session.get(AgentModelConfigRecord, run.model_config_id)
             if comparison is not None and comparison.platform_funding_loader is not None
             else None
-        )
-        refs = tuple(
-            domain_evidence(r)
-            for r in await load_frozen_evidence(session, run, allow_fixture_evidence=False)
-        )
-        request = ResearchRequest(
-            instrument_id=run.instrument_id,
-            data_snapshot_id=run.data_snapshot_id,
-            decision_time=run.decision_time,
         )
     from nexus.agents.research_dispatch import stop_current_dispatch
 
