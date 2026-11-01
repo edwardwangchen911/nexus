@@ -14,6 +14,7 @@ from pydantic import (
     model_validator,
 )
 
+from nexus.agents.http_failure import HttpFailureFacts
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
 from nexus.monitoring.contracts import PriceMonitoringProposal, PriceMonitoringReview
@@ -259,6 +260,7 @@ class StageFailureDiagnostic(BaseModel):
     timeout_source: TimeoutSource | None = None
     timing: StageInvocationTiming | None = None
     failure_facts: SdkFailureFacts | None = None
+    http_failure_facts: HttpFailureFacts | None = None
     validation_kind: (
         Literal[
             "schema_validation",
@@ -274,6 +276,8 @@ class StageFailureDiagnostic(BaseModel):
 
     @model_validator(mode="after")
     def _boundary_fields(self) -> "StageFailureDiagnostic":
+        if self.failure_facts is not None and self.http_failure_facts is not None:
+            raise ValueError("mixed transport failure facts")
         if self.boundary == "invocation":
             if (
                 self.response_hash is not None
@@ -292,6 +296,7 @@ class StageFailureDiagnostic(BaseModel):
             or self.timing is not None
             or self.timeout_source is not None
             or self.failure_facts is not None
+            or self.http_failure_facts is not None
         ):
             raise ValueError("VALIDATION_DIAGNOSTIC_INVALID")
         return self
@@ -301,6 +306,8 @@ class StageFailureDiagnostic(BaseModel):
         payload = cast(dict[str, object], handler(self))
         if self.failure_facts is None:
             payload.pop("failure_facts", None)
+        if self.http_failure_facts is None:
+            payload.pop("http_failure_facts", None)
         if self.timeout_source is None:
             payload.pop("timeout_source", None)
         if self.timing is None:

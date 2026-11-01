@@ -32,6 +32,7 @@ from nexus.agents.codex_sdk import (
 )
 from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_MAX_WIRE_BYTES
 from nexus.agents.comparison_inputs import assert_outbound_safe
+from nexus.agents.http_failure import HttpFailurePhase, http_failure_facts
 from nexus.agents.research_stages.protocol import ProtocolRejected, Ticket
 from nexus.agents.research_stages.support import consume_owned_task, stop_preserving_error
 from nexus.agents.responses_budget import UsageSnapshot
@@ -97,6 +98,7 @@ class HttpStageFailure(CodexInvocationError):
         self.primary = cause
         self.owned = owned
         self.proof_error: BaseException | None = None
+        self.http_failure_facts = http_failure_facts(observation, cause)
 
 
 async def invoke_http_stage(
@@ -135,6 +137,7 @@ async def invoke_http_stage(
     verified = False
     output_error: BaseException | None = None
     proof_error: BaseException | None = None
+    proof_phase: HttpFailurePhase = "publication"
     stop_task: asyncio.Task[Any] | None = None
     cleanup_deadline = min(cleanup_deadline, work_deadline + 7)
     cut_off = wall_anchor + timedelta(seconds=cleanup_deadline - monotonic_anchor)
@@ -346,7 +349,7 @@ async def invoke_http_stage(
         fence(primary)
 
     async def finish() -> None:
-        nonlocal proof_error
+        nonlocal proof_error, proof_phase
         try:
             if publication is not None:
                 done, _ = await asyncio.wait(
@@ -360,6 +363,8 @@ async def invoke_http_stage(
             proof_error = error
             fence(error)
         try:
+            if proof_error is None:
+                proof_phase = "cleanup"
             if loop.time() >= cleanup_deadline:
                 raise ProtocolRejected("CLEANUP_WINDOW_CLOSED")
             await protocol.cleanup(
@@ -403,6 +408,13 @@ async def invoke_http_stage(
         )
         failure.owned = tuple(owned)
         failure.proof_error = proof_error
+        failure.http_failure_facts = http_failure_facts(
+            observation,
+            cause,
+            output_error=output_error,
+            proof_error=proof_error,
+            proof_phase=proof_phase,
+        )
         from nexus.agents.budget import ResearchAccountingBusy
 
         if isinstance(cause, asyncio.CancelledError | ResearchAccountingBusy):

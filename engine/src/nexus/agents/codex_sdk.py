@@ -51,6 +51,7 @@ from nexus.agents.committee import (
     SdkFailureFacts,
     TimeoutSource,
 )
+from nexus.agents.http_failure import HttpFailureFacts
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.sdk_error_details import rpc_error_code
@@ -133,6 +134,7 @@ class CodexInvocationError(ValueError):
         )
         super().__init__(self.reason)
         self.failure_facts: SdkFailureFacts | None = None
+        self.http_failure_facts: HttpFailureFacts | None = None
         self.usage = usage
         self.provider_call_started = provider_call_started
         self.phase_elapsed_ms: dict[InvocationPhase, int] = {}

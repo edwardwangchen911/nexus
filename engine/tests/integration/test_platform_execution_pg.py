@@ -118,6 +118,16 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         body = json.loads(request.content)
         wires.append(body)
         payload = json.loads(body["input"][1]["content"])
+        if mode.startswith("http_"):
+            # Observe the actual requested stage even when no answer is generated.
+            seen.append(("platform", payload["stage"]))
+            return httpx.Response(
+                int(mode.removeprefix("http_")),
+                headers={"content-type": "application/json"},
+                stream=Body(
+                    b'{"error":{"code":"insufficient_quota","message":"PRIVATE_SENTINEL"}}'
+                ),
+            )
         answer = stage_response(payload, "platform", seen)
         event = terminal("completed")
         event["response"]["service_tier"] = "default"
@@ -235,6 +245,34 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                         )
                     )
                     assert held.state == "reserved" and held.settled_usd is None
+                    if mode.startswith("http_"):
+                        from nexus.agents.committee import StageFailureDiagnostic
+                        from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                        output = await s.scalar(
+                            select(AgentResearchOutputRecord).where(
+                                AgentResearchOutputRecord.run_id == UUID(admitted["run_id"]),
+                                AgentResearchOutputRecord.status == "failed",
+                            )
+                        )
+                        assert output.payload["reason"] == "model_usage_uncertain"
+                        diagnostic = StageFailureDiagnostic.model_validate(
+                            output.payload["diagnostic"]
+                        )
+                        facts = diagnostic.http_failure_facts
+                        assert facts is not None
+                        assert facts.phase == "headers" and facts.error_kind == "http_status"
+                        assert facts.http_status == int(mode.removeprefix("http_"))
+                        assert facts.provider_error_code == "insufficient_quota"
+                        assert (
+                            facts.send_started
+                            and facts.headers_received
+                            and facts.cleanup_confirmed
+                        )
+                        assert not facts.terminal_seen and diagnostic.failure_facts is None
+                        assert readback["http_failure_facts"] == facts.model_dump(mode="json")
+                        assert "PRIVATE_SENTINEL" not in json.dumps(output.payload)
+                        assert len(wires) == len(clients) == 1
                     assert (
                         await s.scalar(
                             text(
@@ -290,5 +328,20 @@ async def test_renewed_price_full_worker_http_and_fail_closed_matrix(
         tmp_path,
         mode,
         explicit_spend,
+        price_version=CURRENT_PLATFORM_PRICE_VERSION,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["http_400", "http_401", "http_429", "http_502"])
+async def test_http_failure_survives_real_worker_output_and_normal_inspection(
+    migrated_database_url, monkeypatch, tmp_path, mode
+):
+    await test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        mode,
+        True,
         price_version=CURRENT_PLATFORM_PRICE_VERSION,
     )

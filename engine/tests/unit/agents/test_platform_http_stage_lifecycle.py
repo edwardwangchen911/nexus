@@ -334,6 +334,10 @@ async def test_platform_qualification_cancellation_keeps_original_and_no_send(fr
     assert failure.primary is error.value and not failure.provider_call_started
     assert failure.usage is None and all(task.done() for task in failure.owned)
     assert failure.observation.cleanup.confirmed and client.is_closed
+    assert failure.http_failure_facts.error_kind == "cancelled"
+    assert failure.http_failure_facts.phase == "pre_send"
+    assert not failure.http_failure_facts.send_started
+    assert "original platform cancellation" not in failure.http_failure_facts.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -356,6 +360,10 @@ async def test_platform_precheck_and_cleanup_errors_both_keep_identity(frozen, c
     assert error.value.primary is primary and error.value.observation.cleanup.error is secondary
     assert not error.value.provider_call_started and error.value.usage is None
     assert KEY not in str(error.value) and client.is_closed
+    facts = error.value.http_failure_facts
+    assert facts.phase == "pre_send" and facts.error_kind == "local_guard"
+    assert facts.cleanup_error_kind == "cleanup"
+    assert KEY not in facts.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -383,6 +391,10 @@ async def test_platform_native_terminal_survives_failed_stream_close(frozen, cre
     with pytest.raises(HttpStageFailure) as error:
         await call(protocol, client, frozen, credential, check)
     assert error.value.primary is original and error.value.usage.output_tokens == 9
+    facts = error.value.http_failure_facts
+    assert facts.phase == "cleanup" and facts.error_kind == "cleanup"
+    assert facts.terminal_seen and facts.cleanup_error_kind == "cleanup"
+    assert not facts.cleanup_confirmed and KEY not in facts.model_dump_json()
     assert json.loads(protocol.events[0][1]["payload"]) == value["response"]
     assert len(requests) == 1 and requests[0].content == frozen.wire and body.closed == 1
     assert KEY not in str(error.value) and client.is_closed

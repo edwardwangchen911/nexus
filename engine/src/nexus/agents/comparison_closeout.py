@@ -4,10 +4,12 @@ from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.agents.committee import StageFailureDiagnostic
 from nexus.agents.comparison_manifest import parse_comparison_manifest
 from nexus.agents.comparison_routes import comparison_owner
 from nexus.agents.research_stages.proof import read_terminal_proof
@@ -15,7 +17,7 @@ from nexus.agents.research_stages.protocol import ProtocolRejected, StagedProtoc
 from nexus.agents.research_stages.routes import selected_route
 from nexus.jobs.repository import ClaimedJob
 from nexus.paper.research_request import database_now
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job, JobAttempt, JobDependency, JobLease
 
 
@@ -158,11 +160,33 @@ async def _inspect(session: AsyncSession, experiment_id: UUID, ordinal: int) -> 
                 ),
                 {"run": row["run_id"]},
             )
+        diagnostic_fields: dict[str, Any] = {}
+        output = await session.scalar(
+            select(AgentResearchOutputRecord)
+            .where(
+                AgentResearchOutputRecord.run_id == row["run_id"],
+                AgentResearchOutputRecord.status.in_(("failed", "abstained")),
+            )
+            .order_by(AgentResearchOutputRecord.sequence.desc())
+            .limit(1)
+        )
+        raw_diagnostic = output.payload.get("diagnostic") if output is not None else None
+        if isinstance(raw_diagnostic, dict) and "http_failure_facts" in raw_diagnostic:
+            try:
+                diagnostic = StageFailureDiagnostic.model_validate(raw_diagnostic)
+            except ValidationError:
+                diagnostic_fields["http_failure_facts_unavailable"] = True
+            else:
+                if diagnostic.http_failure_facts is not None:
+                    diagnostic_fields["http_failure_facts"] = (
+                        diagnostic.http_failure_facts.model_dump(mode="json")
+                    )
         return {
             "status": "position_registered",
             "inspection_only": True,
             "dispatch_authority": False,
             "replay_allowed": False,
+            **diagnostic_fields,
             **{k: str(v) if isinstance(v, UUID) else v for k, v in row.items()},
             "stage_scope_stopped": scope_stopped,
             "stage_chain_stopped": chain_stopped,

@@ -9,11 +9,12 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast, get_args
 
 import httpx
 
 from nexus.agents.codex_sdk import _MAX_OUTPUT_BYTES
+from nexus.agents.http_failure import HttpResponseRejected, ProviderErrorCode
 from nexus.agents.responses_stream import (
     HttpCleanupResult,
     ResponsesStreamFacts,
@@ -28,6 +29,47 @@ class HttpStageObservation:
     terminal: dict[str, Any] | None
     error: BaseException | None
     cleanup: HttpCleanupResult
+
+
+async def _read_rejection_code(
+    response: httpx.Response, rejection: HttpResponseRejected, *, work_deadline: float
+) -> None:
+    """At most 8 KiB/one second of this existing response, inside the original deadline.
+
+    This diagnostic is not a usage receipt. Never read a second response, decode
+    arbitrary compression, retain message text, or let an error-body failure
+    overwrite the already observed HTTP rejection.
+    """
+    if (
+        response.headers.get("content-type", "").split(";")[0].strip() != "application/json"
+        or response.headers.get("content-encoding", "identity") != "identity"
+        or response.is_stream_consumed
+        or response.is_closed
+        or not isinstance(response.stream, httpx.AsyncByteStream)
+    ):
+        return
+    try:
+        async with asyncio.timeout_at(min(work_deadline, asyncio.get_running_loop().time() + 1)):
+            response.is_stream_consumed = True
+            body = bytearray()
+            async for chunk in response.stream:
+                if len(body) + len(chunk) > 8192:
+                    rejection.body_state = "too_large"
+                    return
+                body.extend(chunk)
+            value = json.loads(body)
+            error = value.get("error") if isinstance(value, dict) else None
+            if not isinstance(error, dict):
+                rejection.body_state = "malformed"
+                return
+            code = error.get("code")
+            if isinstance(code, str) and code in get_args(ProviderErrorCode.__value__):
+                rejection.provider_error_code = cast(ProviderErrorCode, code)
+            rejection.body_state = "parsed"
+    except (ValueError, UnicodeError):
+        rejection.body_state = "malformed"
+    except Exception:
+        rejection.body_state = "unavailable"
 
 
 async def collect_response_stage(
@@ -45,17 +87,19 @@ async def collect_response_stage(
     """
     loop = asyncio.get_running_loop()
     facts, terminal = ResponsesStreamFacts(), None
+    rejection: HttpResponseRejected | None = None
 
     async def receive() -> object:
-        nonlocal terminal
+        nonlocal terminal, rejection
         if loop.time() >= work_deadline:
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
         if work_deadline >= cleanup_deadline:
             raise StreamProtocolError("RESPONSES_DEADLINE_INVALID")
-        if (
-            response.status_code != 200
-            or response.headers.get("content-type", "").split(";")[0].strip() != "text/event-stream"
-        ):
+        if response.status_code != 200:
+            rejection = HttpResponseRejected()
+            await _read_rejection_code(response, rejection, work_deadline=work_deadline)
+            raise rejection
+        if response.headers.get("content-type", "").split(";")[0].strip() != "text/event-stream":
             raise StreamProtocolError("RESPONSES_STREAM_UNAVAILABLE")
         if (
             response.is_stream_consumed
@@ -139,7 +183,15 @@ async def collect_response_stage(
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
         await task
     except BaseException as error:
-        primary = error
+        # A diagnostic body read must not replace an already observed rejection
+        # when the original work deadline wins the race. Cancellation remains
+        # cancellation, and neither branch supplies a remote usage receipt.
+        if isinstance(error, TimeoutError) and rejection is not None:
+            if rejection.body_state == "not_read":
+                rejection.body_state = "unavailable"
+            primary = rejection
+        else:
+            primary = error
     cleanup = await close_owned_stream(response, task, deadline=cleanup_deadline)
     if cleanup.confirmed:
         facts.confirm_local_cleanup(stream_closed=response.is_closed, request_task_done=task.done())
