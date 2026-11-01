@@ -214,6 +214,9 @@ async def test_normal_cli_admission_consumes_real_bound_funding_and_never_grant(
     f = session_factory(settings)
     source, prepared, m, model, _, _ = await setup(f, monkeypatch)
     m, _ = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
+    # This positive funding-path fixture must cover the protected old hold and
+    # the whole unreserved round, not only the first position under the default.
+    settings.agent_daily_budget_usd = Decimal(2) + m.total_reservation_usd
     paths = {}
     for name, content in {
         "source": source,

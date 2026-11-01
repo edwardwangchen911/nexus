@@ -368,9 +368,20 @@ async def reserve_daily_budget(
     pricing_version: str,
     pricing_fresh: bool,
     economic_allocation: "AllocationRequest | None" = None,
+    required_capacity_usd: Decimal | None = None,
 ) -> AgentDailyBudgetReservationRecord:
-    """Serialize one UTC day and count reservations plus settled actual usage."""
+    """Check capacity under the shared lock; reserve only this run's own maximum.
+
+    A larger required capacity is a preview of subsequent unreserved work, not
+    a hold or permission for that work. Every later reservation still rechecks.
+    """
     _validate_budget_inputs(now, daily_limit_usd, worst_case_usd, pricing_version)
+    capacity = worst_case_usd if required_capacity_usd is None else required_capacity_usd
+    _require_nonnegative_decimal(capacity, "required_capacity_usd")
+    if capacity < worst_case_usd or (
+        economic_allocation is not None and required_capacity_usd is not None
+    ):
+        raise ValueError("RESEARCH_BUDGET_CAPACITY_INVALID")
     if not pricing_fresh:
         raise BudgetExhausted("stale pricing cannot reserve research budget")
     if economic_allocation is not None:
@@ -400,11 +411,15 @@ async def reserve_daily_budget(
         run_id=run_id,
         now=now,
         daily_limit_usd=daily_limit_usd,
-        amount=worst_case_usd,
+        amount=capacity,
     )
     used = await _shared_daily_budget_used(session, business_date=business_date)
-    if not protected and used + worst_case_usd > daily_limit_usd:
-        raise BudgetExhausted("daily research budget exhausted")
+    if not protected and used + capacity > daily_limit_usd:
+        raise BudgetExhausted(
+            "COMPARISON_ROUND_BUDGET_EXHAUSTED"
+            if required_capacity_usd is not None
+            else "daily research budget exhausted"
+        )
     reservation = AgentDailyBudgetReservationRecord(
         business_date=business_date,
         run_id=run_id,

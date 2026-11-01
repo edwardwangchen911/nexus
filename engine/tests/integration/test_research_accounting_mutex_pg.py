@@ -36,8 +36,9 @@ async def blocked_or_finished(factory, task, pid):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["verified_overrun", "known_held_zero", "settled_zero"])
 @pytest.mark.parametrize("publisher_first", [False, True])
+@pytest.mark.parametrize("round_capacity", [False, True])
 async def test_cross_day_native_publication_and_new_allocation_linearize(
-    migrated_database_url, monkeypatch, kind, publisher_first
+    migrated_database_url, monkeypatch, kind, publisher_first, round_capacity
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     tokens = (20_000_000, 0) if kind == "verified_overrun" else (0, 0)
@@ -104,6 +105,7 @@ async def test_cross_day_native_publication_and_new_allocation_linearize(
                 worst_case_usd=Decimal(2),
                 pricing_version="fixture-pricing-v1",
                 pricing_fresh=True,
+                required_capacity_usd=Decimal(4) if round_capacity else None,
             )
             if not publisher_first:
                 entered.set()
