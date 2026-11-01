@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from nexus.agents.comparison_inputs import PreparedComparisonInput
 from nexus.agents.comparison_manifest import (
+    PLATFORM_RENEWED_PURPOSE,
     ComparisonManifest,
     parse_comparison_manifest,
     require_business_run,
@@ -16,30 +17,40 @@ from nexus.agents.comparison_manifest import (
 from nexus.agents.comparison_preparation import prepare_archive
 from nexus.agents.platform_manifest import PLATFORM_PURPOSE, PlatformManifest
 from nexus.agents.platform_profile import platform_profile_hash
-from nexus.agents.platform_usage import platform_reservation_usd
+from nexus.agents.platform_usage import (
+    CURRENT_PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSION,
+    platform_reservation_usd,
+)
 from nexus.agents.platform_wire import freeze_platform_allocation
 from unit.agents.test_comparison_inputs import archive_source
 from unit.agents.test_comparison_manifest import manifest_data
 
 
-def platform_fixture():
+def platform_fixture(price_version=PLATFORM_PRICE_VERSION):
+    purpose = (
+        PLATFORM_RENEWED_PURPOSE
+        if price_version == CURRENT_PLATFORM_PRICE_VERSION
+        else PLATFORM_PURPOSE
+    )
     source = json.dumps(archive_source()).encode()
     data = manifest_data()
     prepared = prepare_archive(
         source,
         expected_source_hash=hashlib.sha256(source).hexdigest(),
         experiment_id=uuid4(),
-        purpose=PLATFORM_PURPOSE,
+        purpose=purpose,
+        platform_price_version=price_version,
     )
     data.update(
         experiment_id=prepared["experiment_id"],
         source_manifest_hash=prepared["source_manifest_hash"],
-        api_config_hash=platform_profile_hash(),
+        api_config_hash=platform_profile_hash(price_version),
         input_hashes=prepared["input_hashes"],
         instrument_ids=prepared["instrument_ids"],
         identity_equivalence_hash=prepared["identity_equivalence_hash"],
         outbound_safety_hash=prepared["outbound_safety_hash"],
-        platform_contract=PLATFORM_PURPOSE,
+        platform_contract=purpose,
         allocations=prepared["allocations"],
         funding_proof_hash="a" * 64,
         credential_binding_hash="b" * 64,
@@ -151,14 +162,18 @@ def test_normal_prepare_cli_freezes_three_full_chains_without_db_or_network(
             "--output",
             str(output),
             "--purpose",
-            PLATFORM_PURPOSE,
+            PLATFORM_RENEWED_PURPOSE,
         ],
     )
     assert research_comparison.main() == 0
     result = json.loads(capsys.readouterr().out)
     artifact = json.loads(output.read_bytes())
     assert result["dispatch_enabled"] is False and result["model_calls"] == 0
-    assert artifact["purpose"] == PLATFORM_PURPOSE and len(artifact["allocations"]) == 3
+    assert artifact["purpose"] == PLATFORM_RENEWED_PURPOSE and len(artifact["allocations"]) == 3
+    assert all(
+        a["profile"]["price_version"] == "platform-terra-default-implicit30m-20261101-v2"
+        for a in artifact["allocations"]
+    )
     assert output.stat().st_mode & 0o777 == 0o600
     assert source_path.read_bytes() == source
 

@@ -20,6 +20,9 @@ SURFACE_SHA256 = "c605a2566dca905b93142dad3cd16962238c33d815d2ade0fcb931cb4caa67
 # Effective after the recorded approval; never extend with a later build.
 MINIMATCH_ACTIVE_FROM = datetime(2026, 10, 31, 3, 34, 37, tzinfo=UTC)
 MINIMATCH_EXPIRES_AT = datetime(2026, 11, 1, tzinfo=UTC)
+# Explicit human renewal, recorded after approval; never backdate the expired gap.
+MINIMATCH_RENEWED_FROM = datetime(2026, 11, 1, 2, 12, 35, tzinfo=UTC)
+MINIMATCH_RENEWED_UNTIL = datetime(2026, 11, 2, tzinfo=UTC)
 MINIMATCH_ADVISORY = "https://github.com/advisories/GHSA-g3hv-75wg-m249"
 MINIMATCH_GRAPH_SHA256 = "0b0a5266fdf557f0297f1028da05736ea41a4f8b6d8b3de6dcd9a94140fadd80"
 MINIMATCH_LOCK_SHA256 = "2f7aec4834ba4069f52a20e7e312f5a49f6e3c857ff6bb2964c152dab3ae54cc"
@@ -358,6 +361,8 @@ def evaluate_minimatch(vulnerabilities, counts, exit_code, root, now):
         raise AuditRejected("AUDIT_ACCEPTANCE_IDENTITY_CHANGED")
     verify_minimatch_resolution(root)
     checked_at = now() if callable(now) else now
+    if MINIMATCH_RENEWED_FROM <= checked_at < MINIMATCH_RENEWED_UNTIL:
+        return "risk_accepted_minimatch_until_2026-11-02T00:00:00Z"
     if not MINIMATCH_ACTIVE_FROM <= checked_at < MINIMATCH_EXPIRES_AT:
         raise AuditRejected("AUDIT_ACCEPTANCE_EXPIRED")
     return "risk_accepted_minimatch_until_2026-11-01T00:00:00Z"

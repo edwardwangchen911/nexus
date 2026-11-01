@@ -318,10 +318,10 @@ class StagedProtocol:
                     raise ProtocolRejected("PRICING_EXPIRED")
                 return checked
 
-            from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+            from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
             binding = None
-            if run.pricing_version == PLATFORM_PRICE_VERSION:
+            if run.pricing_version in PLATFORM_PRICE_VERSIONS:
                 from nexus.agents.platform_stage_accounting import platform_authorization_binding
 
                 binding = await platform_authorization_binding(
@@ -589,13 +589,13 @@ class StagedProtocol:
                 )
             )
         )
-        from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+        from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
         platform_invalid = False
-        if model.version == PLATFORM_PRICE_VERSION:
+        if model.version in PLATFORM_PRICE_VERSIONS:
             from nexus.agents.platform_stage_accounting import platform_stage_accounting
 
-            accounting = platform_stage_accounting(rows)
+            accounting = platform_stage_accounting(rows, price_version=model.version)
             cost = accounting.known_cost_usd
             platform_invalid = accounting.exact_cost_usd is None or accounting.limit_exceeded
         else:

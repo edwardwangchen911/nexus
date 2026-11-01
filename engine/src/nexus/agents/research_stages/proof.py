@@ -233,10 +233,10 @@ async def read_terminal_proof(
         platform_stage_accounting,
         require_platform_stage_cost,
     )
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
-    platform = model.version == PLATFORM_PRICE_VERSION
-    accounting = platform_stage_accounting(rows) if platform else None
+    platform = model.version in PLATFORM_PRICE_VERSIONS
+    accounting = platform_stage_accounting(rows, price_version=model.version) if platform else None
     known = terminal["known"]
     settled = budget.state == "settled"
     held = (

@@ -12,6 +12,7 @@ from integration.test_comparison_execution_pg import stage_response
 from integration.test_platform_funding_pg import funding_fixture
 from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_execution import execute_comparison_position
+from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
 from nexus.persistence.session import session_factory
@@ -36,13 +37,20 @@ from unit.agents.test_http_stage_lifecycle import Body, terminal
     ],
 )
 async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
-    migrated_database_url, monkeypatch, tmp_path, mode, explicit_spend
+    migrated_database_url,
+    monkeypatch,
+    tmp_path,
+    mode,
+    explicit_spend,
+    price_version=PLATFORM_PRICE_VERSION,
 ):
     settings = EngineSettings(
         database_url=migrated_database_url, agent_daily_budget_usd=Decimal(20)
     )
     f = session_factory(settings)
-    source, prepared, m, model, old, protected = await setup(f, monkeypatch, source_kind="SEC")
+    source, prepared, m, model, old, protected = await setup(
+        f, monkeypatch, source_kind="SEC", price_version=price_version
+    )
     m, funding = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
     from nexus.agents import codex_staged
 
@@ -268,3 +276,19 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         assert all(c.is_closed for c in clients) and len(clients) == 9
     finally:
         await f.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["complete", "missing_cache", "wait_price", "wait_authorization"])
+@pytest.mark.parametrize("explicit_spend", [False, True], ids=["gift", "explicit-spend-v2"])
+async def test_renewed_price_full_worker_http_and_fail_closed_matrix(
+    migrated_database_url, monkeypatch, tmp_path, mode, explicit_spend
+):
+    await test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        mode,
+        explicit_spend,
+        price_version=CURRENT_PLATFORM_PRICE_VERSION,
+    )

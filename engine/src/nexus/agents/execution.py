@@ -692,9 +692,9 @@ async def _settle_or_hold_usage(
     # Include deterministic pricing refusal (even zero cost) in the same short
     # financial boundary as verification and new money admission, across dates.
     await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
-    if model.version == PLATFORM_PRICE_VERSION:
+    if model.version in PLATFORM_PRICE_VERSIONS:
         from nexus.agents.platform_stage_accounting import require_platform_stage_cost
         from nexus.agents.research_stages.protocol import stage_evidence
 
@@ -702,7 +702,7 @@ async def _settle_or_hold_usage(
         # Preserve the original exception so the entire closeout rolls back.
         platform_rows = await stage_evidence(session, run.id)
     try:
-        if model.version == PLATFORM_PRICE_VERSION:
+        if model.version in PLATFORM_PRICE_VERSIONS:
             actual_usd = require_platform_stage_cost(
                 model,
                 platform_rows,

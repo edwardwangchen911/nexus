@@ -22,14 +22,24 @@ from typing import Literal
 from uuid import UUID
 
 from dotenv import dotenv_values
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+)
 
 from nexus.ops import openai_local
 
 PLATFORM_KEY_PATH = Path(".secrets/nexus-platform-local/api-key")
 PLATFORM_ENDPOINT = "https://api.openai.com/v1/responses"
 PLATFORM_PURPOSE = "platform-gifted-terra-v1-20261031"
+PLATFORM_RENEWED_PURPOSE = "platform-terra-v2-20261101"
 EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 1, tzinfo=UTC)
+RENEWED_EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 2, tzinfo=UTC)
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _ERRORS = frozenset(
@@ -221,7 +231,7 @@ class ExplicitPlatformSpendAuthorization(BaseModel):
     """Exact local record of an already verified user instruction, never a balance."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True, allow_inf_nan=False)
-    version: int = Field(ge=1, le=1)
+    version: int = Field(ge=1, le=2)
     kind: Literal["explicit_platform_spend_authorization"]
     purpose: str
     endpoint: str
@@ -239,8 +249,13 @@ class ExplicitPlatformSpendAuthorization(BaseModel):
 
     @field_validator("window_end")
     @classmethod
-    def enforce_fixed_deadline(cls, value: datetime) -> datetime:
-        if value > EXPLICIT_SPEND_DEADLINE:
+    def enforce_fixed_deadline(cls, value: datetime, info: ValidationInfo) -> datetime:
+        deadline = (
+            RENEWED_EXPLICIT_SPEND_DEADLINE
+            if info.data.get("version") == 2
+            else EXPLICIT_SPEND_DEADLINE
+        )
+        if value > deadline:
             raise ValueError("PLATFORM_AUTHORIZATION_DEADLINE_EXCEEDED")
         return value
 
@@ -371,7 +386,7 @@ def check_platform_eligibility(
     _validate_credential(credential)
     record = proof.record
     if (
-        purpose != PLATFORM_PURPOSE
+        purpose not in (PLATFORM_PURPOSE, PLATFORM_RENEWED_PURPOSE)
         or record.purpose != purpose
         or record.endpoint != credential.endpoint
         or record.credential_fingerprint != credential.fingerprint
@@ -381,8 +396,10 @@ def check_platform_eligibility(
     ):
         _reject("PLATFORM_PROOF_BINDING_MISMATCH")
     if isinstance(record, ExplicitPlatformSpendAuthorization):
-        if not credential.key_scope_only or (
-            record.experiment_id != experiment_id or record.input_hashes != input_hashes
+        if (
+            record.version != (2 if purpose == PLATFORM_RENEWED_PURPOSE else 1)
+            or not credential.key_scope_only
+            or (record.experiment_id != experiment_id or record.input_hashes != input_hashes)
         ):
             _reject("PLATFORM_PROOF_BINDING_MISMATCH")
         if (
@@ -549,7 +566,7 @@ def main() -> int:
             eligibility = check_platform_eligibility(
                 credential,
                 proof,
-                purpose=PLATFORM_PURPOSE,
+                purpose=proof.record.purpose,
                 now=_now(),
                 required_usd=Decimal(args.required_usd),
                 local_held_usd=Decimal(args.local_held_usd),

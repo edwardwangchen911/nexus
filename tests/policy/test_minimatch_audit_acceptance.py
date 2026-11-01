@@ -151,6 +151,16 @@ def test_acceptance_has_fixed_exclusive_expiry(accepted, at):
         gate.evaluate(report, 0, root, at)
 
 
+def test_explicit_renewal_has_fixed_end_and_does_not_fill_unaccepted_gap(accepted):
+    root, report = accepted
+    assert gate.evaluate(report, 0, root, datetime(2026, 11, 1, 3, tzinfo=UTC)) == (
+        "risk_accepted_minimatch_until_2026-11-02T00:00:00Z"
+    )
+    for at in (datetime(2026, 11, 1, 1, tzinfo=UTC), datetime(2026, 11, 2, tzinfo=UTC)):
+        with pytest.raises(gate.AuditRejected, match="AUDIT_ACCEPTANCE_EXPIRED"):
+            gate.evaluate(report, 0, root, at)
+
+
 def test_expiration_is_sampled_after_slow_identity_reads(accepted, monkeypatch):
     root, report = accepted
     now = [NOW]

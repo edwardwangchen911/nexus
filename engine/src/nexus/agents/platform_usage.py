@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 PLATFORM_PRICE_VERSION = "platform-terra-default-implicit30m-20261031-v1"
+CURRENT_PLATFORM_PRICE_VERSION = "platform-terra-default-implicit30m-20261101-v2"
+PLATFORM_PRICE_VERSIONS = (PLATFORM_PRICE_VERSION, CURRENT_PLATFORM_PRICE_VERSION)
 _MAX_REQUEST_INPUT = 272_000
 
 

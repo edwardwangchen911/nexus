@@ -92,15 +92,18 @@ async def research_reserved_occupancy(
         or run.reserved_cost_usd != reservation.reserved_usd
     ):
         raise ValueError("RESEARCH_USAGE_AUTHORITY_INVALID")
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
-    if model.version == PLATFORM_PRICE_VERSION:
+    if model.version in PLATFORM_PRICE_VERSIONS:
         from nexus.agents.platform_profile import platform_model_matches
         from nexus.agents.platform_stage_accounting import platform_stage_accounting
 
         if rows is None or not platform_model_matches(model):
             raise ValueError("RESEARCH_USAGE_EVIDENCE_INVALID")
-        return max(reservation.reserved_usd, platform_stage_accounting(rows).known_cost_usd)
+        return max(
+            reservation.reserved_usd,
+            platform_stage_accounting(rows, price_version=model.version).known_cost_usd,
+        )
     return max(reservation.reserved_usd, observed_usage_cost(model, tokens[0], tokens[1]))
 
 

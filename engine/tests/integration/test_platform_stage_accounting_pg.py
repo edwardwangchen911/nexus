@@ -11,6 +11,7 @@ from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_claim import claim_comparison_position
 from nexus.agents.comparison_inputs import PreparedComparisonInput
 from nexus.agents.comparison_producer import admit_comparison_position
+from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSIONS
 from nexus.agents.platform_wire import compile_platform_stage
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.agents.research_stages.protocol import StagedProtocol, stage_evidence
@@ -26,8 +27,10 @@ from sqlalchemy.exc import DBAPIError
 from unit.agents.test_platform_usage import usage
 
 
-async def native_platform(factory, monkeypatch, tmp_path):
-    source, prepared, manifest, model_id, old, protected = await setup(factory, monkeypatch)
+async def native_platform(factory, monkeypatch, tmp_path, *, price_version=PLATFORM_PRICE_VERSION):
+    source, prepared, manifest, model_id, old, protected = await setup(
+        factory, monkeypatch, price_version=price_version
+    )
     manifest, funding = await funding_fixture(factory, manifest, tmp_path, monkeypatch)
     async with factory.begin() as s:
         result = await admit_comparison_position(
@@ -79,12 +82,13 @@ async def native_platform(factory, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("orphan", [False, True])
 @pytest.mark.parametrize("classification", ["complete", "missing", "unverified"])
+@pytest.mark.parametrize("price_version", PLATFORM_PRICE_VERSIONS)
 async def test_one_native_cost_path_for_normal_orphan_proof_and_occupancy(
-    migrated_database_url, monkeypatch, tmp_path, orphan, classification
+    migrated_database_url, monkeypatch, tmp_path, orphan, classification, price_version
 ):
     f = session_factory(EngineSettings(database_url=migrated_database_url))
     result, m, claim, p, now, compiled, old, protected = await native_platform(
-        f, monkeypatch, tmp_path
+        f, monkeypatch, tmp_path, price_version=price_version
     )
     try:
         with pytest.raises(ValueError, match="PLATFORM_AUTHORIZATION_BINDING_INVALID"):
@@ -114,6 +118,7 @@ async def test_one_native_cost_path_for_normal_orphan_proof_and_occupancy(
         async with f() as s:
             rows = await stage_evidence(s, result.run_id)
             assert rows[0]["platform_response"] == payload.decode()
+            assert rows[0]["platform_binding"]["price_version"] == price_version
             assert (
                 rows[0]["platform_binding"]["allocation_hash"] == m.allocations[0].allocation_hash
             )

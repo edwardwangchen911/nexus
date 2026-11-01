@@ -20,12 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted, ResearchAccountingBusy
 from nexus.agents.comparison_manifest import (
-    PLATFORM_PURPOSE,
+    PLATFORM_PURPOSES,
+    PLATFORM_RENEWED_PURPOSE,
     PURPOSE,
     PURPOSES,
     parse_comparison_manifest,
 )
 from nexus.agents.comparison_preparation import prepare_archive
+from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 
 
 class PreclaimCommitUnknown(RuntimeError):
@@ -140,10 +142,17 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                 from nexus.agents.comparison_profile import read_api_profile
 
                 await session.execute(text("SET TRANSACTION READ ONLY"))
-                if getattr(args, "purpose", PURPOSE) == PLATFORM_PURPOSE:
+                if getattr(args, "purpose", PURPOSE) in PLATFORM_PURPOSES:
                     from nexus.agents.platform_profile import read_platform_profile
 
-                    profile = await read_platform_profile(session)
+                    profile = await read_platform_profile(
+                        session,
+                        version=(
+                            CURRENT_PLATFORM_PRICE_VERSION
+                            if args.purpose == PLATFORM_RENEWED_PURPOSE
+                            else PLATFORM_PRICE_VERSION
+                        ),
+                    )
                 else:
                     profile = await read_api_profile(session)
                 return {
@@ -163,10 +172,17 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
             if args.command == "register-profile":
                 from nexus.agents.comparison_profile import register_api_profile
 
-                if getattr(args, "purpose", PURPOSE) == PLATFORM_PURPOSE:
+                if getattr(args, "purpose", PURPOSE) in PLATFORM_PURPOSES:
                     from nexus.agents.platform_profile import register_platform_profile
 
-                    profile = await register_platform_profile(session)
+                    profile = await register_platform_profile(
+                        session,
+                        version=(
+                            CURRENT_PLATFORM_PRICE_VERSION
+                            if args.purpose == PLATFORM_RENEWED_PURPOSE
+                            else PLATFORM_PRICE_VERSION
+                        ),
+                    )
                 else:
                     profile = await register_api_profile(
                         session, sdk_model_config_id=args.sdk_model_config_id
@@ -226,7 +242,15 @@ def prepare_file(
     with source.open("rb") as stream:
         raw = stream.read(8 * 1024 * 1024 + 1)
     artifact = prepare_archive(
-        raw, expected_source_hash=expected_source_hash, experiment_id=experiment_id, purpose=purpose
+        raw,
+        expected_source_hash=expected_source_hash,
+        experiment_id=experiment_id,
+        purpose=purpose,
+        platform_price_version=(
+            CURRENT_PLATFORM_PRICE_VERSION
+            if purpose == PLATFORM_RENEWED_PURPOSE
+            else PLATFORM_PRICE_VERSION
+        ),
     )
     artifact["rebuilt_at"] = datetime.now(UTC).isoformat()
     wire = json.dumps(artifact, sort_keys=True, allow_nan=False).encode()

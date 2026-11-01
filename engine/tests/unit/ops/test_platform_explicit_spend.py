@@ -135,6 +135,37 @@ def test_declared_window_cannot_exceed_fixed_cutoff_before_expiry(pc, authorizat
         check_authorization(pc, authorization)
 
 
+def test_renewed_authorization_has_separate_version_and_exclusive_cutoff(pc, authorization):
+    from datetime import UTC, datetime
+
+    _, path, payload = authorization
+    payload.update(
+        version=2, window_end="2026-11-02T00:00:00Z", purpose=pc.PLATFORM_RENEWED_PURPOSE
+    )
+    private_file(path, json.dumps(payload).encode())
+    cutoff = datetime(2026, 11, 2, tzinfo=UTC)
+    result, _ = check_authorization(
+        pc,
+        authorization,
+        purpose=pc.PLATFORM_RENEWED_PURPOSE,
+        now=cutoff - timedelta(minutes=20),
+        required_valid_until=cutoff,
+    )
+    assert result.valid_until == cutoff
+    with pytest.raises(pc.PlatformCredentialError, match="PLATFORM_WINDOW_INVALID"):
+        check_authorization(
+            pc,
+            authorization,
+            purpose=pc.PLATFORM_RENEWED_PURPOSE,
+            now=cutoff,
+            required_valid_until=cutoff,
+        )
+    payload["window_end"] = "2026-11-02T00:00:01Z"
+    private_file(path, json.dumps(payload).encode())
+    with pytest.raises(pc.PlatformCredentialError, match="PLATFORM_PROOF_INVALID"):
+        check_authorization(pc, authorization)
+
+
 def test_exact_fixed_cutoff_and_right_exclusive_check(pc, authorization):
     cutoff = NOW + timedelta(hours=16)
     result, _ = check_authorization(

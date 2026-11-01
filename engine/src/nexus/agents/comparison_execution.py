@@ -86,6 +86,11 @@ async def prepare_execution_pool(
         expected_source_hash=manifest.source_manifest_hash,
         experiment_id=manifest.experiment_id,
         purpose=manifest.purpose,
+        **(
+            {"platform_price_version": manifest.price_version}
+            if isinstance(manifest, PlatformManifest)
+            else {}
+        ),
     )
     if (
         json.dumps({k: v for k, v in prepared.items() if k != "rebuilt_at"}, sort_keys=True)
@@ -113,7 +118,10 @@ async def prepare_execution_pool(
         from nexus.agents.platform_wire import freeze_platform_allocation
 
         if (
-            tuple(freeze_platform_allocation(c.prepared_input) for c in pool)
+            tuple(
+                freeze_platform_allocation(c.prepared_input, profile=a.profile)
+                for c, a in zip(pool, manifest.allocations, strict=True)
+            )
             != manifest.allocations
         ):
             raise ValueError("PLATFORM_ALLOCATION_CHANGED")
