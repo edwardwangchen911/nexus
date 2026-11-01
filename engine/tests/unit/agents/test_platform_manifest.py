@@ -27,8 +27,8 @@ from unit.agents.test_comparison_inputs import archive_source
 from unit.agents.test_comparison_manifest import manifest_data
 
 
-def platform_fixture(price_version=PLATFORM_PRICE_VERSION):
-    purpose = (
+def platform_fixture(price_version=PLATFORM_PRICE_VERSION, *, purpose=None):
+    purpose = purpose or (
         PLATFORM_RENEWED_PURPOSE
         if price_version == CURRENT_PLATFORM_PRICE_VERSION
         else PLATFORM_PURPOSE

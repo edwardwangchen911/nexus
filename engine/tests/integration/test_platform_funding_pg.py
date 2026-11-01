@@ -92,7 +92,7 @@ async def funding_fixture(
             now + timedelta(hours=1),
         )
         body = dict(
-            version=2 if renewed else 1,
+            version=3 if manifest.purpose == "platform-terra-v3-20261101" else 2 if renewed else 1,
             kind="explicit_platform_spend_authorization",
             purpose=manifest.purpose,
             endpoint=credential.endpoint,

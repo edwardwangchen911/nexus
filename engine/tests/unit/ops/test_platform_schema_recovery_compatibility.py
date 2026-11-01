@@ -57,6 +57,20 @@ TARGET = "0106_platform_qualification"
             "pending_consumer_exit_0108_v1",
             False,
         ),
+        (
+            3,
+            "0109_platform_third_round",
+            "0109_platform_third_round",
+            "pending_consumer_exit_0109_v1",
+            True,
+        ),
+        (
+            3,
+            "0108_platform_restore_lookup",
+            "0109_platform_third_round",
+            "pending_consumer_exit_0109_v1",
+            False,
+        ),
     ],
 )
 def test_frozen_proof_policy_decoding_is_exact(version, source, target, policy, valid):
@@ -286,3 +300,9 @@ def test_0106_pending_interrupted_commit_preserves_one_proof(
     pending.test_pending_close_interrupted_management_requires_same_proof_readback(
         tmp_path, committed
     )
+
+
+def test_confirmed_0108_stop_allows_one_explicit_0109_start(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "SOURCE", "0108_platform_restore_lookup")
+    monkeypatch.setitem(globals(), "TARGET", "0109_platform_third_round")
+    test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)

@@ -9,6 +9,7 @@ from nexus.agents.comparison_manifest import (
     PLATFORM_ACTOR,
     PLATFORM_PURPOSE,
     PLATFORM_RENEWED_PURPOSE,
+    PLATFORM_THIRD_PURPOSE,
     ComparisonManifest,
     Hash,
     Route,
@@ -24,7 +25,9 @@ from nexus.agents.platform_wire import PlatformAllocation, PlatformProfile
 
 class PlatformManifest(ComparisonManifest):
     platform_contract: Literal[
-        "platform-gifted-terra-v1-20261031", "platform-terra-v2-20261101"
+        "platform-gifted-terra-v1-20261031",
+        "platform-terra-v2-20261101",
+        "platform-terra-v3-20261101",
     ] = PLATFORM_PURPOSE
     allocations: tuple[PlatformAllocation, PlatformAllocation, PlatformAllocation]
     funding_proof_hash: Hash
@@ -92,6 +95,19 @@ class RenewedPlatformManifest(PlatformManifest):
     """The one separately authorized new round; the original purpose stays consumed."""
 
     platform_contract: Literal[
-        "platform-gifted-terra-v1-20261031", "platform-terra-v2-20261101"
+        "platform-gifted-terra-v1-20261031",
+        "platform-terra-v2-20261101",
+        "platform-terra-v3-20261101",
     ] = PLATFORM_RENEWED_PURPOSE
     purpose: ClassVar[str] = PLATFORM_RENEWED_PURPOSE
+
+
+class ThirdPlatformManifest(PlatformManifest):
+    """One separately authorized third round, using the unchanged v2 price window."""
+
+    platform_contract: Literal[
+        "platform-gifted-terra-v1-20261031",
+        "platform-terra-v2-20261101",
+        "platform-terra-v3-20261101",
+    ] = PLATFORM_THIRD_PURPOSE
+    purpose: ClassVar[str] = PLATFORM_THIRD_PURPOSE

@@ -28,6 +28,7 @@ _PENDING_POLICIES = {
     "0106_platform_qualification": "pending_consumer_exit_0106_v1",
     "0107_platform_price_renewal": "pending_consumer_exit_0107_v1",
     "0108_platform_restore_lookup": "pending_consumer_exit_0108_v1",
+    "0109_platform_third_round": "pending_consumer_exit_0109_v1",
 }
 SAFE_CODES = frozenset(
     _PREFIX + suffix
