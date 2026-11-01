@@ -97,6 +97,14 @@ async def test_normal_backup_restore_keeps_nonempty_profiles_and_original_source
         parse_comparison_manifest(platform_fixture(version)[2])
         for version in (PLATFORM_PRICE_VERSION, CURRENT_PLATFORM_PRICE_VERSION)
     ]
+    if revision == "head":
+        manifests.append(
+            parse_comparison_manifest(
+                platform_fixture(
+                    CURRENT_PLATFORM_PRICE_VERSION, purpose="platform-terra-v3-20261101"
+                )[2]
+            )
+        )
     try:
         async with factory() as session, session.begin():
             for manifest in manifests:

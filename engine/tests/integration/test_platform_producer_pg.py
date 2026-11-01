@@ -38,9 +38,14 @@ from sqlalchemy.exc import DBAPIError
 
 
 async def setup(
-    factory, monkeypatch, *, source_kind="fixture", price_version=PLATFORM_PRICE_VERSION
+    factory,
+    monkeypatch,
+    *,
+    source_kind="fixture",
+    price_version=PLATFORM_PRICE_VERSION,
+    purpose=None,
 ):
-    purpose = (
+    purpose = purpose or (
         PLATFORM_RENEWED_PURPOSE
         if price_version == CURRENT_PLATFORM_PRICE_VERSION
         else PLATFORM_PURPOSE

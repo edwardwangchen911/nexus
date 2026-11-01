@@ -20,8 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted, ResearchAccountingBusy
 from nexus.agents.comparison_manifest import (
+    PLATFORM_PURPOSE,
     PLATFORM_PURPOSES,
-    PLATFORM_RENEWED_PURPOSE,
     PURPOSE,
     PURPOSES,
     parse_comparison_manifest,
@@ -149,7 +149,7 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                         session,
                         version=(
                             CURRENT_PLATFORM_PRICE_VERSION
-                            if args.purpose == PLATFORM_RENEWED_PURPOSE
+                            if args.purpose != PLATFORM_PURPOSE
                             else PLATFORM_PRICE_VERSION
                         ),
                     )
@@ -179,7 +179,7 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
                         session,
                         version=(
                             CURRENT_PLATFORM_PRICE_VERSION
-                            if args.purpose == PLATFORM_RENEWED_PURPOSE
+                            if args.purpose != PLATFORM_PURPOSE
                             else PLATFORM_PRICE_VERSION
                         ),
                     )
@@ -248,7 +248,7 @@ def prepare_file(
         purpose=purpose,
         platform_price_version=(
             CURRENT_PLATFORM_PRICE_VERSION
-            if purpose == PLATFORM_RENEWED_PURPOSE
+            if purpose in PLATFORM_PURPOSES and purpose != PLATFORM_PURPOSE
             else PLATFORM_PRICE_VERSION
         ),
     )

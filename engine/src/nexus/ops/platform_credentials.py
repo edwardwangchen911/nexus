@@ -38,6 +38,7 @@ PLATFORM_KEY_PATH = Path(".secrets/nexus-platform-local/api-key")
 PLATFORM_ENDPOINT = "https://api.openai.com/v1/responses"
 PLATFORM_PURPOSE = "platform-gifted-terra-v1-20261031"
 PLATFORM_RENEWED_PURPOSE = "platform-terra-v2-20261101"
+PLATFORM_THIRD_PURPOSE = "platform-terra-v3-20261101"
 EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 1, tzinfo=UTC)
 RENEWED_EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 2, tzinfo=UTC)
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -231,7 +232,7 @@ class ExplicitPlatformSpendAuthorization(BaseModel):
     """Exact local record of an already verified user instruction, never a balance."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True, allow_inf_nan=False)
-    version: int = Field(ge=1, le=2)
+    version: int = Field(ge=1, le=3)
     kind: Literal["explicit_platform_spend_authorization"]
     purpose: str
     endpoint: str
@@ -252,7 +253,7 @@ class ExplicitPlatformSpendAuthorization(BaseModel):
     def enforce_fixed_deadline(cls, value: datetime, info: ValidationInfo) -> datetime:
         deadline = (
             RENEWED_EXPLICIT_SPEND_DEADLINE
-            if info.data.get("version") == 2
+            if info.data.get("version") in (2, 3)
             else EXPLICIT_SPEND_DEADLINE
         )
         if value > deadline:
@@ -386,7 +387,7 @@ def check_platform_eligibility(
     _validate_credential(credential)
     record = proof.record
     if (
-        purpose not in (PLATFORM_PURPOSE, PLATFORM_RENEWED_PURPOSE)
+        purpose not in (PLATFORM_PURPOSE, PLATFORM_RENEWED_PURPOSE, PLATFORM_THIRD_PURPOSE)
         or record.purpose != purpose
         or record.endpoint != credential.endpoint
         or record.credential_fingerprint != credential.fingerprint
@@ -395,9 +396,16 @@ def check_platform_eligibility(
         or not _HASH.fullmatch(proof.proof_hash)
     ):
         _reject("PLATFORM_PROOF_BINDING_MISMATCH")
+    if purpose == PLATFORM_THIRD_PURPOSE and not isinstance(
+        record, ExplicitPlatformSpendAuthorization
+    ):
+        _reject("PLATFORM_PROOF_BINDING_MISMATCH")
     if isinstance(record, ExplicitPlatformSpendAuthorization):
         if (
-            record.version != (2 if purpose == PLATFORM_RENEWED_PURPOSE else 1)
+            record.version
+            != {PLATFORM_PURPOSE: 1, PLATFORM_RENEWED_PURPOSE: 2, PLATFORM_THIRD_PURPOSE: 3}[
+                purpose
+            ]
             or not credential.key_scope_only
             or (record.experiment_id != experiment_id or record.input_hashes != input_hashes)
         ):

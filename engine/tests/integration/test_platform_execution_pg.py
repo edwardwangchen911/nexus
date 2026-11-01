@@ -43,13 +43,14 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
     mode,
     explicit_spend,
     price_version=PLATFORM_PRICE_VERSION,
+    purpose=None,
 ):
     settings = EngineSettings(
         database_url=migrated_database_url, agent_daily_budget_usd=Decimal(20)
     )
     f = session_factory(settings)
     source, prepared, m, model, old, protected = await setup(
-        f, monkeypatch, source_kind="SEC", price_version=price_version
+        f, monkeypatch, source_kind="SEC", price_version=price_version, purpose=purpose
     )
     m, funding = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
     from nexus.agents import codex_staged
@@ -344,4 +345,20 @@ async def test_http_failure_survives_real_worker_output_and_normal_inspection(
         mode,
         True,
         price_version=CURRENT_PLATFORM_PRICE_VERSION,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["complete", "missing_cache", "wait_authorization", "http_400"])
+async def test_third_round_full_native_worker_keeps_unknown_budget_and_new_authority(
+    migrated_database_url, monkeypatch, tmp_path, mode
+):
+    await test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        mode,
+        True,
+        price_version=CURRENT_PLATFORM_PRICE_VERSION,
+        purpose="platform-terra-v3-20261101",
     )

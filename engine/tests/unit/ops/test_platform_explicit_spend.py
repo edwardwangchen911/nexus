@@ -225,3 +225,38 @@ def test_normal_read_only_check_names_authorization_without_claiming_balance(
     assert result["dispatch_authority"] is False
     assert result["model_requests"] == result["provider_requests"] == result["database_writes"] == 0
     assert KEY not in json.dumps(result)
+
+
+def test_third_authorization_never_consumes_second_round_or_extends_deadline(pc, authorization):
+    from datetime import UTC, datetime
+
+    _, path, payload = authorization
+    purpose = "platform-terra-v3-20261101"
+    payload.update(version=3, purpose=purpose, window_end="2026-11-02T00:00:00Z")
+    private_file(path, json.dumps(payload).encode())
+    cutoff = datetime(2026, 11, 2, tzinfo=UTC)
+    args = dict(purpose=purpose, now=cutoff - timedelta(minutes=20), required_valid_until=cutoff)
+    result, _ = check_authorization(pc, authorization, **args)
+    assert result.valid_until == cutoff
+    for version in (1, 2):
+        payload["version"] = version
+        private_file(path, json.dumps(payload).encode())
+        with pytest.raises(
+            pc.PlatformCredentialError, match="PLATFORM_PROOF_(BINDING_MISMATCH|INVALID)"
+        ):
+            check_authorization(pc, authorization, **args)
+    payload.update(version=3, window_end="2026-11-02T00:00:01Z")
+    private_file(path, json.dumps(payload).encode())
+    with pytest.raises(pc.PlatformCredentialError, match="PLATFORM_PROOF_INVALID"):
+        check_authorization(pc, authorization, **args)
+
+
+def test_third_round_cannot_substitute_an_unbound_console_attestation(pc, admission):
+    from unit.ops.test_platform_credentials import check
+
+    _, path, payload = admission
+    purpose = "platform-terra-v3-20261101"
+    payload["purpose"] = purpose
+    private_file(path, json.dumps(payload).encode())
+    with pytest.raises(pc.PlatformCredentialError, match="PLATFORM_PROOF_BINDING_MISMATCH"):
+        check(pc, admission, purpose=purpose)
