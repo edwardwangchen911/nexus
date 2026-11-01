@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.comparison_inputs import _hash, _validate
 from nexus.agents.comparison_manifest import ACTORS, PURPOSES
 from nexus.agents.comparison_routes import comparison_owner
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.runtime import Job
 
@@ -103,3 +103,28 @@ async def comparison_context_qualified(
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+async def platform_comparison_semantics(
+    session: AsyncSession, run: AgentResearchRunRecord, model: AgentModelConfigRecord
+) -> bool:
+    """Select existing staged semantics only for an exactly bound Platform experiment.
+
+    This is not business-consumption authority and does not alter model/billing identity.
+    Historical outputs are never rebuilt by this execution-only check.
+    """
+    from nexus.agents.platform_profile import platform_model_matches, platform_profile_hash
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
+
+    if model.version not in PLATFORM_PRICE_VERSIONS and model.config_hash not in {
+        platform_profile_hash(version) for version in PLATFORM_PRICE_VERSIONS
+    }:
+        return False
+    if (
+        not platform_model_matches(model)
+        or run.model_hash != model.config_hash
+        or run.pricing_version != model.version
+        or await comparison_context_qualified(session, run) is not True
+    ):
+        raise ValueError("COMPARISON_SYNTHESIS_AUTHORITY_INVALID")
+    return True

@@ -99,3 +99,92 @@ def test_actionable_version_rejects_a_missing_evidence_audit_review_without_rais
         }
     )
     assert not staged_intent_semantics_valid(intent, ACTIONABLE_CONFIG_VERSION)
+
+
+@pytest.mark.parametrize("price_valid", [False, True])
+@pytest.mark.parametrize("review_case", ["sufficient", "limited", "audit_veto"])
+def test_verified_platform_uses_same_review_semantics_without_changing_billing(
+    monkeypatch, price_valid, review_case
+):
+    from nexus.agents.comparison_manifest import PLATFORM_ACTOR
+    from nexus.agents.platform_profile import platform_model_fields
+    from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
+    from nexus.agents.synthesis import synthesize_intent
+    from unit.agents import test_execution as fixtures
+
+    def verified(*args, **kwargs):
+        run, _, snapshot, _, model, _, outputs = args
+        fields = platform_model_fields(CURRENT_PLATFORM_PRICE_VERSION)
+        for key, value in fields.items():
+            setattr(model, key, value)
+        run.actor_id = PLATFORM_ACTOR
+        run.model_hash = model.config_hash
+        run.pricing_version = model.version
+        snapshot.source = "nexus_research_comparison"
+        snapshot.schema_version = "comparison-input-v1"
+        if review_case == "limited":
+            portfolio = outputs[-1]
+            assessment = portfolio.synthesis_assessment.model_copy(
+                update={"review_conclusion": "limited"}
+            )
+            outputs = (
+                *outputs[:-1],
+                portfolio.model_copy(update={"synthesis_assessment": assessment}),
+            )
+        result = synthesize_intent(
+            *args[:-1], outputs, **kwargs, comparison_semantics_verified=True
+        )
+        assert all(getattr(model, key) == value for key, value in fields.items())
+        assert result.theses == outputs[-1].synthesis_assessment.claims
+        return result
+
+    monkeypatch.setattr(fixtures, "synthesize_intent", verified)
+    votes = ["support"] * 8
+    if review_case == "audit_veto":
+        votes[6] = "oppose"
+    intent = fixtures._synthesize(
+        tuple(votes),
+        actionable=True,
+        assessment_stance="watch",
+        price_authority_valid=price_valid,
+    )
+    assert intent.synthesis_assessment is not None
+    assert intent.synthesis_assessment.review_conclusion == (
+        "sufficient" if review_case == "sufficient" else "limited"
+    )
+    assert intent.stance == "watch" and intent.exposure_action == "none"
+    assert intent.quality_status == (
+        "complete" if price_valid and review_case == "sufficient" else "partial"
+    )
+    assert intent.evidence_audit == ("partial" if review_case == "audit_veto" else "complete")
+
+
+@pytest.mark.parametrize("invalid", ["profile", "actor", "snapshot", "run_hash"])
+def test_claimed_platform_semantics_cannot_bypass_exact_identity(monkeypatch, invalid):
+    from nexus.agents.comparison_manifest import PLATFORM_ACTOR
+    from nexus.agents.platform_profile import platform_model_fields
+    from nexus.agents.synthesis import synthesize_intent
+    from unit.agents import test_execution as fixtures
+
+    def invalid_identity(*args, **kwargs):
+        run, _, snapshot, _, model, _, _ = args
+        for key, value in platform_model_fields().items():
+            setattr(model, key, value)
+        run.actor_id = PLATFORM_ACTOR
+        run.model_hash = model.config_hash
+        run.pricing_version = model.version
+        snapshot.source = "nexus_research_comparison"
+        snapshot.schema_version = "comparison-input-v1"
+        if invalid == "profile":
+            model.max_output_tokens += 1
+        elif invalid == "actor":
+            run.actor_id = "ordinary-worker"
+        elif invalid == "snapshot":
+            snapshot.source = "ordinary-research"
+        else:
+            run.model_hash = "f" * 64
+        return synthesize_intent(*args, **kwargs, comparison_semantics_verified=True)
+
+    monkeypatch.setattr(fixtures, "synthesize_intent", invalid_identity)
+    with pytest.raises(ValueError, match="COMPARISON_SYNTHESIS_AUTHORITY_INVALID"):
+        fixtures._synthesize(("support",) * 8, actionable=True, assessment_stance="watch")
