@@ -208,6 +208,12 @@ async def test_historical_unknown_suffix_cannot_hide_known_overrun_after_midnigh
     # overrun fence. Current terminal reading and admission are never mocked.
     with monkeypatch.context() as historical:
         historical.setattr(p, "_fence_exceeded_usage", AsyncMock())
+        # This historical producer also predates the shared cross-experiment
+        # accounting check. Restore only that old construction path; terminal
+        # reading and every admission assertion below use the real new guards.
+        historical.setattr(
+            "nexus.agents.comparison_concurrency.require_comparison_exclusive", AsyncMock()
+        )
         assert await verify(p, ticket, now)
         await p.cleanup(ticket, now=now, confirmed=True)
         second = await p.authorize(claim, stage=2, now=now, wire=b"unknown suffix")

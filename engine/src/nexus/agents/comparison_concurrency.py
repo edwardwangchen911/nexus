@@ -48,6 +48,15 @@ async def require_comparison_exclusive(session: AsyncSession, experiment_id: UUI
             is True
         ):
             continue
+        if row["status"] == "skipped":
+            from nexus.agents.comparison_legacy_preparation import (
+                historical_platform_preparation_isolated,
+            )
+
+            if await historical_platform_preparation_isolated(
+                session, run_id=row["run_id"], job_id=row["job_id"], now=now
+            ):
+                continue
         try:
             proof = await read_terminal_proof(session, run_id=row["run_id"], now=now)
         except ProtocolRejected:
