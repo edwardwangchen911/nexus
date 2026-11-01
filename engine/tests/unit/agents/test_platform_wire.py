@@ -15,6 +15,7 @@ from nexus.agents.codex_sdk import (
 )
 from nexus.agents.comparison_compiler import compile_comparison_stage
 from nexus.agents.comparison_inputs import prepare_comparison_input
+from nexus.agents.platform_schema import LEGACY_PLATFORM_UNITS_VERSION
 from nexus.agents.platform_wire import (
     PlatformProfile,
     PriorPlatformUsage,
@@ -66,14 +67,14 @@ def compile_stage(prepared, *, stage="research", prior_usage=(), previous=None, 
     )
 
 
-def test_normal_compiler_real_schema_and_sdk_http_bytes_are_unchanged(prepared):
+def test_legacy_normal_compiler_real_schema_and_sdk_http_bytes_are_unchanged(prepared):
     payload, schema = compile_comparison_stage(
         prepared, expected_input_hash=prepared.input_hash, stage="research", previous=[]
     )
     sdk_before = codex_request_wire(payload)
     http_before = http_stage_wire(payload, output_model=schema, forbidden=prepared.forbidden)
     original = copy.deepcopy(prepared)
-    allocation = freeze_platform_allocation(prepared)
+    allocation = freeze_platform_allocation(prepared, units_version=LEGACY_PLATFORM_UNITS_VERSION)
     result = compile_stage(prepared, allocation=allocation)
     body = json.loads(result.wire)
     assert body["input"] == [
@@ -98,7 +99,10 @@ def test_normal_compiler_real_schema_and_sdk_http_bytes_are_unchanged(prepared):
     assert (
         http_stage_wire(payload, output_model=schema, forbidden=prepared.forbidden) == http_before
     )
-    assert freeze_platform_allocation(prepared) == allocation
+    assert (
+        freeze_platform_allocation(prepared, units_version=LEGACY_PLATFORM_UNITS_VERSION)
+        == allocation
+    )
 
 
 @pytest.mark.parametrize("text", ['中文𠀀"\\\n' * 50, "\x00" * 400, "𠀀" * 400, '"' * 400])

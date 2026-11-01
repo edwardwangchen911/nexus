@@ -87,7 +87,10 @@ async def prepare_execution_pool(
         experiment_id=manifest.experiment_id,
         purpose=manifest.purpose,
         **(
-            {"platform_price_version": manifest.price_version}
+            {
+                "platform_price_version": manifest.price_version,
+                "platform_units_version": manifest.allocations[0].units_version,
+            }
             if isinstance(manifest, PlatformManifest)
             else {}
         ),
@@ -119,7 +122,9 @@ async def prepare_execution_pool(
 
         if (
             tuple(
-                freeze_platform_allocation(c.prepared_input, profile=a.profile)
+                freeze_platform_allocation(
+                    c.prepared_input, profile=a.profile, units_version=a.units_version
+                )
                 for c, a in zip(pool, manifest.allocations, strict=True)
             )
             != manifest.allocations

@@ -157,7 +157,10 @@ async def admit_comparison_position(
         experiment_id=manifest.experiment_id,
         purpose=manifest.purpose,
         **(
-            {"platform_price_version": manifest.price_version}
+            {
+                "platform_price_version": manifest.price_version,
+                "platform_units_version": manifest.allocations[0].units_version,
+            }
             if isinstance(manifest, PlatformManifest)
             else {}
         ),

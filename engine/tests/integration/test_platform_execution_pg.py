@@ -12,6 +12,7 @@ from integration.test_comparison_execution_pg import stage_response
 from integration.test_platform_funding_pg import funding_fixture
 from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_execution import execute_comparison_position
+from nexus.agents.platform_schema import CURRENT_PLATFORM_UNITS_VERSION
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
@@ -50,7 +51,12 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
     )
     f = session_factory(settings)
     source, prepared, m, model, old, protected = await setup(
-        f, monkeypatch, source_kind="SEC", price_version=price_version, purpose=purpose
+        f,
+        monkeypatch,
+        source_kind="SEC",
+        price_version=price_version,
+        purpose=purpose,
+        units_version=CURRENT_PLATFORM_UNITS_VERSION,
     )
     m, funding = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
     from nexus.agents import codex_staged
@@ -119,6 +125,13 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         body = json.loads(request.content)
         wires.append(body)
         payload = json.loads(body["input"][1]["content"])
+        if payload["stage"] == "research":
+            forms = body["text"]["format"]["schema"]["$defs"]["DisclosureReviewCondition"][
+                "properties"
+            ]["forms"]
+            assert "prefixItems" not in forms
+            assert forms["items"] == {"type": "string", "enum": ["8-K", "8-K/A"]}
+            assert forms["minItems"] == forms["maxItems"] == 2
         if mode.startswith("http_"):
             # Observe the actual requested stage even when no answer is generated.
             seen.append(("platform", payload["stage"]))

@@ -15,6 +15,7 @@ from nexus.agents.comparison_manifest import (
     Route,
 )
 from nexus.agents.platform_profile import platform_profile_hash
+from nexus.agents.platform_schema import PLATFORM_UNITS_VERSIONS
 from nexus.agents.platform_usage import (
     CURRENT_PLATFORM_PRICE_VERSION,
     PLATFORM_PRICE_VERSION,
@@ -62,7 +63,8 @@ class PlatformManifest(ComparisonManifest):
                 or a.stage_order != ("research", "critique", "synthesis")
                 or a.output_limit != 8192
                 or a.framing_units != 8192
-                or a.units_version != "platform-full-http-utf8-plus8192-v1"
+                or a.units_version not in PLATFORM_UNITS_VERSIONS
+                or a.units_version != self.allocations[0].units_version
                 or len(a.stage_input_upper_bounds) != 3
                 or any(
                     type(v) is not int or not 8192 <= v <= 272000

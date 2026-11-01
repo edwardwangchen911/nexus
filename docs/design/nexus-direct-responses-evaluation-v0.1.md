@@ -259,6 +259,7 @@ API 对并发忙返回固定安全说明和 HTTP 409。比较命令在准入前�
 
 ## HTTP 失败的安全诊断
 
+
 新的阶段失败 Output 可附 `diagnostic.http_failure_facts`，与 SDK 的 `failure_facts`
 分开：仅记录实际发送／收头状态、阶段、HTTP 状态、允许的错误代码及清理次因。
 正常 `inspect-position` 只读返回这些已落盘事实；字段损坏时只返回固定的不可用标记。
@@ -271,3 +272,24 @@ API 对并发忙返回固定安全说明和 HTTP 409。比较命令在准入前�
 
 不增加迁移，也不重写旧 payload。已有无字段结果的序列化形状不变；若回滚环境需读取
 新诊断，回滚版本也须支持这个可选字段，不能把严格拒绝新字段的旧读取器当作兼容证明。
+
+## Platform 结构化输出兼容修订（0110）
+
+API 仅接受 JSON Schema 子集。正常准备与每个实际阶段的最终 wire 都使用同一
+Platform 编译器；对既有 SEC 表单固定二元组，使用 `items` 枚举与固定长度编码，
+返回仍由原 `DisclosureReviewCondition` 校验精确位置、值及其余业务约束。
+未知位置数组、开放字典、不支持的组合或 format 在准备/派发前拒绝，不删除约束。
+SDK 输出模型、审计否决、正式门禁、超时和资源上限不变。
+
+新准备使用 `platform-structured-http-utf8-plus8192-v2`，最终 schema、转义后的完整
+HTTP 字节和三阶段容量一起进入原 allocation/manifest 哈希。旧 v1 按冻结版本重建，
+旧请求、预算和未知结果不重标；同一个 manifest 不允许混版。数据库 0110 仅扩展精确
+版本谓词，保留既有价格、用途、资金及阶段权限检查，不新增资格轮或授权。
+
+没有 v2 登记时可降回 0109；存在 v2 登记后只允许支持 0110 及两种 wire 的兼容镜像
+回滚，禁止降低数据库版本。宿主仅增加同 0110 的退出证明读取，不赋予跨 schema
+复用旧 pending 证明的权限。新迁移回归纳入既有必需 PG CI 分组。
+
+离线 schema、隔离 HTTP/数据库通过不代表外部 API 或研究质量已通过。
+本次已终结资格轮不能继续后两股或换键；新的真实样本仍需独立费用授权。
+参考：[OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)。

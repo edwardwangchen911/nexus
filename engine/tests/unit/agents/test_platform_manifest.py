@@ -17,6 +17,10 @@ from nexus.agents.comparison_manifest import (
 from nexus.agents.comparison_preparation import prepare_archive
 from nexus.agents.platform_manifest import PLATFORM_PURPOSE, PlatformManifest
 from nexus.agents.platform_profile import platform_profile_hash
+from nexus.agents.platform_schema import (
+    CURRENT_PLATFORM_UNITS_VERSION,
+    LEGACY_PLATFORM_UNITS_VERSION,
+)
 from nexus.agents.platform_usage import (
     CURRENT_PLATFORM_PRICE_VERSION,
     PLATFORM_PRICE_VERSION,
@@ -27,7 +31,12 @@ from unit.agents.test_comparison_inputs import archive_source
 from unit.agents.test_comparison_manifest import manifest_data
 
 
-def platform_fixture(price_version=PLATFORM_PRICE_VERSION, *, purpose=None):
+def platform_fixture(
+    price_version=PLATFORM_PRICE_VERSION,
+    *,
+    purpose=None,
+    units_version=CURRENT_PLATFORM_UNITS_VERSION,
+):
     purpose = purpose or (
         PLATFORM_RENEWED_PURPOSE
         if price_version == CURRENT_PLATFORM_PRICE_VERSION
@@ -41,6 +50,7 @@ def platform_fixture(price_version=PLATFORM_PRICE_VERSION, *, purpose=None):
         experiment_id=uuid4(),
         purpose=purpose,
         platform_price_version=price_version,
+        platform_units_version=units_version,
     )
     data.update(
         experiment_id=prepared["experiment_id"],
@@ -56,6 +66,71 @@ def platform_fixture(price_version=PLATFORM_PRICE_VERSION, *, purpose=None):
         credential_binding_hash="b" * 64,
     )
     return source, prepared, data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [LEGACY_PLATFORM_UNITS_VERSION, CURRENT_PLATFORM_UNITS_VERSION])
+async def test_execution_rebuilds_the_manifest_version_instead_of_current_defaults(version):
+    import time
+
+    from nexus.agents.comparison_execution import prepare_execution_pool
+    from nexus.agents.platform_wire import compile_platform_stage
+    from nexus.domain.evidence import EvidenceRef
+
+    source, prepared, data = platform_fixture(units_version=version)
+    manifest = parse_comparison_manifest(data)
+    pool = await prepare_execution_pool(
+        source=source, prepared=prepared, manifest=manifest, deadline=time.monotonic() + 300
+    )
+    c = pool[0]
+    payload, model = c.build_stage_request(
+        stage="research",
+        request=c.frozen_request,
+        evidence_refs=tuple(
+            EvidenceRef.model_validate(r) for r in c.prepared_input.payload["evidence"]
+        ),
+        frozen_inputs=c.prepared_input.payload["inputs"],
+        previous=[],
+    )
+    a = manifest.allocations[0]
+    wire = compile_platform_stage(
+        c.prepared_input,
+        allocation=a,
+        expected_allocation_hash=a.allocation_hash,
+        stage="research",
+        previous=[],
+        prior_usage=(),
+        compiled_request=(payload, model),
+    )
+    forms = json.loads(wire.wire)["text"]["format"]["schema"]["$defs"]["DisclosureReviewCondition"][
+        "properties"
+    ]["forms"]
+    assert ("prefixItems" in forms) is (version == LEGACY_PLATFORM_UNITS_VERSION)
+    assert ("items" in forms) is (version == CURRENT_PLATFORM_UNITS_VERSION)
+    assert wire.input_units <= a.stage_input_upper_bounds[0]
+
+
+def test_manifest_cannot_mix_legacy_and_current_schema_allocations():
+    _, _, data = platform_fixture()
+    data["allocations"][1]["units_version"] = LEGACY_PLATFORM_UNITS_VERSION
+    with pytest.raises(ValueError, match="PLATFORM_ALLOCATION_INVALID"):
+        parse_comparison_manifest(data)
+
+
+@pytest.mark.asyncio
+async def test_execution_rejects_version_switch_after_preparation():
+    import time
+
+    from nexus.agents.comparison_execution import prepare_execution_pool
+
+    source, prepared, data = platform_fixture()
+    for allocation in data["allocations"]:
+        allocation["units_version"] = LEGACY_PLATFORM_UNITS_VERSION
+    manifest = parse_comparison_manifest(data)
+    with pytest.raises(ValueError, match="COMPARISON_PREPARATION_CHANGED"):
+        await prepare_execution_pool(
+            source=source, prepared=prepared, manifest=manifest, deadline=time.monotonic() + 300
+        )
 
 
 def test_three_positions_and_full_http_allocations_are_bound():

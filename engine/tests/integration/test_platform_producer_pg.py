@@ -23,6 +23,7 @@ from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.comparison_registration import register_comparison
 from nexus.agents.persistence import BudgetExhausted
 from nexus.agents.platform_manifest import PlatformManifest
+from nexus.agents.platform_schema import LEGACY_PLATFORM_UNITS_VERSION
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 from nexus.agents.research_only import require_formal_research
 from nexus.agents.research_stages.routes import selected_route
@@ -44,6 +45,7 @@ async def setup(
     source_kind="fixture",
     price_version=PLATFORM_PRICE_VERSION,
     purpose=None,
+    units_version=LEGACY_PLATFORM_UNITS_VERSION,
 ):
     purpose = purpose or (
         PLATFORM_RENEWED_PURPOSE
@@ -57,6 +59,7 @@ async def setup(
         experiment_id=uuid4(),
         purpose=purpose,
         platform_price_version=price_version,
+        platform_units_version=units_version,
     )
     manifest = parse_comparison_manifest(
         {

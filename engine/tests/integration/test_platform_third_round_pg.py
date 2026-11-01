@@ -12,6 +12,7 @@ from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_manifest import parse_comparison_manifest
 from nexus.agents.comparison_preparation import prepare_archive
 from nexus.agents.comparison_registration import register_comparison
+from nexus.agents.platform_schema import LEGACY_PLATFORM_UNITS_VERSION
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.session import session_factory
@@ -67,6 +68,7 @@ async def test_new_scope_old_rows_empty_search_path_and_irreversible_registratio
             experiment_id=uuid4(),
             purpose="platform-terra-v3-20261101",
             platform_price_version=CURRENT_PLATFORM_PRICE_VERSION,
+            platform_units_version=LEGACY_PLATFORM_UNITS_VERSION,
         )
         data = old.model_dump(mode="json")
         for key in (
