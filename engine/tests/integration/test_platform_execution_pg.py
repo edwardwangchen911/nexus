@@ -45,6 +45,7 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
     explicit_spend,
     price_version=PLATFORM_PRICE_VERSION,
     purpose=None,
+    review_case="insufficient",
 ):
     settings = EngineSettings(
         database_url=migrated_database_url, agent_daily_budget_usd=Decimal(20)
@@ -148,6 +149,18 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                 ),
             )
         answer = stage_response(payload, "platform", seen)
+        if review_case != "insufficient":
+            if payload["stage"] == "critique":
+                for role in answer["roles"]:
+                    if role["role"] == "evidence_audit":
+                        role["vote"] = "oppose" if review_case == "veto" else "support"
+            elif payload["stage"] == "synthesis":
+                assessment = answer["synthesis_assessment"]
+                assessment["review_conclusion"] = (
+                    "sufficient" if review_case in {"sufficient", "veto"} else "limited"
+                )
+                for review in assessment["reviews"]:
+                    review.update(resolved=True, missing_evidence=[], prevented_conclusion=None)
         event = terminal("completed")
         event["response"]["service_tier"] = "default"
         event["response"]["output"][0]["content"][0]["text"] = json.dumps(answer)
@@ -317,6 +330,36 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
                     )
                 )
                 assert budget.settled_usd == Decimal("0.00429")
+                from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                outputs = list(
+                    await s.scalars(
+                        select(AgentResearchOutputRecord).where(
+                            AgentResearchOutputRecord.run_id == UUID(admitted["run_id"])
+                        )
+                    )
+                )
+                raw = next(o for o in outputs if o.role == "portfolio").payload[
+                    "synthesis_assessment"
+                ]
+                final = next(o for o in outputs if o.status == "synthesized").intent
+                if review_case == "veto":
+                    assert raw["review_conclusion"] == "sufficient"
+                    assert final["synthesis_assessment"] == {**raw, "review_conclusion": "limited"}
+                else:
+                    assert final["synthesis_assessment"] == raw
+                assert final["theses"] == raw["claims"]
+                assert all(value in final["uncertainties"] for value in raw["uncertainties"])
+                assert final["stance"] == "watch" and final["exposure_action"] == "none"
+                assert final["quality_status"] == "partial"
+                from nexus.api.research_stages import read_stage_trace
+                from nexus.persistence.models.agents import AgentResearchRunRecord
+
+                saved_run = await s.get(AgentResearchRunRecord, UUID(admitted["run_id"]))
+                trace = await read_stage_trace(s, saved_run)
+                assert trace is not None and trace.status == "verified"
+                assert trace.stages[-1].roles[0].synthesis_assessment.model_dump(mode="json") == raw
+                assert not s.new and not s.dirty and not s.deleted
                 assert (
                     await s.scalar(
                         text(
@@ -380,4 +423,23 @@ async def test_new_round_full_native_worker_keeps_unknown_budget_and_new_authori
         True,
         price_version=CURRENT_PLATFORM_PRICE_VERSION,
         purpose=purpose,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("review_case", ["sufficient", "limited", "veto"])
+async def test_platform_final_intent_preserves_reviews_and_audit_veto(
+    migrated_database_url, monkeypatch, tmp_path, review_case
+):
+    from nexus.agents.comparison_manifest import PLATFORM_QUALIFICATION_PURPOSE
+
+    await test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        "complete",
+        True,
+        price_version=CURRENT_PLATFORM_PRICE_VERSION,
+        purpose=PLATFORM_QUALIFICATION_PURPOSE,
+        review_case=review_case,
     )

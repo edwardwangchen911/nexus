@@ -384,6 +384,8 @@ async def execute_research_run(
             status="abstained",
             reason="conflicting_facts",
         )
+    from nexus.agents.comparison_authority import platform_comparison_semantics
+
     intent = synthesize_intent(
         run,
         symbol,
@@ -392,6 +394,7 @@ async def execute_research_run(
         model,
         evidence_refs,
         role_outputs,
+        comparison_semantics_verified=await platform_comparison_semantics(session, run, model),
         price_authority_valid=(
             final_price_authority_status is FrozenPriceAuthorityStatus.VALID
             or final_paper_context_status is FrozenAgentPaperContextStatus.VALID

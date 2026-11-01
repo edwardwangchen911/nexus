@@ -225,3 +225,49 @@ async def test_capacity_reader_loads_and_validates_persisted_trace(monkeypatch, 
     assert trace is not None
     assert trace.status == "verified"
     assert [stage.status for stage in trace.stages] == ["complete", "unavailable", "unavailable"]
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "citation", "coverage"])
+def test_platform_trace_uses_existing_structured_validation(monkeypatch, damage):
+    from nexus.agents.comparison_manifest import PLATFORM_ACTOR
+    from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
+
+    original = validate_stage_trace
+
+    def verified(run, records, evidence, prompts):
+        run.actor_id = PLATFORM_ACTOR
+        return original(run, records, evidence, prompts, comparison_semantics_verified=True)
+
+    monkeypatch.setitem(globals(), "validate_stage_trace", verified)
+    test_structured_trace_checks_and_preserves_full_assessment(
+        damage, CURRENT_PLATFORM_PRICE_VERSION
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["missing_model", "profile", "run_hash", "binding"])
+async def test_platform_reader_rejects_invalid_native_authority(monkeypatch, damage):
+    from unittest.mock import AsyncMock
+
+    from nexus.agents import comparison_authority
+    from nexus.agents.platform_profile import platform_model_fields
+    from nexus.api import research_stages
+
+    run, _, _, _ = _case()
+    model = SimpleNamespace(**platform_model_fields())
+    run.model_config_id = uuid4()
+    run.model_hash = model.config_hash
+    run.pricing_version = model.version
+    if damage == "profile":
+        model.max_output_tokens += 1
+    elif damage == "run_hash":
+        run.model_hash = "f" * 64
+    session = AsyncMock()
+    session.get.return_value = None if damage == "missing_model" else model
+    binding = AsyncMock(return_value=damage != "binding")
+    monkeypatch.setattr(comparison_authority, "comparison_context_qualified", binding)
+    trace = await research_stages.read_stage_trace(session, run)
+    assert trace is not None and trace.status == "invalid" and trace.stages == ()
+    session.scalars.assert_not_called()
+    if damage == "binding":
+        binding.assert_awaited_once_with(session, run)

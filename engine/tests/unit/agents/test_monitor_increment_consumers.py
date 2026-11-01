@@ -331,10 +331,12 @@ async def test_execution_revalidates_monitor_before_and_after_roles(
     monkeypatch, context_contract, initial, final
 ):
     from nexus.agents import execution
+    from nexus.agents.codex_flexible_budget import flexible_stage_config_hash
+    from nexus.agents.codex_versions import FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION
     from nexus.agents.committee import FixtureCommittee
     from nexus.agents.paper_context import FrozenAgentPaperContextStatus
     from nexus.agents.price_authority import FrozenPriceAuthorityStatus
-    from nexus.persistence.models.agents import AgentResearchRunRecord
+    from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 
     request, evidence, prompts = _authority()
     run = SimpleNamespace(
@@ -346,7 +348,15 @@ async def test_execution_revalidates_monitor_before_and_after_roles(
         decision_time=request.decision_time,
     )
 
+    model_config = AgentModelConfigRecord(
+        id=run.model_config_id,
+        version=FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        config_hash=flexible_stage_config_hash(),
+    )
+
     async def get(model, *args, **kwargs):
+        if model is AgentModelConfigRecord:
+            return model_config
         return run if model is AgentResearchRunRecord else SimpleNamespace()
 
     session = SimpleNamespace(get=get, flush=AsyncMock())
@@ -406,3 +416,4 @@ async def test_execution_revalidates_monitor_before_and_after_roles(
         with pytest.raises(RuntimeError, match="synthesis reached"):
             await execution.execute_research_run(session, run_id=run.id, committee=fixture)
         assert synthesized.call_args.kwargs["price_authority_valid"] is (final is Status.VALID)
+        assert synthesized.call_args.kwargs["comparison_semantics_verified"] is False

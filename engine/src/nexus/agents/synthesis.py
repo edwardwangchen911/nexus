@@ -114,8 +114,22 @@ def synthesize_intent(
     *,
     price_authority_valid: bool,
     portfolio_context: PortfolioResearchContext | None = None,
+    comparison_semantics_verified: bool = False,
 ) -> ResearchIntent:
     """Reuse role claims verbatim so synthesis cannot introduce an uncited fact."""
+    if comparison_semantics_verified:
+        from nexus.agents.comparison_manifest import ACTORS
+        from nexus.agents.platform_profile import platform_model_matches
+
+        if (
+            not platform_model_matches(model)
+            or run.model_hash != model.config_hash
+            or run.pricing_version != model.version
+            or run.actor_id not in ACTORS
+            or snapshot.source != "nexus_research_comparison"
+            or snapshot.schema_version != "comparison-input-v1"
+        ):
+            raise ValueError("COMPARISON_SYNTHESIS_AUTHORITY_INVALID")
     fundamental_missing = symbol == "00656.HK"
     price_missing = not price_authority_valid
     votes = tuple(
@@ -163,9 +177,19 @@ def synthesize_intent(
         BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     }
-    structured = model.version in STRUCTURED_CONFIG_VERSIONS or capacity_profile
-    staged = model.version in STAGED_CONFIG_VERSIONS or capacity_profile
-    actionable = model.version in ACTIONABLE_CONFIG_VERSIONS or capacity_profile
+    structured = (
+        model.version in STRUCTURED_CONFIG_VERSIONS
+        or capacity_profile
+        or comparison_semantics_verified
+    )
+    staged = (
+        model.version in STAGED_CONFIG_VERSIONS or capacity_profile or comparison_semantics_verified
+    )
+    actionable = (
+        model.version in ACTIONABLE_CONFIG_VERSIONS
+        or capacity_profile
+        or comparison_semantics_verified
+    )
     assessment = by_role["portfolio"].synthesis_assessment if structured else None
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:
