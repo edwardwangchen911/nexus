@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.budget import BudgetExhausted
 from nexus.agents.comparison_manifest import (
     PLATFORM_QUALIFICATION_PURPOSE,
     ComparisonManifest,
@@ -21,6 +22,28 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.runtime import Job
+
+
+class ComparisonBudgetRefusal(BudgetExhausted):
+    """Verified position rejected before native admission; caller must roll back."""
+
+    def __init__(self, manifest: ComparisonManifest, ordinal: int, cause: BudgetExhausted) -> None:
+        reason = (
+            "COMPARISON_ROUND_BUDGET_EXHAUSTED"
+            if str(cause) == "COMPARISON_ROUND_BUDGET_EXHAUSTED"
+            else "COMPARISON_BUDGET_EXHAUSTED"
+        )
+        super().__init__(reason)
+        self.actor_id = manifest.actor
+        self.payload: dict[str, object] = {
+            "experiment_id": str(manifest.experiment_id),
+            "manifest_hash": manifest.digest,
+            "position": ordinal,
+            "reason": reason,
+            "native_admission_committed": False,
+            "position_consumed": False,
+            "automatic_retry_allowed": False,
+        }
 
 
 async def register_comparison(
@@ -179,6 +202,7 @@ async def reserve_comparison_chain(
         is not None
     ):
         raise ValueError("COMPARISON_RESERVATION_ALREADY_PRESENT")
+    required_capacity = None
     if isinstance(manifest, PlatformManifest):
         prior_reserved = await session.scalar(
             text("""SELECT COALESCE(sum(r.reserved_cost_usd),0)
@@ -188,19 +212,37 @@ async def reserve_comparison_chain(
         )
         if prior_reserved + run.reserved_cost_usd > manifest.total_reservation_usd:
             raise ValueError("PLATFORM_EXPERIMENT_BUDGET_EXCEEDED")
+        admitted = set(
+            await session.scalars(
+                text("SELECT ordinal FROM research_comparison_chain WHERE experiment_id=:id"),
+                {"id": experiment_id},
+            )
+        )
+        required_capacity = sum(
+            (
+                manifest.reservation_for(position)
+                for position in range(1, len(manifest.positions) + 1)
+                if position not in admitted
+            ),
+            Decimal(0),
+        )
     from nexus.agents.comparison_concurrency import require_comparison_exclusive
 
     await require_comparison_exclusive(session, experiment_id)
     now = await session.scalar(text("SELECT clock_timestamp()"))
-    budget = await reserve_daily_budget(
-        session,
-        run_id=run_id,
-        now=now,
-        daily_limit_usd=daily_limit_usd,
-        worst_case_usd=run.reserved_cost_usd,
-        pricing_version=run.pricing_version,
-        pricing_fresh=model.pricing_available_at <= now < model.pricing_expires_at,
-    )
+    try:
+        budget = await reserve_daily_budget(
+            session,
+            run_id=run_id,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+            worst_case_usd=run.reserved_cost_usd,
+            pricing_version=run.pricing_version,
+            pricing_fresh=model.pricing_available_at <= now < model.pricing_expires_at,
+            required_capacity_usd=required_capacity,
+        )
+    except BudgetExhausted as error:
+        raise ComparisonBudgetRefusal(manifest, ordinal, error) from error
     await session.execute(
         text("""INSERT INTO research_comparison_chain
       (experiment_id,ordinal,run_id,job_id,reserved_id,input_hash)

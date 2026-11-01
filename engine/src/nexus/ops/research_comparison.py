@@ -27,6 +27,7 @@ from nexus.agents.comparison_manifest import (
     parse_comparison_manifest,
 )
 from nexus.agents.comparison_preparation import prepare_archive
+from nexus.agents.comparison_registration import ComparisonBudgetRefusal
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 
 
@@ -235,6 +236,35 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
             "reservation_id": str(result.reservation_id),
             "dispatch_authority": False,
         }
+    except ComparisonBudgetRefusal as error:
+        # The owning admission transaction has rolled back before this separate
+        # audit transaction. No Run/Job/budget is invented for a refused position.
+        from nexus.audit.service import append_audit_event
+
+        try:
+            async with factory() as session, session.begin():
+                event = await append_audit_event(
+                    session,
+                    actor_id=error.actor_id,
+                    action="research.comparison.admission_refused",
+                    schema_version="comparison-admission-v1",
+                    payload=error.payload,
+                    occurred_at=await session.scalar(text("SELECT clock_timestamp()")),
+                )
+                event_id = str(event.id)
+        except Exception:
+            return {
+                **error.payload,
+                "status": "unknown",
+                "reason": "COMPARISON_REFUSAL_AUDIT_UNCONFIRMED",
+                "dispatch_authority": False,
+            }
+        return {
+            **error.payload,
+            "status": "rejected",
+            "audit_event_id": event_id,
+            "dispatch_authority": False,
+        }
     finally:
         await factory.kw["bind"].dispose()
 
@@ -370,7 +400,12 @@ def main() -> int:
         if args.command != "prepare":
             result = asyncio.run(native_command(args))
             print(json.dumps(result))
-            return int(args.command == "register-round" and result["status"] != "registered")
+            return int(
+                args.command == "register-round"
+                and result["status"] != "registered"
+                or args.command == "admit-position"
+                and result["status"] != "position_prepared"
+            )
         result = prepare_file(
             source=args.source,
             expected_source_hash=args.source_sha256,
@@ -432,7 +467,9 @@ def main() -> int:
         )
         return 1
     except (OSError, ValueError, KeyError, TypeError) as error:
-        code = "COMPARISON_BUDGET_EXHAUSTED" if isinstance(error, BudgetExhausted) else str(error)
+        code = str(error)
+        if isinstance(error, BudgetExhausted) and code != "COMPARISON_ROUND_BUDGET_EXHAUSTED":
+            code = "COMPARISON_BUDGET_EXHAUSTED"
         from nexus.ops.platform_credentials import PlatformCredentialError
 
         platform_safe = isinstance(error, PlatformCredentialError) or code in {

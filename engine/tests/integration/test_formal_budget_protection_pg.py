@@ -317,6 +317,23 @@ async def test_applied_three_candidate_day_protects_four_obligations_without_job
             assert demand is not None
             assert demand.future_usd == Decimal("0.0008")
             assert len(demand.future_tasks) == 4
+            from uuid import uuid4
+
+            from nexus.agents.persistence import reserve_daily_budget
+
+            # Even a zero-cost current run cannot borrow protected future
+            # obligations for its unreserved remaining round.
+            with pytest.raises(BudgetExhausted, match="FORMAL_BUDGET_PROTECTED"):
+                await reserve_daily_budget(
+                    session,
+                    run_id=uuid4(),
+                    now=now,
+                    daily_limit_usd=Decimal("0.0008"),
+                    worst_case_usd=Decimal(0),
+                    required_capacity_usd=Decimal("0.0001"),
+                    pricing_version="synthetic-capacity-preview",
+                    pricing_fresh=True,
+                )
             assert binding.sequence == 1
             replay = await apply_protection(
                 session,

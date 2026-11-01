@@ -405,6 +405,18 @@ async def inspect_round(
             .one_or_none()
         )
     async with factory() as session:
+        refusal = (
+            (
+                await session.execute(
+                    text("""SELECT id,payload FROM audit_events
+                    WHERE action='research.comparison.admission_refused'
+                    AND payload->>'experiment_id'=:id ORDER BY event_seq DESC LIMIT 1"""),
+                    {"id": str(experiment_id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
         positions = (
             (
                 await session.execute(
@@ -434,6 +446,9 @@ async def inspect_round(
         inspection_only=True,
         replay_allowed=False,
         stopped=None if row is None else row["stopped"],
+        last_admission_refusal=None
+        if refusal is None
+        else {**refusal["payload"], "audit_event_id": str(refusal["id"])},
         budget_status=(
             "not_observed"
             if manifest is None
