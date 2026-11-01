@@ -43,6 +43,20 @@ TARGET = "0106_platform_qualification"
         ),
         (3, TARGET, "0107_platform_price_renewal", "pending_consumer_exit_0107_v1", False),
         (2, TARGET, "0107_platform_price_renewal", "comparison_preclaim_0105_to_0106_v1", False),
+        (
+            3,
+            "0108_platform_restore_lookup",
+            "0108_platform_restore_lookup",
+            "pending_consumer_exit_0108_v1",
+            True,
+        ),
+        (
+            3,
+            "0107_platform_price_renewal",
+            "0108_platform_restore_lookup",
+            "pending_consumer_exit_0108_v1",
+            False,
+        ),
     ],
 )
 def test_frozen_proof_policy_decoding_is_exact(version, source, target, policy, valid):
@@ -245,6 +259,12 @@ def test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path):
 def test_confirmed_0106_stop_allows_one_explicit_0107_start(tmp_path, monkeypatch):
     monkeypatch.setitem(globals(), "SOURCE", "0106_platform_qualification")
     monkeypatch.setitem(globals(), "TARGET", "0107_platform_price_renewal")
+    test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)
+
+
+def test_confirmed_0107_stop_allows_one_explicit_0108_start(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "SOURCE", "0107_platform_price_renewal")
+    monkeypatch.setitem(globals(), "TARGET", "0108_platform_restore_lookup")
     test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)
 
 

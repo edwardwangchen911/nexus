@@ -49,8 +49,8 @@ async def test_consistent_bundle_restores_without_source_credentials_or_object_c
         monkeypatch.setattr(
             local_recovery,
             "S3ProviderEvidenceStore",
-            lambda settings: S3ProviderEvidenceStore(
-                settings, client=SimpleNamespace(get_object=get_object)
+            lambda settings, **kwargs: S3ProviderEvidenceStore(
+                settings, client=SimpleNamespace(get_object=get_object), **kwargs
             ),
         )
         backup = LocalBackup(tmp_path / "bundle", tmp_path)
