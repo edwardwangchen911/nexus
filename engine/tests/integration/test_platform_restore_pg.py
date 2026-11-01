@@ -12,6 +12,10 @@ from alembic import command
 from alembic.config import Config
 from integration.test_platform_producer_pg import setup
 from nexus.agents.platform_profile import platform_profile_hash
+from nexus.agents.platform_schema import (
+    CURRENT_PLATFORM_UNITS_VERSION,
+    LEGACY_PLATFORM_UNITS_VERSION,
+)
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 from nexus.persistence.platform_restore import PLATFORM_LOOKUP_REPAIR
 from nexus.persistence.session import session_factory
@@ -94,7 +98,14 @@ async def test_normal_backup_restore_keeps_nonempty_profiles_and_original_source
     await asyncio.to_thread(command.upgrade, Config("engine/alembic.ini"), revision)
     factory = session_factory(EngineSettings(database_url=temporary_database_url))
     manifests = [
-        parse_comparison_manifest(platform_fixture(version)[2])
+        parse_comparison_manifest(
+            platform_fixture(
+                version,
+                units_version=CURRENT_PLATFORM_UNITS_VERSION
+                if revision == "head"
+                else LEGACY_PLATFORM_UNITS_VERSION,
+            )[2]
+        )
         for version in (PLATFORM_PRICE_VERSION, CURRENT_PLATFORM_PRICE_VERSION)
     ]
     if revision == "head":
