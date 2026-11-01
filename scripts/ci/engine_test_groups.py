@@ -126,6 +126,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_platform_price_renewal_pg.py",
     "engine/tests/integration/test_platform_third_round_pg.py",
     "engine/tests/integration/test_platform_round_registry_pg.py",
+    "engine/tests/integration/test_platform_medium_pg.py",
     "engine/tests/integration/test_platform_round_budget_pg.py",
     "engine/tests/integration/test_platform_stable_rounds_pg.py",
     "engine/tests/integration/test_platform_structured_schema_pg.py",

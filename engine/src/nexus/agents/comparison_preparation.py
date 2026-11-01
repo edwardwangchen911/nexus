@@ -40,7 +40,7 @@ def prepare_archive(
     if purpose in PLATFORM_PURPOSES:
         from dataclasses import asdict
 
-        from nexus.agents.platform_wire import PlatformProfile, freeze_platform_allocation
+        from nexus.agents.platform_wire import freeze_platform_allocation, platform_wire_profile
 
         artifact["allocations"] = [
             json.loads(
@@ -50,7 +50,7 @@ def prepare_archive(
                             PreparedComparisonInput(
                                 m["payload"], m["proof"], tuple(m["forbidden"])
                             ),
-                            profile=PlatformProfile(price_version=platform_price_version),
+                            profile=platform_wire_profile(platform_price_version),
                             units_version=platform_units_version,
                         )
                     )

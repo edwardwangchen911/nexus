@@ -31,6 +31,7 @@ _PENDING_POLICIES = {
     "0109_platform_third_round": "pending_consumer_exit_0109_v1",
     "0110_platform_structured_schema": "pending_consumer_exit_0110_v1",
     "0111_platform_round_registry": "pending_consumer_exit_0111_v1",
+    "0112_platform_medium_profile": "pending_consumer_exit_0112_v1",
 }
 SAFE_CODES = frozenset(
     _PREFIX + suffix

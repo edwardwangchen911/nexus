@@ -28,6 +28,13 @@ def test_structured_schema_revision_preserves_third_qualification_predecessor():
 
 def test_fourth_round_preserves_structured_schema_predecessor():
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-    revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
+    revision = ScriptDirectory.from_config(config).get_revision("0111_platform_round_registry")
     assert revision.revision == "0111_platform_round_registry"
     assert revision.down_revision == "0110_platform_structured_schema"
+
+
+def test_medium_profile_preserves_stable_round_predecessor():
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
+    assert revision.revision == "0112_platform_medium_profile"
+    assert revision.down_revision == "0111_platform_round_registry"

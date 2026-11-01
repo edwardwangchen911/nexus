@@ -192,7 +192,7 @@ async def platform_authorization_binding(
         body.get("model") != allocation.profile.model
         or body.get("service_tier") != "default"
         or body.get("prompt_cache_options") != {"mode": "implicit", "ttl": "30m"}
-        or body.get("reasoning") != {"effort": "low"}
+        or body.get("reasoning") != {"effort": allocation.profile.effort}
         or body.get("tools") != []
         or body.get("store") is not False
         or body.get("stream") is not True

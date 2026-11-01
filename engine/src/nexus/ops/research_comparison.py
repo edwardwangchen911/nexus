@@ -22,13 +22,29 @@ from nexus.agents.budget import BudgetExhausted, ResearchAccountingBusy
 from nexus.agents.comparison_manifest import (
     PLATFORM_PURPOSE,
     PLATFORM_PURPOSES,
+    PLATFORM_QUALIFICATION_PURPOSE,
     PURPOSE,
     PURPOSES,
     parse_comparison_manifest,
 )
 from nexus.agents.comparison_preparation import prepare_archive
 from nexus.agents.comparison_registration import ComparisonBudgetRefusal
-from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
+from nexus.agents.platform_usage import (
+    CURRENT_PLATFORM_PRICE_VERSION,
+    MEDIUM_PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSION,
+)
+
+
+def _platform_version(purpose: str, explicit: str | None = None) -> str:
+    if explicit is not None:
+        if purpose != PLATFORM_QUALIFICATION_PURPOSE or explicit not in (
+            CURRENT_PLATFORM_PRICE_VERSION,
+            MEDIUM_PLATFORM_PRICE_VERSION,
+        ):
+            raise ValueError("PLATFORM_PROFILE_INVALID")
+        return explicit
+    return CURRENT_PLATFORM_PRICE_VERSION if purpose != PLATFORM_PURPOSE else PLATFORM_PRICE_VERSION
 
 
 class PreclaimCommitUnknown(RuntimeError):
@@ -156,10 +172,8 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
 
                     profile = await read_platform_profile(
                         session,
-                        version=(
-                            CURRENT_PLATFORM_PRICE_VERSION
-                            if args.purpose != PLATFORM_PURPOSE
-                            else PLATFORM_PRICE_VERSION
+                        version=_platform_version(
+                            args.purpose, getattr(args, "profile_version", None)
                         ),
                     )
                 else:
@@ -186,10 +200,8 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
 
                     profile = await register_platform_profile(
                         session,
-                        version=(
-                            CURRENT_PLATFORM_PRICE_VERSION
-                            if args.purpose != PLATFORM_PURPOSE
-                            else PLATFORM_PRICE_VERSION
+                        version=_platform_version(
+                            args.purpose, getattr(args, "profile_version", None)
                         ),
                     )
                 else:
@@ -276,6 +288,7 @@ def prepare_file(
     experiment_id: UUID,
     output: Path,
     purpose: str = PURPOSE,
+    profile_version: str | None = None,
 ) -> dict[str, Any]:
     with source.open("rb") as stream:
         raw = stream.read(8 * 1024 * 1024 + 1)
@@ -285,8 +298,8 @@ def prepare_file(
         experiment_id=experiment_id,
         purpose=purpose,
         platform_price_version=(
-            CURRENT_PLATFORM_PRICE_VERSION
-            if purpose in PLATFORM_PURPOSES and purpose != PLATFORM_PURPOSE
+            _platform_version(purpose, profile_version)
+            if purpose in PLATFORM_PURPOSES
             else PLATFORM_PRICE_VERSION
         ),
     )
@@ -328,6 +341,11 @@ def main() -> int:
     for flag in ("source-sha256", "task-policy-sha256", "implementation-sha"):
         register.add_argument("--" + flag, required=True)
     register.add_argument("--experiment-id", type=UUID, required=True)
+    register.add_argument(
+        "--profile-version",
+        choices=(CURRENT_PLATFORM_PRICE_VERSION, MEDIUM_PLATFORM_PRICE_VERSION),
+        default=CURRENT_PLATFORM_PRICE_VERSION,
+    )
     prepare = subcommands.add_parser("prepare")
     prepare.add_argument("--source", type=Path, required=True)
     prepare.add_argument("--source-sha256", required=True)
@@ -352,6 +370,11 @@ def main() -> int:
     profile_inspect = subcommands.add_parser("inspect-profile")
     profile_inspect.add_argument("--repo-root", type=Path, required=True)
     profile_inspect.add_argument("--purpose", choices=PURPOSES, default=PURPOSE)
+    for command in (prepare, profile, profile_inspect):
+        command.add_argument(
+            "--profile-version",
+            choices=(CURRENT_PLATFORM_PRICE_VERSION, MEDIUM_PLATFORM_PRICE_VERSION),
+        )
     for name in ("inspect-preclaim", "close-preclaim"):
         command = subcommands.add_parser(name)
         for flag in ("repo-root", "source", "prepared", "manifest"):
@@ -374,6 +397,12 @@ def main() -> int:
     inspect.add_argument("--experiment-id", type=UUID, required=True)
     close_expired.add_argument("--experiment-id", type=UUID, required=True)
     args = parser.parse_args()
+    if (
+        getattr(args, "profile_version", None) is not None
+        and args.command != "register-round"
+        and args.purpose != PLATFORM_QUALIFICATION_PURPOSE
+    ):
+        parser.error("--profile-version is only supported for platform-qualification-v1")
     if (
         args.command == "register-profile"
         and args.purpose == PURPOSE
@@ -412,6 +441,7 @@ def main() -> int:
             experiment_id=args.experiment_id,
             output=args.output,
             purpose=args.purpose,
+            profile_version=args.profile_version,
         )
     except ResearchAccountingBusy:
         # native_command has exited its owning transaction. An executing

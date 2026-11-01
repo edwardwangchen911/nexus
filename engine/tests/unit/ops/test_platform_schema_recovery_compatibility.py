@@ -27,6 +27,20 @@ TARGET = "0106_platform_qualification"
     [
         (
             3,
+            "0112_platform_medium_profile",
+            "0112_platform_medium_profile",
+            "pending_consumer_exit_0112_v1",
+            True,
+        ),
+        (
+            3,
+            "0111_platform_round_registry",
+            "0112_platform_medium_profile",
+            "pending_consumer_exit_0112_v1",
+            False,
+        ),
+        (
+            3,
             "0111_platform_round_registry",
             "0111_platform_round_registry",
             "pending_consumer_exit_0111_v1",
@@ -345,4 +359,10 @@ def test_confirmed_0109_stop_allows_one_explicit_0110_start(tmp_path, monkeypatc
 def test_confirmed_0110_stop_allows_one_explicit_0111_start(tmp_path, monkeypatch):
     monkeypatch.setitem(globals(), "SOURCE", "0110_platform_structured_schema")
     monkeypatch.setitem(globals(), "TARGET", "0111_platform_round_registry")
+    test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)
+
+
+def test_confirmed_0111_stop_allows_one_explicit_0112_start(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "SOURCE", "0111_platform_round_registry")
+    monkeypatch.setitem(globals(), "TARGET", "0112_platform_medium_profile")
     test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)

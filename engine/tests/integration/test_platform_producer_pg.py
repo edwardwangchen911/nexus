@@ -15,6 +15,7 @@ from nexus.agents import platform_profile
 from nexus.agents.comparison_manifest import (
     PLATFORM_ACTOR,
     PLATFORM_PURPOSE,
+    PLATFORM_QUALIFICATION_PURPOSE,
     PLATFORM_RENEWED_PURPOSE,
     parse_comparison_manifest,
 )
@@ -24,7 +25,11 @@ from nexus.agents.comparison_registration import register_comparison
 from nexus.agents.persistence import BudgetExhausted
 from nexus.agents.platform_manifest import PlatformManifest
 from nexus.agents.platform_schema import LEGACY_PLATFORM_UNITS_VERSION
-from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
+from nexus.agents.platform_usage import (
+    CURRENT_PLATFORM_PRICE_VERSION,
+    MEDIUM_PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSION,
+)
 from nexus.agents.research_only import require_formal_research
 from nexus.agents.research_stages.routes import selected_route
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
@@ -48,7 +53,9 @@ async def setup(
     units_version=LEGACY_PLATFORM_UNITS_VERSION,
 ):
     purpose = purpose or (
-        PLATFORM_RENEWED_PURPOSE
+        PLATFORM_QUALIFICATION_PURPOSE
+        if price_version == MEDIUM_PLATFORM_PRICE_VERSION
+        else PLATFORM_RENEWED_PURPOSE
         if price_version == CURRENT_PLATFORM_PRICE_VERSION
         else PLATFORM_PURPOSE
     )
