@@ -12,8 +12,10 @@ Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 ACTOR = "research-comparison:direct-responses-terra-v11"
 PURPOSE = "direct-responses-terra-v11-20261030"
 PLATFORM_PURPOSE: Literal["platform-gifted-terra-v1-20261031"] = "platform-gifted-terra-v1-20261031"
+PLATFORM_RENEWED_PURPOSE: Literal["platform-terra-v2-20261101"] = "platform-terra-v2-20261101"
+PLATFORM_PURPOSES = (PLATFORM_PURPOSE, PLATFORM_RENEWED_PURPOSE)
 PLATFORM_ACTOR = "research-comparison:platform-gifted-terra-v1"
-PURPOSES = (PURPOSE, PLATFORM_PURPOSE)
+PURPOSES = (PURPOSE, *PLATFORM_PURPOSES)
 ACTORS = (ACTOR, PLATFORM_ACTOR)
 SDK_HASH = "cdf5e7d3b0cfd2a3e6fda267f74bc9b3d135f28e33f965431f17175b9f2a8720"
 Route = Literal["sdk", "responses"]
@@ -99,4 +101,8 @@ def parse_comparison_manifest(payload: object) -> ComparisonManifest:
         from nexus.agents.platform_manifest import PlatformManifest
 
         return PlatformManifest.model_validate(payload)
+    if isinstance(payload, dict) and payload.get("platform_contract") == PLATFORM_RENEWED_PURPOSE:
+        from nexus.agents.platform_manifest import RenewedPlatformManifest
+
+        return RenewedPlatformManifest.model_validate(payload)
     return ComparisonManifest.model_validate(payload)

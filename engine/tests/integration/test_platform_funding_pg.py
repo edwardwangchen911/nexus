@@ -9,7 +9,6 @@ import pytest
 from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.platform_funding import load_bound_platform_funding, require_platform_funding
-from nexus.agents.platform_manifest import PlatformManifest
 from nexus.ops.platform_credentials import (
     PLATFORM_KEY_PATH,
     credential_fingerprint,
@@ -80,15 +79,20 @@ async def funding_fixture(
         console_evidence_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
     )
     if explicit_spend:
+        from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
         from nexus.ops import platform_credentials
+
+        renewed = manifest.price_version == CURRENT_PLATFORM_PRICE_VERSION
 
         # Like the synthetic model price window, isolate lifecycle tests from
         # today's date. Unit tests enforce the real fixed cutoff permanently.
         monkeypatch.setattr(
-            platform_credentials, "EXPLICIT_SPEND_DEADLINE", now + timedelta(hours=1)
+            platform_credentials,
+            "RENEWED_EXPLICIT_SPEND_DEADLINE" if renewed else "EXPLICIT_SPEND_DEADLINE",
+            now + timedelta(hours=1),
         )
         body = dict(
-            version=1,
+            version=2 if renewed else 1,
             kind="explicit_platform_spend_authorization",
             purpose=manifest.purpose,
             endpoint=credential.endpoint,
@@ -105,7 +109,7 @@ async def funding_fixture(
     path = tmp_path / "funding.json"
     path.write_text(json.dumps(body))
     path.chmod(0o600)
-    manifest = PlatformManifest.model_validate(
+    manifest = type(manifest).model_validate(
         {
             **manifest.model_dump(),
             "funding_proof_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -260,14 +264,25 @@ async def test_insufficient_actual_proof_cannot_reserve(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("settled", [False, True])
+@pytest.mark.parametrize(
+    "history_version",
+    [
+        "platform-terra-default-implicit30m-20261031-v1",
+        "platform-terra-default-implicit30m-20261101-v2",
+    ],
+)
 async def test_other_platform_prior_day_unknown_or_spend_reduces_gift_coverage(
-    migrated_database_url, monkeypatch, tmp_path, settled
+    migrated_database_url, monkeypatch, tmp_path, settled, history_version
 ):
     from nexus.agents.persistence import reserve_daily_budget
+    from nexus.agents.platform_profile import platform_model_fields
+    from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
     from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 
     f = session_factory(EngineSettings(database_url=migrated_database_url))
-    source, _, m, model_id, held, protected = await setup(f, monkeypatch)
+    source, _, m, model_id, held, protected = await setup(
+        f, monkeypatch, price_version=CURRENT_PLATFORM_PRICE_VERSION
+    )
     m, funding = await funding_fixture(f, m, tmp_path, monkeypatch)
     try:
         async with f() as s, s.begin():
@@ -275,6 +290,10 @@ async def test_other_platform_prior_day_unknown_or_spend_reduces_gift_coverage(
                 AgentResearchRunRecord, UUID(json.loads(source)["members"][0]["run_id"])
             )
             model = await s.get(AgentModelConfigRecord, model_id)
+            if history_version != model.version:
+                model = AgentModelConfigRecord(**platform_model_fields(history_version))
+                s.add(model)
+                await s.flush()
             values = {
                 c.key: getattr(original, c.key) for c in AgentResearchRunRecord.__table__.columns
             }
@@ -282,7 +301,7 @@ async def test_other_platform_prior_day_unknown_or_spend_reduces_gift_coverage(
             values.update(
                 id=extra_id,
                 idempotency_key="isolated-platform-prior-" + str(extra_id),
-                model_config_id=model_id,
+                model_config_id=model.id,
                 model_hash=model.config_hash,
                 pricing_version=model.version,
                 reserved_cost_usd=Decimal(2),

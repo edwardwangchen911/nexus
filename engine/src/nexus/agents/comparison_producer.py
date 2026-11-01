@@ -156,6 +156,11 @@ async def admit_comparison_position(
         expected_source_hash=manifest.source_manifest_hash,
         experiment_id=manifest.experiment_id,
         purpose=manifest.purpose,
+        **(
+            {"platform_price_version": manifest.price_version}
+            if isinstance(manifest, PlatformManifest)
+            else {}
+        ),
     )
     if (
         json.dumps({k: v for k, v in prepared.items() if k != "rebuilt_at"}, sort_keys=True)

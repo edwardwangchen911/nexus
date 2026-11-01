@@ -26,6 +26,7 @@ _CROSS_SCHEMA_POLICIES = {
 _PENDING_POLICIES = {
     "0105_comparison_preclaim": "pending_consumer_exit_0105_v1",
     "0106_platform_qualification": "pending_consumer_exit_0106_v1",
+    "0107_platform_price_renewal": "pending_consumer_exit_0107_v1",
 }
 SAFE_CODES = frozenset(
     _PREFIX + suffix

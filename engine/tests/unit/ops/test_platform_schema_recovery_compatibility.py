@@ -34,6 +34,15 @@ TARGET = "0106_platform_qualification"
         (3, SOURCE, TARGET, "pending_consumer_exit_0106_v1", False),
         (3, TARGET, TARGET, "pending_consumer_exit_0105_v1", False),
         (3, {}, TARGET, "pending_consumer_exit_0106_v1", False),
+        (
+            3,
+            "0107_platform_price_renewal",
+            "0107_platform_price_renewal",
+            "pending_consumer_exit_0107_v1",
+            True,
+        ),
+        (3, TARGET, "0107_platform_price_renewal", "pending_consumer_exit_0107_v1", False),
+        (2, TARGET, "0107_platform_price_renewal", "comparison_preclaim_0105_to_0106_v1", False),
     ],
 )
 def test_frozen_proof_policy_decoding_is_exact(version, source, target, policy, valid):
@@ -231,6 +240,12 @@ def test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path):
     assert after["schema"] == TARGET and after["attempt"] is not None
     assert after["attempts"][:-1] == stopped["attempts"]
     assert receipt.read_bytes() == before and len(starts(root)) == 1
+
+
+def test_confirmed_0106_stop_allows_one_explicit_0107_start(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "SOURCE", "0106_platform_qualification")
+    monkeypatch.setitem(globals(), "TARGET", "0107_platform_price_renewal")
+    test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)
 
 
 @pytest.mark.parametrize("fault", ["receipt", "target"])

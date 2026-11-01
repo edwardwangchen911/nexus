@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.persistence import _lock_budget_day
 from nexus.agents.platform_manifest import PlatformManifest
-from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 from nexus.agents.research_usage import research_reserved_occupancy
 from nexus.ops.platform_credentials import (
     ExplicitPlatformSpendAuthorization,
@@ -109,7 +109,7 @@ async def require_platform_funding(
             AgentResearchRunRecord,
             AgentResearchRunRecord.id == AgentDailyBudgetReservationRecord.run_id,
         )
-        .where(AgentResearchRunRecord.pricing_version == PLATFORM_PRICE_VERSION)
+        .where(AgentResearchRunRecord.pricing_version.in_(PLATFORM_PRICE_VERSIONS))
         .execution_options(populate_existing=True)
     )
     for budget, run in records:

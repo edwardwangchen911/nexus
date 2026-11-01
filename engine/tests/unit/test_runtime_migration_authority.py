@@ -12,5 +12,5 @@ def test_runtime_authority_matches_installed_migration_chain():
     assert worker._MIGRATION_HEAD == CURRENT_MIGRATION_HEAD
 
 
-def test_platform_qualification_revision_is_current_authority():
-    assert CURRENT_MIGRATION_HEAD == "0106_platform_qualification"
+def test_platform_price_renewal_revision_is_current_authority():
+    assert CURRENT_MIGRATION_HEAD == "0107_platform_price_renewal"

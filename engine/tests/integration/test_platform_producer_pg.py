@@ -15,6 +15,7 @@ from nexus.agents import platform_profile
 from nexus.agents.comparison_manifest import (
     PLATFORM_ACTOR,
     PLATFORM_PURPOSE,
+    PLATFORM_RENEWED_PURPOSE,
     parse_comparison_manifest,
 )
 from nexus.agents.comparison_preparation import prepare_archive
@@ -22,6 +23,7 @@ from nexus.agents.comparison_producer import admit_comparison_position
 from nexus.agents.comparison_registration import register_comparison
 from nexus.agents.persistence import BudgetExhausted
 from nexus.agents.platform_manifest import PlatformManifest
+from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 from nexus.agents.research_only import require_formal_research
 from nexus.agents.research_stages.routes import selected_route
 from nexus.persistence.models.agents import (
@@ -34,15 +36,23 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
 
-async def setup(factory, monkeypatch, *, source_kind="fixture"):
+async def setup(
+    factory, monkeypatch, *, source_kind="fixture", price_version=PLATFORM_PRICE_VERSION
+):
+    purpose = (
+        PLATFORM_RENEWED_PURPOSE
+        if price_version == CURRENT_PLATFORM_PRICE_VERSION
+        else PLATFORM_PURPOSE
+    )
     source, _, old, _, held_id = await seed(factory, source_kind=source_kind)
     prepared = prepare_archive(
         source,
         expected_source_hash=hashlib.sha256(source).hexdigest(),
         experiment_id=uuid4(),
-        purpose=PLATFORM_PURPOSE,
+        purpose=purpose,
+        platform_price_version=price_version,
     )
-    manifest = PlatformManifest.model_validate(
+    manifest = parse_comparison_manifest(
         {
             **old.model_dump(),
             **{
@@ -56,8 +66,8 @@ async def setup(factory, monkeypatch, *, source_kind="fixture"):
                     "outbound_safety_hash",
                 )
             },
-            "api_config_hash": platform_profile.platform_profile_hash(),
-            "platform_contract": PLATFORM_PURPOSE,
+            "api_config_hash": platform_profile.platform_profile_hash(price_version),
+            "platform_contract": purpose,
             "allocations": prepared["allocations"],
             "funding_proof_hash": "1" * 64,
             "credential_binding_hash": "2" * 64,
@@ -66,12 +76,19 @@ async def setup(factory, monkeypatch, *, source_kind="fixture"):
     async with factory() as s, s.begin():
         now = await s.scalar(text("SELECT clock_timestamp()"))
         # This test exercises registration/budget, not the separate fixed price expiry gate.
-        fields = platform_profile.platform_model_fields()
+        fields = platform_profile.platform_model_fields(price_version)
         fields.update(
             pricing_available_at=now - timedelta(days=1), pricing_expires_at=now + timedelta(days=1)
         )
-        monkeypatch.setattr(platform_profile, "platform_model_fields", lambda: fields)
-        model = await platform_profile.register_platform_profile(s)
+        original_fields = platform_profile.platform_model_fields
+        monkeypatch.setattr(
+            platform_profile,
+            "platform_model_fields",
+            lambda version=price_version: fields
+            if version == price_version
+            else original_fields(version),
+        )
+        model = await platform_profile.register_platform_profile(s, version=price_version)
         model_id = model.id
         prepared["rebuilt_at"] = now.isoformat()
         protected = await s.scalar(
@@ -305,7 +322,7 @@ async def test_new_purpose_sql_and_downgrade_guards_preserve_frozen_registry(
         async with f() as s:
             assert (
                 await s.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0106_platform_qualification"
+                == "0107_platform_price_renewal"
             )
             assert (
                 await s.scalar(

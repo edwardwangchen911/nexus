@@ -40,11 +40,14 @@ def api_profile_hash() -> str:
 
 def is_comparison_profile(model: AgentModelConfigRecord) -> bool:
     from nexus.agents.platform_profile import platform_profile_hash
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
+    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
-    return model.version in (API_PROFILE_VERSION, PLATFORM_PRICE_VERSION) or model.config_hash in (
+    return model.version in (
+        API_PROFILE_VERSION,
+        *PLATFORM_PRICE_VERSIONS,
+    ) or model.config_hash in (
         api_profile_hash(),
-        platform_profile_hash(),
+        *(platform_profile_hash(v) for v in PLATFORM_PRICE_VERSIONS),
     )
 
 

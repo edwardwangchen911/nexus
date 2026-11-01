@@ -13,15 +13,21 @@ from nexus.agents.comparison_inputs import (
     assert_outbound_safe,
     prepare_comparison_input,
 )
-from nexus.agents.comparison_manifest import PLATFORM_PURPOSE, PURPOSE, PURPOSES
+from nexus.agents.comparison_manifest import PLATFORM_PURPOSES, PURPOSE, PURPOSES
 from nexus.agents.models import ResearchRequest
+from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
 from nexus.jobs.models import job_input_hash
 
 SYMBOLS = ("AAPL", "AVGO", "NVDA")
 
 
 def prepare_archive(
-    source: bytes, *, expected_source_hash: str, experiment_id: UUID, purpose: str = PURPOSE
+    source: bytes,
+    *,
+    expected_source_hash: str,
+    experiment_id: UUID,
+    purpose: str = PURPOSE,
+    platform_price_version: str = PLATFORM_PRICE_VERSION,
 ) -> dict[str, Any]:
     artifact = reconstruct_archive(
         source,
@@ -29,17 +35,20 @@ def prepare_archive(
         experiment_id=experiment_id,
         purpose=purpose,
     )
-    if purpose == PLATFORM_PURPOSE:
+    if purpose in PLATFORM_PURPOSES:
         from dataclasses import asdict
 
-        from nexus.agents.platform_wire import freeze_platform_allocation
+        from nexus.agents.platform_wire import PlatformProfile, freeze_platform_allocation
 
         artifact["allocations"] = [
             json.loads(
                 json.dumps(
                     asdict(
                         freeze_platform_allocation(
-                            PreparedComparisonInput(m["payload"], m["proof"], tuple(m["forbidden"]))
+                            PreparedComparisonInput(
+                                m["payload"], m["proof"], tuple(m["forbidden"])
+                            ),
+                            profile=PlatformProfile(price_version=platform_price_version),
                         )
                     )
                 )

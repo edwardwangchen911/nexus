@@ -103,11 +103,20 @@ cp infra/env.example infra/.env.local
 `PLATFORM_ELIGIBLE_AT_CHECK` 只表示本次本地条件核验通过，仍无派发权、模型权限或实时余额验证；
 主线须冻结两个绑定哈希，并在每次 claim／send 前重新读取同一证明、当前占用和实际凭据。
 
-新赠额目的使用 `nexus-engine-research-comparison prepare --purpose platform-gifted-terra-v1-20261031`
+历史赠额目的使用 `nexus-engine-research-comparison prepare --purpose platform-gifted-terra-v1-20261031`
 冻结三股各三阶段的完整请求容量；`register-profile`／`inspect-profile` 同样须显式选择该目的。
 原目的默认值及 SDK 配置保持原样。新 `admit-position` 要求 `--funding-proof`，在共享账本锁内
 核对证明／实际凭据绑定及完整三股上界，跨日 unknown 和已结算 Platform 支出不会恢复额度。
-价格版本固定至 2026-11-01 00:00 UTC，过期须重新核对，不能顺延已有版本。
+历史 v1 价格版本固定至 2026-11-01 00:00 UTC，不顺延已有版本。
+2026-11-01 复验原模型官方价格后，用户仅批准延至 2026-11-02 00:00 UTC；
+本次另行授权的新轮须在正常 prepare/register-profile/inspect-profile 命令中显式使用
+`--purpose platform-terra-v2-20261101`，选择独立 v2 价格版本；旧用途仍选择 v1并拒绝过期准入。
+新用途仍只能登记一个实验；旧实验不覆盖，同一新用途换键也不能补样本或再领一次。
+旧 manifest、配置哈希及阶段事实按原版本读取，旧过期身份不得重新派发；
+共享账本同时读取两版历史费用及 unknown 预留，换版本不恢复额度。
+迁移 0107 仅为该新版增加精确数据库身份支持，不改写 0106 或既有行。
+登记过新版模型、manifest 或阶段事实后拒绝降级；回滚须使用支持0107及两版读取的维护镜像。
+未产生新版事实的隔离库可正常降至0106并再次升级，旧版约束原样恢复。
 
 当前候选已接原生 HTTP、原始响应及缓存分类结算；隔离验收只替换远端服务。
 新目的通过正常 `run-position --funding-proof <本机资格证明>` 执行，独立读取项目 Key，
@@ -500,7 +509,11 @@ Job、周期或订单；研究、组合和执行仍走各自正常入口与风�
 `nexus.ops.platform_credentials.ExplicitPlatformSpendAuthorization`：绑定唯一实验、三项有序输入哈希、
 实际 Key 指纹、官方 endpoint、原指令私有文件名及其 SHA256、授权时点和有效窗。
 `max_total_usd` 是十进制字符串，必须覆盖整个 manifest 的冻结保守预留且不超过 6.42；
-不是逐次额度，结算或跨日不补充次数。期限右端独占，本次最晚 2026-11-01T00:00Z，原价格门禁独立保留。
+不是逐次额度，结算或跨日不补充次数。期限右端独占，历史 version=1 最晚
+2026-11-01T00:00Z；用户于11月1日明确续期的新轮使用 version=2，最晚
+2026-11-02T00:00Z，并且仅匹配 `purpose=platform-terra-v2-20261101`。
+version=1 仅匹配旧用途。两种授权均绑定独立实验及原明确指令，不修改旧证明；
+原价格门禁独立保留，新的记录版本不等于已有实验获得重放或延期权限。
 真实费用不截断到授权上限；超额／未知照原规则全量留证并停止后续发送。
 
 组织／项目为 null 表示精确项目 Key 自身决定作用域，不是通配符。已有本机 Key 创建来源证据保留；

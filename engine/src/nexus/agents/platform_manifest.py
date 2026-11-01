@@ -8,17 +8,24 @@ from pydantic import model_validator
 from nexus.agents.comparison_manifest import (
     PLATFORM_ACTOR,
     PLATFORM_PURPOSE,
+    PLATFORM_RENEWED_PURPOSE,
     ComparisonManifest,
     Hash,
     Route,
 )
 from nexus.agents.platform_profile import platform_profile_hash
-from nexus.agents.platform_usage import platform_reservation_usd
+from nexus.agents.platform_usage import (
+    CURRENT_PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSION,
+    platform_reservation_usd,
+)
 from nexus.agents.platform_wire import PlatformAllocation, PlatformProfile
 
 
 class PlatformManifest(ComparisonManifest):
-    platform_contract: Literal["platform-gifted-terra-v1-20261031"] = PLATFORM_PURPOSE
+    platform_contract: Literal[
+        "platform-gifted-terra-v1-20261031", "platform-terra-v2-20261101"
+    ] = PLATFORM_PURPOSE
     allocations: tuple[PlatformAllocation, PlatformAllocation, PlatformAllocation]
     funding_proof_hash: Hash
     credential_binding_hash: Hash
@@ -33,12 +40,22 @@ class PlatformManifest(ComparisonManifest):
 
     @model_validator(mode="after")
     def check_platform_contract(self) -> "PlatformManifest":
-        if self.api_config_hash != platform_profile_hash():
+        version = self.price_version
+        expected = (
+            PLATFORM_PRICE_VERSION
+            if self.purpose == PLATFORM_PURPOSE
+            else CURRENT_PLATFORM_PRICE_VERSION
+        )
+        if (
+            self.platform_contract != self.purpose
+            or version != expected
+            or self.api_config_hash != platform_profile_hash(version)
+        ):
             raise ValueError("PLATFORM_PROFILE_INVALID")
         for index, a in enumerate(self.allocations):
             if (
                 a.input_hash != self.input_hashes[index]
-                or a.profile != PlatformProfile()
+                or a.profile != PlatformProfile(price_version=version)
                 or a.stage_order != ("research", "critique", "synthesis")
                 or a.output_limit != 8192
                 or a.framing_units != 8192
@@ -57,6 +74,10 @@ class PlatformManifest(ComparisonManifest):
                 raise ValueError("PLATFORM_ALLOCATION_INVALID")
         return self
 
+    @property
+    def price_version(self) -> str:
+        return self.allocations[0].profile.price_version
+
     def reservation_for(self, ordinal: int) -> Decimal:
         self.input_hash_for(ordinal)
         a = self.allocations[ordinal - 1]
@@ -65,3 +86,12 @@ class PlatformManifest(ComparisonManifest):
     @property
     def total_reservation_usd(self) -> Decimal:
         return sum((self.reservation_for(i) for i in (1, 2, 3)), Decimal(0))
+
+
+class RenewedPlatformManifest(PlatformManifest):
+    """The one separately authorized new round; the original purpose stays consumed."""
+
+    platform_contract: Literal[
+        "platform-gifted-terra-v1-20261031", "platform-terra-v2-20261101"
+    ] = PLATFORM_RENEWED_PURPOSE
+    purpose: ClassVar[str] = PLATFORM_RENEWED_PURPOSE

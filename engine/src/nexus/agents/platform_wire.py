@@ -27,7 +27,11 @@ from nexus.agents.committee import INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION, R
 from nexus.agents.comparison_compiler import _compiler, compile_comparison_stage
 from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbound_safe
 from nexus.agents.models import ResearchRequest
-from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION, price_platform_usage
+from nexus.agents.platform_usage import (
+    PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSIONS,
+    price_platform_usage,
+)
 from nexus.domain.evidence import EvidenceRef
 
 Stage = Literal["research", "critique", "synthesis"]
@@ -62,8 +66,8 @@ class PlatformProfile:
 
 
 def _require_profile(profile: PlatformProfile) -> None:
-    fixed = PlatformProfile()
-    if any(
+    fixed = PlatformProfile(price_version=profile.price_version)
+    if profile.price_version not in PLATFORM_PRICE_VERSIONS or any(
         type(getattr(profile, f.name)) is not type(getattr(fixed, f.name))
         or getattr(profile, f.name) != getattr(fixed, f.name)
         for f in fields(fixed)

@@ -598,11 +598,10 @@ class StagedCodexCommittee(CodexCommittee):
     ) -> None:
         platform_limits = None
         if platform_allocation is not None:
-            from nexus.agents.platform_wire import PlatformAllocation, PlatformProfile
+            from nexus.agents.platform_wire import PlatformAllocation, _require_profile
 
             if (
                 not isinstance(platform_allocation, PlatformAllocation)
-                or platform_allocation.profile != PlatformProfile()
                 or len(platform_allocation.stage_input_upper_bounds) != 3
                 or any(
                     type(n) is not int or not 8192 < n <= 272000
@@ -612,6 +611,7 @@ class StagedCodexCommittee(CodexCommittee):
                 or stage_budget_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION
             ):
                 raise ValueError("PLATFORM_ALLOCATION_INVALID")
+            _require_profile(platform_allocation.profile)
             platform_limits = (
                 sum(platform_allocation.stage_input_upper_bounds),
                 max(platform_allocation.stage_input_upper_bounds) - 8192,
