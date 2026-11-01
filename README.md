@@ -167,6 +167,7 @@ Compose 显示 `Up` 或 `/health/live` 返回 200 只证明进程存活。实际
 - [Alpaca 历史价格](docs/runbooks/alpaca-prices-local.md)
 - [新闻本地采集](docs/runbooks/news-local.md)
 - [盘中市场监控](docs/runbooks/intraday-market-monitor.md)
+- [API 资格轮登记与只读核对](docs/runbooks/platform-qualification.md)
 
 ### 回测与内部模拟
 

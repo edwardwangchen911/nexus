@@ -92,7 +92,12 @@ async def funding_fixture(
             now + timedelta(hours=1),
         )
         body = dict(
-            version=3 if manifest.purpose == "platform-terra-v3-20261101" else 2 if renewed else 1,
+            version={
+                "platform-gifted-terra-v1-20261031": 1,
+                "platform-terra-v2-20261101": 2,
+                "platform-terra-v3-20261101": 3,
+                "platform-qualification-v1": 4,
+            }[manifest.purpose],
             kind="explicit_platform_spend_authorization",
             purpose=manifest.purpose,
             endpoint=credential.endpoint,
@@ -106,6 +111,18 @@ async def funding_fixture(
             authorization_file=original.name,
             authorization_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
         )
+    if manifest.purpose == "platform-qualification-v1":
+        body.update(
+            kind="platform_qualification_budget",
+            version=1,
+            configuration_hash=manifest.api_config_hash,
+            units_version=manifest.allocations[0].units_version,
+            max_total_usd=str(manifest.total_reservation_usd),
+            continuation_evidence_sha256="b" * 64,
+        )
+        body["registered_at"] = body.pop("authorized_at")
+        body["task_policy_file"] = body.pop("authorization_file")
+        body["task_policy_sha256"] = body.pop("authorization_sha256")
     path = tmp_path / "funding.json"
     path.write_text(json.dumps(body))
     path.chmod(0o600)

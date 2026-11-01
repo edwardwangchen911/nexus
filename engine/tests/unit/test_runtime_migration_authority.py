@@ -20,7 +20,14 @@ def test_third_qualification_revision_preserves_restore_lookup_predecessor():
 
 
 def test_structured_schema_revision_preserves_third_qualification_predecessor():
-    assert CURRENT_MIGRATION_HEAD == "0110_platform_structured_schema"
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    revision = ScriptDirectory.from_config(config).get_revision("0110_platform_structured_schema")
+    assert revision.revision == "0110_platform_structured_schema"
+    assert revision.down_revision == "0109_platform_third_round"
+
+
+def test_fourth_round_preserves_structured_schema_predecessor():
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
-    assert revision.down_revision == "0109_platform_third_round"
+    assert revision.revision == "0111_platform_round_registry"
+    assert revision.down_revision == "0110_platform_structured_schema"

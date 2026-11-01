@@ -8,6 +8,7 @@ from pydantic import model_validator
 from nexus.agents.comparison_manifest import (
     PLATFORM_ACTOR,
     PLATFORM_PURPOSE,
+    PLATFORM_QUALIFICATION_PURPOSE,
     PLATFORM_RENEWED_PURPOSE,
     PLATFORM_THIRD_PURPOSE,
     ComparisonManifest,
@@ -29,6 +30,7 @@ class PlatformManifest(ComparisonManifest):
         "platform-gifted-terra-v1-20261031",
         "platform-terra-v2-20261101",
         "platform-terra-v3-20261101",
+        "platform-qualification-v1",
     ] = PLATFORM_PURPOSE
     allocations: tuple[PlatformAllocation, PlatformAllocation, PlatformAllocation]
     funding_proof_hash: Hash
@@ -100,6 +102,7 @@ class RenewedPlatformManifest(PlatformManifest):
         "platform-gifted-terra-v1-20261031",
         "platform-terra-v2-20261101",
         "platform-terra-v3-20261101",
+        "platform-qualification-v1",
     ] = PLATFORM_RENEWED_PURPOSE
     purpose: ClassVar[str] = PLATFORM_RENEWED_PURPOSE
 
@@ -111,5 +114,18 @@ class ThirdPlatformManifest(PlatformManifest):
         "platform-gifted-terra-v1-20261031",
         "platform-terra-v2-20261101",
         "platform-terra-v3-20261101",
+        "platform-qualification-v1",
     ] = PLATFORM_THIRD_PURPOSE
     purpose: ClassVar[str] = PLATFORM_THIRD_PURPOSE
+
+
+class QualificationPlatformManifest(PlatformManifest):
+    """Stable protocol; each round has its own immutable experiment identity."""
+
+    platform_contract: Literal[
+        "platform-gifted-terra-v1-20261031",
+        "platform-terra-v2-20261101",
+        "platform-terra-v3-20261101",
+        "platform-qualification-v1",
+    ] = PLATFORM_QUALIFICATION_PURPOSE
+    purpose: ClassVar[str] = PLATFORM_QUALIFICATION_PURPOSE

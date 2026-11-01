@@ -23,6 +23,10 @@ from sqlalchemy import text
 async def test_old_rows_survive_v2_migration_and_new_rows_require_compatible_rollback(
     migrated_database_url, monkeypatch
 ):
+    # This historical contract belongs to 0110, independently of later heads.
+    await asyncio.to_thread(
+        command.downgrade, Config("engine/alembic.ini"), "0110_platform_structured_schema"
+    )
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     try:
         source, _, old, _, held_id, protected = await setup(
@@ -82,7 +86,9 @@ async def test_old_rows_survive_v2_migration_and_new_rows_require_compatible_rol
         )
         assert await valid(old.model_dump(mode="json")) is True
         assert await valid(data) is False
-        await asyncio.to_thread(command.upgrade, Config("engine/alembic.ini"), "head")
+        await asyncio.to_thread(
+            command.upgrade, Config("engine/alembic.ini"), "0110_platform_structured_schema"
+        )
         assert await valid(data) is True
         async with factory() as session:
             assert (

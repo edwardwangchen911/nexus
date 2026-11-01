@@ -14,7 +14,8 @@ from unit.agents.test_platform_manifest import platform_fixture
 PURPOSE = "platform-terra-v3-20261101"
 
 
-def test_normal_prepare_and_manifest_keep_current_prices_and_new_identity(tmp_path):
+@pytest.mark.parametrize("purpose", [PURPOSE, "platform-qualification-v1"])
+def test_normal_prepare_and_manifest_keep_current_prices_and_new_identity(tmp_path, purpose):
     source, _, original = platform_fixture(CURRENT_PLATFORM_PRICE_VERSION)
     original_manifest = parse_comparison_manifest(original)
     path = tmp_path / "source.json"
@@ -25,7 +26,7 @@ def test_normal_prepare_and_manifest_keep_current_prices_and_new_identity(tmp_pa
         expected_source_hash=hashlib.sha256(source).hexdigest(),
         experiment_id=uuid4(),
         output=output,
-        purpose=PURPOSE,
+        purpose=purpose,
     )
     prepared = json.loads(output.read_bytes())
     data = dict(original)
@@ -39,9 +40,9 @@ def test_normal_prepare_and_manifest_keep_current_prices_and_new_identity(tmp_pa
         "allocations",
     ):
         data[key] = prepared[key]
-    data["platform_contract"] = PURPOSE
+    data["platform_contract"] = purpose
     manifest = parse_comparison_manifest(data)
-    assert manifest.purpose == PURPOSE and manifest.stage_limit == 9
+    assert manifest.purpose == purpose and manifest.stage_limit == 9
     assert manifest.positions == original_manifest.positions
     assert manifest.price_version == CURRENT_PLATFORM_PRICE_VERSION
     assert manifest.api_config_hash == original_manifest.api_config_hash

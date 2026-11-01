@@ -300,6 +300,10 @@ class StagedProtocol:
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
             budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
+            if route is not None and route["kind"] == "comparison":
+                from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+                await require_comparison_exclusive(session, route["scope_id"])
             prior = await session.scalar(
                 text(
                     "SELECT response_hash FROM research_stage_observation WHERE run_id=:run AND "

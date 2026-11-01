@@ -26,6 +26,88 @@ from sqlalchemy import text
 from unit.agents.test_http_stage_lifecycle import Body, terminal
 
 
+async def _admit_stable_successor(factory, monkeypatch, root, source, template):
+    """Normal new-round registration and root reserve after the retained old defect."""
+    import hashlib
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from nexus.agents import platform_profile
+    from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
+    from nexus.ops import platform_round_registration
+
+    async with factory.begin() as session:
+        now = await session.scalar(text("SELECT clock_timestamp()"))
+        fields = platform_profile.platform_model_fields(CURRENT_PLATFORM_PRICE_VERSION)
+        fields.update(
+            pricing_available_at=now - timedelta(days=1), pricing_expires_at=now + timedelta(days=1)
+        )
+        original = platform_profile.platform_model_fields
+        monkeypatch.setattr(
+            platform_profile,
+            "platform_model_fields",
+            lambda version=CURRENT_PLATFORM_PRICE_VERSION: fields
+            if version == CURRENT_PLATFORM_PRICE_VERSION
+            else original(version),
+        )
+        monkeypatch.setattr(
+            platform_round_registration,
+            "platform_model_fields",
+            platform_profile.platform_model_fields,
+        )
+        model = await platform_profile.register_platform_profile(
+            session, version=CURRENT_PLATFORM_PRICE_VERSION
+        )
+        model_id = model.id
+
+    def private(name, data):
+        path = root / name
+        path.write_bytes(data)
+        path.chmod(0o600)
+        return path
+
+    source_path = private("successor-source.json", source)
+    template_path = private("successor-template.json", template.model_dump_json().encode())
+    policy = private("successor-policy.txt", b"Synthetic bounded continuation policy")
+    diagnosis = private("successor-diagnosis.txt", b"Exact historical no-dispatch proof")
+    identity = uuid4()
+    registration = Namespace(
+        command="register-round",
+        repo_root=root,
+        source=source_path,
+        template=template_path,
+        task_policy=policy,
+        continuation_evidence=diagnosis,
+        source_sha256=hashlib.sha256(source).hexdigest(),
+        task_policy_sha256=hashlib.sha256(policy.read_bytes()).hexdigest(),
+        implementation_sha="f" * 40,
+        experiment_id=identity,
+        output=root / str(identity),
+    )
+    assert (await native_command(registration))["status"] == "registered"
+    admitted = await native_command(
+        Namespace(
+            command="admit-position",
+            repo_root=root,
+            source=source_path,
+            prepared=registration.output / "prepared.json",
+            manifest=registration.output / "manifest.json",
+            funding_proof=registration.output / "funding.json",
+            model_config_id=model_id,
+            position=1,
+            worker_id="successor-after-historical-isolation",
+        )
+    )
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                text("SELECT state FROM agent_daily_budget_reservations WHERE run_id=:run"),
+                {"run": UUID(admitted["run_id"])},
+            )
+            == "reserved"
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault",
@@ -36,6 +118,7 @@ from unit.agents.test_http_stage_lifecycle import Body, terminal
         "after_send_unknown",
         "missing_observation",
         "old_bad_terminal",
+        "old_bad_terminal_known_revision",
         "member_without_authorization",
     ],
 )
@@ -53,8 +136,19 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
         if fault in {"observation", "missing_observation"}
         else "SEC",
     )
+    if fault == "old_bad_terminal_known_revision":
+        manifest = manifest.model_copy(
+            update={"implementation_sha": "28e5ff2fb4770ea415a599c0fa3d3763f1a899bf"}
+        )
     manifest, _ = await funding_fixture(factory, manifest, tmp_path, monkeypatch)
-    if fault == "old_bad_terminal":
+    if fault.startswith("old_bad_terminal"):
+        # The broad fixture freezes creation defaults at 2026-01-01. This
+        # historical lifecycle case needs native event/output chronology.
+        async with factory.begin() as session:
+            for table in ("agent_research_events", "agent_research_outputs"):
+                await session.execute(
+                    text(f"ALTER TABLE {table} ALTER COLUMN created_at SET DEFAULT now()")
+                )
         # Reproduce the old capture location only in this isolated fixture;
         # public readers must continue to reject the resulting contradiction.
         from nexus.agents.models import ResearchRequest
@@ -84,8 +178,8 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
             return await execution._persist_terminal(session, run, **kwargs)
 
         monkeypatch.setattr(execution, "_terminal_without_usage", old_zero_call_close)
-    seen = []
-    invalid = [fault in {"before_send", "old_bad_terminal"}]
+    seen, clients = [], []
+    invalid = [fault == "before_send" or fault.startswith("old_bad_terminal")]
     if fault == "member_without_authorization":
         install = executor.StagedProtocol.install
 
@@ -170,9 +264,14 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
     execute = comparison_execution.execute_comparison_position
 
     async def transport(**kwargs):
+        def client():
+            item = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            clients.append(item)
+            return item
+
         return await execute(
             **kwargs,
-            client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+            client_factory=client,
         )
 
     monkeypatch.setattr(comparison_execution, "execute_comparison_position", transport)
@@ -257,10 +356,10 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
                 None,
                 None,
             )
-        elif fault == "old_bad_terminal":
+        elif fault.startswith("old_bad_terminal"):
             from integration.test_comparison_closeout_pg import facts
 
-            assert seen == [] and error is None
+            assert seen == [] and clients == [] and error is None
             assert count == {
                 "research_stage_member": 1,
                 "research_stage_authorization": 0,
@@ -283,6 +382,112 @@ async def test_native_authority_preparation_and_terminal_remain_consistent(
             with pytest.raises(ValueError):
                 await native_command(args)
             assert await facts(factory) == before
+            from uuid import uuid4
+
+            from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+            async with factory.begin() as session:
+                if fault == "old_bad_terminal_known_revision":
+                    await require_comparison_exclusive(session, uuid4())
+                else:
+                    with pytest.raises(ValueError, match="COMPARISON_OTHER_WORK_UNCONFIRMED"):
+                        await require_comparison_exclusive(session, uuid4())
+            assert await facts(factory) == before
+            if fault == "old_bad_terminal_known_revision":
+                from nexus.agents.comparison_inputs import PreparedComparisonInput
+                from nexus.agents.comparison_legacy_preparation import (
+                    historical_platform_preparation_isolated,
+                )
+                from nexus.agents.platform_stage_accounting import platform_authorization_binding
+                from nexus.agents.platform_wire import compile_platform_stage
+                from nexus.persistence.models.agents import AgentResearchRunRecord
+                from sqlalchemy.exc import DBAPIError
+
+                run_id, job_id = UUID(admitted["run_id"]), UUID(admitted["job_id"])
+                member = prepared["members"][0]
+                compiled = compile_platform_stage(
+                    PreparedComparisonInput(
+                        member["payload"], member["proof"], tuple(member["forbidden"])
+                    ),
+                    allocation=manifest.allocations[0],
+                    expected_allocation_hash=manifest.allocations[0].allocation_hash,
+                    stage="research",
+                    previous=[],
+                    prior_usage=[],
+                )
+                authorization = text("""INSERT INTO research_stage_authorization
+                  (run_id,stage,job_id,attempt_no,worker_id,lease_token,fence_token,
+                   reserved_id,wire_hash,schema_hash,prior_hash,authorized_at,platform_binding)
+                  SELECT r.id,1,j.id,a.attempt_no,a.worker_id,a.lease_token,a.fence_token,
+                    b.id,:wire,r.schema_hash,NULL,j.started_at,CAST(:binding AS jsonb)
+                  FROM agent_research_runs r JOIN jobs j ON j.payload->>'run_id'=r.id::text
+                  JOIN job_attempts a ON a.job_id=j.id
+                  JOIN agent_daily_budget_reservations b ON b.run_id=r.id WHERE r.id=:run""")
+                async with factory.begin() as session:
+                    run = await session.get(AgentResearchRunRecord, run_id)
+                    binding = await platform_authorization_binding(
+                        session, run, stage=1, wire=compiled.wire, compiled=compiled
+                    )
+                    parameters = {
+                        "run": run_id,
+                        "job": job_id,
+                        "scope": manifest.experiment_id,
+                        "wire": compiled.body_sha256,
+                        "binding": json.dumps(binding),
+                    }
+                    # Normal SQL still permanently rejects a late original authorization.
+                    with pytest.raises(DBAPIError, match="COMPARISON_CHAIN_STOPPED"):
+                        async with session.begin_nested():
+                            await session.execute(authorization, parameters)
+                    now = await session.scalar(text("SELECT clock_timestamp()"))
+                    for damage in (
+                        "UPDATE job_leases SET fence_token=fence_token+1 WHERE job_id=:job",
+                        "UPDATE research_stage_scope SET stopped=false WHERE id=:scope",
+                        "DELETE FROM research_comparison_chain_stop WHERE run_id=:run",
+                        "UPDATE research_stage_terminal SET chain_hash=repeat('0',64) "
+                        "WHERE run_id=:run",
+                        "UPDATE agent_research_events SET event_hash=repeat('0',64) "
+                        "WHERE run_id=:run",
+                        "UPDATE research_comparison_manifest SET payload=jsonb_set(payload,"
+                        "'{implementation_sha}',to_jsonb(repeat('f',40))) WHERE id=:scope",
+                        authorization,
+                    ):
+                        savepoint = await session.begin_nested()
+                        try:
+                            # Reconstruct corrupt/late historical facts only in the
+                            # isolated DB, then immediately restore real guards.
+                            await session.execute(
+                                text("SET LOCAL session_replication_role=replica")
+                            )
+                            await session.execute(
+                                text(damage) if isinstance(damage, str) else damage,
+                                parameters,
+                            )
+                            await session.execute(text("SET LOCAL session_replication_role=origin"))
+                            session.expire_all()
+                            assert not await historical_platform_preparation_isolated(
+                                session, run_id=run_id, job_id=job_id, now=now
+                            )
+                            expected = (
+                                "COMPARISON_REGISTRATION_CONFLICT"
+                                if isinstance(damage, str) and "implementation_sha" in damage
+                                else "COMPARISON_OTHER_WORK_UNCONFIRMED"
+                            )
+                            with pytest.raises(ValueError, match=expected):
+                                await require_comparison_exclusive(session, uuid4())
+                        finally:
+                            await savepoint.rollback()
+                            session.expire_all()
+                    await require_comparison_exclusive(session, uuid4())
+                replay = Namespace(**{**vars(args), "command": "run-position", "position": 1})
+                with pytest.raises(ValueError):
+                    await native_command(replay)
+                assert seen == []
+                assert await facts(factory) == before
+                await _admit_stable_successor(factory, monkeypatch, tmp_path, source, manifest)
+                after = await facts(factory)
+                for table, rows in before.items():
+                    assert all(row in after[table] for row in rows)
         elif fault == "member_without_authorization":
             assert isinstance(error, executor.StagedFinalizationFailed)
             assert seen == []

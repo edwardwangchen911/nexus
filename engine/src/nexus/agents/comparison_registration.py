@@ -6,7 +6,11 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.comparison_manifest import ComparisonManifest, parse_comparison_manifest
+from nexus.agents.comparison_manifest import (
+    PLATFORM_QUALIFICATION_PURPOSE,
+    ComparisonManifest,
+    parse_comparison_manifest,
+)
 from nexus.agents.persistence import reserve_daily_budget
 from nexus.agents.platform_manifest import PlatformManifest
 from nexus.agents.platform_profile import platform_model_matches
@@ -19,9 +23,17 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.runtime import Job
 
 
-async def register_comparison(session: AsyncSession, manifest: ComparisonManifest) -> None:
+async def register_comparison(
+    session: AsyncSession, manifest: ComparisonManifest, *, allow_new_round: bool = False
+) -> None:
     """Caller owns commit. Same purpose/id/hash may be read back; never reset positions."""
     manifest = parse_comparison_manifest(manifest.model_dump())
+    if manifest.purpose == PLATFORM_QUALIFICATION_PURPOSE and not allow_new_round:
+        if not await session.scalar(
+            text("SELECT 1 FROM research_comparison_manifest WHERE id=:id"),
+            {"id": manifest.experiment_id},
+        ):
+            raise ValueError("PLATFORM_ROUND_REGISTRATION_REQUIRED")
     await session.execute(
         text("""INSERT INTO research_comparison_manifest
       (id,purpose,manifest_hash,payload) VALUES (:id,:purpose,:hash,CAST(:payload AS jsonb))
@@ -36,15 +48,20 @@ async def register_comparison(session: AsyncSession, manifest: ComparisonManifes
     row = (
         (
             await session.execute(
-                text("""SELECT id,manifest_hash FROM
-      research_comparison_manifest WHERE purpose=:purpose FOR UPDATE"""),
-                {"purpose": manifest.purpose},
+                text("""SELECT id,purpose,manifest_hash,payload FROM
+      research_comparison_manifest WHERE id=:id FOR UPDATE"""),
+                {"id": manifest.experiment_id},
             )
         )
         .mappings()
-        .one()
+        .one_or_none()
     )
-    if row["id"] != manifest.experiment_id or row["manifest_hash"] != manifest.digest:
+    if (
+        row is None
+        or row["purpose"] != manifest.purpose
+        or row["manifest_hash"] != manifest.digest
+        or row["payload"] != manifest.model_dump(mode="json")
+    ):
         raise ValueError("COMPARISON_REGISTRATION_CONFLICT")
     if await session.scalar(
         text("SELECT stopped FROM research_stage_scope WHERE id=:id FOR UPDATE"),
@@ -171,6 +188,9 @@ async def reserve_comparison_chain(
         )
         if prior_reserved + run.reserved_cost_usd > manifest.total_reservation_usd:
             raise ValueError("PLATFORM_EXPERIMENT_BUDGET_EXCEEDED")
+    from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+    await require_comparison_exclusive(session, experiment_id)
     now = await session.scalar(text("SELECT clock_timestamp()"))
     budget = await reserve_daily_budget(
         session,

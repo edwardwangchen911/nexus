@@ -39,6 +39,7 @@ PLATFORM_ENDPOINT = "https://api.openai.com/v1/responses"
 PLATFORM_PURPOSE = "platform-gifted-terra-v1-20261031"
 PLATFORM_RENEWED_PURPOSE = "platform-terra-v2-20261101"
 PLATFORM_THIRD_PURPOSE = "platform-terra-v3-20261101"
+PLATFORM_QUALIFICATION_PURPOSE = "platform-qualification-v1"
 EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 1, tzinfo=UTC)
 RENEWED_EXPLICIT_SPEND_DEADLINE = datetime(2026, 11, 2, tzinfo=UTC)
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -261,14 +262,42 @@ class ExplicitPlatformSpendAuthorization(BaseModel):
         return value
 
 
+class PlatformQualificationBudget(BaseModel):
+    """Frozen operating bound under one retained task policy; not consent or credit."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True, allow_inf_nan=False)
+    version: Literal[1]
+    kind: Literal["platform_qualification_budget"]
+    purpose: Literal["platform-qualification-v1"]
+    endpoint: str
+    credential_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    organization_id: None = None
+    project_id: None = None
+    experiment_id: UUID
+    input_hashes: tuple[str, str, str]
+    configuration_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    units_version: str
+    max_total_usd: Decimal = Field(gt=0, le=Decimal("6.42"))
+    registered_at: AwareDatetime
+    window_start: AwareDatetime
+    window_end: AwareDatetime
+    task_policy_file: str = Field(repr=False)
+    task_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    continuation_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 @dataclass(frozen=True)
 class PlatformFundingProof:
-    record: _FundingRecord | ExplicitPlatformSpendAuthorization = field(repr=False)
+    record: _FundingRecord | ExplicitPlatformSpendAuthorization | PlatformQualificationBudget = (
+        field(repr=False)
+    )
     proof_hash: str
 
     @property
     def valid_until(self) -> datetime:
-        if isinstance(self.record, ExplicitPlatformSpendAuthorization):
+        if isinstance(
+            self.record, ExplicitPlatformSpendAuthorization | PlatformQualificationBudget
+        ):
             return self.record.window_end
         return min(self.record.window_end, self.record.gift_expires_at)
 
@@ -314,17 +343,33 @@ def load_platform_funding_proof(path: Path) -> PlatformFundingProof:
         payload = json.loads(raw, object_pairs_hook=_unique_object)
         if not isinstance(payload, dict):
             _reject("PLATFORM_PROOF_INVALID")
-        if payload.get("kind") == "explicit_platform_spend_authorization":
+        if payload.get("kind") in (
+            "explicit_platform_spend_authorization",
+            "platform_qualification_budget",
+        ):
             if not isinstance(payload.get("max_total_usd"), str):
                 _reject("PLATFORM_PROOF_INVALID")
-            authorization = ExplicitPlatformSpendAuthorization.model_validate_json(raw)
+            authorization = (
+                PlatformQualificationBudget.model_validate_json(raw)
+                if payload["kind"] == "platform_qualification_budget"
+                else ExplicitPlatformSpendAuthorization.model_validate_json(raw)
+            )
             if not all(_HASH.fullmatch(value) for value in authorization.input_hashes):
                 _reject("PLATFORM_PROOF_INVALID")
-            name = authorization.authorization_file
+            name = (
+                authorization.task_policy_file
+                if isinstance(authorization, PlatformQualificationBudget)
+                else authorization.authorization_file
+            )
             if not name or Path(name).name != name or name in {".", ".."}:
                 _reject("PLATFORM_PROOF_INVALID")
             original = _private_bytes(path.parent / name, 16 * 1024 * 1024)
-            if not original.strip() or _sha256(original) != authorization.authorization_sha256:
+            original_hash = (
+                authorization.task_policy_sha256
+                if isinstance(authorization, PlatformQualificationBudget)
+                else authorization.authorization_sha256
+            )
+            if not original.strip() or _sha256(original) != original_hash:
                 _reject("PLATFORM_PROOF_INVALID")
             return PlatformFundingProof(authorization, _sha256(raw))
         if any(
@@ -387,7 +432,13 @@ def check_platform_eligibility(
     _validate_credential(credential)
     record = proof.record
     if (
-        purpose not in (PLATFORM_PURPOSE, PLATFORM_RENEWED_PURPOSE, PLATFORM_THIRD_PURPOSE)
+        purpose
+        not in (
+            PLATFORM_PURPOSE,
+            PLATFORM_RENEWED_PURPOSE,
+            PLATFORM_THIRD_PURPOSE,
+            PLATFORM_QUALIFICATION_PURPOSE,
+        )
         or record.purpose != purpose
         or record.endpoint != credential.endpoint
         or record.credential_fingerprint != credential.fingerprint
@@ -400,12 +451,17 @@ def check_platform_eligibility(
         record, ExplicitPlatformSpendAuthorization
     ):
         _reject("PLATFORM_PROOF_BINDING_MISMATCH")
-    if isinstance(record, ExplicitPlatformSpendAuthorization):
+    if (purpose == PLATFORM_QUALIFICATION_PURPOSE) != isinstance(
+        record, PlatformQualificationBudget
+    ):
+        _reject("PLATFORM_PROOF_BINDING_MISMATCH")
+    if isinstance(record, ExplicitPlatformSpendAuthorization | PlatformQualificationBudget):
         if (
-            record.version
-            != {PLATFORM_PURPOSE: 1, PLATFORM_RENEWED_PURPOSE: 2, PLATFORM_THIRD_PURPOSE: 3}[
+            isinstance(record, ExplicitPlatformSpendAuthorization)
+            and record.version
+            != {PLATFORM_PURPOSE: 1, PLATFORM_RENEWED_PURPOSE: 2, PLATFORM_THIRD_PURPOSE: 3}.get(
                 purpose
-            ]
+            )
             or not credential.key_scope_only
             or (record.experiment_id != experiment_id or record.input_hashes != input_hashes)
         ):
@@ -416,7 +472,11 @@ def check_platform_eligibility(
             or not isinstance(required_valid_until, datetime)
             or required_valid_until.utcoffset() is None
             or not record.window_start
-            <= record.authorized_at
+            <= (
+                record.registered_at
+                if isinstance(record, PlatformQualificationBudget)
+                else record.authorized_at
+            )
             <= now
             < required_valid_until
             <= record.window_end
@@ -569,7 +629,9 @@ def main() -> int:
                 organization_id=record.organization_id,
                 project_id=record.project_id,
                 endpoint=record.endpoint,
-                key_scope_only=isinstance(record, ExplicitPlatformSpendAuthorization),
+                key_scope_only=isinstance(
+                    record, ExplicitPlatformSpendAuthorization | PlatformQualificationBudget
+                ),
             )
             eligibility = check_platform_eligibility(
                 credential,
@@ -588,7 +650,7 @@ def main() -> int:
                 funding_proof_hash=eligibility.funding_proof_hash,
                 credential_binding_hash=eligibility.credential_binding_hash,
             )
-            if isinstance(record, ExplicitPlatformSpendAuthorization):
+            if isinstance(record, ExplicitPlatformSpendAuthorization | PlatformQualificationBudget):
                 result.update(funding_kind=record.kind, balance_verified=False)
         print(json.dumps(result))
         return 0

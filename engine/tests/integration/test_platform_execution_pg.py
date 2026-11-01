@@ -59,6 +59,11 @@ async def test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         units_version=CURRENT_PLATFORM_UNITS_VERSION,
     )
     m, funding = await funding_fixture(f, m, tmp_path, monkeypatch, explicit_spend=explicit_spend)
+    if m.purpose == "platform-qualification-v1":
+        from nexus.agents.comparison_registration import register_comparison
+
+        async with f.begin() as session:
+            await register_comparison(session, m, allow_new_round=True)
     from nexus.agents import codex_staged
 
     async def forbidden(*a, **k):
@@ -362,9 +367,10 @@ async def test_http_failure_survives_real_worker_output_and_normal_inspection(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["platform-terra-v3-20261101", "platform-qualification-v1"])
 @pytest.mark.parametrize("mode", ["complete", "missing_cache", "wait_authorization", "http_400"])
-async def test_third_round_full_native_worker_keeps_unknown_budget_and_new_authority(
-    migrated_database_url, monkeypatch, tmp_path, mode
+async def test_new_round_full_native_worker_keeps_unknown_budget_and_new_authority(
+    migrated_database_url, monkeypatch, tmp_path, mode, purpose
 ):
     await test_three_full_native_chains_share_actual_cache_fees_and_no_sdk(
         migrated_database_url,
@@ -373,5 +379,5 @@ async def test_third_round_full_native_worker_keeps_unknown_budget_and_new_autho
         mode,
         True,
         price_version=CURRENT_PLATFORM_PRICE_VERSION,
-        purpose="platform-terra-v3-20261101",
+        purpose=purpose,
     )

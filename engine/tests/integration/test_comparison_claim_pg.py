@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 @pytest.mark.parametrize("known", [False, True])
 @pytest.mark.parametrize("orphan", [False, True])
 async def test_exact_claim_common_authorization_cleanup_and_terminal(
-    migrated_database_url, known, orphan
+    migrated_database_url, known, orphan, monkeypatch
 ):
     from nexus.agents.comparison_claim import claim_comparison_position
 
@@ -74,6 +74,21 @@ async def test_exact_claim_common_authorization_cleanup_and_terminal(
             text("SELECT state FROM agent_daily_budget_reservations WHERE run_id=:id"),
             {"id": result.run_id},
         ) == ("settled" if known else "reserved")
+        from uuid import uuid4
+
+        from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+        # Domain clock advances past the orphan deadline without a real-time sleep.
+        scalar = session.scalar
+
+        async def at_close(statement, *args, **kwargs):
+            if getattr(statement, "text", None) == "SELECT clock_timestamp()":
+                return closed_at
+            return await scalar(statement, *args, **kwargs)
+
+        with monkeypatch.context() as clock:
+            clock.setattr(session, "scalar", at_close)
+            await require_comparison_exclusive(session, uuid4())
     if not known:
         await protocol.observe(
             ticket, now=closed_at + timedelta(seconds=1), payload=b"late-diagnostic", tokens=(20, 9)
@@ -253,3 +268,70 @@ async def test_claimed_position_requires_compatible_reader_rollback(migrated_dat
         )
         assert await session.scalar(text("SELECT count(*) FROM job_attempts")) == 1
         assert await session.scalar(text("SELECT count(*) FROM job_leases")) == 1
+
+
+@pytest.mark.asyncio
+async def test_late_original_cleanup_unblocks_other_round_without_releasing_unknown(
+    migrated_database_url,
+):
+    from uuid import uuid4
+
+    from nexus.agents.comparison_claim import claim_comparison_position
+    from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    try:
+        result, manifest, _ = await prepared_position(factory)
+        claim = await claim_comparison_position(
+            factory,
+            experiment_id=manifest.experiment_id,
+            ordinal=1,
+            worker_id="late-cleanup-fixture",
+        )
+        now = claim.expires_at - timedelta(seconds=330)
+        protocol = StagedProtocol(factory)
+        await protocol.install(
+            scope_id=manifest.experiment_id,
+            claims=(claim,),
+            now=now,
+            work_deadline=now + timedelta(seconds=300),
+            cleanup_deadline=now + timedelta(seconds=307),
+            comparison=True,
+        )
+        ticket = await protocol.authorize(claim, stage=1, now=now, wire=b"frozen-wire")
+        assert await protocol.close(claim, now=now) is False
+        async with factory.begin() as session:
+            frozen = await session.scalar(
+                text("SELECT to_jsonb(b) FROM agent_daily_budget_reservations b WHERE run_id=:id"),
+                {"id": result.run_id},
+            )
+            terminal = await session.scalar(
+                text("SELECT to_jsonb(t) FROM research_stage_terminal t WHERE run_id=:id"),
+                {"id": result.run_id},
+            )
+            with pytest.raises(ValueError, match="COMPARISON_OTHER_WORK_UNCONFIRMED"):
+                await require_comparison_exclusive(session, uuid4())
+        async with factory() as session:
+            late = await session.scalar(text("SELECT clock_timestamp()"))
+        await protocol.cleanup(ticket, now=late, confirmed=True)
+        async with factory.begin() as session:
+            await require_comparison_exclusive(session, uuid4())
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT to_jsonb(b) FROM agent_daily_budget_reservations b WHERE run_id=:id"
+                    ),
+                    {"id": result.run_id},
+                )
+                == frozen
+            )
+            assert (
+                await session.scalar(
+                    text("SELECT to_jsonb(t) FROM research_stage_terminal t WHERE run_id=:id"),
+                    {"id": result.run_id},
+                )
+                == terminal
+            )
+            assert frozen["state"] == "reserved" and frozen["settled_usd"] is None
+    finally:
+        await factory.kw["bind"].dispose()
