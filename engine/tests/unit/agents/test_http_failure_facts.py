@@ -47,6 +47,7 @@ async def test_http_rejection_keeps_allowlisted_cause_without_body_or_credential
     assert facts is not None
     assert facts.phase == "headers" and facts.error_kind == "http_status"
     assert facts.http_status == status and facts.provider_error_code == code
+    assert facts.protocol_code is None
     assert facts.send_started and facts.headers_received and facts.cleanup_confirmed
     assert caught.value.usage is None and caught.value.failure_facts is None
     diagnostic = StageFailureDiagnostic(

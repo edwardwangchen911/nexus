@@ -65,7 +65,8 @@ class HttpResponseRejected(StreamProtocolError):
     """No raw response, provider message, headers or exception text in the outward error."""
 
     def __init__(self) -> None:
-        super().__init__("RESPONSES_HTTP_REJECTED")
+        # Preserve the public protocol code; typed facts carry the HTTP distinction.
+        super().__init__("RESPONSES_STREAM_UNAVAILABLE")
         self.provider_error_code: ProviderErrorCode | None = None
         self.body_state: Literal["not_read", "parsed", "too_large", "malformed", "unavailable"] = (
             "not_read"
@@ -162,7 +163,12 @@ def http_failure_facts(
     else:
         phase = "stream"
     rejection = stage.error if stage and isinstance(stage.error, HttpResponseRejected) else None
-    code = str(cause) if isinstance(cause, StreamProtocolError | TimeoutError) else None
+    code = (
+        str(cause)
+        if isinstance(cause, StreamProtocolError | TimeoutError)
+        and not isinstance(cause, HttpResponseRejected)
+        else None
+    )
     return HttpFailureFacts(
         phase=phase,
         error_kind=_kind(cause, phase),
