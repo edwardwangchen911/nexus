@@ -119,6 +119,9 @@ async def claim_comparison_position(
         for record in (JobAttempt, JobLease, JobDependency):
             if await session.scalar(select(record.id).where(record.job_id == job.id)) is not None:
                 raise ValueError("COMPARISON_POSITION_CONSUMED")
+        from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+        await require_comparison_exclusive(session, experiment_id)
         now = await session.scalar(text("SELECT clock_timestamp()"))
         if (
             model is None

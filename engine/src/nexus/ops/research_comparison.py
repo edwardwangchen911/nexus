@@ -60,6 +60,14 @@ async def native_command(args: argparse.Namespace) -> dict[str, Any]:
     settings = local_settings(args.repo_root, load_model_key=False)
     factory = session_factory(settings)
     try:
+        if args.command == "inspect-round":
+            from nexus.ops.platform_round_registration import inspect_round
+
+            return await inspect_round(factory, args.experiment_id)
+        if args.command == "register-round":
+            from nexus.ops.platform_round_registration import register_round
+
+            return await register_round(factory, args)
         if args.command == "close-expired-position":
             from nexus.agents.comparison_closeout import close_expired_comparison_position
 
@@ -274,6 +282,22 @@ def prepare_file(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
+    round_inspection = subcommands.add_parser("inspect-round")
+    round_inspection.add_argument("--repo-root", type=Path, required=True)
+    round_inspection.add_argument("--experiment-id", type=UUID, required=True)
+    register = subcommands.add_parser("register-round")
+    for flag in (
+        "repo-root",
+        "source",
+        "template",
+        "task-policy",
+        "continuation-evidence",
+        "output",
+    ):
+        register.add_argument("--" + flag, type=Path, required=True)
+    for flag in ("source-sha256", "task-policy-sha256", "implementation-sha"):
+        register.add_argument("--" + flag, required=True)
+    register.add_argument("--experiment-id", type=UUID, required=True)
     prepare = subcommands.add_parser("prepare")
     prepare.add_argument("--source", type=Path, required=True)
     prepare.add_argument("--source-sha256", required=True)
@@ -346,7 +370,7 @@ def main() -> int:
         if args.command != "prepare":
             result = asyncio.run(native_command(args))
             print(json.dumps(result))
-            return 0
+            return int(args.command == "register-round" and result["status"] != "registered")
         result = prepare_file(
             source=args.source,
             expected_source_hash=args.source_sha256,
@@ -374,7 +398,9 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "unknown",
-                    "reason": "COMPARISON_ADMISSION_RESULT_UNKNOWN"
+                    "reason": "PLATFORM_ROUND_REGISTRATION_UNCONFIRMED"
+                    if args.command == "register-round"
+                    else "COMPARISON_ADMISSION_RESULT_UNKNOWN"
                     if args.command == "admit-position"
                     else "COMPARISON_PROFILE_REGISTRATION_UNKNOWN"
                     if args.command == "register-profile"
@@ -386,9 +412,19 @@ def main() -> int:
                     if args.command == "close-expired-position"
                     else "COMPARISON_READ_FAILED",
                     **(
+                        {"experiment_id": str(args.experiment_id)}
+                        if args.command == "register-round"
+                        else {}
+                    ),
+                    **(
                         {"replay_allowed": False}
                         if args.command
-                        in {"run-position", "close-preclaim", "close-expired-position"}
+                        in {
+                            "run-position",
+                            "close-preclaim",
+                            "close-expired-position",
+                            "register-round",
+                        }
                         else {}
                     ),
                 }
@@ -407,6 +443,12 @@ def main() -> int:
             "PLATFORM_EXPERIMENT_BUDGET_EXCEEDED",
             "PLATFORM_PRICE_WINDOW_INVALID",
             "PLATFORM_PROFILE_EXISTING_INVALID",
+            "PLATFORM_ROUND_TEMPLATE_CHANGED",
+            "PLATFORM_ROUND_FILE_CONFLICT",
+            "PLATFORM_ROUND_BUNDLE_CONFLICT",
+            "PLATFORM_ROUND_LOCAL_BUNDLE_REQUIRED",
+            "PLATFORM_ROUND_REGISTRATION_REQUIRED",
+            "PLATFORM_ROUND_PUBLICATION_BUSY",
         }
         if (
             not platform_safe
@@ -420,7 +462,8 @@ def main() -> int:
             code = "COMPARISON_PREPARATION_FAILED"
         details: dict[str, Any] = (
             {"replay_allowed": False}
-            if args.command in {"run-position", "close-preclaim", "close-expired-position"}
+            if args.command
+            in {"run-position", "close-preclaim", "close-expired-position", "register-round"}
             else {}
         )
         if args.command in {"inspect-grant", "refresh-grant"}:

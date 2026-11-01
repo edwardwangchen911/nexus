@@ -5,6 +5,7 @@ import copy
 import json
 from argparse import Namespace
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from integration import test_comparison_producer_pg as fixtures
@@ -84,6 +85,10 @@ async def test_normal_preclaim_close_preserves_unknown_and_never_fabricates_a_st
     assert receipt["status"] == "preclaim_closed"
     assert await native_command(args) == receipt
     assert await native_command(close) == receipt
+    from nexus.agents.comparison_concurrency import require_comparison_exclusive
+
+    async with factory.begin() as session:
+        await require_comparison_exclusive(session, uuid4())
     from nexus.audit.service import append_audit_event
 
     async with factory() as session, session.begin():

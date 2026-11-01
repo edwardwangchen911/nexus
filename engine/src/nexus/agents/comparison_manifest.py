@@ -14,7 +14,13 @@ PURPOSE = "direct-responses-terra-v11-20261030"
 PLATFORM_PURPOSE: Literal["platform-gifted-terra-v1-20261031"] = "platform-gifted-terra-v1-20261031"
 PLATFORM_RENEWED_PURPOSE: Literal["platform-terra-v2-20261101"] = "platform-terra-v2-20261101"
 PLATFORM_THIRD_PURPOSE: Literal["platform-terra-v3-20261101"] = "platform-terra-v3-20261101"
-PLATFORM_PURPOSES = (PLATFORM_PURPOSE, PLATFORM_RENEWED_PURPOSE, PLATFORM_THIRD_PURPOSE)
+PLATFORM_QUALIFICATION_PURPOSE: Literal["platform-qualification-v1"] = "platform-qualification-v1"
+PLATFORM_PURPOSES = (
+    PLATFORM_PURPOSE,
+    PLATFORM_RENEWED_PURPOSE,
+    PLATFORM_THIRD_PURPOSE,
+    PLATFORM_QUALIFICATION_PURPOSE,
+)
 PLATFORM_ACTOR = "research-comparison:platform-gifted-terra-v1"
 PURPOSES = (PURPOSE, *PLATFORM_PURPOSES)
 ACTORS = (ACTOR, PLATFORM_ACTOR)
@@ -110,4 +116,11 @@ def parse_comparison_manifest(payload: object) -> ComparisonManifest:
         from nexus.agents.platform_manifest import ThirdPlatformManifest
 
         return ThirdPlatformManifest.model_validate(payload)
+    if (
+        isinstance(payload, dict)
+        and payload.get("platform_contract") == PLATFORM_QUALIFICATION_PURPOSE
+    ):
+        from nexus.agents.platform_manifest import QualificationPlatformManifest
+
+        return QualificationPlatformManifest.model_validate(payload)
     return ComparisonManifest.model_validate(payload)

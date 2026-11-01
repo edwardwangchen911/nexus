@@ -16,6 +16,7 @@ from nexus.ops.platform_credentials import (
     ExplicitPlatformSpendAuthorization,
     PlatformCredential,
     PlatformFundingProof,
+    PlatformQualificationBudget,
     check_platform_eligibility,
     load_platform_funding_proof,
     resolve_platform_credential,
@@ -41,7 +42,7 @@ def require_funding_binding(manifest: PlatformManifest, funding: PlatformFunding
     ):
         raise ValueError("PLATFORM_FUNDING_BINDING_CHANGED")
     record = funding.proof.record
-    if isinstance(record, ExplicitPlatformSpendAuthorization):
+    if isinstance(record, ExplicitPlatformSpendAuthorization | PlatformQualificationBudget):
         if (
             record.experiment_id != manifest.experiment_id
             or record.input_hashes != manifest.input_hashes
@@ -49,6 +50,12 @@ def require_funding_binding(manifest: PlatformManifest, funding: PlatformFunding
             raise ValueError("PLATFORM_PROOF_BINDING_MISMATCH")
         if manifest.total_reservation_usd > record.max_total_usd:
             raise ValueError("PLATFORM_SPEND_LIMIT_EXCEEDED")
+    if isinstance(record, PlatformQualificationBudget) and (
+        record.configuration_hash != manifest.api_config_hash
+        or record.units_version != manifest.allocations[0].units_version
+        or record.max_total_usd != manifest.total_reservation_usd
+    ):
+        raise ValueError("PLATFORM_FUNDING_BINDING_CHANGED")
 
 
 def load_bound_platform_funding(
@@ -61,7 +68,9 @@ def load_bound_platform_funding(
         organization_id=proof.record.organization_id,
         project_id=proof.record.project_id,
         endpoint=proof.record.endpoint,
-        key_scope_only=isinstance(proof.record, ExplicitPlatformSpendAuthorization),
+        key_scope_only=isinstance(
+            proof.record, ExplicitPlatformSpendAuthorization | PlatformQualificationBudget
+        ),
     )
     result = PlatformFunding(credential, proof)
     require_funding_binding(manifest, result)
