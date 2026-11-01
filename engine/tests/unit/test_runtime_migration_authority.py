@@ -13,7 +13,14 @@ def test_runtime_authority_matches_installed_migration_chain():
 
 
 def test_third_qualification_revision_preserves_restore_lookup_predecessor():
-    assert CURRENT_MIGRATION_HEAD == "0109_platform_third_round"
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    revision = ScriptDirectory.from_config(config).get_revision("0109_platform_third_round")
+    assert revision.revision == "0109_platform_third_round"
+    assert revision.down_revision == "0108_platform_restore_lookup"
+
+
+def test_structured_schema_revision_preserves_third_qualification_predecessor():
+    assert CURRENT_MIGRATION_HEAD == "0110_platform_structured_schema"
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
-    assert revision.down_revision == "0108_platform_restore_lookup"
+    assert revision.down_revision == "0109_platform_third_round"

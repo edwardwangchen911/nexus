@@ -25,6 +25,20 @@ TARGET = "0106_platform_qualification"
 @pytest.mark.parametrize(
     "version,source,target,policy,valid",
     [
+        (
+            3,
+            "0110_platform_structured_schema",
+            "0110_platform_structured_schema",
+            "pending_consumer_exit_0110_v1",
+            True,
+        ),
+        (
+            3,
+            "0109_platform_third_round",
+            "0110_platform_structured_schema",
+            "pending_consumer_exit_0110_v1",
+            False,
+        ),
         (2, "0099_research_stages", SOURCE, "research_stages_0099_to_0105_v1", True),
         (2, SOURCE, TARGET, "comparison_preclaim_0105_to_0106_v1", True),
         (3, SOURCE, SOURCE, "pending_consumer_exit_0105_v1", True),
@@ -305,4 +319,10 @@ def test_0106_pending_interrupted_commit_preserves_one_proof(
 def test_confirmed_0108_stop_allows_one_explicit_0109_start(tmp_path, monkeypatch):
     monkeypatch.setitem(globals(), "SOURCE", "0108_platform_restore_lookup")
     monkeypatch.setitem(globals(), "TARGET", "0109_platform_third_round")
+    test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)
+
+
+def test_confirmed_0109_stop_allows_one_explicit_0110_start(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "SOURCE", "0109_platform_third_round")
+    monkeypatch.setitem(globals(), "TARGET", "0110_platform_structured_schema")
     test_confirmed_0105_stop_allows_one_explicit_0106_start(tmp_path)

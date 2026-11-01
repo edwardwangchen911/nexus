@@ -19,7 +19,6 @@ from nexus.agents.codex_capacity import _monitoring_capacity_view, candidate_cap
 from nexus.agents.codex_sdk import (
     BASE_INSTRUCTIONS,
     DEVELOPER_INSTRUCTIONS,
-    codex_output_schema,
     codex_request_wire,
 )
 from nexus.agents.codex_staged import STAGES
@@ -27,6 +26,12 @@ from nexus.agents.committee import INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION, R
 from nexus.agents.comparison_compiler import _compiler, compile_comparison_stage
 from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbound_safe
 from nexus.agents.models import ResearchRequest
+from nexus.agents.platform_schema import (
+    CURRENT_PLATFORM_UNITS_VERSION,
+    LEGACY_PLATFORM_UNITS_VERSION,
+    PLATFORM_UNITS_VERSIONS,
+    platform_output_schema,
+)
 from nexus.agents.platform_usage import (
     PLATFORM_PRICE_VERSION,
     PLATFORM_PRICE_VERSIONS,
@@ -86,7 +91,7 @@ class PlatformAllocation:
     stage_order: tuple[str, ...] = _STAGE_ORDER
     output_limit: int = _OUTPUT_LIMIT
     framing_units: int = _FRAMING_UNITS
-    units_version: str = "platform-full-http-utf8-plus8192-v1"
+    units_version: str = LEGACY_PLATFORM_UNITS_VERSION
 
     @property
     def allocation_hash(self) -> str:
@@ -137,6 +142,7 @@ def _wire(
     output_remaining: int,
     profile: PlatformProfile,
     forbidden: tuple[str, ...],
+    units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
 ) -> bytes:
     body = {
         "model": profile.model,
@@ -154,7 +160,7 @@ def _wire(
                 "type": "json_schema",
                 "name": "research_stage",
                 "strict": True,
-                "schema": codex_output_schema(output_model),
+                "schema": platform_output_schema(output_model, units_version=units_version),
             }
         },
         "max_output_tokens": output_remaining,
@@ -168,7 +174,10 @@ def _wire(
 
 
 def freeze_platform_allocation(
-    prepared: PreparedComparisonInput, *, profile: PlatformProfile = PlatformProfile()
+    prepared: PreparedComparisonInput,
+    *,
+    profile: PlatformProfile = PlatformProfile(),
+    units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
 ) -> PlatformAllocation:
     """Compile the existing maximal schema envelope, including outer JSON escaping.
 
@@ -177,6 +186,8 @@ def freeze_platform_allocation(
     the old experiment's outputs. No old common-wire 100479 admission is used.
     """
     _require_profile(profile)
+    if units_version not in PLATFORM_UNITS_VERSIONS:
+        raise ValueError("PLATFORM_ALLOCATION_CHANGED")
     if prepared.input_hash != prepared.proof.get("input_hash"):
         raise ValueError("COMPARISON_INPUT_CHANGED")
     member = copy.deepcopy(prepared.payload)
@@ -225,6 +236,7 @@ def freeze_platform_allocation(
                     output_remaining=_OUTPUT_LIMIT,
                     profile=profile,
                     forbidden=prepared.forbidden,
+                    units_version=units_version,
                 )
             )
             + _FRAMING_UNITS
@@ -232,8 +244,10 @@ def freeze_platform_allocation(
         if units > _MAX_STAGE_UNITS:
             raise ValueError("PLATFORM_INPUT_TOO_LARGE")
         bounds.append(units)
-        schemas.append(_hash(codex_output_schema(schema)))
-    return PlatformAllocation(prepared.input_hash, tuple(bounds), tuple(schemas), profile)
+        schemas.append(_hash(platform_output_schema(schema, units_version=units_version)))
+    return PlatformAllocation(
+        prepared.input_hash, tuple(bounds), tuple(schemas), profile, units_version=units_version
+    )
 
 
 def _remaining(
@@ -303,7 +317,7 @@ def compile_platform_stage(
         or allocation.output_limit != _OUTPUT_LIMIT
         or type(allocation.framing_units) is not int
         or allocation.framing_units != _FRAMING_UNITS
-        or allocation.units_version != "platform-full-http-utf8-plus8192-v1"
+        or allocation.units_version not in PLATFORM_UNITS_VERSIONS
         or len(allocation.stage_schema_envelope_hashes) != 3
         or len(allocation.stage_input_upper_bounds) != 3
         or any(
@@ -344,6 +358,7 @@ def compile_platform_stage(
         output_remaining=remaining,
         profile=allocation.profile,
         forbidden=prepared.forbidden,
+        units_version=allocation.units_version,
     )
     units = len(wire) + _FRAMING_UNITS
     upper_bound = allocation.stage_input_upper_bounds[index]

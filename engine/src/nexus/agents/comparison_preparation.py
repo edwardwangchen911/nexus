@@ -15,6 +15,7 @@ from nexus.agents.comparison_inputs import (
 )
 from nexus.agents.comparison_manifest import PLATFORM_PURPOSES, PURPOSE, PURPOSES
 from nexus.agents.models import ResearchRequest
+from nexus.agents.platform_schema import CURRENT_PLATFORM_UNITS_VERSION
 from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
 from nexus.jobs.models import job_input_hash
 
@@ -28,6 +29,7 @@ def prepare_archive(
     experiment_id: UUID,
     purpose: str = PURPOSE,
     platform_price_version: str = PLATFORM_PRICE_VERSION,
+    platform_units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
 ) -> dict[str, Any]:
     artifact = reconstruct_archive(
         source,
@@ -49,6 +51,7 @@ def prepare_archive(
                                 m["payload"], m["proof"], tuple(m["forbidden"])
                             ),
                             profile=PlatformProfile(price_version=platform_price_version),
+                            units_version=platform_units_version,
                         )
                     )
                 )

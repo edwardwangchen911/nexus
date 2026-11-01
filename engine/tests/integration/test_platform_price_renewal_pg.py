@@ -79,6 +79,12 @@ async def test_empty_renewal_downgrade_and_reupgrade_keep_exact_old_functions(
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     try:
+        # The renewal assertion compares the original v1 function. 0110 has
+        # its own versioned-schema migration/rollback regression; capture the
+        # historical function before that intentional predicate extension.
+        await asyncio.to_thread(
+            command.downgrade, Config("engine/alembic.ini"), "0109_platform_third_round"
+        )
         async with factory() as session:
             expected = await session.scalar(
                 text(
