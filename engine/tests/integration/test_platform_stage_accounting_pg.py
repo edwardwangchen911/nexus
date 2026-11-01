@@ -11,7 +11,16 @@ from integration.test_platform_producer_pg import setup
 from nexus.agents.comparison_claim import claim_comparison_position
 from nexus.agents.comparison_inputs import PreparedComparisonInput
 from nexus.agents.comparison_producer import admit_comparison_position
-from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSIONS
+from nexus.agents.comparison_registration import register_comparison
+from nexus.agents.platform_schema import (
+    CURRENT_PLATFORM_UNITS_VERSION,
+    LEGACY_PLATFORM_UNITS_VERSION,
+)
+from nexus.agents.platform_usage import (
+    MEDIUM_PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSIONS,
+)
 from nexus.agents.platform_wire import compile_platform_stage
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.agents.research_stages.protocol import StagedProtocol, stage_evidence
@@ -29,10 +38,25 @@ from unit.agents.test_platform_usage import usage
 
 async def native_platform(factory, monkeypatch, tmp_path, *, price_version=PLATFORM_PRICE_VERSION):
     source, prepared, manifest, model_id, old, protected = await setup(
-        factory, monkeypatch, price_version=price_version
+        factory,
+        monkeypatch,
+        price_version=price_version,
+        units_version=CURRENT_PLATFORM_UNITS_VERSION
+        if price_version == MEDIUM_PLATFORM_PRICE_VERSION
+        else LEGACY_PLATFORM_UNITS_VERSION,
     )
-    manifest, funding = await funding_fixture(factory, manifest, tmp_path, monkeypatch)
+    manifest, funding = await funding_fixture(
+        factory,
+        manifest,
+        tmp_path,
+        monkeypatch,
+        explicit_spend=manifest.purpose == "platform-qualification-v1",
+    )
     async with factory.begin() as s:
+        if manifest.purpose == "platform-qualification-v1":
+            # Stable rounds require registration before admission; unlike the
+            # historical purposes, admission must never create their identity.
+            await register_comparison(s, manifest, allow_new_round=True)
         result = await admit_comparison_position(
             s,
             source=source,

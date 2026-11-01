@@ -19,7 +19,10 @@ from nexus.agents.chatgpt_grant import GrantStore
 from nexus.agents.comparison_execution import execute_comparison_position
 from nexus.agents.comparison_manifest import parse_comparison_manifest
 from nexus.agents.platform_schema import CURRENT_PLATFORM_UNITS_VERSION
-from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
+from nexus.agents.platform_usage import (
+    CURRENT_PLATFORM_PRICE_VERSION,
+    MEDIUM_PLATFORM_PRICE_VERSION,
+)
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.ops import openai_local, platform_round_registration
 from nexus.ops.research_comparison import native_command
@@ -36,6 +39,11 @@ async def stable_environment(migrated_database_url, monkeypatch, tmp_path, reque
         database_url=migrated_database_url, agent_daily_budget_usd=Decimal(20)
     )
     factory = session_factory(settings)
+    version = (
+        MEDIUM_PLATFORM_PRICE_VERSION
+        if getattr(request, "param", None) == "medium"
+        else CURRENT_PLATFORM_PRICE_VERSION
+    )
     if getattr(request, "param", None) == "wide_sdk":
         from integration import test_comparison_producer_pg as legacy_fixtures
         from nexus.agents.committee import INDEPENDENT_MONITOR_PROMPT_VERSION
@@ -63,7 +71,10 @@ async def stable_environment(migrated_database_url, monkeypatch, tmp_path, reque
                 factory,
                 monkeypatch,
                 source_kind="SEC",
-                price_version=CURRENT_PLATFORM_PRICE_VERSION,
+                price_version=version,
+                purpose="platform-qualification-v1"
+                if version == MEDIUM_PLATFORM_PRICE_VERSION
+                else None,
                 units_version=CURRENT_PLATFORM_UNITS_VERSION,
             )
         reference, _ = await funding_fixture(
@@ -121,6 +132,7 @@ async def stable_environment(migrated_database_url, monkeypatch, tmp_path, reque
                 implementation_sha="f" * 40,
                 experiment_id=identity,
                 output=output or tmp_path / str(identity),
+                profile_version=version,
             )
 
         def position(registration, ordinal=1):
@@ -138,6 +150,7 @@ async def stable_environment(migrated_database_url, monkeypatch, tmp_path, reque
 
         yield Namespace(
             factory=factory,
+            profile_version=version,
             root=tmp_path,
             registration=registration,
             position=position,
@@ -150,6 +163,7 @@ async def stable_environment(migrated_database_url, monkeypatch, tmp_path, reque
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stable_environment", ["low", "medium"], indirect=True)
 @pytest.mark.parametrize(
     "first_unknown", [False, True], ids=["two-complete-rounds", "closed-unknown-retained"]
 )
@@ -173,8 +187,15 @@ async def test_same_deployment_normal_rounds_execute_and_preserve_prior_facts(
             )
         assert request.headers["authorization"] == "Bearer synthetic-platform-native-funding"
         wire = json.loads(request.content)
+        assert wire["reasoning"] == {
+            "effort": "medium" if env.profile_version == MEDIUM_PLATFORM_PRICE_VERSION else "low"
+        }
         wires.append(wire)
         payload = json.loads(wire["input"][1]["content"])
+        assert (
+            wire["max_output_tokens"]
+            == {"research": 8192, "critique": 8112, "synthesis": 8032}[payload["stage"]]
+        )
         if not seen and first_unknown:
             seen.append(("platform", payload["stage"]))
             return httpx.Response(
@@ -792,3 +813,57 @@ async def test_authority_directory_names_are_durable_before_database_registratio
         with pytest.raises(OSError, match="synthetic parent directory sync failure"):
             await native_command(args)
         assert marker.read_bytes() == frozen and db_attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stable_environment", ["medium"], indirect=True)
+async def test_normal_medium_profile_is_bound_to_round_and_cannot_relabel_low(stable_environment):
+    env = stable_environment
+    args = env.registration()
+    registered_profile = await native_command(
+        Namespace(
+            command="register-profile",
+            repo_root=args.repo_root,
+            purpose="platform-qualification-v1",
+            profile_version=MEDIUM_PLATFORM_PRICE_VERSION,
+        )
+    )
+    assert registered_profile["model_config_id"] == str(env.position(args).model_config_id)
+    assert (await native_command(args))["status"] == "registered"
+    profile = await native_command(
+        Namespace(
+            command="inspect-profile",
+            repo_root=args.repo_root,
+            purpose="platform-qualification-v1",
+            profile_version=MEDIUM_PLATFORM_PRICE_VERSION,
+        )
+    )
+    assert profile["version"] == MEDIUM_PLATFORM_PRICE_VERSION
+    assert profile["model_config_id"] == str(env.position(args).model_config_id)
+    before = (args.output / "round.json").read_bytes()
+    args.profile_version = CURRENT_PLATFORM_PRICE_VERSION
+    with pytest.raises(ValueError, match="COMPARISON_REGISTRATION_CONFLICT"):
+        await native_command(args)
+    assert (args.output / "round.json").read_bytes() == before
+    async with env.factory() as session:
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM research_comparison_manifest WHERE id=:id"),
+                {"id": args.experiment_id},
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM research_comparison_chain WHERE experiment_id=:id"),
+                {"id": args.experiment_id},
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                text("SELECT to_jsonb(b) FROM agent_daily_budget_reservations b WHERE id=:id"),
+                {"id": env.old},
+            )
+            == env.protected
+        )

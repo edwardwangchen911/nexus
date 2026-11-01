@@ -71,13 +71,25 @@ class PlatformProfile:
 
 
 def _require_profile(profile: PlatformProfile) -> None:
-    fixed = PlatformProfile(price_version=profile.price_version)
+    fixed = platform_wire_profile(profile.price_version)
     if profile.price_version not in PLATFORM_PRICE_VERSIONS or any(
         type(getattr(profile, f.name)) is not type(getattr(fixed, f.name))
         or getattr(profile, f.name) != getattr(fixed, f.name)
         for f in fields(fixed)
     ):
         raise ValueError("PLATFORM_PROFILE_INVALID")
+
+
+def platform_wire_profile(version: str) -> PlatformProfile:
+    """Exact supported configurations; historical constructors/defaults remain low."""
+    from nexus.agents.platform_usage import MEDIUM_PLATFORM_PRICE_VERSION
+
+    if version not in PLATFORM_PRICE_VERSIONS:
+        raise ValueError("PLATFORM_PROFILE_INVALID")
+    return PlatformProfile(
+        price_version=version,
+        effort="medium" if version == MEDIUM_PLATFORM_PRICE_VERSION else "low",
+    )
 
 
 @dataclass(frozen=True)

@@ -79,10 +79,10 @@ async def funding_fixture(
         console_evidence_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
     )
     if explicit_spend:
-        from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
+        from nexus.agents.platform_usage import PLATFORM_PRICE_VERSION
         from nexus.ops import platform_credentials
 
-        renewed = manifest.price_version == CURRENT_PLATFORM_PRICE_VERSION
+        renewed = manifest.price_version != PLATFORM_PRICE_VERSION
 
         # Like the synthetic model price window, isolate lifecycle tests from
         # today's date. Unit tests enforce the real fixed cutoff permanently.

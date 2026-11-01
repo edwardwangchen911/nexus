@@ -27,6 +27,27 @@ def argv(tmp_path):
     return args
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_round_profile_selection_is_explicit_and_default_stays_low(
+    tmp_path, monkeypatch, capsys, explicit
+):
+    from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION
+
+    version = "platform-terra-medium-implicit30m-20261101-v1"
+
+    async def inspect(args):
+        assert args.profile_version == (version if explicit else CURRENT_PLATFORM_PRICE_VERSION)
+        return {"status": "registered", "dispatch_authority": False}
+
+    command = argv(tmp_path)
+    if explicit:
+        command += ["--profile-version", version]
+    monkeypatch.setattr(research_comparison, "native_command", inspect)
+    monkeypatch.setattr(sys, "argv", command)
+    assert research_comparison.main() == 0
+    assert json.loads(capsys.readouterr().out)["dispatch_authority"] is False
+
+
 @pytest.mark.parametrize(
     "code",
     [

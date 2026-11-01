@@ -10,8 +10,12 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
-from nexus.agents.platform_wire import PlatformProfile
+from nexus.agents.platform_usage import (
+    CURRENT_PLATFORM_PRICE_VERSION,
+    MEDIUM_PLATFORM_PRICE_VERSION,
+    PLATFORM_PRICE_VERSION,
+)
+from nexus.agents.platform_wire import platform_wire_profile
 from nexus.persistence.models.agents import AgentModelConfigRecord
 
 
@@ -20,12 +24,13 @@ def platform_profile(version: str = PLATFORM_PRICE_VERSION) -> dict[str, object]
     windows = {
         PLATFORM_PRICE_VERSION: ("2026-10-31", "2026-11-01"),
         CURRENT_PLATFORM_PRICE_VERSION: ("2026-11-01", "2026-11-02"),
+        MEDIUM_PLATFORM_PRICE_VERSION: ("2026-11-01", "2026-11-02"),
     }
     if version not in windows:
         raise ValueError("PLATFORM_PROFILE_INVALID")
     start, end = windows[version]
     return {
-        **asdict(PlatformProfile(price_version=version)),
+        **asdict(platform_wire_profile(version)),
         "model_id": "gpt-5.6-terra",
         "version": version,
         "max_input_tokens": 816000,  # 3 stages; each independently capped at 272000.

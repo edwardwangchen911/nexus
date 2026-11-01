@@ -12,6 +12,16 @@
 
 ---
 
+## 2026-11-02 已评审的 medium 单变量诊断
+
+冻结原件到实际三阶段请求的复核已确认：单股任务、经营与季度指标、三项 EPS 采纳范围及宏观来源均已送达；没有证据支持增加任务字段或同时改提示。指定 Chat 定向评审据此接受只把同一 Terra 的 effort 从 low 改为 medium 的一次诊断。原 low 质量评分与失败分母保留；没有展示全部 EPS 数值本身不是新增失败条件。评审仍按相关性、财务口径、断言引用和审计闭合证据判断。
+
+支持配置 `platform-terra-medium-implicit30m-20261101-v1` 仅供稳定 `platform-qualification-v1` 协议显式选用；旧 low 配置与默认入口不变。配置支持与每轮 UUID 分离，后续同配置只登记业务身份和预算，不再增加迁移。模型、原 source、冻结时点、任务、提示、schema、两条 claim／每条三引用、三阶段累计 8192 output（含 reasoning）、输入上限、阶段与清理截止、共享预算均保持。价格窗口仍截止 `2026-11-02T00:00:00Z`，不延期。
+
+第一阶段除新身份和 effort 外保持相同业务输入；后续阶段必须消费该新链自己的实际前驱，不注入旧输出来伪造严格相同请求。完整九阶段预算先冻结，按 AAPL→AVGO→NVDA 顺序，失败即停、不补样本、不重试；若 medium 再次质量失败，停止该候选的连续采样。离线回归通过不能证明模型质量。人工评估隐藏 effort 与耗时；这属于配置诊断，不是原 low 的纯传输比较，也不自动批准切换 SDK 默认。
+
+0112 迁移只扩展精确配置／hash／effort 的绑定，不改写任何旧行。空库可退回 0111；存在 medium 配置或阶段事实时拒绝数据库降级，必须保留 0112 并使用验证过的兼容读取镜像。官方依据：[Terra 支持 medium](https://developers.openai.com/api/docs/models/gpt-5.6-terra)、[完整 output 含推理用量](https://developers.openai.com/api/docs/guides/reasoning)。
+
 # 直接 Responses 最小迁移与完整比较
 
 ## 全阶段容量预检与精确未领取关闭

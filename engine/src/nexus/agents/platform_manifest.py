@@ -16,13 +16,14 @@ from nexus.agents.comparison_manifest import (
     Route,
 )
 from nexus.agents.platform_profile import platform_profile_hash
-from nexus.agents.platform_schema import PLATFORM_UNITS_VERSIONS
+from nexus.agents.platform_schema import CURRENT_PLATFORM_UNITS_VERSION, PLATFORM_UNITS_VERSIONS
 from nexus.agents.platform_usage import (
     CURRENT_PLATFORM_PRICE_VERSION,
+    MEDIUM_PLATFORM_PRICE_VERSION,
     PLATFORM_PRICE_VERSION,
     platform_reservation_usd,
 )
-from nexus.agents.platform_wire import PlatformAllocation, PlatformProfile
+from nexus.agents.platform_wire import PlatformAllocation, platform_wire_profile
 
 
 class PlatformManifest(ComparisonManifest):
@@ -54,18 +55,27 @@ class PlatformManifest(ComparisonManifest):
         )
         if (
             self.platform_contract != self.purpose
-            or version != expected
+            or version
+            not in (
+                (expected, MEDIUM_PLATFORM_PRICE_VERSION)
+                if self.purpose == PLATFORM_QUALIFICATION_PURPOSE
+                else (expected,)
+            )
             or self.api_config_hash != platform_profile_hash(version)
         ):
             raise ValueError("PLATFORM_PROFILE_INVALID")
         for index, a in enumerate(self.allocations):
             if (
                 a.input_hash != self.input_hashes[index]
-                or a.profile != PlatformProfile(price_version=version)
+                or a.profile != platform_wire_profile(version)
                 or a.stage_order != ("research", "critique", "synthesis")
                 or a.output_limit != 8192
                 or a.framing_units != 8192
                 or a.units_version not in PLATFORM_UNITS_VERSIONS
+                or (
+                    version == MEDIUM_PLATFORM_PRICE_VERSION
+                    and a.units_version != CURRENT_PLATFORM_UNITS_VERSION
+                )
                 or a.units_version != self.allocations[0].units_version
                 or len(a.stage_input_upper_bounds) != 3
                 or any(

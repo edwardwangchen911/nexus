@@ -191,6 +191,7 @@ def _durable_directory(path: Path, root: Path) -> None:
 
 
 def _freeze(args: argparse.Namespace, now: datetime, request: dict[str, str]) -> dict[str, Any]:
+    version = getattr(args, "profile_version", CURRENT_PLATFORM_PRICE_VERSION)
     source = _private_bytes(args.source.absolute(), 8 * 1024 * 1024)
     template_bytes = _private_bytes(args.template.absolute(), 65536)
     if hashlib.sha256(template_bytes).hexdigest() != request["template_sha256"]:
@@ -201,11 +202,11 @@ def _freeze(args: argparse.Namespace, now: datetime, request: dict[str, str]) ->
         expected_source_hash=args.source_sha256,
         experiment_id=args.experiment_id,
         purpose=PLATFORM_QUALIFICATION_PURPOSE,
-        platform_price_version=CURRENT_PLATFORM_PRICE_VERSION,
+        platform_price_version=version,
         platform_units_version=CURRENT_PLATFORM_UNITS_VERSION,
     )
     prepared["rebuilt_at"] = now.isoformat()
-    fields = platform_model_fields(CURRENT_PLATFORM_PRICE_VERSION)
+    fields = platform_model_fields(version)
     if (
         not cast(datetime, fields["pricing_available_at"])
         <= now
@@ -240,7 +241,7 @@ def _freeze(args: argparse.Namespace, now: datetime, request: dict[str, str]) ->
     data.update(
         platform_contract=PLATFORM_QUALIFICATION_PURPOSE,
         implementation_sha=args.implementation_sha,
-        api_config_hash=platform_profile_hash(CURRENT_PLATFORM_PRICE_VERSION),
+        api_config_hash=platform_profile_hash(version),
         funding_proof_hash="0" * 64,
         credential_binding_hash=credential.binding_hash,
     )
@@ -301,6 +302,10 @@ async def register_round(
             _private_bytes(args.continuation_evidence.absolute(), 16 * 1024 * 1024)
         ).hexdigest(),
     )
+    version = getattr(args, "profile_version", CURRENT_PLATFORM_PRICE_VERSION)
+    # Preserve historical low request bytes; a new profile is immutable for this ID.
+    if version != CURRENT_PLATFORM_PRICE_VERSION:
+        request["profile_version"] = version
     output = args.output.absolute()
     if output.resolve() != output:
         raise ValueError("PLATFORM_PROOF_UNSAFE")
@@ -342,6 +347,7 @@ async def register_round(
         or manifest.source_manifest_hash != args.source_sha256
         or manifest.implementation_sha != args.implementation_sha
         or not isinstance(manifest, QualificationPlatformManifest)
+        or manifest.price_version != version
         or manifest.funding_proof_hash != hashlib.sha256(_wire(bundle["budget"])).hexdigest()
         or budget.experiment_id != manifest.experiment_id
         or budget.input_hashes != manifest.input_hashes

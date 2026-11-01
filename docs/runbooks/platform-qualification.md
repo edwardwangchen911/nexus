@@ -1,6 +1,6 @@
 # API 资格轮登记与只读核对
 
-适用于 schema 0111 的稳定用途 `platform-qualification-v1`。同一受支持配置下，
+适用于 schema 0111 及以上的稳定用途 `platform-qualification-v1`。同一受支持配置下，
 后续轮次只登记新的实验 UUID 和冻结预算，不增加用途枚举、迁移或发布版本。
 旧用途和旧结果保持原身份、原唯一约束及只读核对能力。
 
@@ -35,6 +35,20 @@
 `bound_frozen_positions_unreserved` 仅表示整轮上界已冻结；实际预留、领取和发送仍逐位置走
 原 `admit-position`、`run-position` 路径，消费共享账本和全部门禁。登记成功不等于允许发送，
 更不等于质量合格或正式决策许可；质量达标前业务默认仍为 SDK。
+
+### 显式选择 medium 诊断配置（0112）
+
+默认仍为原 low 配置。已评审的 medium 单变量诊断须在正常
+`register-profile` / `inspect-profile` 上同时指定
+`--purpose platform-qualification-v1` 和
+`--profile-version platform-terra-medium-implicit30m-20261101-v1`；
+`register-round` 也必须显式传入同一个 `--profile-version`。独立 `prepare` 支持相同选择，
+但已登记的轮次继续消费原冻结包，不重新 prepare。其他历史 purpose 拒绝该选择。
+
+配置选择固化进权威包；同一 UUID 换 effort、版本或导出目录都不能重新冻结或登记。
+使用该配置返回的 model_config_id 准入，不套用旧 low 模型记录。官方支持 medium 不代表
+本地质量已合格；三阶段累计 output 仍为 8192 且包含 reasoning，用完即停，不增大上限。
+价格截止仍 `2026-11-02T00:00:00Z`，现有旧未知费用与共享预算保护不变。
 
 ### 共享额度与本机配置
 
@@ -96,6 +110,10 @@ Platform 价格版本与 SDK 版本分别登记。只有精确模型配置、Run
 0111 仅放开稳定用途的多身份登记，保留四种历史用途唯一性，不改历史记录。出现稳定用途
 数据后拒绝降回不支持它的 schema；回滚必须使用已验证读取 0111 的兼容镜像，保留原预算、
 阶段事实及审计。新价格或模型配置仍须独立验证为受支持配置，不能借新轮登记放宽校验。
+
+0112 新增 medium 精确配置支持，不改旧行。未产生 medium 配置或阶段事实时可退回 0111；
+一旦存在则拒绝数据库降级，保留 0112，使用验证过的兼容读取镜像。部署前必须验证该回滚路径，
+不能把仅支持 0111 的历史镜像当作 medium 事实的可行回滚。
 
 ## 原首版准备退出的限定历史读取
 
