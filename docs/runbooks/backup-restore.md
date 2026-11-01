@@ -56,12 +56,20 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.local_recovery \
 
 1. 校验 dump 的 SHA-256、长度和备份 manifest；manifest 必须包含 `provider_capabilities`、`portfolio_snapshots`、`price_series_manifests`、`price_bar_records` 四张表的计数/哈希。
 2. 拒绝远程 Docker，只通过本机 Unix socket 新建带本轮所有权标签、无持久 volume、数据使用 tmpfs、关闭容器日志的随机容器。目标端口不得与业务数据库相同；恢复前核验目标无已有关系或额外 schema。
-3. 再校验传入容器的 dump，执行 `pg_restore --no-owner --no-privileges --exit-on-error --single-transaction`。不运行新迁移；恢复的 schema 和四张表须与备份时点一致。
+3. 再校验传入容器的 dump，默认执行 `pg_restore --no-owner --no-privileges --exit-on-error --single-transaction`；完整 0107 归档使用下述限定兼容路径。不自动运行新迁移；版本标记和逐表摘要须与备份时点一致。
 4. 扫描恢复数据库的 S3 引用，通过同一 URI 关联原始记录的哈希/长度；派生引用可以不重复长度，但其哈希必须一致。仅从现有本机对象存储按精确版本读取，校验版本、SHA-256 和长度，复制为 0600 本地文件，再离线读回校验。单对象上限 64 MiB，总量上限 512 MiB、最多 10000 个，超过时停止而非默默跳过。
 5. 不改写历史 URI，私有 `object-bindings.json` 保存原始 URI 与本地副本的对应关系；`result.json` 只保存安全状态、时间和汇总。终端不打印对象 URI、账户内容、密码或异常原文。
 6. 成功或失败均仅清理本轮标签恒等的精确容器；清理失败即整体失败，保留主错误和清理错误。原始备份及本轮私有结果保留，不覆盖、不递归删除。
 
 这一步验证数据库内容及数据库引用对象的可恢复性。原 `pre-0034` 备份只有数据库；对象是在恢复核验时从仍可用的本机对象存储取得。未被数据库 URI 引用的原始文件不在本片范围内，不能宣称完整离线灾备、角色/权限恢复或应用切换已验证。备份文件修改时间也不是数据库事务的一致性时刻或 RPO 承诺。
+
+### 0107 完整归档的函数查找兼容与 0108 回滚
+
+0107 的 Platform manifest 包装函数调用未限定 schema 的 v1 函数。在恢复工具的安全空 `search_path` 下，非空 manifest 的 COPY 会因函数解析失败而中止。0108 仅将两处调用限定为 `public.`；原 v1 正文、校验策略、表结构与业务行均不变，不改写历史迁移。
+
+正常恢复入口只对通过原摘要和完整格式校验的 0107 归档启用兼容分支：从原 dump 生成 pre-data 及 data/post-data SQL，在同一个 `psql -X --set=ON_ERROR_STOP=1 --single-transaction` 会话内依次执行 pre-data、限定修正、data/post-data。修正前严格验证签名、属性和原函数正文指纹；未知定义立即拒绝。空搜索路径、CHECK、触发器及 post-data 均保留，不先失败后重试。原 dump、业务源库、manifest 行和恢复副本的 `alembic_version` 不变；恢复报告的 `schema_compatibility` 明确记录 `0107_platform_manifest_qualified_lookup`，不能把目标副本的兼容修正称为逐字相同 schema 或自动升级。
+
+其他版本继续原 `pg_restore` 路径。新 0108 备份无需该兼容分支。应用回滚应使用支持当前 schema、旧身份及可选 HTTP 诊断字段的兼容镜像；显式将 0108 版本标记降回 0107 时保留函数限定修正，不重新引入恢复缺陷。0107 对已存在 v2 事实的更早版本降级保护不变。恢复通过仅证明该备份的数据和对象恢复，不证明服务切换或研究闭环。
 
 ### 2026-09-03 实际核验与故障记录
 

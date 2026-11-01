@@ -48,6 +48,7 @@ async def test_complete_committee_allocation_counterexample_uses_no_real_sdk(
         SimpleNamespace(
             get_running_loop=lambda: SimpleNamespace(time=lambda: started + elapsed),
             timeout_at=lambda deadline: asyncio.timeout(deadline - (started + elapsed)),
+            CancelledError=asyncio.CancelledError,
         ),
     )
 

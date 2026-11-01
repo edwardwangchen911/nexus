@@ -14,6 +14,7 @@ from nexus.agents.comparison_preparation import prepare_archive
 from nexus.agents.comparison_registration import register_comparison
 from nexus.agents.platform_profile import platform_profile_hash
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import text
@@ -61,7 +62,7 @@ async def test_sql_renewal_matches_frozen_profiles_and_forbids_downgrade(
         async with factory() as session:
             assert (
                 await session.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0107_platform_price_renewal"
+                == CURRENT_MIGRATION_HEAD
             )
             assert (
                 await session.scalars(
@@ -102,7 +103,7 @@ async def test_empty_renewal_downgrade_and_reupgrade_keep_exact_old_functions(
         async with factory() as session:
             assert (
                 await session.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0107_platform_price_renewal"
+                == CURRENT_MIGRATION_HEAD
             )
     finally:
         await factory.kw["bind"].dispose()

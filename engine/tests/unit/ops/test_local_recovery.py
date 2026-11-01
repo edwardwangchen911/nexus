@@ -265,3 +265,74 @@ async def test_cancelled_create_finishes_before_owner_cleanup(tmp_path, monkeypa
     assert events == ["create_started", "create_finished", "cleanup_started", "removed"]
     assert created is False
     assert not (backup.backup / "complete.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_twice", [False, True])
+async def test_restore_cancel_waits_for_issued_transaction_before_cleanup(
+    tmp_path, monkeypatch, cancel_twice
+):
+    from nexus.ops import local_recovery
+
+    tmp_path.chmod(0o700)
+    write_private(tmp_path / "database.dump", b"synthetic")
+    write_private(tmp_path / "manifest.json", b"{}")
+    monkeypatch.setattr(
+        local_recovery,
+        "read_backup",
+        lambda _: {
+            "schema": "0107_platform_price_renewal",
+            "format": "nexus_local_backup_v1",
+            "source_port": 55439,
+        },
+    )
+    recovery = LocalRecovery(tmp_path, tmp_path)
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = Event()
+    events = []
+
+    def run(args, **kwargs):
+        if "psql" in args:
+            events.append("transaction_started")
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=5)
+            events.append("transaction_finished")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    async def start():
+        return "synthetic target"
+
+    async def restore(*args):
+        await recovery.restore_archive("0107_platform_price_renewal", complete_backup=True)
+
+    async def cleanup():
+        assert events == ["transaction_started", "transaction_finished"]
+        events.append("cleanup")
+
+    async def forbidden(*args):
+        pytest.fail("cancelled database restoration must not start object recovery")
+
+    monkeypatch.setattr(local_recovery.subprocess, "run", run)
+    monkeypatch.setattr(recovery, "start", start)
+    monkeypatch.setattr(recovery, "restore_database", restore)
+    monkeypatch.setattr(recovery, "cleanup", cleanup)
+    monkeypatch.setattr(recovery, "recover_local_objects", forbidden)
+    task = asyncio.create_task(recovery.execute())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel("restore-stop")
+        await asyncio.sleep(0)
+        if cancel_twice:
+            task.cancel("second-cancel")
+            await asyncio.sleep(0)
+        assert events == ["transaction_started"]
+    finally:
+        release.set()
+        with pytest.raises(CancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=5)
+    assert cancelled.value.args == ("restore-stop",)
+    assert events == ["transaction_started", "transaction_finished", "cleanup"]
+    result = json.loads((recovery.output / "result.json").read_text())
+    assert result["status"] == "failed" and result["target_residue"] == 0
+    assert not result.get("database_restored", False)

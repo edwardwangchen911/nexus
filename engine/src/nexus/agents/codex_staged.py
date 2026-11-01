@@ -1397,7 +1397,21 @@ class StagedCodexCommittee(CodexCommittee):
                 raw, usage = await (self.stage_invoker or invoke_codex)(
                     payload, output_model=output_model, **invocation_options
                 )
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
+            diagnostic_error = (
+                error
+                if isinstance(error, CodexInvocationError)
+                else getattr(error, "http_stage_failure", None)
+            )
+            # asyncio.timeout preserves the interrupted exception as its cause.
+            # Read only our typed carrier; never copy arbitrary exception text.
+            if diagnostic_error is None and isinstance(error, TimeoutError):
+                diagnostic_error = getattr(error.__cause__, "http_stage_failure", None)
+            if isinstance(error, asyncio.CancelledError) and not (
+                isinstance(diagnostic_error, CodexInvocationError)
+                and diagnostic_error.http_failure_facts is not None
+            ):
+                raise
             if isinstance(error, CodexInvocationError) and error.usage is not None:
                 self.usage = UsageSnapshot(
                     input_tokens=self.usage.input_tokens + error.usage.input_tokens,
@@ -1421,6 +1435,9 @@ class StagedCodexCommittee(CodexCommittee):
                 boundary="invocation",
                 failure_facts=error.failure_facts
                 if isinstance(error, CodexInvocationError)
+                else None,
+                http_failure_facts=diagnostic_error.http_failure_facts
+                if isinstance(diagnostic_error, CodexInvocationError)
                 else None,
                 response_hash=None,
                 invocation_phase=error.phase

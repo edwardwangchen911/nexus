@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from nexus.market.object_store import S3ProviderEvidenceStore, _version_id_from_frozen_uri
 from nexus.ops.backup_restore import _POSTGRES_IMAGE
 from nexus.ops.fosun_local import load_local_environment
+from nexus.persistence.platform_restore import PLATFORM_LOOKUP_REPAIR
 from nexus.settings import EngineSettings
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
@@ -254,6 +255,7 @@ class LocalRecovery:
         self.docker: tuple[str, ...] = ("docker",)
         self.owns_target = False
         self.output: Path | None = None
+        self.schema_compatibility: list[str] = []
 
     async def command(
         self,
@@ -417,19 +419,9 @@ class LocalRecovery:
             )
             if digest != manifest["dump_sha256"]:
                 raise RecoveryError("RECOVERY_BACKUP_DIGEST_MISMATCH")
-            await self.command(
-                "exec",
-                self.container,
-                "pg_restore",
-                "-U",
-                "nexus_recovery",
-                "-d",
-                self.database,
-                "--no-owner",
-                "--no-privileges",
-                "--exit-on-error",
-                "--single-transaction",
-                "/tmp/recovery.dump",
+            await self.restore_archive(
+                manifest["schema"],
+                complete_backup=manifest.get("format") == "nexus_local_backup_v1",
             )
             async with engine.connect() as connection:
                 await connection.execute(text("SET TRANSACTION READ ONLY"))
@@ -453,6 +445,75 @@ class LocalRecovery:
         finally:
             await engine.dispose()
 
+    async def restore_archive(self, schema: str, *, complete_backup: bool) -> None:
+        if schema != "0107_platform_price_renewal" or not complete_backup:
+            await self.command(
+                "exec",
+                self.container,
+                "pg_restore",
+                "-U",
+                "nexus_recovery",
+                "-d",
+                self.database,
+                "--no-owner",
+                "--no-privileges",
+                "--exit-on-error",
+                "--single-transaction",
+                "/tmp/recovery.dump",
+            )
+            return
+        # Generate SQL from the verified archive without connecting to a database.
+        # CHECKs run during COPY, before a subsequent migration could repair lookup.
+        for sections, output in (
+            (("--section=pre-data",), "/tmp/recovery-pre.sql"),
+            (("--section=data", "--section=post-data"), "/tmp/recovery-data.sql"),
+        ):
+            await self.command(
+                "exec",
+                self.container,
+                "pg_restore",
+                "--no-owner",
+                "--no-privileges",
+                *sections,
+                f"--file={output}",
+                "/tmp/recovery.dump",
+            )
+        await self.command(
+            "exec",
+            "-i",
+            self.container,
+            "tee",
+            "/tmp/recovery-lookup.sql",
+            input_bytes=PLATFORM_LOOKUP_REPAIR.encode(),
+        )
+        await self.command(
+            "exec",
+            self.container,
+            "chmod",
+            "600",
+            "/tmp/recovery-pre.sql",
+            "/tmp/recovery-lookup.sql",
+            "/tmp/recovery-data.sql",
+        )
+        # One transaction covers schema, narrowly guarded correction, COPY and all
+        # post-data constraints. Keep the archive's secure empty search_path.
+        await self.command(
+            "exec",
+            self.container,
+            "psql",
+            "-X",
+            "-U",
+            "nexus_recovery",
+            "-d",
+            self.database,
+            "--set=ON_ERROR_STOP=1",
+            "--single-transaction",
+            "--file=/tmp/recovery-pre.sql",
+            "--file=/tmp/recovery-lookup.sql",
+            "--file=/tmp/recovery-data.sql",
+        )
+        self.schema_compatibility = ["0107_platform_manifest_qualified_lookup"]
+
     async def recover_objects(self, rows: list[dict[str, Any]]) -> int:
         assert self.output is not None
         settings = EngineSettings.model_validate(self.environment)
@@ -474,8 +535,11 @@ class LocalRecovery:
             )
             if version is None:
                 content = await asyncio.to_thread(
-                    _read_audit_manifest, store, settings.object_store_bucket or "",
-                    storage_key, size,
+                    _read_audit_manifest,
+                    store,
+                    settings.object_store_bucket or "",
+                    storage_key,
+                    size,
                 )
             else:
                 if not storage_key.startswith(prefix):
@@ -603,6 +667,7 @@ class LocalRecovery:
                         "elapsed_seconds": round(monotonic() - started, 3),
                         "service_failover_tested": False,
                         "unreferenced_objects_included": False,
+                        "schema_compatibility": self.schema_compatibility,
                     }
                 )
                 write_private(self.output / "result.json", json.dumps(result).encode())

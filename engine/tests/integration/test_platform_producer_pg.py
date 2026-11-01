@@ -26,6 +26,7 @@ from nexus.agents.platform_manifest import PlatformManifest
 from nexus.agents.platform_usage import CURRENT_PLATFORM_PRICE_VERSION, PLATFORM_PRICE_VERSION
 from nexus.agents.research_only import require_formal_research
 from nexus.agents.research_stages.routes import selected_route
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentResearchRunRecord,
@@ -322,7 +323,7 @@ async def test_new_purpose_sql_and_downgrade_guards_preserve_frozen_registry(
         async with f() as s:
             assert (
                 await s.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0107_platform_price_renewal"
+                == CURRENT_MIGRATION_HEAD
             )
             assert (
                 await s.scalar(
