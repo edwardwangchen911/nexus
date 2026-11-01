@@ -176,7 +176,7 @@ async def collect_response_stage(
         return None
 
     task = asyncio.create_task(receive())
-    primary = None
+    primary: BaseException | None = None
     try:
         done, _ = await asyncio.wait({task}, timeout=max(0, work_deadline - loop.time()))
         if not done:
