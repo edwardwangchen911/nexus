@@ -51,6 +51,7 @@ from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
     AgentPromptVersionRecord,
+    AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
@@ -155,6 +156,57 @@ async def load_frozen_synthesis_authority(
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
     return frozen
+
+
+async def require_frozen_sol_sources(
+    session: AsyncSession, frozen: PortfolioSynthesisInputV1
+) -> None:
+    """Prove the original admitted sources for readback or fenced orphan closure."""
+    from nexus.agents.actionable_research import frozen_source_matches
+    from nexus.agents.research_stages.proof import read_terminal_proof
+
+    for source in frozen.security_outputs:
+        output = await session.get(
+            AgentResearchOutputRecord, source.research_output_id, populate_existing=True
+        )
+        research = (
+            None
+            if output is None
+            else await session.get(AgentResearchRunRecord, output.run_id, populate_existing=True)
+        )
+        if (
+            output is None
+            or research is None
+            or output.created_at > frozen.admitted_at
+            or output.content_hash != source.content_hash
+            or research.model_config_id != frozen.model_config_id
+            or research.model_hash != frozen.model_hash
+            or research.pricing_version != frozen.pricing_version
+            or research.actor_id != "local-agent-paper-cycle"
+            or research.instrument_id != source.instrument_id
+            or research.decision_time != frozen.decision_time
+            or research.idempotency_key != f"agent-paper:{frozen.cycle_id}:{source.instrument_id}"
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
+        proof = await read_terminal_proof(session, run_id=research.id, now=frozen.admitted_at)
+        bindings = (
+            await session.scalars(
+                select(AgentResearchOutputEvidenceRecord).where(
+                    AgentResearchOutputEvidenceRecord.output_id == output.id
+                )
+            )
+        ).all()
+        if (
+            proof is None
+            or not proof.budget_settled
+            or not proof.known
+            or not proof.cleanup_confirmed
+            or any(binding.created_at > frozen.admitted_at for binding in bindings)
+            or not frozen_source_matches(
+                output, source.intent, source.intent_hash, source.evidence_ref_ids, bindings
+            )
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
 
 
 async def reserve_portfolio_synthesis_budget(

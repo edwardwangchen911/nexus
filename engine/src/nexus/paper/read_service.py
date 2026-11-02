@@ -70,6 +70,7 @@ from nexus.api.schemas.paper import (
     PortfolioEconomicEvidenceResponse,
     PortfolioEconomicOrdinarySampleResponse,
     PortfolioEconomicProtocolResponse,
+    PortfolioResponsesUsage,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
@@ -649,7 +650,23 @@ class PaperReadService:
                 for choice in intent.choices
             )
         )
+        receipt = authority.platform_receipt
         return AgentPaperSynthesisResponse(
+            responses_usage=(
+                PortfolioResponsesUsage(
+                    requested_model=receipt.requested_model,
+                    reported_model=receipt.reported_model,
+                    failure_phase=receipt.failure.phase if receipt.failure else None,
+                    failure_kind=receipt.failure.error_kind if receipt.failure else None,
+                    settled_cost_usd=(
+                        None
+                        if run.settled_cost_usd is None
+                        else decimal_to_string(run.settled_cost_usd)
+                    ),
+                )
+                if receipt is not None
+                else None
+            ),
             synthesis_run_id=run.id,
             synthesis_output_id=output.id,
             candidate_batch_id=run.candidate_batch_id,

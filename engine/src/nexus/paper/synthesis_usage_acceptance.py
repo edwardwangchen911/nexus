@@ -273,20 +273,23 @@ async def _collect_proof(
         ):
             raise SynthesisUsageDiagnosticError("synthesis_history", "BINDING_INVALID")
         observed_research.add(research.id)
-        action = await load_actionable_research_output(
-            session,
-            run_id=research.id,
-            decision_time=frozen.admitted_at,
-            allow_safe_no_trade=True,
-            formal_stage_capacity=formal,
-        )
-        if (
-            action.output_id != output.id
-            or action.intent_hash != source.intent_hash
-            or output.content_hash != source.content_hash
-            or action.evidence_ref_ids != source.evidence_ref_ids
-        ):
-            raise SynthesisUsageDiagnosticError("synthesis_history", "BINDING_INVALID")
+        # Native source bindings, cleanup and accounting were verified at admission
+        # time by load_synthesis_read_authority. SDK keeps its own historical verifier.
+        if authority.platform_receipt is None:
+            action = await load_actionable_research_output(
+                session,
+                run_id=research.id,
+                decision_time=frozen.admitted_at,
+                allow_safe_no_trade=True,
+                formal_stage_capacity=formal,
+            )
+            if (
+                action.output_id != output.id
+                or action.intent_hash != source.intent_hash
+                or output.content_hash != source.content_hash
+                or action.evidence_ref_ids != source.evidence_ref_ids
+            ):
+                raise SynthesisUsageDiagnosticError("synthesis_history", "BINDING_INVALID")
         research_reserves = list(
             await session.scalars(
                 select(AgentDailyBudgetReservationRecord).where(

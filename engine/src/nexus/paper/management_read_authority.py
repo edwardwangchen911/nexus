@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select
@@ -18,6 +19,7 @@ from nexus.agents.codex_versions import (
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
 from nexus.agents.persistence import load_actionable_research_output
+from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT, read_sol_business_profile
 from nexus.agents.portfolio_synthesis_contracts import (
     PortfolioSynthesisInputV1,
     PortfolioSynthesisIntentV1,
@@ -28,7 +30,10 @@ from nexus.agents.portfolio_synthesis_diagnostics import (
     SynthesisFailureRead,
     read_synthesis_failure,
 )
-from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
+from nexus.agents.portfolio_synthesis_persistence import (
+    load_frozen_synthesis_authority,
+    require_frozen_sol_sources,
+)
 from nexus.paper.agent_decision_store import (
     PersistedPortfolioProposal,
     load_portfolio_proposal,
@@ -48,6 +53,9 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 
+if TYPE_CHECKING:
+    from nexus.agents.platform_portfolio import PortfolioReceiptRead
+
 
 @dataclass(frozen=True)
 class SynthesisReadAuthority:
@@ -56,6 +64,7 @@ class SynthesisReadAuthority:
     frozen: PortfolioSynthesisInputV1
     intent: PortfolioSynthesisIntentV1 | None
     failure_diagnostic: SynthesisFailureRead | None = None
+    platform_receipt: PortfolioReceiptRead | None = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +109,9 @@ async def formal_proposal_read_profile(
     ).one_or_none()
     if identity is None:
         return False
-    if identity[0] == FORMAL_STAGE_CAPACITY_CONFIG_VERSION:
+    if identity[0] == FORMAL_STAGE_CAPACITY_CONFIG_VERSION or identity[0].startswith(
+        SOL_BUSINESS_CONTRACT + "-"
+    ):
         return True
     if identity[0] not in {
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
@@ -161,7 +172,28 @@ async def load_synthesis_read_authority(
         BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
     } and bool(events and events[0].fact_ids.get("formal_stage_capacity") is True)
-    if run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION or formal_full:
+    sol_model = None
+    if run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"):
+        from nexus.paper.agent_cycle import _require_cycle_candidate_profile
+
+        sol_model = await read_sol_business_profile(session, model_config_id=run.model_config_id)
+        if (
+            frozen.admitted_at > read_as_of
+            or sol_model is None
+            or sol_model.config_hash != run.model_hash
+            or sol_model.version != run.pricing_version
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
+        await _require_cycle_candidate_profile(
+            session,
+            cycle=cycle,
+            candidate_stage_capacity=False,
+            formal_stage_capacity=True,
+            expected_formal_model_id=run.model_config_id,
+            now=frozen.admitted_at,
+        )
+        await require_frozen_sol_sources(session, frozen)
+    elif run.pricing_version == FORMAL_STAGE_CAPACITY_CONFIG_VERSION or formal_full:
         from nexus.paper.agent_cycle import _require_cycle_candidate_profile
 
         await _require_cycle_candidate_profile(
@@ -259,11 +291,19 @@ async def load_synthesis_read_authority(
         raise ValueError("PORTFOLIO_SYNTHESIS_OUTPUT_CONFLICT")
     if intent is not None:
         validate_portfolio_synthesis_intent(intent, frozen)
+    receipt = None
+    if sol_model is not None:
+        from nexus.agents.platform_portfolio import require_portfolio_settlement_read
+
+        receipt = await require_portfolio_settlement_read(
+            session, run, frozen, output, sol_model, read_as_of
+        )
     return SynthesisReadAuthority(
         run=run,
         output=output,
         frozen=frozen,
         intent=intent,
+        platform_receipt=receipt,
         failure_diagnostic=await read_synthesis_failure(session, run_id=run.id),
     )
 

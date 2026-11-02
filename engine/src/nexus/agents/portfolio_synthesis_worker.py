@@ -43,6 +43,7 @@ from nexus.agents.portfolio_synthesis_diagnostics import (
 from nexus.agents.portfolio_synthesis_persistence import (
     load_frozen_synthesis_authority,
     persist_portfolio_synthesis_terminal,
+    require_frozen_sol_sources,
 )
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.synthesis_lifecycle import (
@@ -372,6 +373,9 @@ async def formal_synthesis_job_qualified(
             or now >= frozen.expires_at
         ):
             return False
+        if expired_recovery and model.platform_profile is not None:
+            await require_frozen_sol_sources(session, frozen)
+            return True
         for source in frozen.security_outputs:
             output = await session.get(
                 AgentResearchOutputRecord, source.research_output_id, populate_existing=True
@@ -397,33 +401,6 @@ async def formal_synthesis_job_qualified(
                 != f"agent-paper:{frozen.cycle_id}:{source.instrument_id}"
             ):
                 return False
-            if expired_recovery and model.platform_profile is not None:
-                # An orphan can only close an existing fenced attempt. Bind its already
-                # admitted source and cleanup facts without applying today's price window.
-                from nexus.agents.actionable_research import frozen_source_matches
-                from nexus.agents.research_stages.proof import read_terminal_proof
-                from nexus.persistence.models.agents import AgentResearchOutputEvidenceRecord
-
-                proof = await read_terminal_proof(
-                    session, run_id=research.id, now=frozen.admitted_at
-                )
-                bindings = (
-                    await session.scalars(
-                        select(AgentResearchOutputEvidenceRecord).where(
-                            AgentResearchOutputEvidenceRecord.output_id == output.id
-                        )
-                    )
-                ).all()
-                if (
-                    proof is None
-                    or not proof.known
-                    or not proof.cleanup_confirmed
-                    or not frozen_source_matches(
-                        output, source.intent, source.intent_hash, source.evidence_ref_ids, bindings
-                    )
-                ):
-                    return False
-                continue
             action = await load_actionable_research_output(
                 session,
                 run_id=research.id,

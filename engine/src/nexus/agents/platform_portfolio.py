@@ -21,17 +21,22 @@ from nexus.agents.codex_sdk import (
     MAX_OUTPUT_TOKENS,
     codex_request_wire,
 )
+from nexus.agents.http_failure import HttpFailureFacts
 from nexus.agents.platform_pricing import SolPriceRecord, sol_price_record
 from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.agents.platform_usage import price_platform_usage
 from nexus.agents.platform_wire import _wire, platform_wire_profile
 from nexus.agents.portfolio_synthesis_contracts import (
+    PortfolioSynthesisInputV1,
     PortfolioSynthesisIntentV1,
+    canonical_portfolio_synthesis_hash,
 )
 from nexus.agents.synthesis_lifecycle import SYNTHESIS_HANDLER_SECONDS
 from nexus.audit.service import append_audit_event
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
+    AgentPortfolioSynthesisBudgetReservationRecord,
+    AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
     AgentPromptVersionRecord,
     AgentResearchOutputRecord,
@@ -270,6 +275,20 @@ async def portfolio_charge(
         or job.input_hash != run.input_hash
     ):
         raise ValueError(INVALID_PROOF)
+    return await _receipt_charge(session, run, model, job_id, attempt_no, fence, now, orphan=orphan)
+
+
+async def _receipt_charge(
+    session: AsyncSession,
+    run: AgentPortfolioSynthesisRunRecord,
+    model: AgentModelConfigRecord,
+    job_id: UUID,
+    attempt_no: int,
+    fence: int,
+    now: datetime,
+    *,
+    orphan: bool,
+) -> PortfolioCharge:
     prep = await read_receipt(session, job_id, "prepared", as_of=now)
     if prep is None and orphan:
         # Pre-receipt native identities can close their historical orphan only as unknown.
@@ -279,12 +298,14 @@ async def portfolio_charge(
         return PortfolioCharge()
     if (
         prep is None
-        or prep["run_id"] != str(run.id)
-        or prep["model_hash"] != model.config_hash
-        or prep["input_hash"] != run.input_hash
-        or prep["pricing_version"] != run.pricing_version
-        or prep["price_hash"] != original_price(model).content_hash
-        or prep["job_id"] != str(job_id)
+        or not isinstance(prep.get("body_hash"), str)
+        or len(prep["body_hash"]) != 64
+        or prep.get("run_id") != str(run.id)
+        or prep.get("model_hash") != model.config_hash
+        or prep.get("input_hash") != run.input_hash
+        or prep.get("pricing_version") != run.pricing_version
+        or prep.get("price_hash") != original_price(model).content_hash
+        or prep.get("job_id") != str(job_id)
     ):
         raise ValueError(INVALID_PROOF)
     identities = dict(
@@ -333,3 +354,113 @@ async def portfolio_charge(
         if close.get("failed") is False and terminal.get("status") == "completed"
         else None,
     )
+
+
+@dataclass(frozen=True)
+class PortfolioReceiptRead:
+    requested_model: str
+    reported_model: str | None
+    failure: HttpFailureFacts | None
+
+
+async def require_portfolio_settlement_read(
+    session: AsyncSession,
+    run: AgentPortfolioSynthesisRunRecord,
+    frozen: PortfolioSynthesisInputV1,
+    output: AgentPortfolioSynthesisOutputRecord,
+    model: AgentModelConfigRecord,
+    as_of: datetime,
+) -> PortfolioReceiptRead:
+    """Check a finished ledger entry against its original receipts; never authorize a writer."""
+    rows = (
+        await session.execute(
+            select(Job, JobAttempt, JobLease, AgentPortfolioSynthesisBudgetReservationRecord)
+            .join(JobAttempt, JobAttempt.job_id == Job.id)
+            .join(JobLease, JobLease.job_id == Job.id)
+            .join(
+                AgentPortfolioSynthesisBudgetReservationRecord,
+                AgentPortfolioSynthesisBudgetReservationRecord.run_id == run.id,
+            )
+            .where(
+                Job.job_type == "agent.portfolio_synthesis",
+                Job.payload["run_id"].as_string() == str(run.id),
+            )
+        )
+    ).all()
+    if len(rows) != 1:
+        raise ValueError(INVALID_PROOF)
+    job, attempt, lease, hold = rows[0]
+    if (
+        job.payload != {"run_id": str(run.id)}
+        or job.input_hash != run.input_hash
+        or job.scope_kind != "portfolio"
+        or job.scope_id != str(frozen.portfolio_id)
+        or job.effective_at != run.decision_time
+        or job.attempt_count != 1
+        or job.max_attempts != 1
+        or job.manual_retry_count != 0
+        or job.retry_policy != "never"
+        or (job.status, attempt.outcome)
+        not in {("succeeded", "succeeded"), ("failed", "failed"), ("dead_letter", "lost")}
+        or attempt.attempt_no != 1
+        or attempt.finished_at is None
+        or attempt.finished_at > as_of
+        or job.finished_at != attempt.finished_at
+        or attempt.lease_token != lease.lease_token
+        or attempt.worker_id != lease.worker_id
+        or attempt.fence_token != lease.fence_token
+        or hold.business_date != frozen.admitted_at.date()
+        or hold.created_at > as_of
+        or hold.pricing_version != model.version
+        or hold.reserved_usd != model.worst_case_cost_usd
+        or run.completed_at is None
+        or run.completed_at > as_of
+    ):
+        raise ValueError(INVALID_PROOF)
+    charge = await _receipt_charge(
+        session,
+        run,
+        model,
+        job.id,
+        attempt.attempt_no,
+        attempt.fence_token,
+        as_of,
+        orphan=attempt.outcome == "lost",
+    )
+    state = "released" if charge.unused else "reserved" if charge.cost is None else "settled"
+    if (
+        (charge.input_tokens, charge.output_tokens, charge.cost)
+        != (run.input_tokens, run.output_tokens, run.settled_cost_usd)
+        or hold.state != state
+        or hold.settled_usd != charge.cost
+        or (
+            output.intent is not None
+            and canonical_portfolio_synthesis_hash(output.intent) != charge.intent_hash
+        )
+    ):
+        raise ValueError(INVALID_PROOF)
+    prepared = await read_receipt(session, job.id, "prepared", as_of=as_of)
+    if prepared is None:
+        return PortfolioReceiptRead(model.model_id, None, None)
+    expected = dict(
+        job_id=str(job.id),
+        attempt=attempt.attempt_no,
+        fence=attempt.fence_token,
+        body_hash=prepared.get("body_hash"),
+    )
+    terminal = await read_receipt(session, job.id, "terminal", as_of=as_of)
+    cleanup = await read_receipt(session, job.id, "cleanup", as_of=as_of)
+    reported_model = None
+    if terminal is not None:
+        authorized = await read_receipt(session, job.id, "authorized", as_of=as_of)
+        if terminal.get("identity") != expected or authorized != expected:
+            raise ValueError(INVALID_PROOF)
+        if terminal.get("model") == model.model_id:
+            reported_model = model.model_id
+    failure = None
+    if cleanup is not None:
+        if cleanup.get("identity") != expected:
+            raise ValueError(INVALID_PROOF)
+        if cleanup.get("failure_facts") is not None:
+            failure = HttpFailureFacts.model_validate(cleanup["failure_facts"])
+    return PortfolioReceiptRead(model.model_id, reported_model, failure)

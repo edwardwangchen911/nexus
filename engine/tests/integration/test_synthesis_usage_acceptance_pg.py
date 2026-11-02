@@ -869,11 +869,39 @@ async def test_legacy_acceptance_proof_survives_nullable_diagnostic_column(
         engine, sessions, _, scope, calls = await _failed_case(migrated_database_url, monkeypatch)
 
     def legacy_hash(row):
-        values = {
-            col.key: getattr(row, col.key)
-            for col in inspect(type(row)).columns
-            if col.key != "failure_diagnostic"
-        }
+        from nexus.persistence.models.agents import AgentModelConfigRecord
+
+        # Reproduce the columns the pre-diagnostic writer actually serialized.
+        # Nullable 0113 profile data did not exist on that SDK writer.
+        if isinstance(row, AgentModelConfigRecord):
+            assert row.platform_profile is None
+            columns = (
+                "id",
+                "model_id",
+                "version",
+                "config_hash",
+                "max_input_tokens",
+                "max_tool_calls",
+                "max_output_tokens",
+                "input_usd_per_million",
+                "output_usd_per_million",
+                "pricing_available_at",
+                "pricing_expires_at",
+                "created_at",
+            )
+        elif isinstance(row, AgentPortfolioSynthesisOutputRecord):
+            columns = (
+                "id",
+                "run_id",
+                "status",
+                "intent",
+                "content_hash",
+                "binding_hash",
+                "created_at",
+            )
+        else:
+            columns = tuple(col.key for col in inspect(type(row)).columns)
+        values = {key: getattr(row, key) for key in columns}
         normalized = json.loads(json.dumps(values, default=str))
         return hashlib.sha256(
             json.dumps(

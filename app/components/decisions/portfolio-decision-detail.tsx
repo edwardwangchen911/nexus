@@ -4,6 +4,8 @@ import { cycleDecisionPresentation } from "../../lib/product-status";
 import type { components } from "../../lib/generated/schema";
 import { instrumentLabel, TargetComparison } from "./target-comparison";
 type Detail = components["schemas"]["AgentPaperManagementCycleResponse"];
+const failurePhases = { pre_send: "发送前检查", send: "发送请求", headers: "读取响应头", stream: "读取响应流", response_validation: "校验响应", publication: "保存结果", cleanup: "清理连接" };
+const failureKinds = { local_guard: "本地检查拒绝", http_status: "服务端拒绝", stream_protocol: "响应流无效", timeout: "超时", connection: "连接失败", transport_protocol: "传输协议错误", cancelled: "已取消", output_validation: "输出校验失败", persistence: "结果保存失败", cleanup: "清理失败", unexpected: "原因未识别" };
 const actions = { include: "拟纳入", increase: "拟增加", reduce: "拟降低", exit: "拟退出", maintain: "维持目标", defer: "暂缓" };
 export function PortfolioDecisionDetail({ detail, paperHref }: { detail: Detail; paperHref?: string }): React.ReactElement {
   const { active_target: active, proposal, synthesis, blocker, activation_result: activation } = detail;
@@ -16,6 +18,13 @@ export function PortfolioDecisionDetail({ detail, paperHref }: { detail: Detail;
     || (detail.cycle.status === "completed" && detail.cycle.result_code === "PORTFOLIO_ASSESSMENT_DEFERRED")
     ? cycleDecisionPresentation(detail.cycle).summary : null;
   return <div className="portfolio-decision pm-stack">
+    {synthesis?.responses_usage ? <aside className="pm-panel" role="note" aria-label="组合模型用量">
+      <h2>组合模型用量</h2>
+      <p>请求路线 · Responses API · {synthesis.responses_usage.requested_model}</p>
+      <p>响应回执模型 · {synthesis.responses_usage.reported_model ?? "未知"}</p>
+      {synthesis.responses_usage.failure_phase && synthesis.responses_usage.failure_kind ? <p>失败阶段 · {failurePhases[synthesis.responses_usage.failure_phase]} · {failureKinds[synthesis.responses_usage.failure_kind]}</p> : null}
+      <p>{synthesis.responses_usage.settled_cost_usd === null ? "费用未知，预算保留" : `已结算 USD ${synthesis.responses_usage.settled_cost_usd}`}</p>
+    </aside> : null}
     {usageDisposition ? <aside className="pm-panel" role="note" aria-label="组合用量历史处置">
       <h2>组合失败／用量未知／未执行</h2>
       <p>{({ accepted: "历史未知已接受，预算保留", not_accepted: "历史未知尚未接受，预算保留", invalid: "历史接受证明失效，预算保留" })[usageDisposition.status]}。</p>
