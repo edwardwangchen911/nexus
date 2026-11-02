@@ -7,7 +7,7 @@ import json
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, text
 
@@ -116,7 +116,13 @@ class FrozenCommittee:
 
 
 async def execute_staged_claim(
-    *, factory: Any, claim: Any, clock: Any, execute: Any, comparison: Any = None
+    *,
+    factory: Any,
+    claim: Any,
+    clock: Any,
+    execute: Any,
+    comparison: Any = None,
+    native_settings: Any = None,
 ) -> Any:
     from nexus.agents.research_maintenance import require_research_open
 
@@ -144,6 +150,10 @@ async def execute_staged_claim(
         raise ProtocolRejected("STAGED_ROUTE_REQUIRED")
     if (route["kind"] == "comparison") != (comparison is not None):
         raise ProtocolRejected("COMPARISON_EXECUTION_BINDING_REQUIRED")
+
+    native = route.get("platform_binding") is not None
+    if native != (native_settings is not None) or native and comparison is not None:
+        raise ProtocolRejected("PLATFORM_NATIVE_EXECUTION_REQUIRED")
 
     captured_preparation = False
     with capture_preparation():
@@ -212,9 +222,27 @@ async def execute_staged_claim(
         run = await session.get(AgentResearchRunRecord, run_id)
         platform_model = (
             await session.get(AgentModelConfigRecord, run.model_config_id)
-            if comparison is not None and comparison.platform_funding_loader is not None
+            if native or comparison is not None and comparison.platform_funding_loader is not None
             else None
         )
+        native_price, native_binding, native_allocation, native_credential = None, None, None, None
+        if native:
+            from nexus.agents.platform_native import (
+                credential_for_preparation,
+                read_native_allocation,
+            )
+            from nexus.agents.platform_pricing import sol_price_record
+
+            native_binding, native_allocation = await read_native_allocation(session, run=run)
+            native_credential = credential_for_preparation(native_settings)
+            if (
+                native_credential.binding_hash != native_binding["credential_binding_hash"]
+                or committee._platform_allocation != native_allocation
+            ):
+                raise ProtocolRejected("PLATFORM_NATIVE_EXECUTION_BINDING_INVALID")
+            if platform_model is None or platform_model.platform_profile is None:
+                raise ProtocolRejected("PLATFORM_NATIVE_MODEL_BINDING_INVALID")
+            native_price = sol_price_record(platform_model.platform_profile["price_record"])
     from nexus.agents.research_dispatch import stop_current_dispatch
 
     protocol = StagedProtocol(factory, clock=clock, on_failure=stop_current_dispatch)
@@ -246,13 +274,44 @@ async def execute_staged_claim(
             async with factory.begin() as check:
                 await _lock_active_claim(check, claim=claim, now=clock())
                 chain = await stage_evidence(check, run_id)
-            if len(chain) != stage_number - 1 or not usage_known(chain):
+            if len(chain) != stage_number - 1 or not usage_known(chain, model=platform_model):
                 await protocol.stop(scope)
                 raise ProtocolRejected("PERSISTED_PREDECESSOR_MISMATCH")
         from nexus.agents.platform_manifest import PlatformManifest
 
         platform_wire = None
-        if comparison is not None and isinstance(comparison.manifest, PlatformManifest):
+        if native:
+            from nexus.agents.platform_wire import (
+                PriorPlatformUsage,
+                Stage,
+                compile_native_platform_stage,
+                native_platform_input_hash,
+            )
+
+            if native_allocation is None or native_binding is None or native_price is None:
+                raise ProtocolRejected("PLATFORM_NATIVE_EXECUTION_REQUIRED")
+            input_hash = native_platform_input_hash(
+                committee, request=request, evidence_refs=refs, inputs=committee._frozen_inputs
+            )
+            platform_wire = compile_native_platform_stage(
+                input_hash=input_hash,
+                allocation=native_allocation,
+                expected_allocation_hash=native_binding["allocation_hash"],
+                stage=cast(Stage, native_allocation.stage_order[stage_number - 1]),
+                compiled_request=(payload, options["output_model"]),
+                prior_usage=[
+                    PriorPlatformUsage(
+                        stage=r["stage"],
+                        input_hash=input_hash,
+                        verified=r["verified"] is True and r["eligible"] is True,
+                        response=json.loads(r["platform_response"]),
+                    )
+                    for r in chain
+                ],
+                price_record=native_price,
+            )
+            wire = platform_wire.wire
+        elif comparison is not None and isinstance(comparison.manifest, PlatformManifest):
             platform_wire = comparison.platform_wire(payload, options["output_model"], chain)
             wire = platform_wire.wire
         else:
@@ -289,7 +348,18 @@ async def execute_staged_claim(
                 raise codex_sdk.CodexInvocationError(
                     "CODEX_RESEARCH_STOPPED", provider_call_started=False
                 )
-            if platform_wire is not None:
+            if native:
+                from nexus.agents.platform_native import credential_for_preparation
+
+                if native_binding is None or native_price is None:
+                    raise ProtocolRejected("PLATFORM_NATIVE_EXECUTION_REQUIRED")
+                if (
+                    credential_for_preparation(native_settings).binding_hash
+                    != native_binding["credential_binding_hash"]
+                ):
+                    raise ProtocolRejected("PLATFORM_HTTP_CREDENTIAL_CHANGED")
+                native_price.require_current(now=clock(), deadline=stage_deadline)
+            elif platform_wire is not None:
                 from nexus.agents.platform_funding import require_funding_binding
 
                 assert comparison.platform_funding_loader is not None
@@ -313,7 +383,7 @@ async def execute_staged_claim(
                 old_guard()
 
         options["dispatch_guard"] = guard
-        if comparison is not None and comparison.transport == "responses":
+        if native or comparison is not None and comparison.transport == "responses":
             from nexus.agents.research_stages.http_lifecycle import invoke_http_stage
 
             work = min(original_deadline, options.get("deadline_at", original_deadline))
@@ -322,8 +392,26 @@ async def execute_staged_claim(
                 original_deadline,
                 monotonic_anchor + (original_expiry - wall_anchor).total_seconds(),
             )
-            platform_options = {}
-            if platform_wire is not None:
+            platform_options: dict[str, Any] = {}
+            if native:
+
+                async def native_pre_send() -> Any:
+                    from nexus.agents.platform_native import credential_for_preparation
+
+                    async with factory.begin() as check:
+                        member = await protocol._member(check, claim)
+                        await _lock_active_claim(check, claim=claim, now=clock())
+                        if member["stopped"] or protocol.local_stopped or clock() >= stage_deadline:
+                            raise ProtocolRejected("STOPPED_OR_DEADLINE")
+                        guard()
+                    return credential_for_preparation(native_settings)
+
+                platform_options = dict(
+                    platform_credential=native_credential,
+                    platform_wire=platform_wire,
+                    platform_pre_send=native_pre_send,
+                )
+            elif platform_wire is not None:
                 from nexus.agents.platform_funding import require_platform_funding
 
                 async def pre_send() -> Any:
@@ -349,19 +437,21 @@ async def execute_staged_claim(
                     platform_wire=platform_wire,
                     platform_pre_send=pre_send,
                 )
+            from nexus.agents.platform_native import native_http_client
+
             return await invoke_http_stage(
                 protocol=protocol,
                 scope=scope,
                 ticket=ticket,
                 wire=wire,
                 output_model=options["output_model"],
-                grant=comparison.grant,
+                grant=None if native else comparison.grant,
                 clock=clock,
                 wall_anchor=wall_anchor,
                 monotonic_anchor=monotonic_anchor,
                 work_deadline=work,
                 cleanup_deadline=cleanup,
-                client=comparison.client_factory(),
+                client=native_http_client() if native else comparison.client_factory(),
                 dispatch_guard=guard,
                 **platform_options,
             )
@@ -396,7 +486,7 @@ async def execute_staged_claim(
             member = await protocol._member(final, claim)
             rows = await stage_evidence(final, run_id)
             matched = bool(rows) and all(row["verified"] is True for row in rows)
-            known = usage_known(rows)
+            known = usage_known(rows, model=platform_model)
             complete = (
                 known and len(rows) == 3 and all(row["confirmed"] and row["valid"] for row in rows)
             )

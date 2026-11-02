@@ -135,7 +135,23 @@ async def freeze_native_route_binding(
 async def native_run_allocation(
     session: AsyncSession, *, run: AgentResearchRunRecord, model: AgentModelConfigRecord
 ) -> PlatformAllocation:
-    """The same full input envelope for optional daily preview and original registration."""
+    compiler, request, refs, inputs = await native_prepared_material(session, run=run, model=model)
+    assert model.platform_profile is not None
+    price = sol_price_record(model.platform_profile["price_record"])
+    return freeze_native_platform_allocation(
+        compiler,
+        request=request,
+        evidence_refs=refs,
+        inputs=inputs,
+        profile=platform_wire_profile(price.version, price_record=price),
+        price_record=price,
+    )
+
+
+async def native_prepared_material(
+    session: AsyncSession, *, run: AgentResearchRunRecord, model: AgentModelConfigRecord
+) -> tuple[Any, Any, Any, Any]:
+    """Build the normal committee's original frozen material, without a model call."""
     if (
         not sol_business_model_matches(model)
         or model.config_hash != run.model_hash
@@ -143,7 +159,6 @@ async def native_run_allocation(
     ):
         raise ValueError("PLATFORM_NATIVE_MODEL_BINDING_INVALID")
     assert model.platform_profile is not None
-    price = sol_price_record(model.platform_profile["price_record"])
     prompts = await load_frozen_prompts(session, run)
     evidence = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
     if prompts is None or not evidence:
@@ -171,11 +186,202 @@ async def native_run_allocation(
         data_snapshot_id=run.data_snapshot_id,
         decision_time=run.decision_time,
     )
-    return freeze_native_platform_allocation(
+    return (
         compiler,
-        request=request,
-        evidence_refs=tuple(domain_evidence(e) for e in evidence),
-        inputs=await compiler._inputs(request),
-        profile=platform_wire_profile(price.version, price_record=price),
-        price_record=price,
+        request,
+        tuple(domain_evidence(e) for e in evidence),
+        await compiler._inputs(request),
     )
+
+
+async def read_native_allocation(
+    session: AsyncSession, *, run: AgentResearchRunRecord
+) -> tuple[dict[str, Any], PlatformAllocation]:
+    """Historical read: validate the original route, not today's credentials or prices."""
+    from pydantic import TypeAdapter
+
+    row = (
+        (
+            await session.execute(
+                text(
+                    "SELECT platform_binding,public.nexus_sol_native_route_valid(r) AS valid "
+                    "FROM research_stage_route r WHERE run_id=:run"
+                ),
+                {"run": run.id},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None or row["valid"] is not True or row["platform_binding"] is None:
+        raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+    binding = dict(row["platform_binding"])
+    allocation = TypeAdapter(PlatformAllocation).validate_python(binding["allocation"])
+    if allocation.allocation_hash != binding["allocation_hash"]:
+        raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+    return binding, allocation
+
+
+async def prepare_native_pool(
+    session: AsyncSession, settings: EngineSettings, run: AgentResearchRunRecord, *, deadline: float
+) -> StructuredStagedCodexCommittee:
+    """Revalidate the original owner pool before claim; never create replacement work."""
+    import asyncio
+
+    from nexus.agents.platform_wire import native_platform_input_hash
+    from nexus.agents.research_stages.routes import selected_route
+
+    credential = credential_for_preparation(settings)
+    owner = (
+        await session.execute(
+            text("SELECT scope_id FROM research_stage_route WHERE run_id=:run"), {"run": run.id}
+        )
+    ).scalar_one()
+    members = (
+        await session.execute(
+            text(
+                "SELECT run_id,job_id FROM research_stage_route "
+                "WHERE scope_id=:scope ORDER BY run_id"
+            ),
+            {"scope": owner},
+        )
+    ).all()
+    root = await selected_route(
+        session, next(job_id for run_id, job_id in members if run_id == run.id)
+    )
+    if root is None:
+        raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+    if root["kind"] == "independent":
+        from nexus.paper.research_request import read_research_manifest
+        from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+        request_record = await session.get(ManualPaperRequest, owner)
+        if request_record is None:
+            raise ValueError("PLATFORM_NATIVE_POOL_NOT_READY")
+        manifest = await read_research_manifest(session, request_record)
+        expected_ids = set() if manifest is None else {m.run_id for m in manifest.members}
+    elif root["kind"] == "formal":
+        from nexus.paper.agent_cycle import _events, _fact_uuids
+
+        expected_ids = set(_fact_uuids(await _events(session, owner), "research_run_ids"))
+    elif root["kind"] == "increment":
+        expected_ids = {run.id}
+    else:
+        raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+    if not expected_ids or expected_ids != {rid for rid, _ in members}:
+        raise ValueError("PLATFORM_NATIVE_POOL_NOT_READY")
+    selected = None
+    bound_pool = []
+    selected_material = None
+    async with asyncio.timeout_at(deadline):
+        for run_id, job_id in members:
+            if monotonic() >= deadline:
+                raise ValueError("CODEX_CAPACITY_PRECLAIM_TIMEOUT")
+            route = await selected_route(session, job_id)
+            member = await session.get(AgentResearchRunRecord, run_id)
+            if route is None or member is None or route.get("platform_binding") is None:
+                raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+            model = await session.get(AgentModelConfigRecord, member.model_config_id)
+            if model is None or not sol_business_model_matches(model):
+                raise ValueError("PLATFORM_NATIVE_MODEL_BINDING_INVALID")
+            if member.status not in {"prepared", "completed"}:
+                raise ValueError("PLATFORM_NATIVE_POOL_NOT_READY")
+            bound_pool.append(
+                dict(
+                    run_id=str(run_id), allocation_hash=route["platform_binding"]["allocation_hash"]
+                )
+            )
+            if member.status != "prepared":
+                continue
+            binding, allocation = await read_native_allocation(session, run=member)
+            if credential.binding_hash != binding["credential_binding_hash"]:
+                raise ValueError("PLATFORM_HTTP_CREDENTIAL_CHANGED")
+            assert model.platform_profile is not None
+            price = sol_price_record(model.platform_profile["price_record"])
+            at = await session.scalar(text("SELECT clock_timestamp()"))
+            price.require_current(
+                now=at, deadline=at + timedelta(seconds=max(0, deadline - monotonic()) + 7)
+            )
+            compiler, request, refs, inputs = await native_prepared_material(
+                session, run=member, model=model
+            )
+            fresh = freeze_native_platform_allocation(
+                compiler,
+                request=request,
+                evidence_refs=refs,
+                inputs=inputs,
+                profile=allocation.profile,
+                price_record=price,
+            )
+            if (
+                fresh != allocation
+                or native_platform_input_hash(
+                    compiler, request=request, evidence_refs=refs, inputs=inputs
+                )
+                != allocation.input_hash
+            ):
+                raise ValueError("PLATFORM_NATIVE_INPUT_CHANGED")
+            if run_id == run.id:
+                selected_material = (request, refs, inputs)
+                selected = StructuredStagedCodexCommittee(
+                    prompts=compiler._prompts,
+                    tools=compiler._tools,
+                    deadline=deadline,
+                    aggregate_input_tokens=sum(allocation.stage_input_upper_bounds),
+                    max_wire_bytes=max(allocation.stage_input_upper_bounds) - 8192,
+                    inline_citations=True,
+                    paper_stage_scope=True,
+                    stage_time_budget=True,
+                    stage_budget_version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+                    platform_allocation=allocation,
+                    platform_price_record=price,
+                )
+        if selected is None or selected_material is None or monotonic() >= deadline:
+            raise ValueError("PLATFORM_NATIVE_PREPARATION_REQUIRED")
+        from nexus.agents.codex_sdk import codex_request_hash
+        from nexus.agents.platform_wire import _hash
+
+        request, refs, inputs = selected_material
+        selected._capacity_pool_manifest = _hash(dict(scope_id=str(owner), members=bound_pool))
+        selected._capacity_pool_request = request
+        selected._capacity_pool_evidence = refs
+        selected._capacity_research_hash = codex_request_hash(
+            *selected.build_stage_request(
+                stage="research",
+                request=request,
+                evidence_refs=refs,
+                frozen_inputs=inputs,
+                previous=[],
+            )
+        )
+        return selected
+
+
+def native_http_client() -> Any:
+    import httpx
+
+    return httpx.AsyncClient(timeout=None, follow_redirects=False, auth=None, trust_env=True)
+
+
+async def native_platform_semantics(
+    session: AsyncSession, run: AgentResearchRunRecord, model: AgentModelConfigRecord
+) -> bool:
+    """Select original staged audit/synthesis semantics only for a native Sol owner."""
+    from nexus.agents.research_stages.routes import selected_route
+
+    if not sol_business_model_matches(model):
+        return False
+    job_id = await session.scalar(
+        text("SELECT job_id FROM research_stage_route WHERE run_id=:run"), {"run": run.id}
+    )
+    route = None if job_id is None else await selected_route(session, job_id)
+    if (
+        run.model_hash != model.config_hash
+        or run.pricing_version != model.version
+        or route is None
+        or route.get("platform_binding") is None
+        or route["kind"] == "comparison"
+    ):
+        raise ValueError("PLATFORM_NATIVE_SYNTHESIS_AUTHORITY_INVALID")
+    await read_native_allocation(session, run=run)
+    return True

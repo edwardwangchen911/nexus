@@ -14,6 +14,30 @@ branch_labels = None
 depends_on = None
 
 
+_AUTH_START = "IF TG_TABLE_NAME='research_stage_authorization' THEN"
+_NATIVE_AUTH = """
+          IF EXISTS(SELECT 1 FROM public.research_stage_route WHERE run_id=NEW.run_id
+                    AND platform_binding IS NOT NULL) THEN
+            IF NOT public.nexus_sol_native_authorization_valid(NEW) THEN
+              RAISE EXCEPTION 'PLATFORM_NATIVE_AUTHORIZATION_INVALID' USING ERRCODE='23514';
+            END IF;
+            RETURN NEW;
+          END IF;
+"""
+
+
+def _stage_dispatch(*, reverse: bool = False) -> None:
+    old, new = _AUTH_START, _AUTH_START + _NATIVE_AUTH
+    if reverse:
+        old, new = new, old
+    definition = op.get_bind().scalar(
+        sa.text("SELECT pg_get_functiondef('research_platform_stage_fact_guard()'::regprocedure)")
+    )
+    if not isinstance(definition, str) or definition.count(old) != 1:
+        raise RuntimeError("PLATFORM_NATIVE_STAGE_FUNCTION_UNEXPECTED")
+    op.get_bind().exec_driver_sql(definition.replace(old, new))
+
+
 def upgrade() -> None:
     op.add_column("agent_model_configs", sa.Column("platform_profile", JSONB(), nullable=True))
     op.execute("""
@@ -155,6 +179,33 @@ def upgrade() -> None:
     op.execute("""CREATE TRIGGER trg_sol_native_transport BEFORE INSERT ON public.research_stage_authorization
       FOR EACH ROW EXECUTE FUNCTION public.nexus_sol_native_transport_guard()""")
 
+    op.execute("""
+    CREATE FUNCTION public.nexus_sol_native_authorization_valid(v research_stage_authorization)
+    RETURNS boolean LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $$
+    DECLARE r public.research_stage_route; b jsonb:=v.platform_binding; n jsonb; a jsonb;
+    BEGIN
+      SELECT * INTO r FROM public.research_stage_route WHERE run_id=v.run_id;
+      n:=r.platform_binding; a:=n->'allocation';
+      IF n IS NULL OR NOT public.nexus_sol_native_route_valid(r)
+        OR jsonb_typeof(b) IS DISTINCT FROM 'object'
+        OR (SELECT count(*) FROM jsonb_object_keys(b))<>13 OR v.stage NOT BETWEEN 1 AND 3
+        THEN RETURN false; END IF;
+      RETURN COALESCE(b->'version'='2'::jsonb AND b->>'body_sha256'=v.wire_hash
+        AND b->>'price_version'=n->>'price_version'
+        AND b->>'price_record_hash'=n->>'price_record_hash'
+        AND b->>'model_config_id'=n->>'model_config_id' AND b->>'model_hash'=n->>'model_hash'
+        AND b->>'credential_binding_hash'=n->>'credential_binding_hash'
+        AND b->>'allocation_hash'=n->>'allocation_hash' AND b->>'input_hash'=a->>'input_hash'
+        AND b->'input_upper_bound'=a->'stage_input_upper_bounds'->(v.stage-1)
+        AND b->>'cache_mode'='implicit' AND b->>'cache_ttl'='30m'
+        AND b->>'binding_hash'=encode(sha256(convert_to(public.nexus_economic_json_text(
+          jsonb_build_object('allocation_hash',n->>'allocation_hash',
+            'stage',a->'stage_order'->>(v.stage-1),'body_sha256',v.wire_hash),false),'UTF8')),'hex'),false);
+    EXCEPTION WHEN OTHERS THEN RETURN false;
+    END $$;
+    """)
+    _stage_dispatch()
+
 
 def downgrade() -> None:
     op.execute("LOCK TABLE agent_model_configs IN ACCESS EXCLUSIVE MODE NOWAIT")
@@ -164,6 +215,10 @@ def downgrade() -> None:
         )
     ):
         raise RuntimeError("PLATFORM_SOL_COMPATIBLE_READER_ROLLBACK_REQUIRED")
+    _stage_dispatch(reverse=True)
+    op.execute(
+        "DROP FUNCTION public.nexus_sol_native_authorization_valid(public.research_stage_authorization)"
+    )
     op.execute("DROP TRIGGER trg_sol_native_transport ON research_stage_authorization")
     op.execute("DROP FUNCTION public.nexus_sol_native_transport_guard()")
     op.execute("DROP TRIGGER trg_sol_native_route ON research_stage_route")

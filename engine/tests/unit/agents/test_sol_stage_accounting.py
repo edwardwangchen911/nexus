@@ -46,6 +46,26 @@ def test_sol_three_stage_exact_accounting_consumes_original_prices_and_raw_usage
     assert not actual.limit_exceeded and rows == before
 
 
+def test_common_known_usage_requires_the_original_sol_model_price():
+    from types import SimpleNamespace
+
+    from nexus.agents.platform_profile import sol_business_model_fields
+    from nexus.agents.research_stages.protocol import usage_known
+
+    rows = [sol_row()]
+    model = SimpleNamespace(**sol_business_model_fields(record_fixture()))
+    assert usage_known(rows, model=model)
+    assert not usage_known(rows)
+    replacement = SimpleNamespace(
+        **sol_business_model_fields(record_fixture() | {"output_usd_per_million": "20"})
+    )
+    assert not usage_known(rows, model=replacement)
+    raw = json.loads(rows[0]["platform_response"])
+    del raw["usage"]["input_tokens_details"]["cache_write_tokens"]
+    update_response(rows[0], raw)
+    assert not usage_known(rows, model=model)
+
+
 @pytest.mark.parametrize(
     "kind",
     [

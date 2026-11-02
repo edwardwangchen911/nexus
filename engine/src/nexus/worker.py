@@ -244,7 +244,7 @@ async def run_agent_worker_once(
         or formal_stage_capacity
         and (
             candidate_stage_capacity
-            or runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or runtime_mode not in {AgentRuntimeMode.CODEX_SDK, AgentRuntimeMode.RESPONSES}
             or job_ids is None
             or len(job_ids) != 1
             or not isinstance(job_ids[0], UUID)
@@ -315,13 +315,29 @@ async def run_agent_worker_once(
                 selected_run = await session.get(
                     AgentResearchRunRecord, UUID(cast(str, selected.payload["run_id"]))
                 )
-                formal_full_input_capacity = (
+                from nexus.agents.platform_profile import sol_business_model_matches
+
+                selected_model = (
+                    await session.get(AgentModelConfigRecord, selected_run.model_config_id)
+                    if selected_run is not None
+                    else None
+                )
+                native_sol = selected_model is not None and sol_business_model_matches(
+                    selected_model
+                )
+                if runtime_mode is AgentRuntimeMode.RESPONSES and not native_sol:
+                    raise ValueError("CODEX_FORMAL_WORKER_ARGUMENT_INVALID")
+                formal_full_input_capacity = native_sol or (
                     selected_run is not None
                     and selected_run.pricing_version in ISOLATED_CAPACITY_CONFIG_VERSIONS
                 )
                 if formal_full_input_capacity:
                     assert selected_run is not None
-                    capacity_profile_version = selected_run.pricing_version
+                    capacity_profile_version = (
+                        BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                        if native_sol
+                        else selected_run.pricing_version
+                    )
         locked_guard = formal_stage_job_qualified
         if formal_full_input_capacity:
             if tools is not None or responses_client is not None:
@@ -354,8 +370,19 @@ async def run_agent_worker_once(
 
         async with factory() as routing_session:
             stage_route = await selected_route(routing_session, job_ids[0])
+        if (
+            stage_route is None
+            and runtime_mode is AgentRuntimeMode.RESPONSES
+            and formal_stage_capacity
+        ):
+            raise ValueError("PLATFORM_NATIVE_PREPARATION_REQUIRED")
         if stage_route is not None:
-            if locked_guard is None or runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+            expected_runtime = (
+                AgentRuntimeMode.RESPONSES
+                if stage_route.get("platform_binding") is not None
+                else AgentRuntimeMode.CODEX_SDK
+            )
+            if locked_guard is None or runtime_mode is not expected_runtime:
                 raise ValueError("CODEX_STAGED_WORKER_ARGUMENT_INVALID")
             native_locked_guard = locked_guard
 
@@ -375,7 +402,13 @@ async def run_agent_worker_once(
 
             from nexus.agents.research_stages.executor import execute_staged_claim
 
-            research_executor = partial(execute_staged_claim, factory=factory)
+            research_executor = partial(
+                execute_staged_claim,
+                factory=factory,
+                native_settings=settings
+                if stage_route.get("platform_binding") is not None
+                else None,
+            )
     return await run_job_worker_once(
         factory,
         registry=_agent_registry(
@@ -414,12 +447,15 @@ async def _prepare_preclaim_capacity_pool(
     *,
     formal_stage_capacity: bool = False,
 ) -> None:
-    """Bound v11 input-only preparation before any Job claim or SDK call."""
+    """Bound native Sol/v11 input preparation before any Job claim or provider call."""
     from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + CAPACITY_PRECLAIM_TIMEOUT_SECONDS
-    if run.pricing_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
+    native = settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+    if native and not formal_stage_capacity:
+        raise ValueError("PLATFORM_NATIVE_PREPARATION_REQUIRED")
+    if not native and run.pricing_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
         await prepare_cycle_capacity_pool(
             session,
             settings,
@@ -431,13 +467,18 @@ async def _prepare_preclaim_capacity_pool(
     allowance = asyncio.timeout_at(deadline)
     try:
         async with allowance:
-            await prepare_cycle_capacity_pool(
-                session,
-                settings,
-                run,
-                deadline=deadline,
-                formal_stage_capacity=formal_stage_capacity,
-            )
+            if native:
+                from nexus.agents.platform_native import prepare_native_pool
+
+                await prepare_native_pool(session, settings, run, deadline=deadline)
+            else:
+                await prepare_cycle_capacity_pool(
+                    session,
+                    settings,
+                    run,
+                    deadline=deadline,
+                    formal_stage_capacity=formal_stage_capacity,
+                )
             # A synchronous tokenizer can exhaust the allowance without yielding.
             if loop.time() >= deadline:
                 raise CapacityPreclaimTimeout("CODEX_CAPACITY_PRECLAIM_TIMEOUT")
@@ -664,7 +705,14 @@ def _agent_registry(
         or formal_stage_capacity
         and (
             candidate_stage_capacity
-            or runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or runtime_mode not in {AgentRuntimeMode.CODEX_SDK, AgentRuntimeMode.RESPONSES}
+            or (
+                runtime_mode is AgentRuntimeMode.RESPONSES
+                and (
+                    not formal_full_input_capacity
+                    or capacity_profile_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                )
+            )
             or not include_agent_paper
         )
     ):
@@ -672,6 +720,7 @@ def _agent_registry(
     allow_fixture_evidence = (
         settings.environment is not Environment.PRODUCTION
         and runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        and not formal_stage_capacity
     )
     allow_fixture_price_authority = runtime_mode is AgentRuntimeMode.FIXTURE
 
@@ -731,13 +780,32 @@ def _agent_registry(
                 deadline = context.monotonic_deadline()
                 if deadline is None:
                     raise ValueError("CODEX_CAPACITY_WORKER_ARGUMENT_INVALID")
-                committee = await prepare_cycle_capacity_pool(
-                    context.session,
-                    settings,
-                    run,
-                    deadline=deadline,
-                    formal_stage_capacity=formal_full_input_capacity,
+                from nexus.agents.platform_profile import sol_business_model_matches
+
+                native_model = await context.session.get(
+                    AgentModelConfigRecord, run.model_config_id
                 )
+                if native_model is not None and sol_business_model_matches(native_model):
+                    from nexus.agents.platform_native import prepare_native_pool
+
+                    committee = await prepare_native_pool(
+                        context.session,
+                        settings,
+                        run,
+                        deadline=deadline
+                        - (
+                            FORMAL_RESEARCH_HANDLER_TIMEOUT_SECONDS
+                            - FORMAL_RESEARCH_JOB_TIMEOUT_SECONDS
+                        ),
+                    )
+                else:
+                    committee = await prepare_cycle_capacity_pool(
+                        context.session,
+                        settings,
+                        run,
+                        deadline=deadline,
+                        formal_stage_capacity=formal_full_input_capacity,
+                    )
             else:
                 committee = await _committee(
                     context.session,
@@ -811,7 +879,9 @@ def _agent_registry(
                 if runtime_mode is AgentRuntimeMode.CODEX_SDK
                 else 45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
-                max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
+                max_attempts=1
+                if runtime_mode is AgentRuntimeMode.CODEX_SDK or formal_stage_capacity
+                else 3,
                 idempotency_namespace="agent.research",
                 handler=handle,
                 research_budget_profile=capacity_profile_version

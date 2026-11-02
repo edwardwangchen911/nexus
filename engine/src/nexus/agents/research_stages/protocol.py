@@ -112,7 +112,9 @@ def evidence_digest(rows: Sequence[Mapping[str, Any]]) -> str:
     ).hexdigest()
 
 
-def usage_known(rows: Sequence[Mapping[str, Any]]) -> bool:
+def usage_known(
+    rows: Sequence[Mapping[str, Any]], *, model: AgentModelConfigRecord | None = None
+) -> bool:
     totals_known = bool(rows) and all(
         r["verified"] is True and r["eligible"] and r["input_tokens"] is not None for r in rows
     )
@@ -121,6 +123,13 @@ def usage_known(rows: Sequence[Mapping[str, Any]]) -> bool:
 
         # Counts may be known while fees are not. Do not label this a known
         # terminal/accounting failure or silently apply the reservation scalar.
+        if model is not None:
+            from nexus.agents.platform_stage_accounting import platform_accounting_for_model
+
+            try:
+                return platform_accounting_for_model(model, rows).exact_cost_usd is not None
+            except ValueError:
+                return False
         return platform_stage_accounting(rows).exact_cost_usd is not None
     return totals_known
 
@@ -322,10 +331,10 @@ class StagedProtocol:
                     raise ProtocolRejected("PRICING_EXPIRED")
                 return checked
 
-            from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
+            from nexus.agents.platform_stage_accounting import is_platform_stage_model
 
             binding = None
-            if run.pricing_version in PLATFORM_PRICE_VERSIONS:
+            if is_platform_stage_model(model):
                 from nexus.agents.platform_stage_accounting import platform_authorization_binding
 
                 binding = await platform_authorization_binding(
@@ -593,13 +602,13 @@ class StagedProtocol:
                 )
             )
         )
-        from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
+        from nexus.agents.platform_stage_accounting import is_platform_stage_model
 
         platform_invalid = False
-        if model.version in PLATFORM_PRICE_VERSIONS:
-            from nexus.agents.platform_stage_accounting import platform_stage_accounting
+        if is_platform_stage_model(model):
+            from nexus.agents.platform_stage_accounting import platform_accounting_for_model
 
-            accounting = platform_stage_accounting(rows, price_version=model.version)
+            accounting = platform_accounting_for_model(model, rows)
             cost = accounting.known_cost_usd
             platform_invalid = accounting.exact_cost_usd is None or accounting.limit_exceeded
         else:
@@ -821,9 +830,9 @@ class StagedProtocol:
         rows = await stage_evidence(session, run.id)
         if not rows:
             raise ProtocolRejected("NO_ZERO_CALL_PROOF")
-        known = usage_known(rows)
-        chain = evidence_digest(rows)
         model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
+        known = usage_known(rows, model=model)
+        chain = evidence_digest(rows)
 
         async def terminal(session: AsyncSession) -> JobCompletion:
             accounted = False
