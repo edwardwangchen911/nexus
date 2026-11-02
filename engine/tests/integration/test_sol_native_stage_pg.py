@@ -970,7 +970,7 @@ async def test_native_increment_worker_settles_only_child_and_retains_parent(
 
 @pytest.mark.asyncio
 async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, portfolio_case="orphan", after_admission=None
 ):
     from integration.test_sol_native_preparation_pg import (
         test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes as prepare,
@@ -1111,13 +1111,24 @@ async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
                 await session.scalar(select(func.count()).select_from(MonitorCoverageReceipt)) == 3
             )
         assert len(requests) == 9 and all(c.is_closed for c in clients)
-        await _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch)
+        await _verify_native_portfolio_boundary(
+            factory,
+            host,
+            cycle_id,
+            monkeypatch,
+            portfolio_case,
+            tmp_path,
+            env_file,
+            after_admission,
+        )
         assert len(requests) == 9
 
     await prepare(migrated_database_url, monkeypatch, after_prepared=validate, monitoring=True)
 
 
-async def _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch):
+async def _verify_native_portfolio_boundary(
+    factory, host, cycle_id, monkeypatch, portfolio_case, root, env_file, after_admission
+):
     from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
     from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
     from nexus.persistence.models.paper import AgentPaperCycleEventRecord
@@ -1223,6 +1234,12 @@ async def _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch
                 )
         assert job.status == "queued" and job.attempt_count == 0
         assert hold.state == "reserved" and hold.reserved_usd > 0 and hold.settled_usd is None
+    if after_admission is not None:
+        await after_admission(
+            factory, host, portfolio, portfolio_job, at, monkeypatch, portfolio_case, root, env_file
+        )
+        return
+
     # A committed claim can outlive its process. Exercise normal cycle
     # recovery with no provider I/O or made-up zero-call settlement.
     from nexus.agents.portfolio_synthesis_worker import formal_synthesis_job_qualified
@@ -1246,7 +1263,8 @@ async def _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch
         )
         assert claim is not None
         member = await session.get(AgentPortfolioSynthesisRunRecord, portfolio.id)
-        member.status = "running"
+        if portfolio_case != "prepared_orphan":
+            member.status = "running"
     from datetime import timedelta
 
     from nexus.persistence.models.agents import AgentModelConfigRecord
@@ -1289,7 +1307,11 @@ async def _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch
                 and held.reserved_usd == hold.reserved_usd
                 and held.settled_usd is None
             )
-            assert original.status == ("running" if key == "live" else "failed")
+            assert original.status == (
+                ("prepared" if portfolio_case == "prepared_orphan" else "running")
+                if key == "live"
+                else "failed"
+            )
             assert original.input_tokens is None and original.settled_cost_usd is None
             assert (await session.get(Job, portfolio_job.id)).attempt_count == 1
     async with factory.begin() as session:

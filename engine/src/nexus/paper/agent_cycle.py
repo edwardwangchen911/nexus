@@ -1072,7 +1072,7 @@ async def resume_schwab_agent_paper_cycle(
             ):
                 # This receipt was appended atomically with orphan closeout. Validate
                 # its original owner without turning a historical read into a new claim.
-                if original.status != "failed":
+                if original.status != "failed" or recovery_events[-1].occurred_at > now:
                     raise ValueError("PORTFOLIO_SYNTHESIS_ORPHAN_BINDING_INVALID")
                 frozen = await load_frozen_synthesis_authority(session, original)
                 await _require_cycle_candidate_profile(

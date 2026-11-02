@@ -176,7 +176,7 @@ async def test_protected_file_freezes_exact_v8_profile(
 
             saved = root / PLATFORM_KEY_PATH
             saved.parent.mkdir(parents=True)
-            saved.write_text("sk-proj-synthetic-host-only")
+            saved.write_text("offline-sol-budget-test-key")
             saved.chmod(0o600)
             values.update(
                 AGENT_RUNTIME_MODE="responses",

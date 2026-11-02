@@ -66,7 +66,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
     StrategyDecisionTargetRecord,
 )
-from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
+from nexus.persistence.models.runtime import Job
 from nexus.strategy.intents import ResearchIntent
 
 if TYPE_CHECKING:
@@ -639,7 +639,7 @@ async def admit_portfolio_synthesis(
             pricing_fresh=True,
             **({"economic_allocation": allocation} if allocation is not None else {}),
         )
-        await enqueue_job(
+        job = await enqueue_job(
             session,
             key=JobKeyV1(
                 job_type=JobType.AGENT_PORTFOLIO_SYNTHESIS,
@@ -659,6 +659,10 @@ async def admit_portfolio_synthesis(
             max_attempts=1,
             available_at=now,
         )
+        if model.platform_profile is not None:
+            from nexus.agents.platform_portfolio import freeze_portfolio_request
+
+            await freeze_portfolio_request(session, run, model, job, prompt, now)
         await session.flush()
     return PortfolioSynthesisAdmission(run, False)
 
@@ -780,49 +784,46 @@ async def persist_portfolio_synthesis_terminal(
         or reservation.reserved_usd != model.worst_case_cost_usd
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_BUDGET_INVALID")
-    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT, sol_business_model_matches
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
 
     native = model.platform_profile is not None or run.pricing_version.startswith(
         SOL_BUSINESS_CONTRACT + "-"
     )
     if native:
-        # The legacy terminal has neither a native response usage breakdown nor
-        # a send/cleanup receipt. Only an exact expired orphan may close unknown.
-        orphan = await session.scalar(
-            select(JobAttempt.id)
-            .join(Job, Job.id == JobAttempt.job_id)
-            .join(JobLease, JobLease.job_id == Job.id)
-            .where(
-                Job.id == diagnostic_job_id,
-                Job.job_type == JobType.AGENT_PORTFOLIO_SYNTHESIS.value,
-                Job.input_hash == run.input_hash,
-                Job.payload["run_id"].astext == str(run.id),
-                Job.status == "dead_letter",
-                JobAttempt.attempt_no == diagnostic_attempt_no,
-                JobAttempt.fence_token == diagnostic_fence_token,
-                JobAttempt.lease_token == JobLease.lease_token,
-                JobAttempt.fence_token == JobLease.fence_token,
-                JobAttempt.outcome == "lost",
-                JobLease.expires_at <= now,
-            )
+        from nexus.agents.platform_portfolio import portfolio_charge
+
+        charge = await portfolio_charge(
+            session,
+            run,
+            model,
+            diagnostic_job_id,
+            diagnostic_attempt_no,
+            diagnostic_fence_token,
+            now,
         )
         if (
-            not sol_business_model_matches(model)
+            provider_call_started is False
+            or (
+                input_tokens is not None
+                and (input_tokens, output_tokens) != (charge.input_tokens, charge.output_tokens)
+            )
             or status != "failed"
-            or input_tokens is not None
-            or provider_call_started is False
-            or orphan is None
+            and charge.cost is None
+            or intent is not None
+            and canonical_portfolio_synthesis_hash(intent) != charge.intent_hash
         ):
             raise ValueError("PORTFOLIO_SYNTHESIS_PLATFORM_USAGE_PROOF_REQUIRED")
+        input_tokens, output_tokens, cost = charge.input_tokens, charge.output_tokens, charge.cost
+    else:
+        cost = (
+            None
+            if input_tokens is None or output_tokens is None
+            else usage_cost(model, input_tokens, output_tokens)
+        )
     await _lock_budget_day(session, reservation.business_date.isoformat())
-    cost = (
-        None
-        if input_tokens is None or output_tokens is None
-        else usage_cost(model, input_tokens, output_tokens)
-    )
     async with session.begin_nested():
         if cost is not None:
-            reservation.state = "settled"
+            reservation.state = "released" if native and charge.unused else "settled"
             reservation.settled_usd = cost
         elif not native and (run.status == "prepared" or provider_call_started is False):
             reservation.state = "released"

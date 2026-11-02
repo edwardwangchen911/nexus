@@ -294,7 +294,12 @@ async def formal_synthesis_job_qualified(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if run is None or run.status != ("running" if expired_recovery else "prepared"):
+    allowed_statuses = (
+        {"prepared", "running"}
+        if expired_recovery
+        else {"running" if claimed and transport is not None else "prepared"}
+    )
+    if run is None or run.status not in allowed_statuses:
         return False
     if expired_recovery:
         # Historical identity proof only; the caller separately fences actual lease expiry.
@@ -311,6 +316,12 @@ async def formal_synthesis_job_qualified(
     )
     if (
         model is None
+        or expired_recovery
+        and run.status == "prepared"
+        and model.platform_profile is None
+        or expired_recovery
+        and run.status == "prepared"
+        and model.platform_profile is None
         or transport is not None
         and not transport.supports(model)
         or not formal_preparation_model_matches(model)
@@ -575,8 +586,19 @@ async def _run_synthesis_job_once(
     async def candidate_guard(session: AsyncSession, job: Job) -> bool:
         return await candidate_synthesis_job_qualified(session, job, now=clock())
 
+    from nexus.agents.portfolio_responses import (
+        NativePortfolioTransport,
+        PortfolioAlreadyDispatched,
+        PortfolioHTTPError,
+    )
+
     async def formal_guard(session: AsyncSession, job: Job) -> bool:
-        return await formal_synthesis_job_qualified(session, job, now=clock(), transport=transport)
+        now = clock()
+        if not await formal_synthesis_job_qualified(session, job, now=now, transport=transport):
+            return False
+        if isinstance(transport, NativePortfolioTransport):
+            await transport.require_job(session, job, now)
+        return True
 
     async with factory.begin() as session:
         await require_candidate_consumer_profile(
@@ -722,6 +744,8 @@ async def _run_synthesis_job_once(
         async with factory.begin() as session:
             lease_expires_at = await checkpoint_job(session, claim=claim, now=clock(), apply=start)
         terminal_claim = replace(claim, expires_at=lease_expires_at)
+        if isinstance(transport, NativePortfolioTransport):
+            transport.claim = terminal_claim
     except ValueError:
         async with factory.begin() as session:
             run = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
@@ -807,6 +831,13 @@ async def _run_synthesis_job_once(
         failure_observation = FailureObservation(local="cancelled")
         intent = None
         error_code = "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
+    except PortfolioAlreadyDispatched as error:
+        # A duplicate observer cannot write a terminal or close the original owner's lease.
+        raise SynthesisHandlerResultUnknown() from error
+    except PortfolioHTTPError as error:
+        error_code = str(error)
+        failure_observation = FailureObservation(local="exception")
+        intent = None
     except CodexInvocationError as error:
         failure_observation = freeze_failure_observation(
             {

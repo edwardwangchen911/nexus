@@ -118,15 +118,18 @@ async def run_portfolio_synthesis_worker_once(
     candidate_stage_capacity: bool = False,
     formal_stage_capacity: bool = False,
 ) -> bool:
-    """Explicit one-shot synthesis using frozen Codex authority and no retry."""
+    """Claim one portfolio Job with its selected transport and original billing identity."""
     from nexus.agents.research_maintenance import require_research_open
 
     require_research_open()
+    from nexus.agents.platform_native import native_runtime_matches
+    from nexus.agents.portfolio_responses import NativePortfolioTransport
     from nexus.agents.portfolio_synthesis_worker import (
         CodexSynthesisTransport,
         run_synthesis_job_once,
     )
 
+    native = formal_stage_capacity is True and native_runtime_matches(settings)
     if type(formal_stage_capacity) is not bool or (
         formal_stage_capacity
         and (
@@ -135,7 +138,8 @@ async def run_portfolio_synthesis_worker_once(
             or len(job_ids) != 1
             or not isinstance(job_ids[0], UUID)
             or settings.database_url is None
-            or _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK
+            or not native
+            and _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK
             or make_url(settings.database_url).host not in {"127.0.0.1", "localhost", "::1"}
             or bool(
                 set(make_url(settings.database_url).query)
@@ -150,7 +154,7 @@ async def run_portfolio_synthesis_worker_once(
         and (len(job_ids) != 1 or not isinstance(job_ids[0], UUID) or settings.database_url is None)
     ):
         raise ValueError("CODEX_CANDIDATE_WORKER_ARGUMENT_INVALID")
-    if _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK:
+    if not native and _require_worker_runtime(settings) is not AgentRuntimeMode.CODEX_SDK:
         raise ValueError("PORTFOLIO_SYNTHESIS_TRANSPORT_UNSUPPORTED")
     factory = session_factory(settings)
     if candidate_stage_capacity:
@@ -169,7 +173,9 @@ async def run_portfolio_synthesis_worker_once(
 
     return await run_synthesis_job_once(
         factory,
-        transport=CodexSynthesisTransport(formal_stage_capacity=True)
+        transport=NativePortfolioTransport(factory, settings)
+        if native
+        else CodexSynthesisTransport(formal_stage_capacity=True)
         if formal_stage_capacity
         else CodexSynthesisTransport(candidate_stage_capacity=True)
         if candidate_stage_capacity

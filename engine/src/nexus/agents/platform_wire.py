@@ -161,6 +161,7 @@ def _wire(
     profile: PlatformProfile,
     forbidden: tuple[str, ...],
     units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
+    schema_name: str = "research_stage",
 ) -> bytes:
     body = {
         "model": profile.model,
@@ -176,7 +177,7 @@ def _wire(
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "research_stage",
+                "name": schema_name,
                 "strict": True,
                 "schema": platform_output_schema(output_model, units_version=units_version),
             }

@@ -397,6 +397,10 @@ async def _collect_proof(
             or lease.expires_at > now
         ):
             raise SynthesisUsageDiagnosticError("synthesis_history", "BINDING_INVALID")
+        if synthesis and model.platform_profile is not None:
+            from nexus.agents.platform_portfolio import native_unknown_receipts
+
+            rows.extend(await native_unknown_receipts(session, job, attempt, now))
         rows.extend([job, attempt, lease])
     if any(getattr(row, "created_at", now) > now for row in rows):
         raise SynthesisUsageDiagnosticError("synthesis_history", "BINDING_INVALID")
