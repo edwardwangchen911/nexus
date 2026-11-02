@@ -21,7 +21,7 @@ from nexus.agents.codex_sdk import (
     DEVELOPER_INSTRUCTIONS,
     codex_request_wire,
 )
-from nexus.agents.codex_staged import STAGES
+from nexus.agents.codex_staged import STAGES, StructuredStagedCodexCommittee
 from nexus.agents.committee import INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION, ROLE_ORDER
 from nexus.agents.comparison_compiler import _compiler, compile_comparison_stage
 from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbound_safe
@@ -214,6 +214,89 @@ def freeze_platform_allocation(
     request = ResearchRequest.model_validate(member["request"])
     refs = tuple(EvidenceRef.model_validate(row) for row in member["evidence"])
     inputs = member["inputs"]
+    return _freeze_allocation(
+        compiler,
+        request=request,
+        evidence_refs=refs,
+        inputs=inputs,
+        input_hash=prepared.input_hash,
+        forbidden=prepared.forbidden,
+        profile=profile,
+        units_version=units_version,
+    )
+
+
+def native_platform_input_hash(
+    compiler: StructuredStagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: Sequence[EvidenceRef],
+    inputs: dict[str, Any],
+) -> str:
+    """Bind actual native material; no aliasing or comparison ownership is added.
+
+    The producer separately proves Run/Job/owner and freezes this digest in its
+    original transaction. A digest alone never authorizes admission or dispatch.
+    """
+    material = dict(
+        contract="platform-native-input-v1",
+        compiler=dict(
+            inline_citations=compiler._inline_citations,
+            paper_stage_scope=compiler._paper_stage_scope,
+            stage_time_budget=compiler._stage_time_budget,
+            stage_budget_version=compiler._stage_budget_version,
+            diagnostic_profile=compiler._diagnostic_profile,
+            structured_synthesis=compiler.structured_synthesis,
+        ),
+        request=request.model_dump(mode="json"),
+        evidence=[ref.model_dump(mode="json") for ref in evidence_refs],
+        inputs=inputs,
+        prompts={role: compiler._prompts[role].model_dump(mode="json") for role in ROLE_ORDER},
+    )
+    assert_outbound_safe(material, ())
+    return _hash(material)
+
+
+def freeze_native_platform_allocation(
+    compiler: StructuredStagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: Sequence[EvidenceRef],
+    inputs: dict[str, Any],
+    profile: PlatformProfile,
+    price_record: object,
+    units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
+) -> PlatformAllocation:
+    """Normal producer capacity using its actual daily/independent/increment compiler."""
+    _require_profile(profile, price_record=sol_price_record(price_record))
+    if units_version not in PLATFORM_UNITS_VERSIONS:
+        raise ValueError("PLATFORM_ALLOCATION_CHANGED")
+    return _freeze_allocation(
+        compiler,
+        request=request,
+        evidence_refs=tuple(evidence_refs),
+        inputs=inputs,
+        input_hash=native_platform_input_hash(
+            compiler, request=request, evidence_refs=evidence_refs, inputs=inputs
+        ),
+        forbidden=(),
+        profile=profile,
+        units_version=units_version,
+    )
+
+
+def _freeze_allocation(
+    compiler: StructuredStagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: tuple[EvidenceRef, ...],
+    inputs: dict[str, Any],
+    input_hash: str,
+    forbidden: tuple[str, ...],
+    profile: PlatformProfile,
+    units_version: str,
+) -> PlatformAllocation:
+    refs = evidence_refs
     envelope = candidate_capacity_envelope(
         compiler, request=request, evidence_refs=refs, inputs=inputs
     )
@@ -254,7 +337,7 @@ def freeze_platform_allocation(
                     schema,
                     output_remaining=_OUTPUT_LIMIT,
                     profile=profile,
-                    forbidden=prepared.forbidden,
+                    forbidden=forbidden,
                     units_version=units_version,
                 )
             )
@@ -265,7 +348,7 @@ def freeze_platform_allocation(
         bounds.append(units)
         schemas.append(_hash(platform_output_schema(schema, units_version=units_version)))
     return PlatformAllocation(
-        prepared.input_hash, tuple(bounds), tuple(schemas), profile, units_version=units_version
+        input_hash, tuple(bounds), tuple(schemas), profile, units_version=units_version
     )
 
 
@@ -313,8 +396,38 @@ def _remaining(
     return remaining
 
 
+@dataclass(frozen=True)
+class _NativeInputIdentity:
+    input_hash: str
+    forbidden: tuple[str, ...] = ()
+
+
+def compile_native_platform_stage(
+    *,
+    input_hash: str,
+    allocation: PlatformAllocation,
+    expected_allocation_hash: str,
+    stage: Stage,
+    compiled_request: tuple[Mapping[str, object], type[BaseModel]],
+    prior_usage: Sequence[PriorPlatformUsage],
+    price_record: object,
+) -> PlatformStageWire:
+    """Preserve the normal committee's entire current payload and output schema."""
+    pricing = sol_price_record(price_record)
+    return compile_platform_stage(
+        _NativeInputIdentity(input_hash),
+        allocation=allocation,
+        expected_allocation_hash=expected_allocation_hash,
+        stage=stage,
+        compiled_request=compiled_request,
+        previous=[],
+        prior_usage=prior_usage,
+        price_record=pricing,
+    )
+
+
 def compile_platform_stage(
-    prepared: PreparedComparisonInput,
+    prepared: PreparedComparisonInput | _NativeInputIdentity,
     *,
     allocation: PlatformAllocation,
     expected_allocation_hash: str,
@@ -360,6 +473,8 @@ def compile_platform_stage(
         price_record=price_record,
     )
     if compiled_request is None:
+        if not isinstance(prepared, PreparedComparisonInput):
+            raise ValueError("PLATFORM_NATIVE_REQUEST_REQUIRED")
         payload, schema = compile_comparison_stage(
             prepared,
             expected_input_hash=allocation.input_hash,

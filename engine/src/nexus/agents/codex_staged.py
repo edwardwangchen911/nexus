@@ -595,8 +595,11 @@ class StagedCodexCommittee(CodexCommittee):
         stage_budget_version: str | None = None,
         diagnostic_profile: str | None = None,
         platform_allocation: Any = None,
+        platform_price_record: object = None,
     ) -> None:
         platform_limits = None
+        if platform_price_record is not None and platform_allocation is None:
+            raise ValueError("PLATFORM_ALLOCATION_INVALID")
         if platform_allocation is not None:
             from nexus.agents.platform_wire import PlatformAllocation, _require_profile
 
@@ -611,7 +614,7 @@ class StagedCodexCommittee(CodexCommittee):
                 or stage_budget_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION
             ):
                 raise ValueError("PLATFORM_ALLOCATION_INVALID")
-            _require_profile(platform_allocation.profile)
+            _require_profile(platform_allocation.profile, price_record=platform_price_record)
             platform_limits = (
                 sum(platform_allocation.stage_input_upper_bounds),
                 max(platform_allocation.stage_input_upper_bounds) - 8192,
