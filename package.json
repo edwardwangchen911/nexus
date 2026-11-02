@@ -50,6 +50,7 @@
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "16.4.0",
     "jsdom": "^29.1.1",
+    "minimatch": "file:tools/minimatch-compat",
     "openapi-typescript": "^7.13.0",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.2.1",
@@ -70,6 +71,7 @@
     },
     "@typescript-eslint/typescript-estree@8.59.3": {
       "minimatch": "11.0.1"
-    }
+    },
+    "minimatch@^3 || ^5": "$minimatch"
   }
 }

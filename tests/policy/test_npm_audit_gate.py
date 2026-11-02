@@ -161,12 +161,8 @@ def test_current_checkout_rejects_historical_acceptance(report):
 
 def test_current_checkout_clean_scan_needs_no_risk_extension():
     report = json.loads(
-        (Path(__file__).parent / "fixtures/npm-audit-clean-20261029.json").read_text()
+        (Path(__file__).parent / "fixtures/npm-audit-clean-20261102.json").read_text()
     )
-    # Synthetic clean case for the new inventory: the scoped minimatch upgrade
-    # adds one dev-only matcher package. This is not a current clean scan claim.
-    report["metadata"]["dependencies"]["dev"] += 1
-    report["metadata"]["dependencies"]["total"] += 1
     assert gate.evaluate(report, 0, Path(__file__).resolve().parents[2], gate.EXPIRES_AT) == "clean"
 
 
