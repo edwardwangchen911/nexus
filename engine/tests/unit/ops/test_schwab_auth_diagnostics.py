@@ -96,8 +96,12 @@ def test_local_readiness_never_claims_remote_authentication(tmp_path, current):
     assert "fake-access" not in json.dumps(result) and "fake-refresh" not in json.dumps(result)
 
 
+@pytest.mark.parametrize(
+    ("runtime", "ambient_key"),
+    [(None, False), ("codex_sdk", False), ("responses", False), ("responses", True)],
+)
 def test_readiness_cli_separates_static_success_from_expired_local_auth(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, runtime, ambient_key
 ):
     from nexus.ops import agent_paper_readiness as readiness
 
@@ -112,11 +116,16 @@ def test_readiness_cli_separates_static_success_from_expired_local_auth(
     oauth.save_schwab_token(tmp_path, TOKEN)
     token_file = tmp_path / ".secrets/nexus-schwab-local/tokens.json"
     before = token_file.read_bytes()
+    if ambient_key:
+        monkeypatch.setenv("OPENAI_API_KEY", "unused-fixture-key")
+    else:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(readiness, "_validate_local_env", lambda *args: None)
     monkeypatch.setattr(
         readiness,
         "load_local_environment",
         lambda *args: {
+            **({"AGENT_RUNTIME_MODE": runtime} if runtime is not None else {}),
             "NEXUS_ENV": "test",
             "DATABASE_URL": "postgresql+asyncpg://fixture:fixture@127.0.0.1:55439/fixture",
             "NEXUS_AGENT_PAPER_ACCOUNT_ID": "00000000-0000-0000-0000-000000000001",
@@ -124,7 +133,10 @@ def test_readiness_cli_separates_static_success_from_expired_local_auth(
         },
     )
 
-    async def inspect(*args, **kwargs):
+    async def inspect(settings, **kwargs):
+        assert settings.openai_api_key is None
+        if runtime == "responses":
+            assert settings.agent_runtime_mode == "fixture"
         return {
             "status": "ready_static",
             "window_evidence_status": "not_evaluated",
@@ -144,3 +156,33 @@ def test_readiness_cli_separates_static_success_from_expired_local_auth(
         "market_window_evidence": "not_evaluated",
     }
     assert token_file.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "invalid", [{"AGENT_RUNTIME_MODE": "invalid-route"}, {"AGENT_DAILY_BUDGET_USD": "0"}]
+)
+def test_readiness_rejects_invalid_configuration_before_inspection(
+    tmp_path, monkeypatch, capsys, invalid
+):
+    from nexus.ops import agent_paper_readiness as readiness
+
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra/compose.yaml").touch()
+    monkeypatch.setattr(readiness, "_validate_local_env", lambda *args: None)
+    monkeypatch.setattr(
+        readiness,
+        "load_local_environment",
+        lambda *args: {
+            "NEXUS_ENV": "test",
+            "AGENT_RUNTIME_MODE": "responses",
+            "DATABASE_URL": "postgresql+asyncpg://127.0.0.1:55439/fixture",
+            "NEXUS_AGENT_PAPER_ACCOUNT_ID": "00000000-0000-0000-0000-000000000001",
+            "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": "00000000-0000-0000-0000-000000000002",
+            **invalid,
+        },
+    )
+    monkeypatch.setattr(
+        readiness, "_inspect", lambda *a, **kw: pytest.fail("invalid scope reached DB")
+    )
+    assert readiness.main(["--repo-root", str(tmp_path)]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "AGENT_PAPER_READINESS_INVALID"
