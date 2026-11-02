@@ -266,6 +266,10 @@ def _row_hash(row: Base) -> str:
     else:
         keys = tuple(item.key for item in row.__mapper__.column_attrs)
     values = {key: getattr(row, key) for key in keys}
+    # The nullable 0113 extension was not part of historical SDK audit rows.
+    # A real native profile must participate in the hash in its entirety.
+    if isinstance(row, AgentModelConfigRecord) and values.get("platform_profile") is None:
+        values.pop("platform_profile", None)
     return job_input_hash(json.loads(json.dumps(values, default=str)))
 
 
@@ -499,7 +503,6 @@ async def _legacy_proof(
         or run.actor_id != "local-agent-paper-cycle"
         or run.idempotency_key != f"agent-paper:{cycle_id}:{run.instrument_id}"
         or run.decision_time != cycle.decision_time
-        or run.reserved_cost_usd != 0
     ):
         raise ValueError(_BLOCKED)
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
@@ -512,22 +515,36 @@ async def _legacy_proof(
     if (
         model is None
         or reservation is None
+        or model.config_hash != run.model_hash
+        or model.version != run.pricing_version
+        or model.max_tool_calls != 0
+        or reservation.settled_usd is not None
+        or reservation.pricing_version != run.pricing_version
+        or reservation.reserved_usd != run.reserved_cost_usd
+    ):
+        raise ValueError(_BLOCKED)
+    from nexus.agents.platform_native import native_platform_semantics
+
+    try:
+        platform = await native_platform_semantics(session, run, model)
+    except ValueError:
+        raise ValueError(_BLOCKED) from None
+    if platform:
+        # The original allocation and immutable price profile are verified above.
+        # Disposition never turns unknown usage into zero or releases a paid hold.
+        if reservation.state != "reserved" or run.reserved_cost_usd != model.worst_case_cost_usd:
+            raise ValueError(_BLOCKED)
+    elif (
+        getattr(model, "platform_profile", None) is not None
         or (
-            (
-                run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS
-                and not formal_preparation_model_matches(model)
-            )
-            or model.model_id != MODEL_ID
-            or model.config_hash != run.model_hash
-            or model.version != run.pricing_version
-            or model.max_tool_calls != 0
-            or model.input_usd_per_million != 0
-            or model.output_usd_per_million != 0
-            or reservation.reserved_usd != 0
-            or reservation.settled_usd is not None
-            or reservation.state not in {"reserved", "released"}
-            or reservation.pricing_version != run.pricing_version
+            run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS
+            and not formal_preparation_model_matches(model)
         )
+        or model.model_id != MODEL_ID
+        or model.input_usd_per_million != 0
+        or model.output_usd_per_million != 0
+        or run.reserved_cost_usd != 0
+        or reservation.state not in {"reserved", "released"}
     ):
         raise ValueError(_BLOCKED)
     if run.pricing_version not in ACTIONABLE_CONFIG_VERSIONS:
@@ -615,6 +632,8 @@ async def _legacy_proof(
         stage_proof = await read_terminal_proof(session, run_id=run.id, now=now)
     except ProtocolRejected:
         raise ValueError(_BLOCKED) from None
+    if platform and stage_proof is None:
+        raise ValueError(_BLOCKED)
     if stage_proof is not None:
         # Selected identities prove their frozen lower bound from stage facts;
         # stopped publication need not have emitted legacy per-role outputs.

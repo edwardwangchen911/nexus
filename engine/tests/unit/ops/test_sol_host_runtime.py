@@ -112,3 +112,39 @@ async def test_formal_loop_dispatch_preserves_explicit_native_key_without_sdk_pr
         ),
     )
     assert result is None and calls == [UUID(int=41)]
+
+
+@pytest.mark.asyncio
+async def test_untyped_error_matching_native_refusal_is_not_zero_call_authority(
+    monkeypatch, tmp_path
+):
+    from unit.ops.test_agent_paper_loop import snapshot
+
+    env = environment()
+    settings = loop._FileEngineSettings.model_validate(env)
+
+    async def resolve(*args, **kwargs):
+        return True
+
+    async def unclassified(*args, **kwargs):
+        raise ValueError("PLATFORM_HTTP_CREDENTIAL_CHANGED")
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("unclassified error closed the pool")
+
+    monkeypatch.setattr(loop, "resolve_formal_host_cycle_profile", resolve)
+    monkeypatch.setattr(loop, "run_cycle_job_once", unclassified)
+    monkeypatch.setattr(loop, "close_capacity_rejected_cycle_once", forbidden)
+    with pytest.raises(ValueError, match="PLATFORM_HTTP_CREDENTIAL_CHANGED"):
+        await loop.execute_agent_paper_loop_action(
+            settings,
+            account_id=UUID(int=1),
+            repo_root=tmp_path,
+            action=loop.AgentPaperLoopAction.RUN_RESEARCH_JOB,
+            snapshot=snapshot(
+                cycle_id=UUID(int=31),
+                cycle_status="researching",
+                research_job_id=UUID(int=41),
+                research_job_status="queued",
+            ),
+        )

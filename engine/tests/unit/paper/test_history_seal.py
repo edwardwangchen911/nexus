@@ -516,3 +516,22 @@ def test_login_process_guard_resolves_installed_docker_without_shell_path(
         with pytest.raises(seal.ResearchProcessDiagnosticError):
             seal.require_research_processes_quiescent()
     assert os.environ["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def test_model_row_hash_preserves_pre_native_columns_and_includes_non_null_profile():
+    import json
+
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper.history_seal import _row_hash
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    model = AgentModelConfigRecord()
+    original = {
+        item.key: getattr(model, item.key)
+        for item in model.__mapper__.column_attrs
+        if item.key != "platform_profile"
+    }
+    old_hash = job_input_hash(json.loads(json.dumps(original, default=str)))
+    assert _row_hash(model) == old_hash
+    model.platform_profile = {"contract": "synthetic-non-null-profile"}
+    assert _row_hash(model) != old_hash

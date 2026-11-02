@@ -20,6 +20,7 @@ from nexus.jobs.repository import claim_next_job, finalize_job, job_lease_consum
 from nexus.ops.agent_capacity_rejection import CAPACITY_REJECTION_CODES
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentModelConfigRecord,
     AgentResearchEventRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
@@ -309,6 +310,17 @@ async def close_capacity_rejected_increment_once(
                         )
                     return True
 
+                from nexus.agents.platform_native import native_platform_semantics
+
+                # The lease contract is bounded; billing remains the immutable Sol
+                # version. Validate original route facts, never today's Key/price.
+                configured_model = await session.get(AgentModelConfigRecord, run.model_config_id)
+                if configured_model is None:
+                    raise ValueError(INVALID)
+                native = await native_platform_semantics(session, run, configured_model)
+                budget_profile = (
+                    BOUNDED_STAGE_BUDGET_CONFIG_VERSION if native else run.pricing_version
+                )
                 old_marker = await session.scalar(
                     text("SELECT current_setting('nexus.stage_protocol',true)")
                 )
@@ -318,12 +330,12 @@ async def close_capacity_rejected_increment_once(
                     worker_id=f"monitor-preclaim:{trigger_id}",
                     now=now,
                     lease_seconds=BOUNDED_RESEARCH_LEASE_SECONDS
-                    if run.pricing_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                    if budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
                     else 210,
                     job_ids=(job.id,),
                     job_types=("agent.paper.research",),
                     locked_job_guard=locked_guard,
-                    research_budget_profile=run.pricing_version,
+                    research_budget_profile=budget_profile,
                 )
                 await session.execute(
                     text("SELECT set_config('nexus.stage_protocol',:value,true)"),

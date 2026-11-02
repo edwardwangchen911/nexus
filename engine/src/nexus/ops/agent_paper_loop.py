@@ -39,8 +39,8 @@ from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
 from nexus.ops.agent_capacity_rejection import (
-    CAPACITY_REJECTION_CODES,
     close_capacity_rejected_cycle_once,
+    dispatch_preclaim_code,
 )
 from nexus.ops.agent_paper_formal import (
     require_formal_host_configuration_match,
@@ -3658,14 +3658,15 @@ async def execute_agent_paper_loop_action(
                 **({"formal_stage_capacity": True} if formal_stage_capacity else {}),
             )
         except ValueError as error:
-            if not formal_stage_capacity or str(error) not in CAPACITY_REJECTION_CODES:
+            code = dispatch_preclaim_code(error, research_settings)
+            if not formal_stage_capacity or code is None:
                 raise
             await close_capacity_rejected_cycle_once(
                 research_settings,
                 account_id=account_id,
                 cycle_id=snapshot.cycle_id,
                 job_id=snapshot.research_job_id,
-                code=str(error),
+                code=code,
             )
             return None
         if not worked:

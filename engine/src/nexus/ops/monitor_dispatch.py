@@ -413,12 +413,13 @@ async def dispatch_configured_once(
                     payload={"trigger_id": str(trigger_id), "job_id": str(job_id)},
                     occurred_at=sent_at,
                 )
-            from nexus.ops.agent_capacity_rejection import CAPACITY_REJECTION_CODES
+            from nexus.ops.agent_capacity_rejection import dispatch_preclaim_code
 
             try:
                 await run_agent_worker_once(settings, job_ids=(job_id,), formal_stage_capacity=True)
             except ValueError as error:
-                if str(error) not in CAPACITY_REJECTION_CODES:
+                code = dispatch_preclaim_code(error, settings)
+                if code is None:
                     raise
                 from nexus.monitoring.preclaim import close_capacity_rejected_increment_once
 
@@ -427,7 +428,7 @@ async def dispatch_configured_once(
                     account_id=settings.agent_paper_account_id,
                     trigger_id=trigger_id,
                     job_id=job_id,
-                    code=str(error),
+                    code=code,
                 )
                 await run(settings, argparse.Namespace(action="reconcile"))
                 return rejected
