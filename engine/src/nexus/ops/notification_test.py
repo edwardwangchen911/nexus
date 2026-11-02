@@ -19,7 +19,7 @@ from nexus.notifications.worker import (
     load_bark_credentials,
     load_bark_worker_settings,
 )
-from nexus.ops.agent_paper_loop import load_agent_paper_service_environment
+from nexus.ops.agent_paper_loop import load_local_host_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _validate_local_env
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         root = args.repo_root.resolve()
         config = args.env_file if args.env_file.is_absolute() else root / args.env_file
         config = _validate_local_env(root, config)
-        environment = load_agent_paper_service_environment(root, {}, env_file=config)
+        environment = load_local_host_environment(root, {}, env_file=config)
         receipt = asyncio.run(run(environment, action=args.action, test_id=args.test_id))
     except DiagnosticNotificationRejected as error:
         report = {

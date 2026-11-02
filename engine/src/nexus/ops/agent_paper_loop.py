@@ -519,7 +519,7 @@ class _FileDailySettings(_FileOnlySources, DailyOnceSettings):
     pass
 
 
-def load_agent_paper_service_environment(
+def load_local_host_environment(
     repo_root: Path, process_environment: Mapping[str, str], *, env_file: Path | None = None
 ) -> dict[str, str]:
     """Load configuration and restore loopback endpoints required by host networking."""
@@ -548,6 +548,25 @@ def load_agent_paper_service_environment(
             environment["OBJECT_STORE_ENDPOINT"] = urlunsplit(
                 object_store._replace(netloc=f"127.0.0.1:{host_port}")
             )
+    return environment
+
+
+def load_agent_paper_service_environment(
+    repo_root: Path, process_environment: Mapping[str, str], *, env_file: Path | None = None
+) -> dict[str, str]:
+    environment = load_local_host_environment(repo_root, process_environment, env_file=env_file)
+    if (
+        environment.get("AGENT_RUNTIME_MODE", "").strip().lower() == "responses"
+        and environment.get("OPENAI_REASONING_MODEL", environment.get("AGENT_REASONING_MODEL_ID"))
+        == "gpt-6.1-sol"
+        and environment.get("OPENAI_EXTRACTION_MODEL", environment.get("AGENT_EXTRACTION_MODEL_ID"))
+        == "gpt-6.1-sol"
+        and environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "").lower()
+        not in {"false", "0", "off", "no"}
+    ):
+        from nexus.ops.platform_credentials import bind_host_project_key
+
+        bind_host_project_key(repo_root, environment)
     return environment
 
 
@@ -634,7 +653,10 @@ def _native_service_configuration_valid(environment: Mapping[str, str]) -> bool:
     if environment.get("AGENT_RUNTIME_MODE", "").strip().lower() != "responses":
         return False
     try:
-        return native_runtime_matches(_FileEngineSettings.model_validate(environment))
+        settings = _FileEngineSettings.model_validate(environment)
+        return settings.agent_paper_formal_model_config_id is not None and native_runtime_matches(
+            settings
+        )
     except ValueError:
         return False
 

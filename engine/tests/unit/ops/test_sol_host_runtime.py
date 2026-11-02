@@ -148,3 +148,56 @@ async def test_untyped_error_matching_native_refusal_is_not_zero_call_authority(
                 research_job_status="queued",
             ),
         )
+
+
+def test_normal_host_reads_saved_key_for_exact_sol_route_only(tmp_path, monkeypatch):
+    from nexus.ops.platform_credentials import PLATFORM_KEY_PATH, PlatformCredentialError
+
+    conf = tmp_path / "host.env"
+    env = environment()
+    key = env.pop("OPENAI_API_KEY")
+    conf.write_text("\n".join(f"{k}={v}" for k, v in env.items()))
+    saved = tmp_path / PLATFORM_KEY_PATH
+    saved.parent.mkdir(parents=True)
+    saved.write_text(key + "\n")
+    saved.chmod(0o600)
+    monkeypatch.setenv("OPENAI_API_KEY", "wrong-ambient-key")
+    loaded = loop.load_agent_paper_service_environment(tmp_path, {}, env_file=conf)
+    settings = loop._FileEngineSettings.model_validate(loaded)
+    assert settings.openai_api_key.get_secret_value() == key
+    assert "OPENAI_API_KEY" not in conf.read_text()
+    with pytest.raises(PlatformCredentialError):
+        loop.load_agent_paper_service_environment(
+            tmp_path, {"OPENAI_PROJECT": "another-project"}, env_file=conf
+        )
+    for override in (
+        {"OPENAI_API_KEY": "sk-proj-other"},
+        {"OPENAI_BASE_URL": "https://wrong.invalid/v1"},
+    ):
+        with pytest.raises(PlatformCredentialError):
+            loop.load_agent_paper_service_environment(tmp_path, override, env_file=conf)
+    # Consumers that only localize endpoints never resolve the saved model credential.
+    assert "OPENAI_API_KEY" not in loop.load_local_host_environment(tmp_path, {}, env_file=conf)
+    saved.chmod(0o644)
+    with pytest.raises(PlatformCredentialError):
+        loop.load_agent_paper_service_environment(tmp_path, {}, env_file=conf)
+    sdk = loop.load_agent_paper_service_environment(
+        tmp_path, {"AGENT_RUNTIME_MODE": "codex_sdk"}, env_file=conf
+    )
+    assert not sdk.get("OPENAI_API_KEY")
+
+
+@pytest.mark.asyncio
+async def test_native_host_requires_registered_formal_model_before_trigger(tmp_path):
+    from nexus.ops.agent_paper_formal import require_formal_host_trigger_profile
+
+    path = tmp_path / ".secrets/nexus-agent-paper"
+    path.mkdir(parents=True, mode=0o700)
+    env = environment()
+    del env["NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID"]
+    receipt = loop.agent_paper_service_startup_preflight(env, repo_root=tmp_path)
+    assert "AGENT_PAPER_MODEL_RUNTIME_MISMATCH" in receipt["blocking_codes"]
+    with pytest.raises(ValueError, match="CODEX_FORMAL_HOST_PROFILE_INVALID"):
+        await require_formal_host_trigger_profile(
+            loop._FileEngineSettings.model_validate(env), now=NOW
+        )

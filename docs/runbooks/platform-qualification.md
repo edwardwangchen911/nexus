@@ -59,6 +59,22 @@ watch/defer 语义；旧 Output 不重算。离线 HTTP 替身回归不证明真
 这些离线覆盖不证明已部署的默认选择、公开 API / 实际页面、真实宿主恢复、
 SDK 运维回切或自然监控验收。
 
+正常日研宿主选择 Sol 时，在受保护的宿主配置中设定 `AGENT_RUNTIME_MODE=responses`，
+将 `OPENAI_EXTRACTION_MODEL` 和 `OPENAI_REASONING_MODEL` 均设为 `gpt-6.1-sol`，
+把登记回执的精确 ID 填入 `NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID`。
+宿主在内存中读取 `nexus-platform-local save-key` 已保存的项目 Key。已有显式 Key
+须与文件一致。组织、项目或 API 目的地冲突时，配置读取失败。
+
+启用正式预算保护时，在自然槽前通过 `nexus-engine-formal-budget-protection` 应用
+当日配置，并以 `--status` 读回。该日已应用的绑定决定模型 ID、hash 和价档。
+改动配置文件后须按原合同重新应用。检查到槽已认领时，保留该槽原来的身份。
+Sol 的预算绑定记录有界研究时长，Job 为 300 秒、处理器为 315 秒。
+
+隔离库覆盖了宿主读取配置、派发三项研究、阶段结算和监控登记。受控样本中两项
+有合格价格提案，第三项保留审计否决。再次核对时沿用原覆盖回执。
+自然日研中三项成功后还进入组合合成；当前组合 Worker 只接受 SDK，
+这是完整自然周期切到 Sol 前仍需解决的入口。
+
 登记提交回执未知时返回 `PLATFORM_PROFILE_REGISTRATION_RESULT_UNKNOWN` 和已准备的
 配置 ID/hash，后续仅用 `inspect-sol-profile` 核对该 ID；不要换时间、换价档或重新登记。
 同一登记的并发调用只产生一份配置和审计。0113 尚无 Sol 记录时可以降回 0112；

@@ -160,6 +160,30 @@ def _resolved_key(root: Path) -> SecretStr:
     return settings.openai_api_key
 
 
+def _validate_destination(
+    environment: dict[str, str],
+    organization_id: str | None,
+    project_id: str | None,
+    *,
+    key_scope_only: bool,
+) -> None:
+    if key_scope_only and any(
+        environment.get(name)
+        for name in ("OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_PROJECT")
+    ):
+        _reject("PLATFORM_CREDENTIAL_BINDING_MISMATCH")
+    expected = {
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "OPENAI_API_BASE": "https://api.openai.com/v1",
+        "OPENAI_ORG_ID": organization_id,
+        "OPENAI_ORGANIZATION": organization_id,
+        "OPENAI_PROJECT_ID": project_id,
+        "OPENAI_PROJECT": project_id,
+    }
+    if any(environment.get(name, value) != value for name, value in expected.items()):
+        _reject("PLATFORM_DESTINATION_MISMATCH")
+
+
 def resolve_platform_credential(
     root: Path,
     *,
@@ -180,21 +204,7 @@ def resolve_platform_credential(
         name: value for name, value in dotenv_values(root / "infra/.env.local").items() if value
     }
     environment.update({name: value for name, value in os.environ.items() if value})
-    if key_scope_only and any(
-        environment.get(name)
-        for name in ("OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_PROJECT")
-    ):
-        _reject("PLATFORM_CREDENTIAL_BINDING_MISMATCH")
-    expected = {
-        "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "OPENAI_API_BASE": "https://api.openai.com/v1",
-        "OPENAI_ORG_ID": organization_id,
-        "OPENAI_ORGANIZATION": organization_id,
-        "OPENAI_PROJECT_ID": project_id,
-        "OPENAI_PROJECT": project_id,
-    }
-    if any(environment.get(name, value) != value for name, value in expected.items()):
-        _reject("PLATFORM_DESTINATION_MISMATCH")
+    _validate_destination(environment, organization_id, project_id, key_scope_only=key_scope_only)
     result = PlatformCredential(
         key, actual, organization_id, project_id, endpoint, key_scope_only=key_scope_only
     )
@@ -327,6 +337,24 @@ def _private_bytes(path: Path, limit: int) -> bytes:
         raise
     except Exception:
         raise PlatformCredentialError("PLATFORM_PROOF_UNSAFE") from None
+
+
+def bind_host_project_key(root: Path, environment: dict[str, str]) -> None:
+    """Resolve the selected host's key without importing unrelated process settings."""
+    _validate_destination(environment, None, None, key_scope_only=True)
+    supplied = environment.get("OPENAI_API_KEY")
+    saved = root / PLATFORM_KEY_PATH
+    if saved.exists() or saved.is_symlink():
+        try:
+            key = _private_bytes(saved, 1025).decode().rstrip("\r\n")
+            fingerprint = credential_fingerprint(key)
+        except (PlatformCredentialError, UnicodeError):
+            raise PlatformCredentialError("PLATFORM_CREDENTIAL_INVALID") from None
+        if supplied and credential_fingerprint(supplied) != fingerprint:
+            _reject("PLATFORM_CREDENTIAL_BINDING_MISMATCH")
+        environment["OPENAI_API_KEY"] = key
+    elif supplied:
+        credential_fingerprint(supplied)
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

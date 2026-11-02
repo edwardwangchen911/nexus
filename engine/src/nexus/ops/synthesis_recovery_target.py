@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.ops.agent_paper_loop import load_agent_paper_service_environment
+from nexus.ops.agent_paper_loop import load_local_host_environment
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_stack import _validate_local_env
 from nexus.paper.synthesis_usage_acceptance import SynthesisUsageDiagnosticError
@@ -34,7 +34,7 @@ def _source(root: Path, path: Path) -> tuple[str, str]:
     ):
         raise _reject("SOURCE_CONFIGURATION_UNSAFE")
     before = path.read_bytes()
-    environment = load_agent_paper_service_environment(root, {}, env_file=path)
+    environment = load_local_host_environment(root, {}, env_file=path)
     url = environment.get("DATABASE_URL")
     _validate_local_database(url)
     name = make_url(url or "").database

@@ -153,7 +153,7 @@ async def test_normal_sol_preparation_freezes_all_three_native_routes_and_shared
 
 @pytest.mark.asyncio
 async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
-    migrated_database_url, monkeypatch, after_prepared=None
+    migrated_database_url, monkeypatch, after_prepared=None, monitoring=False
 ):
     from integration import test_candidate_multistock_path as candidates
     from nexus.agents.platform_native import credential_for_preparation
@@ -216,7 +216,12 @@ async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
     try:
         with pytest.raises(Prepared):
             await candidates.test_fresh_multistock_candidate_cycle_freezes_native_jobs(
-                migrated_database_url, monkeypatch, count=3, trade=False, profile="formal_v11"
+                migrated_database_url,
+                monkeypatch,
+                count=3,
+                trade=False,
+                profile="formal_v11",
+                monitoring=monitoring,
             )
         async with factory() as session:
             rows = (

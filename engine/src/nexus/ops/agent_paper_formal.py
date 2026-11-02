@@ -66,6 +66,8 @@ async def _read_session(settings: EngineSettings) -> AsyncIterator[AsyncSession]
 async def require_formal_host_trigger_profile(settings: EngineSettings, *, now: datetime) -> None:
     model_id = settings.agent_paper_formal_model_config_id
     if model_id is None:
+        if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES:
+            raise ValueError(_CODE)
         return
     if not _runtime_supported(settings):
         raise ValueError(_CODE)

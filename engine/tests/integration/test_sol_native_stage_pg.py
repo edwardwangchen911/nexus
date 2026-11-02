@@ -133,7 +133,7 @@ async def test_sol_normal_and_orphan_consume_identical_original_price(
         await factory.kw["bind"].dispose()
 
 
-def install_sol_http(monkeypatch, store, *, audit_veto=False, on_request=None):
+def install_sol_http(monkeypatch, store, *, audit_veto=False, on_request=None, model_response=None):
     import httpx
     from nexus.agents import platform_native
     from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _staged_batch
@@ -170,6 +170,8 @@ def install_sol_http(monkeypatch, store, *, audit_veto=False, on_request=None):
                         f"daily_pending_{suffix}": None,
                     }
                 )
+        if model_response is not None:
+            model_response(response, payload)
         # The normal formal prompt has no monitor fields. Omit only absent
         # optional-null fixture fields; keep every substantive value for validation.
         properties = body["text"]["format"]["schema"]["properties"]
@@ -964,3 +966,140 @@ async def test_native_increment_worker_settles_only_child_and_retains_parent(
         assert all(c.is_closed for c in clients)
 
     await prepare(migrated_database_url, monkeypatch, after_admitted=validate)
+
+
+@pytest.mark.asyncio
+async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from integration.test_sol_native_preparation_pg import (
+        test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes as prepare,
+    )
+    from nexus.ops import agent_paper_loop as loop
+    from nexus.ops import research_monitor
+    from nexus.ops.platform_credentials import PLATFORM_KEY_PATH
+    from nexus.persistence.models.monitoring import MonitorCoverageReceipt, MonitorPlan
+    from nexus.persistence.models.paper import AgentPaperCycleRecord
+    from sqlalchemy import func
+    from unit.ops.test_sol_host_runtime import environment
+
+    async def validate(factory, settings, cycle_id):
+        async with factory() as session:
+            cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+            routes = (
+                await session.execute(
+                    text(
+                        "SELECT run_id,job_id FROM research_stage_route "
+                        "WHERE scope_id=:cycle ORDER BY run_id"
+                    ),
+                    {"cycle": cycle_id},
+                )
+            ).all()
+        config = environment()
+        config.pop("OPENAI_API_KEY")
+        config.update(
+            DATABASE_URL=migrated_database_url,
+            NEXUS_AGENT_PAPER_ACCOUNT_ID=str(cycle.account_id),
+            NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID=str(cycle.candidate_batch_id),
+            NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID=str(
+                settings.agent_paper_formal_model_config_id
+            ),
+            AGENT_DAILY_BUDGET_USD=str(settings.agent_daily_budget_usd),
+        )
+        secret_path = tmp_path / PLATFORM_KEY_PATH
+        secret_path.parent.mkdir(parents=True)
+        secret_path.write_text(settings.openai_api_key.get_secret_value())
+        secret_path.chmod(0o600)
+        env_file = tmp_path / "host.env"
+        env_file.write_text("\n".join(f"{k}={v}" for k, v in config.items()))
+        host = loop._FileEngineSettings.model_validate(
+            loop.load_agent_paper_service_environment(tmp_path, {}, env_file=env_file)
+        )
+        from unit.agents.test_monitoring_producer import proposal_wire
+
+        def reviewed_response(body, payload):
+            proposal = payload.get("monitoring_proposal")
+            if payload["stage"] == "synthesis":
+                assessment = body["synthesis_assessment"]
+                for review in assessment["reviews"]:
+                    review.update(
+                        status="accepted",
+                        resolved=True,
+                        missing_evidence=[],
+                        prevented_conclusion=None,
+                        rationale="已核对冻结证据。",
+                    )
+                assessment.update(
+                    review_conclusion="sufficient",
+                    uncertainties=[],
+                    claims=[{"text": "证据支持继续观察并复核价格。", "citations": [0]}],
+                )
+                body["monitoring_adoption_hash"] = proposal["content_hash"] if approved else None
+            else:
+                for row in body["roles"]:
+                    row["vote"] = "support"
+                    if payload["stage"] == "research" and row["role"] == "market_state":
+                        row["monitoring_proposal"] = proposal_wire(cycle.decision_time)
+                    if payload["stage"] == "critique":
+                        veto = not approved and row["role"] == "evidence_audit"
+                        row["vote"] = "abstain" if veto else "support"
+                        row["monitoring_review"] = {
+                            "proposal_hash": proposal["content_hash"],
+                            "decision": "rejected" if veto else "accepted",
+                            "rationale": "核对冻结价格条件及其证据。",
+                            "citations": [0],
+                        }
+
+        requests, clients = install_sol_http(monkeypatch, None, model_response=reviewed_response)
+        for run_id, job_id in routes:
+            approved = run_id != routes[-1].run_id
+            snapshot = loop.AgentPaperLoopSnapshot(
+                now=cycle.decision_time,
+                cycle_id=cycle_id,
+                cycle_status="researching",
+                research_job_id=job_id,
+                research_job_status="queued",
+            )
+            assert loop.choose_loop_action(snapshot) == loop.AgentPaperLoopAction.RUN_RESEARCH_JOB
+            assert (
+                await loop.execute_agent_paper_loop_action(
+                    host,
+                    account_id=cycle.account_id,
+                    repo_root=tmp_path,
+                    env_file=env_file,
+                    action=loop.choose_loop_action(snapshot),
+                    snapshot=snapshot,
+                )
+                is None
+            )
+            async with factory() as session:
+                run = await session.get(AgentResearchRunRecord, run_id)
+                assert run.status == "completed" and run.settled_cost_usd == Decimal("0.0897")
+        assert requests == ["research", "critique", "synthesis"] * 3
+        args = research_monitor.parser().parse_args(["reconcile"])
+        result = await research_monitor.run(host, args)
+        async with factory() as session:
+            coverage = (
+                await session.execute(
+                    select(MonitorCoverageReceipt.reason, MonitorCoverageReceipt.quality_status)
+                )
+            ).all()
+        assert result["installed"] == 2 and result["gap"] == 1, coverage
+        assert ("MONITOR_AUDIT_REJECTED", "partial") in coverage
+        assert (
+            result["execution_locked"]
+            and result["model_requests"] == result["provider_requests"] == 0
+        )
+        again = await research_monitor.run(host, args)
+        assert again["installed"] == 0 and again["recorded"] == 0
+        async with factory() as session:
+            plans = tuple(await session.scalars(select(MonitorPlan)))
+            assert len(plans) == 2 and {p.source_run_id for p in plans} == {
+                r.run_id for r in routes[:-1]
+            }
+            assert (
+                await session.scalar(select(func.count()).select_from(MonitorCoverageReceipt)) == 3
+            )
+        assert len(requests) == 9 and all(c.is_closed for c in clients)
+
+    await prepare(migrated_database_url, monkeypatch, after_prepared=validate, monitoring=True)
