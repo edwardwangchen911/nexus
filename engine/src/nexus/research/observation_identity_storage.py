@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
-from nexus.market.current_identity_storage import ArtifactBinding
+from nexus.market.current_identity_storage import ArtifactBinding, CurrentIdentityProof
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
@@ -100,14 +100,63 @@ def _rows(
     )
 
 
+class _OriginalChecks:
+    """Share verified originals only within one identity read at one fixed cutoff."""
+
+    def __init__(self, session: AsyncSession, store: ExhibitStore, cutoff: datetime) -> None:
+        self.session = session
+        self.store = store
+        self.cutoff = cutoff
+        self.bases: dict[UUID, tuple[DataSnapshot, CurrentIdentityProof]] = {}
+        self.sources: set[
+            tuple[str, str, str, tuple[ArtifactBinding, ...], tuple[datetime, datetime]]
+        ] = set()
+
+    async def base(self, snapshot_id: UUID) -> tuple[DataSnapshot, CurrentIdentityProof]:
+        if snapshot_id not in self.bases:
+            self.bases[snapshot_id] = await _base(
+                self.session, self.store, snapshot_id, self.cutoff
+            )
+        return self.bases[snapshot_id]
+
+    async def verify_sources(
+        self, document: ResearchIdentityBinding | ResearchObservationIdentityBinding
+    ) -> None:
+        key = (
+            document.symbol,
+            document.issuer_cik,
+            document.exchange,
+            document.source_artifacts,
+            document.source_received_at,
+        )
+        if key in self.sources:
+            return
+        raw = [
+            await _read_artifact(self.session, self.store, item, self.cutoff)
+            for item in document.source_artifacts
+        ]
+        sources = validate_observation_source_originals(
+            contents=(raw[0], raw[1], raw[2], raw[3]),
+            symbol=document.symbol,
+            cik=document.issuer_cik,
+            exchange=document.exchange,
+            as_of=self.cutoff,
+        )
+        if (
+            sources.originals[0].received_at,
+            sources.originals[2].received_at,
+        ) != document.source_received_at:
+            raise ValueError("RESEARCH_OBSERVATION_RECEIPT_INVALID")
+        self.sources.add(key)
+
+
 async def _verify_document(
-    session: AsyncSession,
-    store: ExhibitStore,
+    checks: _OriginalChecks,
     snapshot: DataSnapshot,
     evidence: ResearchEvidenceRef,
     document: ResearchIdentityBinding | ResearchObservationIdentityBinding,
-    cutoff: datetime,
 ) -> None:
+    session, store, cutoff = checks.session, checks.store, checks.cutoff
     if evidence is None:
         raise ValueError("RESEARCH_OBSERVATION_ORIGINAL_MISSING")
     content = document.canonical_bytes()
@@ -141,7 +190,7 @@ async def _verify_document(
         != content
     ):
         raise ValueError("RESEARCH_OBSERVATION_DOCUMENT_INVALID")
-    base, proof = await _base(session, store, document.identity_snapshot_id, cutoff)
+    base, proof = await checks.base(document.identity_snapshot_id)
     if (
         (
             document.instrument_id,
@@ -167,19 +216,7 @@ async def _verify_document(
         or document.available_at != max(base.available_at, *document.source_received_at)
     ):
         raise ValueError("RESEARCH_OBSERVATION_BASE_INVALID")
-    raw = [await _read_artifact(session, store, item, cutoff) for item in document.source_artifacts]
-    sources = validate_observation_source_originals(
-        contents=(raw[0], raw[1], raw[2], raw[3]),
-        symbol=document.symbol,
-        cik=document.issuer_cik,
-        exchange=document.exchange,
-        as_of=cutoff,
-    )
-    if (
-        sources.originals[0].received_at,
-        sources.originals[2].received_at,
-    ) != document.source_received_at:
-        raise ValueError("RESEARCH_OBSERVATION_RECEIPT_INVALID")
+    await checks.verify_sources(document)
 
 
 async def _check_known_sources(
@@ -239,13 +276,12 @@ async def _check_known_sources(
 
 
 async def _known_originals(
-    session: AsyncSession,
-    store: ExhibitStore,
+    checks: _OriginalChecks,
     instrument_id: UUID,
-    cutoff: datetime,
 ) -> tuple[
     list[tuple[DataSnapshot, ResearchEvidenceRef, ResearchIdentityBinding]], InstrumentAlias
 ]:
+    session, store, cutoff = checks.session, checks.store, checks.cutoff
     rows = list(await session.execute(_rows(instrument_id, CURRENT_SOURCE, cutoff)))
     if not rows:
         raise ValueError("RESEARCH_OBSERVATION_ORIGINAL_MISSING")
@@ -254,7 +290,7 @@ async def _known_originals(
         document = ResearchIdentityBinding.model_validate(snapshot.payload)
         if document.policy_hash != CURRENT_POLICY_HASH:
             raise ValueError("RESEARCH_OBSERVATION_ORIGINAL_INVALID")
-        await _verify_document(session, store, snapshot, evidence, document, cutoff)
+        await _verify_document(checks, snapshot, evidence, document)
         verified.append((snapshot, evidence, document))
     mappings = {
         (d.instrument_id, d.alias_id, d.symbol, d.issuer_cik, d.exchange) for _, _, d in verified
@@ -304,7 +340,7 @@ async def _known_originals(
         )
     )
     for candidate in bases:
-        _, proof = await _base(session, store, candidate.id, cutoff)
+        _, proof = await checks.base(candidate.id)
         if (
             proof.instrument_id,
             proof.alias_id,
@@ -326,7 +362,8 @@ async def register_observation_identity_binding(
     """Derive a new purpose from existing originals; never collect or backdate."""
     store = store or configured_exhibit_store(session)
     cutoff = await _clock(session)
-    originals, alias = await _known_originals(session, store, instrument_id, cutoff)
+    checks = _OriginalChecks(session, store, cutoff)
+    originals, alias = await _known_originals(checks, instrument_id)
     eligible = [row for row in originals if identity_evidence_id in (None, row[1].id)]
     if not eligible:
         raise ValueError("RESEARCH_OBSERVATION_ORIGINAL_MISSING")
@@ -425,7 +462,8 @@ async def read_observation_identity_bindings(
         if cutoff > await _clock(session):
             return {}
         store = store or configured_exhibit_store(session)
-        originals, alias = await _known_originals(session, store, instrument_id, cutoff)
+        checks = _OriginalChecks(session, store, cutoff)
+        originals, alias = await _known_originals(checks, instrument_id)
         original_docs = {ref.id: doc for _, ref, doc in originals}
         rows = list(await session.execute(_rows(instrument_id, SOURCE, cutoff)))
         verified = {}
@@ -448,7 +486,7 @@ async def read_observation_identity_bindings(
             }
             if any(getattr(document, key) != getattr(old, key) for key in shared):
                 raise ValueError("RESEARCH_OBSERVATION_ORIGINAL_INVALID")
-            await _verify_document(session, store, snapshot, evidence, document, cutoff)
+            await _verify_document(checks, snapshot, evidence, document)
             verified[evidence.id] = document
         if evidence_ids is not None:
             return (

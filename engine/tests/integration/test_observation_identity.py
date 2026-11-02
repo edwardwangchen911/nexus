@@ -4,6 +4,7 @@ import importlib
 import json
 from datetime import timedelta
 from hashlib import sha256
+from urllib.parse import urlsplit
 
 import pytest
 from helpers.current_identity import archives
@@ -80,6 +81,7 @@ async def test_register_observation_exact_readback_and_fail_closed(
             assert ref.source == "research_observation_identity"
         async with factory() as session:
             cutoff = await session.scalar(select(func.clock_timestamp()))
+        client.get_calls.clear()
         async with factory() as session, session.begin():
             result = await module.read_observation_identity_bindings(
                 session, instrument_id=instrument, as_of=cutoff, store=store
@@ -87,6 +89,9 @@ async def test_register_observation_exact_readback_and_fail_closed(
             assert set(result) == {ref.id}
             doc = result[ref.id]
             assert doc.original_evidence_id == original
+            # The original, derived wrapper and conflict scan share this immutable listing base.
+            base_key = urlsplit(doc.identity_artifacts[0].uri).path.lstrip("/")
+            assert sum(call["Key"] == base_key for call in client.get_calls) == 1
             assert doc.source_effective_at is None and doc.remote_latest_status == "unverified"
             assert doc.execution_locked is True
             if fault == "corruption":
