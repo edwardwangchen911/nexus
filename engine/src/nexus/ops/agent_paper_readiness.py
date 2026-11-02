@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -11,12 +10,12 @@ from uuid import UUID
 from sqlalchemy import func, select, text
 
 from nexus.ops.agent_paper_once import _validate_local_database
-from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.fosun_local import load_local_environment, local_read_settings
 from nexus.ops.local_stack import LocalStackConfigurationError, _validate_local_env
 from nexus.paper.candidate_batch import inspect_agent_paper_candidate_static_readiness
 from nexus.persistence.session import session_factory
 from nexus.providers.market.schwab_oauth import inspect_schwab_token_readiness
-from nexus.settings import AgentRuntimeMode, EngineSettings
+from nexus.settings import EngineSettings
 
 
 async def _inspect(
@@ -47,11 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             raise LocalStackConfigurationError("REPOSITORY_ROOT_INVALID")
         _validate_local_env(root, root / "infra/.env.local")
         environment = load_local_environment(root, {})
-        runtime = environment.get("AGENT_RUNTIME_MODE", os.environ.get("AGENT_RUNTIME_MODE"))
-        # Static readiness reads the database; the host alone owns the Responses transport.
-        if runtime == AgentRuntimeMode.RESPONSES:
-            environment["AGENT_RUNTIME_MODE"] = AgentRuntimeMode.FIXTURE.value
-        settings = EngineSettings.model_validate({**environment, "OPENAI_API_KEY": None})
+        settings = local_read_settings(environment)
         account_id = UUID(environment.get("NEXUS_AGENT_PAPER_ACCOUNT_ID", ""))
         batch_id = UUID(environment.get("NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID", ""))
         result = asyncio.run(_inspect(settings, account_id=account_id, batch_id=batch_id))

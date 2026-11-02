@@ -395,9 +395,21 @@ async def test_normal_daily_reconcile_adopts_original_sec_plan_independently(
                 session, account_id=pointer.account_id, run=source, now=captured["clock"][0]
             )
             saved_price_receipt = price_receipt.id
+    from nexus.monitoring import reconciliation
+
+    scope_reads = []
+    verify_scope = reconciliation._scope_evidence
+
+    async def observe_verification(session, *, account_id, run):
+        scope_reads.append(run.id)
+        return await verify_scope(session, account_id=account_id, run=run)
+
+    monkeypatch.setattr(reconciliation, "_scope_evidence", observe_verification)
     try:
         result = await run(settings, parser().parse_args(["reconcile"]))
         assert result["model_requests"] == result["provider_requests"] == 0
+        assert pointer.source_run_id in scope_reads
+        assert len(scope_reads) == len(set(scope_reads))
         async with factory() as session:
             plans = tuple(
                 await session.scalars(

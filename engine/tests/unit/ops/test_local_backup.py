@@ -24,7 +24,10 @@ ROW = {"uri": URI, "sha256": hashlib.sha256(CONTENT).hexdigest(), "byte_size": l
 
 
 @pytest.mark.asyncio
-async def test_mixed_audit_and_provider_objects_survive_offline_copy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("runtime", ["fixture", "responses"])
+async def test_mixed_audit_and_provider_objects_survive_offline_copy(
+    tmp_path, monkeypatch, runtime
+):
     from nexus.ops import local_recovery
 
     content = gzip.compress(b'{"synthetic":"audit"}\n', mtime=0)
@@ -49,7 +52,9 @@ async def test_mixed_audit_and_provider_objects_survive_offline_copy(tmp_path, m
     )
     recovery = LocalRecovery(tmp_path, tmp_path)
     recovery.output = tmp_path
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     recovery.environment = {
+        "AGENT_RUNTIME_MODE": runtime,
         "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:59999",
         "OBJECT_STORE_REGION": "us-east-1", "OBJECT_STORE_BUCKET": "synthetic",
         "OBJECT_STORE_ACCESS_KEY_ID": "synthetic", "OBJECT_STORE_SECRET_ACCESS_KEY": "synthetic",

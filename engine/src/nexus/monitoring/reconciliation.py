@@ -375,6 +375,7 @@ async def reconcile_account_results(
                 await _require_independent_predecessor_pair(
                     session, account_id=account_id, run=run, now=now
                 )
+                verified_scope = None
                 for kind in kinds:
                     if (
                         await session.scalar(
@@ -387,13 +388,21 @@ async def reconcile_account_results(
                         is not None
                     ):
                         continue
-                    receipt = await _reconcile_run(
+                    if verified_scope is None:
+                        await lock_security(
+                            session, account_id=account_id, instrument_id=run.instrument_id
+                        )
+                        verified_scope = await _scope_evidence(
+                            session, run=run, account_id=account_id
+                        )
+                    receipt = await _record_validated_kind(
                         session,
                         account_id=account_id,
                         run=run,
                         now=now,
                         kind=kind,
                         atomic_pair=len(kinds) == 2,
+                        scope=verified_scope,
                     )
                     if receipt is not None:
                         receipts.append(receipt)
@@ -543,7 +552,29 @@ async def _reconcile_run(
 ) -> MonitorCoverageReceipt | None:
     await lock_security(session, account_id=account_id, instrument_id=run.instrument_id)
     # Revalidate frozen lineage before recording even an unavailable result.
-    evidence, member = await _scope_evidence(session, run=run, account_id=account_id)
+    scope = await _scope_evidence(session, run=run, account_id=account_id)
+    return await _record_validated_kind(
+        session,
+        account_id=account_id,
+        run=run,
+        now=now,
+        kind=kind,
+        atomic_pair=atomic_pair,
+        scope=scope,
+    )
+
+
+async def _record_validated_kind(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    run: AgentResearchRunRecord,
+    now: datetime,
+    kind: Literal["price", "disclosure"],
+    atomic_pair: bool,
+    scope: tuple[tuple[EvidenceRef, ...], MonitorIncrement | None],
+) -> MonitorCoverageReceipt | None:
+    evidence, member = scope
     if member is not None:
         if kind != "price":
             raise ValueError("MONITOR_SOURCE_INVALID")
