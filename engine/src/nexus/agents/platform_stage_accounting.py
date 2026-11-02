@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.platform_pricing import sol_price_record
 from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS, price_platform_usage
 from nexus.agents.platform_wire import PlatformStageWire
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
@@ -29,17 +30,31 @@ class PlatformStageAccounting:
 
 
 def platform_stage_accounting(
-    rows: Sequence[Mapping[str, Any]], *, price_version: str | None = None
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    price_version: str | None = None,
+    price_record: object = None,
 ) -> PlatformStageAccounting:
-    cost, inp, out = Decimal(0), 0, 0
+    picodollars, inp, out = 0, 0, 0
+    priced_stages = 0
     complete, exceeded = bool(rows), False
+    allowed_versions = set(PLATFORM_PRICE_VERSIONS)
+    binding_version, price_hash = 1, None
+    if price_record is not None:
+        binding_version = 2
+        try:
+            pricing = sol_price_record(price_record)
+            allowed_versions = {pricing.version}
+            price_hash = pricing.content_hash
+        except ValueError:
+            allowed_versions = set()
     versions = {
         r["platform_binding"].get("price_version")
         for r in rows
         if isinstance(r.get("platform_binding"), dict)
         and isinstance(r["platform_binding"].get("price_version"), str)
     }
-    complete &= len(versions) == 1 and versions.issubset(PLATFORM_PRICE_VERSIONS)
+    complete &= len(versions) == 1 and versions.issubset(allowed_versions)
     if price_version is not None:
         complete &= versions == {price_version}
     for index, row in enumerate(rows, 1):
@@ -59,8 +74,10 @@ def platform_stage_accounting(
         if (
             row.get("stage") != index
             or not isinstance(binding, dict)
-            or binding.get("version") != 1
-            or binding.get("price_version") not in PLATFORM_PRICE_VERSIONS
+            or binding.get("version") != binding_version
+            or binding.get("price_version") not in allowed_versions
+            or binding_version == 2
+            and binding.get("price_record_hash") != price_hash
             or price_version is not None
             and binding.get("price_version") != price_version
             or binding.get("body_sha256") != row.get("wire_hash")
@@ -89,6 +106,7 @@ def platform_stage_accounting(
             service_tier=response.get("service_tier"),
             cache_mode=binding.get("cache_mode"),
             cache_ttl=binding.get("cache_ttl"),
+            price_record=price_record,
         )
         if (
             not usage.totals_verified
@@ -97,8 +115,19 @@ def platform_stage_accounting(
         ):
             complete = False
             continue
-        cost += usage.exact_cost_usd
+        numerator, denominator = usage.exact_cost_usd.as_integer_ratio()
+        picodollars += numerator * 1_000_000_000_000 // denominator
+        priced_stages += 1
     exceeded |= out > 8192
+    # Preserve the legacy textual scale used by frozen receipts, including the
+    # distinction between no priced evidence (0) and a measured zero (0E-7).
+    cost = Decimal(0)
+    if priced_stages:
+        cost = (
+            Decimal(f"{picodollars // 100000}e-7")
+            if price_record is None
+            else Decimal(f"{picodollars}e-12")
+        )
     return PlatformStageAccounting(inp, out, cost, cost if complete else None, exceeded)
 
 
@@ -222,11 +251,17 @@ def require_platform_stage_cost(
     input_tokens: int,
     output_tokens: int,
 ) -> Decimal:
-    from nexus.agents.platform_profile import platform_model_matches
+    from nexus.agents.platform_profile import platform_model_matches, sol_business_model_matches
 
-    result = platform_stage_accounting(rows, price_version=model.version)
+    normal_sol = sol_business_model_matches(model)
+    record = None
+    if normal_sol:
+        assert model.platform_profile is not None
+        record = model.platform_profile["price_record"]
+    version = sol_price_record(record).version if normal_sol else model.version
+    result = platform_stage_accounting(rows, price_version=version, price_record=record)
     if (
-        not platform_model_matches(model)
+        not (normal_sol or platform_model_matches(model))
         or result.exact_cost_usd is None
         or result.limit_exceeded
         or input_tokens > model.max_input_tokens

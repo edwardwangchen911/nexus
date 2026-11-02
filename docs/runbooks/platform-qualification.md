@@ -1,5 +1,35 @@
 # API 资格轮登记与只读核对
 
+## Sol 正常业务价档（0113；独立于历史资格轮）
+
+`nexus-platform-local register-sol-profile --price-record /absolute/price.json
+--source-evidence /absolute/source-evidence` 登记已核验的 Sol 价档与请求配置，
+`nexus-platform-local inspect-sol-profile --model-config-id UUID` 只读回原记录。
+在正常运行根目录执行；两份输入均为本机私有文件（0600），不包含 Key、账户或资金材料。
+命令使用项目正常配置连接本机数据库，不读取模型凭据、不访问 provider、不启动宿主、
+不创建研究或预留预算，也不改变当前默认路线。
+
+价档遵循 `platform-sol-pricing-v1`：准确模型 `gpt-6.1-sol`、标准 tier、implicit 30m、
+USD、官方标准价表 URL、实际归档原件的 SHA-256、核验与失效时刻，以及普通输入、
+缓存读、30m 写、完整输出的四项每百万 token 单价。单价为十进制字符串，最多六位小数；
+不得从请求参数补齐响应中的实际模型、tier 或用量分类。来源摘要相符只是归档身份核对，
+运维仍须先核对真实官方原件，登记不等于实时账单或资金来源证明。
+
+本地有效期上限为 168 小时，不按跨夏令时的七个日历日计算，不代表官方锁价。
+新研究准备须验证窗口覆盖原有界期限，发送前重验；旧价档过期不阻止历史读回和
+按原始用量结案。续核产生新的不可变价格/模型身份，不修改旧记录或增加日期白名单。
+SQL 与应用共同核对完整价档、配置 hash、Sol medium 请求格式、容量及保守预留费率；
+原 Terra 实验 profile 和权限保持独立。
+
+登记提交回执未知时返回 `PLATFORM_PROFILE_REGISTRATION_RESULT_UNKNOWN` 和已准备的
+配置 ID/hash，后续仅用 `inspect-sol-profile` 核对该 ID；不要换时间、换价档或重新登记。
+同一登记的并发调用只产生一份配置和审计。0113 尚无 Sol 记录时可以降回 0112；
+已有记录则拒绝降级，必须保留 0113 并使用支持其事实的兼容维护镜像。
+维护镜像与 SDK 正常业务回切仍须分别验收；此价档入口本身不证明正常生产者、
+Worker、监控接替或 Sol 自然运行已贯通。
+
+---
+
 适用于 schema 0111 及以上的稳定用途 `platform-qualification-v1`。同一受支持配置下，
 后续轮次只登记新的实验 UUID 和冻结预算，不增加用途枚举、迁移或发布版本。
 旧用途和旧结果保持原身份、原唯一约束及只读核对能力。

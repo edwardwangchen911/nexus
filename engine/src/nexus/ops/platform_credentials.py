@@ -1,12 +1,14 @@
-"""Local Platform key and explicit funding authority; never contact a provider or DB.
+"""Local Platform credentials/funding and explicit profile-management commands.
 
 Manual console evidence is an operator attestation, not a remote balance query.
 Admission callers must freeze both hashes, reread the same private evidence at
 claim/send, and supply current shared-ledger occupancy and spending since the
 snapshot. A successful check grants no dispatch right and no model permission.
+Only register/inspect-sol-profile use the database, never a provider or Key.
 """
 
 import argparse
+import asyncio
 import getpass
 import hashlib
 import json
@@ -586,6 +588,13 @@ def main() -> int:
     sub.add_parser(
         "fingerprint", help="Identify the actually resolved credential; no qualification"
     )
+    register = sub.add_parser(
+        "register-sol-profile", help="Register verified local price data only"
+    )
+    register.add_argument("--price-record", type=Path, required=True)
+    register.add_argument("--source-evidence", type=Path, required=True)
+    inspect = sub.add_parser("inspect-sol-profile", help="Read one existing profile; no renewal")
+    inspect.add_argument("--model-config-id", type=UUID, required=True)
     check = sub.add_parser(
         "check", help="Check private manual evidence; does not dispatch or write DB"
     )
@@ -601,6 +610,12 @@ def main() -> int:
         root = Path.cwd()
         if not (root / "engine/pyproject.toml").is_file():
             _reject("PLATFORM_REPOSITORY_ROOT_REQUIRED")
+        if args.action in {"register-sol-profile", "inspect-sol-profile"}:
+            from nexus.ops.platform_profiles import profile_command
+
+            profile_receipt = asyncio.run(profile_command(root, args))
+            print(json.dumps(profile_receipt))
+            return 1 if profile_receipt["status"] == "unknown" else 0
         result: dict[str, object] = {
             "dispatch_authority": False,
             "model_requests": 0,
@@ -655,7 +670,20 @@ def main() -> int:
         print(json.dumps(result))
         return 0
     except (Exception, KeyboardInterrupt) as error:
+        profile_codes = {
+            "PLATFORM_PROFILE_LOCAL_DATABASE_REQUIRED",
+            "PLATFORM_PRICE_RECORD_INVALID",
+            "PLATFORM_PRICE_SOURCE_MISMATCH",
+            "PLATFORM_PRICE_WINDOW_INVALID",
+            "PLATFORM_PROFILE_EXISTING_INVALID",
+        }
         code = str(error) if isinstance(error, PlatformCredentialError) else "PLATFORM_CHECK_FAILED"
+        if args.action in {"register-sol-profile", "inspect-sol-profile"}:
+            code = (
+                str(error)
+                if type(error) is ValueError and str(error) in profile_codes
+                else "PLATFORM_PROFILE_OPERATION_FAILED"
+            )
         print(json.dumps({"status": "blocked", "code": code, "execution_locked": True}))
         return 1
 

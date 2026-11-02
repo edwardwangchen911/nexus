@@ -102,6 +102,7 @@ class AgentModelConfigRecord(ImmutableCreatedAt, Base):
     output_usd_per_million: Mapped[Decimal]
     pricing_available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     pricing_expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    platform_profile: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
 
     @property
     def worst_case_cost_usd(self) -> Decimal:

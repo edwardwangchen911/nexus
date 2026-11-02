@@ -6,13 +6,16 @@ at most 272,000 input tokens per request. USD per million: ordinary 2, read
 https://developers.openai.com/api/docs/models/gpt-5.6-terra
 https://developers.openai.com/api/docs/guides/prompt-caching
 
-Existing profiles and consumers deliberately do not import this module.
+Sol uses an explicit immutable source/price record. No default model, dispatch
+permission or historical Terra profile changes as a side effect of pricing.
 """
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal
+
+from nexus.agents.platform_pricing import sol_price_record
 
 PLATFORM_PRICE_VERSION = "platform-terra-default-implicit30m-20261031-v1"
 CURRENT_PLATFORM_PRICE_VERSION = "platform-terra-default-implicit30m-20261101-v2"
@@ -73,6 +76,7 @@ def price_platform_usage(
     service_tier: object,
     cache_mode: object,
     cache_ttl: object,
+    price_record: object = None,
 ) -> PlatformUsage:
     """Evaluate one raw usage mapping without coercion or missing-value defaults.
 
@@ -97,6 +101,18 @@ def price_platform_usage(
     write_12h = _count(writes.get("ttl_12h_tokens"))
     reasoning = _count(_mapping(raw.get("output_tokens_details")).get("reasoning_tokens"))
     issues: list[str] = []
+    expected_model = "gpt-5.6-terra"
+    price_version = PLATFORM_PRICE_VERSION
+    # All four rates expressed in picodollars/token, retaining exact old fees.
+    rates = (2_000_000, 200_000, 2_500_000, 12_000_000)
+    if price_record is not None:
+        try:
+            pricing = sol_price_record(price_record)
+            expected_model = pricing.model_id
+            price_version = pricing.version
+            rates = pricing.token_picodollars
+        except ValueError:
+            issues.append("PLATFORM_PRICE_RECORD_INVALID")
     totals_verified = False
     if inp is None or out is None or total is None:
         issues.append("PLATFORM_USAGE_TOTALS_UNKNOWN")
@@ -121,7 +137,7 @@ def price_platform_usage(
     if write_12h is not None and write_12h > 0:
         issues.append("PLATFORM_CACHE_TTL_UNSUPPORTED")
     if (
-        model != "gpt-5.6-terra"
+        model != expected_model
         or service_tier != "default"
         or cache_mode != "implicit"
         or cache_ttl != "30m"
@@ -135,7 +151,12 @@ def price_platform_usage(
         assert ordinary is not None and cached is not None and write_30m is not None
         assert out is not None
         # All output is billed, including reasoning; writes replace ordinary input.
-        cost = _usd(ordinary * 20 + cached * 2 + write_30m * 25 + out * 120)
+        pico = ordinary * rates[0] + cached * rates[1] + write_30m * rates[2] + out * rates[3]
+        cost = (
+            _usd(ordinary * 20 + cached * 2 + write_30m * 25 + out * 120)
+            if price_record is None
+            else Decimal(f"{pico}e-12")
+        )
     return PlatformUsage(
         input_tokens=inp,
         output_tokens=out,
@@ -150,11 +171,12 @@ def price_platform_usage(
         exact_cost_usd=cost,
         issues=tuple(dict.fromkeys(issues)),
         raw_usage=deepcopy(raw_usage),
+        price_version=price_version,
     )
 
 
 def platform_reservation_usd(
-    stage_input_upper_bounds: Sequence[int], output_upper_bound: int
+    stage_input_upper_bounds: Sequence[int], output_upper_bound: int, *, price_record: object = None
 ) -> Decimal:
     """Conservative bound for this fixed profile, never an actual usage settlement.
 
@@ -174,4 +196,8 @@ def platform_reservation_usd(
         or output_upper_bound < 0
     ):
         raise ValueError("PLATFORM_RESERVATION_INVALID")
+    if price_record is not None:
+        prices = sol_price_record(price_record).token_picodollars
+        bound = sum(stage_input_upper_bounds) * max(prices[:3]) + output_upper_bound * prices[3]
+        return Decimal(f"{bound}e-12")
     return _usd(sum(stage_input_upper_bounds) * 25 + output_upper_bound * 120)

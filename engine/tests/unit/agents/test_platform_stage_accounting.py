@@ -45,6 +45,7 @@ def test_exact_cost_is_not_the_reservation_scalar_and_raw_evidence_unchanged():
     before = deepcopy(rows)
     result = platform_stage_accounting(rows)
     assert result.exact_cost_usd == result.known_cost_usd == Decimal("0.0969")
+    assert str(result.exact_cost_usd) == "0.0969000"
     assert (result.input_tokens, result.output_tokens) == (36000, 3000)
     assert result.limit_exceeded is False and rows == before
 
@@ -99,3 +100,4 @@ def test_trusted_input_or_cumulative_output_overrun_is_a_fence():
 
 def test_no_evidence_does_not_prove_zero_usage():
     assert platform_stage_accounting([]).exact_cost_usd is None
+    assert str(platform_stage_accounting([]).known_cost_usd) == "0"
