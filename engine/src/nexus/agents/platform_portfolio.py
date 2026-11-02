@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents import platform_native
@@ -23,7 +23,7 @@ from nexus.agents.codex_sdk import (
 )
 from nexus.agents.http_failure import HttpFailureFacts
 from nexus.agents.platform_pricing import SolPriceRecord, sol_price_record
-from nexus.agents.platform_profile import sol_business_model_matches
+from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT, sol_business_model_matches
 from nexus.agents.platform_usage import price_platform_usage
 from nexus.agents.platform_wire import _wire, platform_wire_profile
 from nexus.agents.portfolio_synthesis_contracts import (
@@ -236,6 +236,7 @@ class PortfolioCharge:
     cost: Decimal | None = None
     intent_hash: str | None = None
     unused: bool = False
+    overrun_cost: Decimal | None = None
 
 
 async def portfolio_charge(
@@ -316,17 +317,19 @@ async def _receipt_charge(
         raise ValueError(INVALID_PROOF)
     terminal = await read_receipt(session, job_id, "terminal", as_of=now)
     close = await read_receipt(session, job_id, "cleanup", as_of=now)
-    if close is None or close.get("identity") != identities or close.get("confirmed") is not True:
+    closed = (
+        close is not None and close.get("identity") == identities and close.get("confirmed") is True
+    )
+    if terminal is None:
+        if (
+            closed
+            and close is not None
+            and close.get("sent") is False
+            and close.get("pre_send_rejected") is True
+        ):
+            return PortfolioCharge(cost=Decimal("0"), unused=True)
         return PortfolioCharge()
-    if terminal is None and close.get("sent") is False and close.get("pre_send_rejected") is True:
-        return PortfolioCharge(cost=Decimal("0"), unused=True)
-    if (
-        auth is None
-        or close.get("terminal_write_confirmed") is not True
-        or terminal is None
-        or terminal.get("identity") != identities
-        or close.get("sent") is not True
-    ):
+    if auth is None or terminal.get("identity") != identities:
         return PortfolioCharge()
     measured = price_platform_usage(
         terminal.get("usage"),
@@ -340,10 +343,22 @@ async def _receipt_charge(
         measured.exact_cost_usd is None
         or measured.input_tokens is None
         or measured.output_tokens is None
-        or measured.input_tokens > MAX_INPUT_TOKENS
-        or measured.output_tokens > MAX_OUTPUT_TOKENS
         or terminal.get("verified_totals") != [measured.input_tokens, measured.output_tokens]
+    ):
+        return PortfolioCharge()
+    if (
+        measured.input_tokens > MAX_INPUT_TOKENS
+        or measured.output_tokens > MAX_OUTPUT_TOKENS
         or measured.exact_cost_usd > model.worst_case_cost_usd
+    ):
+        # The immutable authorized terminal already proves exposure. Settlement
+        # and release still require their own bounds and confirmed cleanup.
+        return PortfolioCharge(overrun_cost=measured.exact_cost_usd)
+    if (
+        not closed
+        or close is None
+        or close.get("terminal_write_confirmed") is not True
+        or close.get("sent") is not True
     ):
         return PortfolioCharge()
     return PortfolioCharge(
@@ -354,6 +369,67 @@ async def _receipt_charge(
         if close.get("failed") is False and terminal.get("status") == "completed"
         else None,
     )
+
+
+async def portfolio_reserved_overrun(
+    session: AsyncSession, hold: AgentPortfolioSynthesisBudgetReservationRecord
+) -> Decimal | None:
+    """Read exposure from the original attempt, including before or without cleanup."""
+    if hold.state != "reserved" or not hold.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"):
+        return None
+    job = (
+        await session.scalars(
+            select(Job).where(
+                Job.job_type == "agent.portfolio_synthesis",
+                Job.payload["run_id"].as_string() == str(hold.run_id),
+            )
+        )
+    ).one_or_none()
+    if job is None or await read_receipt(session, job.id, "terminal") is None:
+        return None
+    run = await session.get(AgentPortfolioSynthesisRunRecord, hold.run_id)
+    model = None if run is None else await session.get(AgentModelConfigRecord, run.model_config_id)
+    if (
+        run is None
+        or model is None
+        or not sol_business_model_matches(model)
+        or run.model_hash != model.config_hash
+        or run.pricing_version != model.version
+        or hold.pricing_version != model.version
+        or hold.reserved_usd != model.worst_case_cost_usd
+        or job.payload != {"run_id": str(run.id)}
+        or job.input_hash != run.input_hash
+        or job.scope_kind != "portfolio"
+        or job.scope_id != run.frozen_input.get("portfolio_id")
+        or job.effective_at != run.decision_time
+        or job.attempt_count != 1
+        or job.max_attempts != 1
+        or job.manual_retry_count != 0
+        or job.retry_policy != "never"
+    ):
+        raise ValueError(INVALID_PROOF)
+    attempt = (
+        await session.scalars(
+            select(JobAttempt)
+            .join(JobLease, JobLease.job_id == JobAttempt.job_id)
+            .where(
+                JobAttempt.job_id == job.id,
+                JobAttempt.attempt_no == 1,
+                JobAttempt.lease_token == JobLease.lease_token,
+                JobAttempt.fence_token == JobLease.fence_token,
+                JobAttempt.worker_id == JobLease.worker_id,
+            )
+        )
+    ).one_or_none()
+    if attempt is None:
+        raise ValueError(INVALID_PROOF)
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime):
+        raise ValueError(INVALID_PROOF)
+    charge = await _receipt_charge(
+        session, run, model, job.id, 1, attempt.fence_token, now, orphan=False
+    )
+    return charge.overrun_cost
 
 
 @dataclass(frozen=True)

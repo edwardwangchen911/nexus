@@ -237,6 +237,23 @@ class NativePortfolioTransport:
                     phase == "cleanup" and auth is None and value.get("sent") is False
                 ):
                     raise ValueError(INVALID_PROOF)
+            if phase == "terminal":
+                from nexus.agents.persistence import _lock_budget_day
+                from nexus.persistence.models.agents import (
+                    AgentPortfolioSynthesisBudgetReservationRecord,
+                )
+
+                run_id = job.payload.get("run_id")
+                if not isinstance(run_id, str):
+                    raise ValueError(INVALID_PROOF)
+                day = await session.scalar(
+                    select(AgentPortfolioSynthesisBudgetReservationRecord.business_date).where(
+                        AgentPortfolioSynthesisBudgetReservationRecord.run_id == UUID(run_id)
+                    )
+                )
+                if day is None:
+                    raise ValueError(INVALID_PROOF)
+                await _lock_budget_day(session, day.isoformat())
             await append_receipt(session, job.id, phase, value, at)
 
     async def invoke(

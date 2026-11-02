@@ -168,3 +168,17 @@ async def require_research_accounting_clear(session: AsyncSession) -> None:
         )
         if known_terminal is True or last_reason == "usage_accounting_failed":
             raise BudgetExhausted("RESEARCH_ACCOUNTING_UNSETTLED")
+    from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisBudgetReservationRecord
+
+    for hold in await session.scalars(
+        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+            AgentPortfolioSynthesisBudgetReservationRecord.state == "reserved",
+            AgentPortfolioSynthesisBudgetReservationRecord.pricing_version.startswith(
+                SOL_BUSINESS_CONTRACT + "-"
+            ),
+        )
+    ):
+        if await portfolio_reserved_overrun(session, hold) is not None:
+            raise BudgetExhausted("RESEARCH_ACCOUNTING_UNSETTLED")

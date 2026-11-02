@@ -398,6 +398,21 @@ async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
             )
             assert row["kind"] == "increment" and row["scope_id"] == member.id
             assert row["platform_binding"]["transport"] == "platform_responses"
+            # Exercise the exact 0113 INSERT guard predicate against the registered
+            # child and its actual SDK predecessor, before any provider invocation.
+            invalid_routes = await session.execute(
+                text("""
+                SELECT nexus_sol_native_route_valid(jsonb_populate_record(r,
+                           jsonb_build_object('platform_binding', NULL))),
+                       nexus_sol_native_route_valid(jsonb_populate_record(r,
+                           jsonb_build_object('run_id', CAST(:parent AS uuid)))),
+                       nexus_sol_native_route_valid(jsonb_populate_record(r,
+                           jsonb_build_object('kind', 'comparison')))
+                  FROM research_stage_route r WHERE r.run_id=:child
+            """),
+                {"child": child.id, "parent": parent.id},
+            )
+            assert invalid_routes.one() == (False, False, False)
             previous = await session.get(AgentResearchRunRecord, parent.id)
             assert (
                 previous.model_config_id,

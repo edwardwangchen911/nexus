@@ -2,12 +2,13 @@
 
 import json
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from integration.test_sol_native_stage_pg import (
     test_normal_sol_formal_research_reconciles_monitor_plans_once as normal_research,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 @pytest.mark.asyncio
@@ -21,6 +22,9 @@ from sqlalchemy import select
         "close_failed",
         "invalid_output",
         "known_orphan",
+        "overrun",
+        "overrun_orphan",
+        "token_overrun",
         "auth_lost",
         "terminal_ack_lost",
         "cleanup_ack_lost",
@@ -53,7 +57,9 @@ async def _run_native_portfolio_http(
     import httpx
     from integration.test_portfolio_synthesis_persistence_pg import synthesis_intent
     from nexus.agents import platform_native
+    from nexus.agents.persistence import _shared_daily_budget_used
     from nexus.ops import agent_paper_loop as loop
+    from nexus.paper.formal_budget_protection import _native_usage
     from nexus.persistence.models.agents import (
         AgentPortfolioSynthesisBudgetReservationRecord,
         AgentPortfolioSynthesisRunRecord,
@@ -62,6 +68,28 @@ async def _run_native_portfolio_http(
     from unit.agents.test_http_stage_lifecycle import Body, terminal
     from unit.agents.test_platform_usage import usage
 
+    output_overrun = {"overrun": 1000000, "overrun_orphan": 1000000, "token_overrun": 8193}.get(
+        case
+    )
+    baseline = None
+    inventory_baseline = None
+    actual_cost = None
+    if output_overrun is not None:
+        actual_cost = Decimal("0.0299") + Decimal(output_overrun - 1000) * Decimal("10") / 1000000
+        async with factory() as session:
+            from nexus.paper.formal_budget_inventory import inspect_inventory
+
+            inventory_input = dict(
+                account_id=host.agent_paper_account_id,
+                batch_id=portfolio.candidate_batch_id,
+                enabled=True,
+                now=at,
+                configuration_hash="0" * 64,
+            )
+            inventory_baseline = (
+                await inspect_inventory(session, **inventory_input)
+            ).conservative_native_occupied_usd
+            baseline = await _shared_daily_budget_used(session, business_date=at.date())
     terminal_saved = asyncio.Event()
     claims = {}
     actual, clients = [], []
@@ -75,6 +103,8 @@ async def _run_native_portfolio_http(
             raise httpx.ReadTimeout("synthetic observation timeout", request=request)
         event = terminal()
         counts = usage()
+        if output_overrun is not None:
+            counts.update(output_tokens=output_overrun, total_tokens=12000 + output_overrun)
         if case == "unknown_cache":
             counts["input_tokens_details"].pop("cache_write_tokens")
         event["response"].update(model="gpt-6.1-sol", service_tier="default", usage=counts)
@@ -154,12 +184,26 @@ async def _run_native_portfolio_http(
         monkeypatch.setattr(
             portfolio_responses.NativePortfolioTransport, "_write_evidence", capture_claim
         )
-    if case == "cancel_after_terminal":
+    if case == "cancel_after_terminal" or output_overrun is not None:
         original_append = portfolio_responses.append_receipt
 
         async def observed(session, job_id, phase, value, at):
             await original_append(session, job_id, phase, value, at)
             if phase == "terminal":
+                if actual_cost is not None:
+                    async with factory.begin() as competitor:
+                        assert not await competitor.scalar(
+                            text(
+                                "SELECT pg_try_advisory_xact_lock("
+                                "hashtext('agent-budget:accounting'))"
+                            )
+                        )
+                    hold = await session.scalar(
+                        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                            AgentPortfolioSynthesisBudgetReservationRecord.run_id == portfolio.id
+                        )
+                    )
+                    assert await _native_usage(session, hold) == max(hold.reserved_usd, actual_cost)
                 terminal_saved.set()
 
         monkeypatch.setattr(portfolio_responses, "append_receipt", observed)
@@ -204,7 +248,7 @@ async def _run_native_portfolio_http(
     class ProcessExit(BaseException):
         pass
 
-    if case == "known_orphan":
+    if case in {"known_orphan", "overrun_orphan"}:
 
         async def exit_before_settlement(*args, **kwargs):
             raise ProcessExit
@@ -248,7 +292,7 @@ async def _run_native_portfolio_http(
             if not action.done():
                 action.cancel()
                 await asyncio.gather(action, return_exceptions=True)
-    elif case == "known_orphan":
+    elif case in {"known_orphan", "overrun_orphan"}:
         with pytest.raises(ProcessExit):
             await loop.execute_agent_paper_loop_action(
                 host,
@@ -330,6 +374,39 @@ async def _run_native_portfolio_http(
             assert reservation.state == "released" and result.settled_cost_usd == 0
         else:
             assert reservation.state == "reserved" and result.settled_cost_usd is None
+        if output_overrun is not None:
+            from datetime import timedelta
+
+            from nexus.agents.budget import BudgetExhausted
+            from nexus.agents.persistence import reserve_daily_budget
+            from nexus.agents.research_usage import require_research_accounting_clear
+
+            assert actual_cost is not None and baseline is not None and terminal_saved.is_set()
+            assert (actual_cost > reservation.reserved_usd) == (case != "token_overrun")
+            occupied = max(actual_cost, reservation.reserved_usd)
+            assert await _native_usage(session, reservation) == occupied
+            assert (
+                await _shared_daily_budget_used(session, business_date=reservation.business_date)
+                == baseline + occupied - reservation.reserved_usd
+            )
+            assert inventory_baseline is not None
+            inventory = await inspect_inventory(session, **inventory_input)
+            assert "RESEARCH_ACCOUNTING_UNSETTLED" in inventory.blocking_codes
+            assert inventory.conservative_native_occupied_usd == (
+                inventory_baseline + occupied - reservation.reserved_usd
+            )
+            with pytest.raises(BudgetExhausted, match="RESEARCH_ACCOUNTING_UNSETTLED"):
+                await require_research_accounting_clear(session)
+            with pytest.raises(BudgetExhausted, match="RESEARCH_ACCOUNTING_UNSETTLED"):
+                await reserve_daily_budget(
+                    session,
+                    run_id=uuid4(),
+                    now=at + timedelta(days=1),
+                    daily_limit_usd=Decimal("100"),
+                    worst_case_usd=Decimal("1"),
+                    pricing_version="legacy-sdk",
+                    pricing_fresh=True,
+                )
     assert actual == (
         []
         if case in {"wrong_key", "auth_lost", "wrong_scope", "source_expired"}
@@ -401,7 +478,7 @@ async def _run_native_portfolio_http(
 
         checked = await session.scalar(select(func.clock_timestamp()))
         expiry = await session.scalar(select(func.max(JobLease.expires_at)))
-        if case == "known_orphan":
+        if case in {"known_orphan", "overrun_orphan"}:
             assert checked > expiry
         else:
             assert expiry > checked
@@ -417,6 +494,9 @@ async def _run_native_portfolio_http(
             "auth_lost",
             "terminal_not_saved",
             "cleanup_not_saved",
+            "overrun",
+            "overrun_orphan",
+            "token_overrun",
         }:
             with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
                 await require_manual_account_available(

@@ -112,6 +112,12 @@ async def _native_usage(
         from nexus.agents.research_usage import research_reserved_occupancy
 
         return await research_reserved_occupancy(session, row)
+    if isinstance(row, AgentPortfolioSynthesisBudgetReservationRecord) and row.state == "reserved":
+        from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+
+        overrun = await portfolio_reserved_overrun(session, row)
+        if overrun is not None:
+            return max(usage, overrun)
     return usage
 
 

@@ -1570,6 +1570,22 @@ async def _shared_daily_budget_used(session: AsyncSession, *, business_date: dat
             ).where(model.business_date == business_date)
         )
         totals.append(Decimal(str(used)))
+    from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+
+    # Reserved amounts were included above. Add only the verified excess on this day.
+    for hold in await session.scalars(
+        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+            AgentPortfolioSynthesisBudgetReservationRecord.business_date == business_date,
+            AgentPortfolioSynthesisBudgetReservationRecord.state == "reserved",
+            AgentPortfolioSynthesisBudgetReservationRecord.pricing_version.startswith(
+                SOL_BUSINESS_CONTRACT + "-"
+            ),
+        )
+    ):
+        overrun = await portfolio_reserved_overrun(session, hold)
+        if overrun is not None:
+            totals.append(max(Decimal("0"), overrun - hold.reserved_usd))
     from nexus.paper.economic_budget_hold import held_pair_budget
 
     return sum(totals, Decimal("0")) + await held_pair_budget(session, business_date=business_date)
