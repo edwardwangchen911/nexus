@@ -387,7 +387,7 @@ async def test_diagnostic_one_identity_one_encrypted_delivery_no_business(
         monkeypatch.setattr(notification_test, "_validate_local_env", lambda root, path: path)
         monkeypatch.setattr(
             notification_test,
-            "load_agent_paper_service_environment",
+            "load_local_host_environment",
             lambda *args, **kwargs: {"DATABASE_URL": "invalid"},
         )
         # Preflight cannot read the persisted published receipt. It must not deny its history.

@@ -13,6 +13,7 @@ from nexus.agents.price_authority import FrozenPriceAuthorityStatus
 from nexus.audit.canonical import Hash64
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
     AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
@@ -121,6 +122,7 @@ def admit_actionable_research_output(
     paper_decision_context_valid: bool = False,
     candidate_identity_verified: bool = False,
     formal_identity_verified: bool = False,
+    native_formal_model: AgentModelConfigRecord | None = None,
 ) -> ActionableResearchDecision:
     """Recompute immutable output/evidence facts and return only an admitted direction."""
     try:
@@ -143,38 +145,38 @@ def admit_actionable_research_output(
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
         )
 
+        formal_version = run.pricing_version in {
+            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+            FULL_INPUT_CAPACITY_CONFIG_VERSION,
+            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+        }
+        if native_formal_model is not None:
+            from nexus.agents.platform_profile import sol_business_model_matches
+
+            if not (
+                formal_identity_verified is True
+                and sol_business_model_matches(native_formal_model)
+                and native_formal_model.id == run.model_config_id
+                and native_formal_model.version == run.pricing_version
+                and native_formal_model.config_hash == run.model_hash
+            ):
+                raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+            formal_version = True
         if (
             type(candidate_identity_verified) is not bool
             or type(formal_identity_verified) is not bool
             or formal_identity_verified
-            and candidate_identity_verified
-            or formal_identity_verified
-            and run.pricing_version
-            not in {
-                FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
-                FULL_INPUT_CAPACITY_CONFIG_VERSION,
-                BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
-                FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
-            }
+            and (candidate_identity_verified or not formal_version)
         ):
             raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         version_admitted = (
             run.pricing_version in ACTIONABLE_CONFIG_VERSIONS
-            or (
-                candidate_identity_verified
-                and run.pricing_version
-                in {CANDIDATE_BUDGET_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
-            )
-            or (
-                formal_identity_verified
-                and run.pricing_version
-                in {
-                    FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
-                    FULL_INPUT_CAPACITY_CONFIG_VERSION,
-                    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
-                    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
-                }
-            )
+            or candidate_identity_verified
+            and run.pricing_version
+            in {CANDIDATE_BUDGET_CONFIG_VERSION, FULL_INPUT_CAPACITY_CONFIG_VERSION}
+            or formal_identity_verified
+            and formal_version
         )
 
         terminals = tuple(terminal_outputs)
@@ -240,6 +242,31 @@ def admit_actionable_research_output(
         raise
     except (AttributeError, KeyError, TypeError, ValueError) as error:
         raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE) from error
+
+
+def frozen_source_matches(
+    output: AgentResearchOutputRecord,
+    intent: ResearchIntent,
+    intent_hash: str,
+    evidence_ids: tuple[UUID, ...],
+    bindings: Sequence[AgentResearchOutputEvidenceRecord],
+) -> bool:
+    """Compare a previously admitted immutable source; confers no action permission."""
+    document = intent.model_dump(mode="json")
+    by_id = {row.evidence_ref_id: row for row in bindings}
+    return (
+        output.status == "completed"
+        and output.role is None
+        and output.intent == document
+        and _hash(document) == intent_hash
+        and set(by_id) == set(evidence_ids)
+        and len(by_id) == len(bindings) == len(evidence_ids) == len(intent.evidence_refs)
+        and all(row.output_id == output.id for row in bindings)
+        and all(
+            _binding_identity(by_id[identity]) == _evidence_identity(ref)
+            for identity, ref in zip(evidence_ids, intent.evidence_refs, strict=True)
+        )
+    )
 
 
 def _all_nested_evidence_bound(

@@ -43,6 +43,7 @@ from nexus.agents.portfolio_synthesis_diagnostics import (
 from nexus.agents.portfolio_synthesis_persistence import (
     load_frozen_synthesis_authority,
     persist_portfolio_synthesis_terminal,
+    require_frozen_sol_sources,
 )
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.synthesis_lifecycle import (
@@ -112,7 +113,7 @@ class CodexSynthesisTransport:
 
     def supports(self, model: AgentModelConfigRecord) -> bool:
         if self._formal_stage_capacity:
-            return formal_preparation_model_matches(model)
+            return model.model_id == MODEL_ID and formal_preparation_model_matches(model)
         if self._candidate_stage_capacity:
             return isolated_candidate_model_matches(model)
         return (
@@ -263,13 +264,14 @@ async def formal_synthesis_job_qualified(
     now: datetime,
     claimed: bool = False,
     expired_recovery: bool = False,
+    transport: SynthesisTransport | None = None,
 ) -> bool:
     """Verify frozen formal synthesis authority under the selected Job lock."""
     if (
         type(claimed) is not bool
         or type(expired_recovery) is not bool
         or expired_recovery
-        and not claimed
+        and (not claimed or transport is not None)
         or job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
         or job.queue != QueueName.GENERAL.value
         or job.schema_version not in SYNTHESIS_JOB_VERSIONS
@@ -293,7 +295,12 @@ async def formal_synthesis_job_qualified(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if run is None or run.status != ("running" if expired_recovery else "prepared"):
+    allowed_statuses = (
+        {"prepared", "running"}
+        if expired_recovery
+        else {"running" if claimed and transport is not None else "prepared"}
+    )
+    if run is None or run.status not in allowed_statuses:
         return False
     if expired_recovery:
         # Historical identity proof only; the caller separately fences actual lease expiry.
@@ -310,6 +317,14 @@ async def formal_synthesis_job_qualified(
     )
     if (
         model is None
+        or expired_recovery
+        and run.status == "prepared"
+        and model.platform_profile is None
+        or expired_recovery
+        and run.status == "prepared"
+        and model.platform_profile is None
+        or transport is not None
+        and not transport.supports(model)
         or not formal_preparation_model_matches(model)
         or run.model_hash != model.config_hash
         or run.pricing_version != model.version
@@ -358,6 +373,9 @@ async def formal_synthesis_job_qualified(
             or now >= frozen.expires_at
         ):
             return False
+        if expired_recovery and model.platform_profile is not None:
+            await require_frozen_sol_sources(session, frozen)
+            return True
         for source in frozen.security_outputs:
             output = await session.get(
                 AgentResearchOutputRecord, source.research_output_id, populate_existing=True
@@ -545,8 +563,19 @@ async def _run_synthesis_job_once(
     async def candidate_guard(session: AsyncSession, job: Job) -> bool:
         return await candidate_synthesis_job_qualified(session, job, now=clock())
 
+    from nexus.agents.portfolio_responses import (
+        NativePortfolioTransport,
+        PortfolioAlreadyDispatched,
+        PortfolioHTTPError,
+    )
+
     async def formal_guard(session: AsyncSession, job: Job) -> bool:
-        return await formal_synthesis_job_qualified(session, job, now=clock())
+        now = clock()
+        if not await formal_synthesis_job_qualified(session, job, now=now, transport=transport):
+            return False
+        if isinstance(transport, NativePortfolioTransport):
+            await transport.require_job(session, job, now)
+        return True
 
     async with factory.begin() as session:
         await require_candidate_consumer_profile(
@@ -692,6 +721,8 @@ async def _run_synthesis_job_once(
         async with factory.begin() as session:
             lease_expires_at = await checkpoint_job(session, claim=claim, now=clock(), apply=start)
         terminal_claim = replace(claim, expires_at=lease_expires_at)
+        if isinstance(transport, NativePortfolioTransport):
+            transport.claim = terminal_claim
     except ValueError:
         async with factory.begin() as session:
             run = await session.get(AgentPortfolioSynthesisRunRecord, run_id)
@@ -777,6 +808,13 @@ async def _run_synthesis_job_once(
         failure_observation = FailureObservation(local="cancelled")
         intent = None
         error_code = "PORTFOLIO_SYNTHESIS_CALL_UNCERTAIN"
+    except PortfolioAlreadyDispatched as error:
+        # A duplicate observer cannot write a terminal or close the original owner's lease.
+        raise SynthesisHandlerResultUnknown() from error
+    except PortfolioHTTPError as error:
+        error_code = str(error)
+        failure_observation = FailureObservation(local="exception")
+        intent = None
     except CodexInvocationError as error:
         failure_observation = freeze_failure_observation(
             {

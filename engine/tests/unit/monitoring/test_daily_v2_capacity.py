@@ -12,6 +12,47 @@ from nexus.persistence.models.data import DataSnapshot
 from unit.agents.test_codex_sdk import _authority, _tools
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "gap,reason",
+    [
+        (False, None),
+        (False, "PLATFORM_INPUT_TOO_LARGE"),
+        (True, "PLATFORM_INPUT_TOO_LARGE"),
+        (False, "PLATFORM_NATIVE_INPUT_REQUIRED"),
+    ],
+)
+async def test_sol_daily_preview_keeps_optional_bundle_gap_and_original_failure(
+    monkeypatch, gap, reason
+):
+    from nexus.agents import platform_native
+    from nexus.agents.platform_profile import sol_business_model_fields
+    from unit.agents.test_sol_pricing import sol_price_record
+
+    module, session, run, snapshot, model, *_ = setup_preview(monkeypatch)
+    model.__dict__.update(sol_business_model_fields(sol_price_record()))
+    run.model_hash, run.pricing_version = model.config_hash, model.version
+    if gap:
+        snapshot.payload["agent_paper_context"] = {"pending_monitoring_v2_gap": {}}
+        module.read_agent_paper_research_context.return_value = (
+            SimpleNamespace(pending_monitoring_v2=None, pending_monitoring_v2_gap=object()),
+            object(),
+        )
+    preview = AsyncMock(side_effect=None if reason is None else ValueError(reason))
+    monkeypatch.setattr(platform_native, "native_run_allocation", preview)
+    if reason:
+        expected = (
+            "MONITOR_CONTENT_CAPACITY"
+            if not gap and reason == "PLATFORM_INPUT_TOO_LARGE"
+            else reason
+        )
+        with pytest.raises(ValueError, match=f"^{expected}$"):
+            await module.preview_daily_event_capacity(session, run)
+    else:
+        await module.preview_daily_event_capacity(session, run)
+    preview.assert_awaited_once_with(session, run=run, model=model)
+
+
 def setup_preview(monkeypatch, profile="bounded"):
     from nexus.agents.codex_capacity import capacity_config, capacity_config_hash
     from nexus.agents.codex_flexible_budget import flexible_stage_config, flexible_stage_config_hash

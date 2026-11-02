@@ -24,6 +24,7 @@ from nexus.paper.manual_request import (
 )
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
     AgentPromptVersionRecord,
     AgentResearchEventRecord,
     AgentResearchOutputRecord,
@@ -185,7 +186,14 @@ async def read_research_manifest(
 async def prepare_research_request(
     session: AsyncSession, settings: EngineSettings, *, request_id: UUID
 ) -> ManualRequestView:
-    """Caller owns one atomic preparation transaction. No provider or model calls."""
+    """All members roll back even if the host catches a refusal and commits its receipt."""
+    async with session.begin_nested():
+        return await _prepare_research_request(session, settings, request_id=request_id)
+
+
+async def _prepare_research_request(
+    session: AsyncSession, settings: EngineSettings, *, request_id: UUID
+) -> ManualRequestView:
     from nexus.agents.snapshots import prepare_research_snapshot
     from nexus.research.observation_identity_storage import register_observation_identity_binding
 
@@ -220,6 +228,14 @@ async def prepare_research_request(
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     prompts = await require_research_profile(session, row=row, settings=settings)
+    from nexus.agents.platform_profile import sol_business_model_matches
+
+    selected_model = await session.get(AgentModelConfigRecord, row.model_config_id)
+    platform_credential = None
+    if selected_model is not None and sol_business_model_matches(selected_model):
+        from nexus.agents.platform_native import credential_for_preparation
+
+        platform_credential = credential_for_preparation(settings)
     for instrument_id in batch.instrument_ids:
         await register_observation_identity_binding(session, instrument_id=instrument_id)
     await session.flush()
@@ -296,7 +312,14 @@ async def prepare_research_request(
     if row.contract_version == 3:
         from nexus.agents.research_stages.routes import register_new_prepared_runs
 
-        await register_new_prepared_runs(session, tuple(run.id for run, _ in native))
+        if platform_credential is not None:
+            await register_new_prepared_runs(
+                session,
+                tuple(run.id for run, _ in native),
+                platform_credential=platform_credential,
+            )
+        else:
+            await register_new_prepared_runs(session, tuple(run.id for run, _ in native))
     return await record_manual_request_event(
         session, row, status="active", code="MANUAL_RESEARCH_STARTED"
     )
@@ -476,6 +499,10 @@ async def require_research_profile(
     from nexus.agents.research_dispatch import uses_two_flight
 
     parallel = uses_two_flight(profile)
+    from nexus.agents.platform_profile import sol_business_model_matches
+
+    model = await session.get(AgentModelConfigRecord, row.model_config_id)
+    platform = model is not None and sol_business_model_matches(model)
     if (
         not isinstance(profile, dict)
         or set(profile)
@@ -483,7 +510,9 @@ async def require_research_profile(
         | ({"execution_policy"} if parallel else set())
         or settings.agent_runtime_mode is None
         or profile["runtime_mode"] != settings.agent_runtime_mode.value
-        or profile["runtime_mode"] != "codex_sdk"
+        or profile["runtime_mode"] != ("responses" if platform else "codex_sdk")
+        or platform
+        and row.contract_version != 3
         or profile["daily_limit_usd"] != format(settings.agent_daily_budget_usd.normalize(), "f")
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")

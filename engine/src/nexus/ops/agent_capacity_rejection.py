@@ -1,4 +1,4 @@
-"""Close a freshly rejected, entirely untouched formal v9 research pool."""
+"""Close a freshly rejected, entirely untouched formal research pool."""
 
 from uuid import UUID
 
@@ -17,21 +17,40 @@ from nexus.paper.agent_cycle import (
 )
 from nexus.paper.manual_cancel import cancel_unused_manual_research
 from nexus.paper.manual_request import _require_cycle_jobs_settled
+from nexus.paper.research_failure import (
+    PLATFORM_PRECLAIM_CODES,
+    PRECLAIM_CODES,
+    CapacityPreclaimRejected,
+)
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentModelConfigRecord,
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.economic import EconomicLaneCycleRecord
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
-CAPACITY_REJECTION_CODES = frozenset(
-    {"CODEX_CAPACITY_POOL_WIRE_EXCEEDED", "CODEX_CAPACITY_POOL_INPUT_EXCEEDED"}
-)
+# Keep the historical name/receipt contract; use the same finite preclaim causes
+# as the Worker. These codes alone never prove zero calls: every owner/claim,
+# immutable route, reservation and terminal check below remains mandatory.
+CAPACITY_REJECTION_CODES = PRECLAIM_CODES
 _BLOCKED = "AGENT_PAPER_LOOP_RESULT_UNKNOWN"
+
+
+def dispatch_preclaim_code(error: ValueError, settings: EngineSettings) -> str | None:
+    """The native Worker must attest the input-only boundary; error text alone is not proof."""
+    if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES:
+        return (
+            error.code
+            if isinstance(error, CapacityPreclaimRejected) and error.code in PRECLAIM_CODES
+            else None
+        )
+    code = str(error)
+    return code if code in PRECLAIM_CODES and code not in PLATFORM_PRECLAIM_CODES else None
 
 
 async def close_capacity_rejected_cycle_once(
@@ -89,8 +108,13 @@ async def close_capacity_rejected_cycle_once(
                 expected_formal_model_id=settings.agent_paper_formal_model_config_id,
                 now=cycle.decision_time,
             )
-            if any(run.pricing_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS for run in runs):
-                raise ValueError(_BLOCKED)
+            from nexus.agents.platform_native import native_platform_semantics
+
+            for run in runs:
+                if run.pricing_version not in ISOLATED_CAPACITY_CONFIG_VERSIONS:
+                    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+                    if model is None or not await native_platform_semantics(session, run, model):
+                        raise ValueError(_BLOCKED)
             days = tuple(
                 await session.scalars(
                     select(AgentDailyBudgetReservationRecord.business_date)

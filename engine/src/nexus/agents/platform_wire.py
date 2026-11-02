@@ -21,11 +21,12 @@ from nexus.agents.codex_sdk import (
     DEVELOPER_INSTRUCTIONS,
     codex_request_wire,
 )
-from nexus.agents.codex_staged import STAGES
+from nexus.agents.codex_staged import STAGES, StructuredStagedCodexCommittee
 from nexus.agents.committee import INDEPENDENT_MONITOR_COMPACT_PROMPT_VERSION, ROLE_ORDER
 from nexus.agents.comparison_compiler import _compiler, compile_comparison_stage
 from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbound_safe
 from nexus.agents.models import ResearchRequest
+from nexus.agents.platform_pricing import sol_price_record
 from nexus.agents.platform_schema import (
     CURRENT_PLATFORM_UNITS_VERSION,
     LEGACY_PLATFORM_UNITS_VERSION,
@@ -70,9 +71,9 @@ class PlatformProfile:
     developer_instructions_hash: str = hashlib.sha256(DEVELOPER_INSTRUCTIONS.encode()).hexdigest()
 
 
-def _require_profile(profile: PlatformProfile) -> None:
-    fixed = platform_wire_profile(profile.price_version)
-    if profile.price_version not in PLATFORM_PRICE_VERSIONS or any(
+def _require_profile(profile: PlatformProfile, *, price_record: object = None) -> None:
+    fixed = platform_wire_profile(profile.price_version, price_record=price_record)
+    if any(
         type(getattr(profile, f.name)) is not type(getattr(fixed, f.name))
         or getattr(profile, f.name) != getattr(fixed, f.name)
         for f in fields(fixed)
@@ -80,10 +81,15 @@ def _require_profile(profile: PlatformProfile) -> None:
         raise ValueError("PLATFORM_PROFILE_INVALID")
 
 
-def platform_wire_profile(version: str) -> PlatformProfile:
+def platform_wire_profile(version: str, *, price_record: object = None) -> PlatformProfile:
     """Exact supported configurations; historical constructors/defaults remain low."""
     from nexus.agents.platform_usage import MEDIUM_PLATFORM_PRICE_VERSION
 
+    if price_record is not None:
+        pricing = sol_price_record(price_record)
+        if version != pricing.version:
+            raise ValueError("PLATFORM_PROFILE_INVALID")
+        return PlatformProfile(model=pricing.model_id, effort="medium", price_version=version)
     if version not in PLATFORM_PRICE_VERSIONS:
         raise ValueError("PLATFORM_PROFILE_INVALID")
     return PlatformProfile(
@@ -155,6 +161,7 @@ def _wire(
     profile: PlatformProfile,
     forbidden: tuple[str, ...],
     units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
+    schema_name: str = "research_stage",
 ) -> bytes:
     body = {
         "model": profile.model,
@@ -170,7 +177,7 @@ def _wire(
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "research_stage",
+                "name": schema_name,
                 "strict": True,
                 "schema": platform_output_schema(output_model, units_version=units_version),
             }
@@ -190,6 +197,7 @@ def freeze_platform_allocation(
     *,
     profile: PlatformProfile = PlatformProfile(),
     units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
+    price_record: object = None,
 ) -> PlatformAllocation:
     """Compile the existing maximal schema envelope, including outer JSON escaping.
 
@@ -197,7 +205,7 @@ def freeze_platform_allocation(
     Prior shapes cover all accepted schema outputs, independent of a sample or
     the old experiment's outputs. No old common-wire 100479 admission is used.
     """
-    _require_profile(profile)
+    _require_profile(profile, price_record=price_record)
     if units_version not in PLATFORM_UNITS_VERSIONS:
         raise ValueError("PLATFORM_ALLOCATION_CHANGED")
     if prepared.input_hash != prepared.proof.get("input_hash"):
@@ -207,6 +215,89 @@ def freeze_platform_allocation(
     request = ResearchRequest.model_validate(member["request"])
     refs = tuple(EvidenceRef.model_validate(row) for row in member["evidence"])
     inputs = member["inputs"]
+    return _freeze_allocation(
+        compiler,
+        request=request,
+        evidence_refs=refs,
+        inputs=inputs,
+        input_hash=prepared.input_hash,
+        forbidden=prepared.forbidden,
+        profile=profile,
+        units_version=units_version,
+    )
+
+
+def native_platform_input_hash(
+    compiler: StructuredStagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: Sequence[EvidenceRef],
+    inputs: dict[str, Any],
+) -> str:
+    """Bind actual native material; no aliasing or comparison ownership is added.
+
+    The producer separately proves Run/Job/owner and freezes this digest in its
+    original transaction. A digest alone never authorizes admission or dispatch.
+    """
+    material = dict(
+        contract="platform-native-input-v1",
+        compiler=dict(
+            inline_citations=compiler._inline_citations,
+            paper_stage_scope=compiler._paper_stage_scope,
+            stage_time_budget=compiler._stage_time_budget,
+            stage_budget_version=compiler._stage_budget_version,
+            diagnostic_profile=compiler._diagnostic_profile,
+            structured_synthesis=compiler.structured_synthesis,
+        ),
+        request=request.model_dump(mode="json"),
+        evidence=[ref.model_dump(mode="json") for ref in evidence_refs],
+        inputs=inputs,
+        prompts={role: compiler._prompts[role].model_dump(mode="json") for role in ROLE_ORDER},
+    )
+    assert_outbound_safe(material, ())
+    return _hash(material)
+
+
+def freeze_native_platform_allocation(
+    compiler: StructuredStagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: Sequence[EvidenceRef],
+    inputs: dict[str, Any],
+    profile: PlatformProfile,
+    price_record: object,
+    units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
+) -> PlatformAllocation:
+    """Normal producer capacity using its actual daily/independent/increment compiler."""
+    _require_profile(profile, price_record=sol_price_record(price_record))
+    if units_version not in PLATFORM_UNITS_VERSIONS:
+        raise ValueError("PLATFORM_ALLOCATION_CHANGED")
+    return _freeze_allocation(
+        compiler,
+        request=request,
+        evidence_refs=tuple(evidence_refs),
+        inputs=inputs,
+        input_hash=native_platform_input_hash(
+            compiler, request=request, evidence_refs=evidence_refs, inputs=inputs
+        ),
+        forbidden=(),
+        profile=profile,
+        units_version=units_version,
+    )
+
+
+def _freeze_allocation(
+    compiler: StructuredStagedCodexCommittee,
+    *,
+    request: ResearchRequest,
+    evidence_refs: tuple[EvidenceRef, ...],
+    inputs: dict[str, Any],
+    input_hash: str,
+    forbidden: tuple[str, ...],
+    profile: PlatformProfile,
+    units_version: str,
+) -> PlatformAllocation:
+    refs = evidence_refs
     envelope = candidate_capacity_envelope(
         compiler, request=request, evidence_refs=refs, inputs=inputs
     )
@@ -247,7 +338,7 @@ def freeze_platform_allocation(
                     schema,
                     output_remaining=_OUTPUT_LIMIT,
                     profile=profile,
-                    forbidden=prepared.forbidden,
+                    forbidden=forbidden,
                     units_version=units_version,
                 )
             )
@@ -258,7 +349,7 @@ def freeze_platform_allocation(
         bounds.append(units)
         schemas.append(_hash(platform_output_schema(schema, units_version=units_version)))
     return PlatformAllocation(
-        prepared.input_hash, tuple(bounds), tuple(schemas), profile, units_version=units_version
+        input_hash, tuple(bounds), tuple(schemas), profile, units_version=units_version
     )
 
 
@@ -269,6 +360,7 @@ def _remaining(
     input_hash: str,
     profile: PlatformProfile,
     input_bounds: tuple[int, ...],
+    price_record: object = None,
 ) -> int:
     if len(prior) != index:
         raise ValueError("PLATFORM_PRIOR_USAGE_INVALID")
@@ -288,6 +380,7 @@ def _remaining(
             service_tier=row.response.get("service_tier"),
             cache_mode=profile.cache_mode,
             cache_ttl=profile.cache_ttl,
+            price_record=price_record,
         )
         if (
             not usage.totals_verified
@@ -304,8 +397,38 @@ def _remaining(
     return remaining
 
 
+@dataclass(frozen=True)
+class _NativeInputIdentity:
+    input_hash: str
+    forbidden: tuple[str, ...] = ()
+
+
+def compile_native_platform_stage(
+    *,
+    input_hash: str,
+    allocation: PlatformAllocation,
+    expected_allocation_hash: str,
+    stage: Stage,
+    compiled_request: tuple[Mapping[str, object], type[BaseModel]],
+    prior_usage: Sequence[PriorPlatformUsage],
+    price_record: object,
+) -> PlatformStageWire:
+    """Preserve the normal committee's entire current payload and output schema."""
+    pricing = sol_price_record(price_record)
+    return compile_platform_stage(
+        _NativeInputIdentity(input_hash),
+        allocation=allocation,
+        expected_allocation_hash=expected_allocation_hash,
+        stage=stage,
+        compiled_request=compiled_request,
+        previous=[],
+        prior_usage=prior_usage,
+        price_record=pricing,
+    )
+
+
 def compile_platform_stage(
-    prepared: PreparedComparisonInput,
+    prepared: PreparedComparisonInput | _NativeInputIdentity,
     *,
     allocation: PlatformAllocation,
     expected_allocation_hash: str,
@@ -313,6 +436,7 @@ def compile_platform_stage(
     previous: list[dict[str, object]],
     prior_usage: Sequence[PriorPlatformUsage],
     compiled_request: tuple[Mapping[str, object], type[BaseModel]] | None = None,
+    price_record: object = None,
 ) -> PlatformStageWire:
     """The single future producer/claim/HTTP handoff: frozen bytes plus their binding.
 
@@ -320,7 +444,7 @@ def compile_platform_stage(
     using separately qualified project-key auth. This helper never loads a Key,
     creates a Grant/JWT, verifies funds, grants a ticket, or settles a ledger.
     """
-    _require_profile(allocation.profile)
+    _require_profile(allocation.profile, price_record=price_record)
     if (
         allocation.allocation_hash != expected_allocation_hash
         or allocation.input_hash != prepared.input_hash
@@ -347,8 +471,11 @@ def compile_platform_stage(
         input_hash=prepared.input_hash,
         profile=allocation.profile,
         input_bounds=allocation.stage_input_upper_bounds,
+        price_record=price_record,
     )
     if compiled_request is None:
+        if not isinstance(prepared, PreparedComparisonInput):
+            raise ValueError("PLATFORM_NATIVE_REQUEST_REQUIRED")
         payload, schema = compile_comparison_stage(
             prepared,
             expected_input_hash=allocation.input_hash,

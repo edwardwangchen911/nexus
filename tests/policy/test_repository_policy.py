@@ -2154,3 +2154,30 @@ def test_run_all_includes_the_real_e2e_boundary(
 
     assert findings == [expected]
     assert inventory == []
+
+
+def test_npm_inventory_reports_the_actual_package_behind_an_alias(tmp_path):
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "packages": {
+                    "node_modules/upstream-minimatch": {
+                        "name": "minimatch",
+                        "version": "11.0.1",
+                        "license": "BlueOak-1.0.0",
+                    },
+                    "node_modules/minimatch": {
+                        "name": "@nexus/minimatch-compat",
+                        "version": "1.0.0",
+                        "license": "UNLICENSED",
+                    },
+                }
+            }
+        )
+    )
+    records = repository_policy._npm_inventory(lock)
+    assert {(row.name, row.version, row.license) for row in records} == {
+        ("minimatch", "11.0.1", "BlueOak-1.0.0"),
+        ("@nexus/minimatch-compat", "1.0.0", "UNLICENSED"),
+    }

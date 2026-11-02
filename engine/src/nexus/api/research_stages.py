@@ -45,6 +45,7 @@ async def read_stage_trace(
     from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
     comparison_semantics_verified = False
+    native_platform_semantics_verified = False
     if run.pricing_version in PLATFORM_PRICE_VERSIONS:
         from nexus.agents.comparison_authority import platform_comparison_semantics
 
@@ -58,7 +59,22 @@ async def read_stage_trace(
         if not comparison_semantics_verified:
             return ResearchStageTrace(evidence_hash=run.evidence_hash, status="invalid", stages=())
     elif run.pricing_version not in (STAGED_CONFIG_VERSIONS | _CAPACITY_TRACE_VERSIONS):
-        return None
+        from nexus.agents.platform_native import native_platform_semantics
+        from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+
+        if not run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"):
+            return None
+        model = await session.get(AgentModelConfigRecord, run.model_config_id)
+        if model is None or model.platform_profile is None:
+            return None
+        try:
+            native_platform_semantics_verified = await native_platform_semantics(
+                session, run, model
+            )
+        except ValueError:
+            native_platform_semantics_verified = False
+        if not native_platform_semantics_verified:
+            return ResearchStageTrace(evidence_hash=run.evidence_hash, status="invalid", stages=())
     records = tuple(
         await session.scalars(
             select(AgentResearchOutputRecord)
@@ -78,6 +94,7 @@ async def read_stage_trace(
         tuple(domain_evidence(item) for item in evidence),
         {} if prompts is None else {role: prompt.content_hash for role, prompt in prompts.items()},
         comparison_semantics_verified=comparison_semantics_verified,
+        native_platform_semantics_verified=native_platform_semantics_verified,
     )
 
 
@@ -88,6 +105,7 @@ def validate_stage_trace(
     prompt_hashes: dict[str, str],
     *,
     comparison_semantics_verified: bool = False,
+    native_platform_semantics_verified: bool = False,
 ) -> ResearchStageTrace:
     """Suppress a corrupted trace; never display arbitrary stored JSON as checked research."""
     invalid = ResearchStageTrace(evidence_hash=run.evidence_hash, status="invalid", stages=())
@@ -96,6 +114,16 @@ def validate_stage_trace(
         from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
         if run.actor_id not in ACTORS or run.pricing_version not in PLATFORM_PRICE_VERSIONS:
+            return invalid
+    if native_platform_semantics_verified:
+        from nexus.agents.comparison_manifest import ACTORS
+        from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+
+        if (
+            comparison_semantics_verified
+            or run.actor_id in ACTORS
+            or not run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-")
+        ):
             return invalid
     expected = [(stage, role) for stage, roles in STAGES for role in roles]
     if not evidence or len(records) > len(expected) or len(prompt_hashes) != 8:
@@ -148,6 +176,7 @@ def validate_stage_trace(
             if (
                 run.pricing_version in (STRUCTURED_CONFIG_VERSIONS | _CAPACITY_TRACE_VERSIONS)
                 or comparison_semantics_verified
+                or native_platform_semantics_verified
             ) and stage == "synthesis":
                 required = {
                     item for item in prior_ids if item.startswith(("bear:", "evidence_audit:"))

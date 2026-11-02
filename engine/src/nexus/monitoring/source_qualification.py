@@ -332,6 +332,15 @@ async def load_qualified_source(
     context, evidence = await _qualify_source(
         session, run=run, output=output, intent=intent, account_id=account_id, now=now
     )
+    from nexus.agents.platform_native import native_platform_semantics
+    from nexus.agents.research_stages.proof import read_terminal_proof
+
+    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    native_platform = model is not None and await native_platform_semantics(session, run, model)
+    if native_platform:
+        proof = await read_terminal_proof(session, run_id=run.id, now=now)
+        if proof is None or not proof.known or not proof.cleanup_confirmed:
+            raise ValueError(invalid)
     records = tuple(
         await session.scalars(
             select(AgentResearchOutputRecord)
@@ -354,6 +363,7 @@ async def load_qualified_source(
             records,
             evidence,
             {str(role): prompt.content_hash for role, prompt in prompts.items()},
+            native_platform_semantics_verified=native_platform,
         ).status
         != "verified"
     ):
@@ -371,6 +381,7 @@ async def load_qualified_source(
         model,
         evidence,
         outputs,
+        native_platform_semantics_verified=native_platform,
         price_authority_valid=(
             not isinstance(context, IndependentMonitorContext)
             or await _independent_price_valid(session, run, evidence)

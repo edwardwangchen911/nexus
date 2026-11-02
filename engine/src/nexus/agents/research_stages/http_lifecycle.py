@@ -260,7 +260,9 @@ async def invoke_http_stage(
         try:
             response = Response.model_validate(value)
             normalized = normalize_response(response)
-            if response.model != MODEL_ID or any(
+            if response.model != (
+                json.loads(wire).get("model") if platform_requested else MODEL_ID
+            ) or any(
                 item.get("type") not in {"message", "reasoning"} for item in normalized.output
             ):
                 raise CodexInvocationError("CODEX_UNEXPECTED_TOOL")

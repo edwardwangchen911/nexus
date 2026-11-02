@@ -517,17 +517,22 @@ async def admit_manual_request(
     model = await require_formal_stage_model_profile(
         session, model_config_id=model_config_id, now=now
     )
+    from nexus.agents.platform_profile import sol_business_model_matches
+
+    platform = sol_business_model_matches(model)
+    if platform and (runtime_mode != "responses" or contract_version not in {1, 3}):
+        raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     if two_flight:
         from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
 
-        if model.version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
+        if model.version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION and not platform:
             raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     profile: dict[str, object] | None = None
     if contract_version in {2, 3}:
         from nexus.agents.independent_monitor import ensure_prompts
         from nexus.agents.research_only import ensure_research_only_prompts
 
-        if runtime_mode != "codex_sdk":
+        if runtime_mode != ("responses" if platform else "codex_sdk"):
             raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
         prompts = await (
             ensure_prompts(session)

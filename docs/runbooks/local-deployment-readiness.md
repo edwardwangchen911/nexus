@@ -45,10 +45,10 @@ schema 内容仍须通过正常 check:generated 与已绑定的签入契约一�
 不接收外部配置；新增根目录 Redocly 配置会拒绝。lint 的 pattern/options 来自仓库
 CLI、配置及插件选项，未审查源码不能视为可信输入。隔离完整工具链和构建 module graph
 已验证，构建应用图中不含这些工具模块；开发依赖目录仍含它们，不能宣称物理移除。
-CI 保存原始 npm 审计 artifact。部署前须在最终候选的独立、完整安装目录再次运行
-`.venv/bin/python scripts/ci/npm_audit_gate.py --report <私有证据目录>/npm-audit.json`，检查真实
-当前时间仍在期限内；较早的绿色 CI 不替代部署时检查。输出必须明确为该项风险接受，
-不得称作 clean。到期、范围变化或任一身份不符均停止发布，不自动延期。
+CI 保存原始 npm 审计 artifact。使用旧锁文件的候选只能在当时的接受窗口发布，该窗口已经结束。
+
+Sol 候选的开发工具通过项目内的私有包 `@nexus/minimatch-compat` 保留旧的 CommonJS 调用方式。`npm ci` 按项目 `.npmrc` 将适配包安装为普通目录。它直接导出官方 `minimatch@11.0.1` 的匹配函数。TypeScript ESLint 解析器使用同版本的原生模块。两处官方包在锁文件中绑定同一发布完整性摘要。
+部署前在最终候选的独立安装目录运行 `.venv/bin/python scripts/ci/npm_audit_gate.py --report <私有证据目录>/npm-audit.json`。这套锁文件应返回 `clean`，并通过正常 lint、客户端生成校验、构建和工具链回归。回滚时重新审计目标镜像，旧风险接受已经到期。
 
 正常 `run-research` 是持锁的前台有界入口，自然退出和精确退出审计是成功条件；它不是常驻定时服务，也不能与常驻宿主争抢进程锁。正式 `start --mode research_and_paper` 只排队，由已恢复的唯一正常宿主领取，不能另启第二个执行者。
 

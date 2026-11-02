@@ -1428,7 +1428,11 @@ def _npm_inventory(lock_path: Path) -> list[DependencyRecord]:
             continue
         if not isinstance(metadata, dict):
             continue
-        name = package_path.rsplit("node_modules/", 1)[-1]
+        # npm aliases retain their installation name in the path. Inventory the package
+        # whose code and license were actually installed.
+        name = metadata.get("name", package_path.rsplit("node_modules/", 1)[-1])
+        if not isinstance(name, str) or not name:
+            name = package_path.rsplit("node_modules/", 1)[-1]
         version = metadata.get("version")
         license_name = metadata.get("license")
         records.append(

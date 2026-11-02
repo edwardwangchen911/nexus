@@ -19,7 +19,7 @@ from nexus.ops.local_stack import _validate_local_env
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.monitoring import MonitorPlan
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 
 def parser() -> argparse.ArgumentParser:
@@ -486,6 +486,8 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                     instrument_id=sealed_batch.instrument_id,
                 )
                 try:
+                    from nexus.agents.platform_native import credential_for_preparation
+
                     member = await admit_batch(
                         session,
                         account_id=settings.agent_paper_account_id,
@@ -496,6 +498,11 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                         model_config_id=settings.agent_paper_formal_model_config_id,
                         daily_limit_usd=settings.agent_daily_budget_usd,
                         daily_sdk_call_limit=settings.agent_monitor_daily_sdk_call_limit,
+                        platform_credential=(
+                            credential_for_preparation(settings)
+                            if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+                            else None
+                        ),
                         now=now,
                     )
                 except (ValueError, BudgetExhausted) as error:
@@ -616,6 +623,8 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                         "provider_requests": 0,
                     }
                 try:
+                    from nexus.agents.platform_native import credential_for_preparation
+
                     member = await admit_trigger(
                         session,
                         account_id=settings.agent_paper_account_id,
@@ -625,6 +634,11 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                         model_config_id=settings.agent_paper_formal_model_config_id,
                         daily_limit_usd=settings.agent_daily_budget_usd,
                         daily_sdk_call_limit=settings.agent_monitor_daily_sdk_call_limit,
+                        platform_credential=(
+                            credential_for_preparation(settings)
+                            if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+                            else None
+                        ),
                         now=now,
                     )
                 except (ValueError, BudgetExhausted) as error:

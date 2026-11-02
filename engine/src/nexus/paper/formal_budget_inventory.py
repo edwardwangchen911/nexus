@@ -189,6 +189,19 @@ async def inspect_inventory(
                     usage = await research_reserved_occupancy(session, row)
                 except ValueError:
                     valid = False
+            if (
+                isinstance(row, AgentPortfolioSynthesisBudgetReservationRecord)
+                and row.state == "reserved"
+            ):
+                from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+
+                try:
+                    overrun = await portfolio_reserved_overrun(session, row)
+                    if overrun is not None:
+                        usage = max(usage, overrun)
+                        codes.add("RESEARCH_ACCOUNTING_UNSETTLED")
+                except ValueError:
+                    valid = False
             native_total += usage
             if not valid:
                 codes.add("NATIVE_USAGE_UNKNOWN")

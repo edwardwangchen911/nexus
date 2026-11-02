@@ -51,6 +51,7 @@ from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisOutputRecord,
     AgentPortfolioSynthesisRunRecord,
     AgentPromptVersionRecord,
+    AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
@@ -155,6 +156,57 @@ async def load_frozen_synthesis_authority(
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_PROMPT_INVALID")
     return frozen
+
+
+async def require_frozen_sol_sources(
+    session: AsyncSession, frozen: PortfolioSynthesisInputV1
+) -> None:
+    """Prove the original admitted sources for readback or fenced orphan closure."""
+    from nexus.agents.actionable_research import frozen_source_matches
+    from nexus.agents.research_stages.proof import read_terminal_proof
+
+    for source in frozen.security_outputs:
+        output = await session.get(
+            AgentResearchOutputRecord, source.research_output_id, populate_existing=True
+        )
+        research = (
+            None
+            if output is None
+            else await session.get(AgentResearchRunRecord, output.run_id, populate_existing=True)
+        )
+        if (
+            output is None
+            or research is None
+            or output.created_at > frozen.admitted_at
+            or output.content_hash != source.content_hash
+            or research.model_config_id != frozen.model_config_id
+            or research.model_hash != frozen.model_hash
+            or research.pricing_version != frozen.pricing_version
+            or research.actor_id != "local-agent-paper-cycle"
+            or research.instrument_id != source.instrument_id
+            or research.decision_time != frozen.decision_time
+            or research.idempotency_key != f"agent-paper:{frozen.cycle_id}:{source.instrument_id}"
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
+        proof = await read_terminal_proof(session, run_id=research.id, now=frozen.admitted_at)
+        bindings = (
+            await session.scalars(
+                select(AgentResearchOutputEvidenceRecord).where(
+                    AgentResearchOutputEvidenceRecord.output_id == output.id
+                )
+            )
+        ).all()
+        if (
+            proof is None
+            or not proof.budget_settled
+            or not proof.known
+            or not proof.cleanup_confirmed
+            or any(binding.created_at > frozen.admitted_at for binding in bindings)
+            or not frozen_source_matches(
+                output, source.intent, source.intent_hash, source.evidence_ref_ids, bindings
+            )
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
 
 
 async def reserve_portfolio_synthesis_budget(
@@ -639,7 +691,7 @@ async def admit_portfolio_synthesis(
             pricing_fresh=True,
             **({"economic_allocation": allocation} if allocation is not None else {}),
         )
-        await enqueue_job(
+        job = await enqueue_job(
             session,
             key=JobKeyV1(
                 job_type=JobType.AGENT_PORTFOLIO_SYNTHESIS,
@@ -659,6 +711,10 @@ async def admit_portfolio_synthesis(
             max_attempts=1,
             available_at=now,
         )
+        if model.platform_profile is not None:
+            from nexus.agents.platform_portfolio import freeze_portfolio_request
+
+            await freeze_portfolio_request(session, run, model, job, prompt, now)
         await session.flush()
     return PortfolioSynthesisAdmission(run, False)
 
@@ -780,17 +836,48 @@ async def persist_portfolio_synthesis_terminal(
         or reservation.reserved_usd != model.worst_case_cost_usd
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_BUDGET_INVALID")
-    await _lock_budget_day(session, reservation.business_date.isoformat())
-    cost = (
-        None
-        if input_tokens is None or output_tokens is None
-        else usage_cost(model, input_tokens, output_tokens)
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+
+    native = model.platform_profile is not None or run.pricing_version.startswith(
+        SOL_BUSINESS_CONTRACT + "-"
     )
+    if native:
+        from nexus.agents.platform_portfolio import portfolio_charge
+
+        charge = await portfolio_charge(
+            session,
+            run,
+            model,
+            diagnostic_job_id,
+            diagnostic_attempt_no,
+            diagnostic_fence_token,
+            now,
+        )
+        if (
+            provider_call_started is False
+            or (
+                input_tokens is not None
+                and (input_tokens, output_tokens) != (charge.input_tokens, charge.output_tokens)
+            )
+            or status != "failed"
+            and charge.cost is None
+            or intent is not None
+            and canonical_portfolio_synthesis_hash(intent) != charge.intent_hash
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_PLATFORM_USAGE_PROOF_REQUIRED")
+        input_tokens, output_tokens, cost = charge.input_tokens, charge.output_tokens, charge.cost
+    else:
+        cost = (
+            None
+            if input_tokens is None or output_tokens is None
+            else usage_cost(model, input_tokens, output_tokens)
+        )
+    await _lock_budget_day(session, reservation.business_date.isoformat())
     async with session.begin_nested():
         if cost is not None:
-            reservation.state = "settled"
+            reservation.state = "released" if native and charge.unused else "settled"
             reservation.settled_usd = cost
-        elif run.status == "prepared" or provider_call_started is False:
+        elif not native and (run.status == "prepared" or provider_call_started is False):
             reservation.state = "released"
             reservation.settled_usd = Decimal("0")
             cost = Decimal("0")

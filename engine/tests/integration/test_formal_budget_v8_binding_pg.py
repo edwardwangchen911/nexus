@@ -30,14 +30,16 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from unit.ops.test_agent_paper_loop import service_ready_environment
 from unit.ops.test_formal_stage_registration import OPTIONS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selection", ["v8", "v9", "v10", "missing", "legacy", "legacy_binding"])
+@pytest.mark.parametrize(
+    "selection", ["v8", "v9", "v10", "sol", "missing", "legacy", "legacy_binding"]
+)
 async def test_protected_file_freezes_exact_v8_profile(
     migrated_database_url, monkeypatch, tmp_path, selection
 ):
@@ -72,6 +74,21 @@ async def test_protected_file_freezes_exact_v8_profile(
     )
     try:
         await _set_test_insert_clock(sessions, now)
+        if selection == "sol":
+            from integration.test_sol_profile_pg import current_record, register
+
+            # Register in this scenario's existing historical clock. The real
+            # profile validator, audit and binding run against the migrated DB.
+            original = AsyncSession.scalar
+
+            async def register_clock(self, statement, *args, **kwargs):
+                if str(statement) == "SELECT clock_timestamp()":
+                    return now
+                return await original(self, statement, *args, **kwargs)
+
+            with monkeypatch.context() as registration:
+                registration.setattr(AsyncSession, "scalar", register_clock)
+                selected_sol = await register(sessions, await current_record(sessions))
         async with sessions.begin() as session:
             assert (await session.scalar(select(func.current_database()))).startswith("nexus_test_")
             next_day = AT + timedelta(days=3)
@@ -88,6 +105,8 @@ async def test_protected_file_freezes_exact_v8_profile(
             model = await session.scalar(
                 select(AgentModelConfigRecord).where(AgentModelConfigRecord.version == version)
             )
+            if selection == "sol":
+                model = await session.get(AgentModelConfigRecord, selected_sol)
             assert model is not None
             legacy = await session.scalar(
                 select(AgentModelConfigRecord).where(AgentModelConfigRecord.version != version)
@@ -129,7 +148,7 @@ async def test_protected_file_freezes_exact_v8_profile(
         monkeypatch.setattr(AsyncSession, "scalar", clock)
         chosen = (
             model.id
-            if selection in {"v8", "v9", "v10"}
+            if selection in {"v8", "v9", "v10", "sol"}
             else UUID(int=999)
             if selection == "missing"
             else legacy.id
@@ -152,6 +171,19 @@ async def test_protected_file_freezes_exact_v8_profile(
         values = service_ready_environment() | values
         if selection == "legacy_binding":
             values.pop("NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID")
+        if selection == "sol":
+            from nexus.ops.platform_credentials import PLATFORM_KEY_PATH
+
+            saved = root / PLATFORM_KEY_PATH
+            saved.parent.mkdir(parents=True)
+            saved.write_text("offline-sol-budget-test-key")
+            saved.chmod(0o600)
+            values.update(
+                AGENT_RUNTIME_MODE="responses",
+                OPENAI_REASONING_MODEL="gpt-6.1-sol",
+                OPENAI_EXTRACTION_MODEL="gpt-6.1-sol",
+                AGENT_DAILY_BUDGET_USD="10",
+            )
         path = root / "infra/.env.local"
         path.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n")
         path.chmod(0o600)
@@ -234,7 +266,7 @@ async def test_protected_file_freezes_exact_v8_profile(
                     == 1
                 )
             return
-        if selection not in {"v8", "v9", "v10"}:
+        if selection not in {"v8", "v9", "v10", "sol"}:
             with pytest.raises(ValueError, match="CODEX_FORMAL_AUTHORITY_INVALID"):
                 await apply(root, idempotency_key="protected-v8")
             async with sessions() as session:
@@ -259,6 +291,41 @@ async def test_protected_file_freezes_exact_v8_profile(
         await verify_host_consumes_frozen_file(changed_settings, model.id)
         with pytest.raises(ValueError, match="CODEX_FORMAL_AUTHORITY_INVALID"):
             await apply(root, idempotency_key="protected-v8-changed")
+        # Exercise the real branch rollback at each boundary. An earlier
+        # migration guard must not hide the protected-budget guard.
+        monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+        migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+
+        async def downgrade():
+            await asyncio.to_thread(
+                command.downgrade,
+                migration_config,
+                "0067_formal_budget_binding@0066_research_identity_binding",
+            )
+
+        if selection == "sol":
+            with pytest.raises(
+                RuntimeError, match="PLATFORM_SOL_COMPATIBLE_READER_ROLLBACK_REQUIRED"
+            ):
+                await downgrade()
+            async with sessions() as session:
+                binding = await session.scalar(select(FormalBudgetBindingRecord))
+                assert binding.payload["model_hash"] == model.config_hash
+                assert binding.payload["pricing_version"] == model.version
+                assert len(binding.payload["tasks"]) == 4
+                assert binding.payload["runtime_spec"]["research_job_timeout_seconds"] == 300
+                assert binding.payload["runtime_spec"]["research_handler_timeout_seconds"] == 315
+            return
+        with pytest.raises(Exception, match="FORMAL_BUDGET_BINDING_ROLLBACK_REQUIRES_EMPTY"):
+            await downgrade()
+        async with sessions() as session:
+            assert (
+                await session.scalar(text("SELECT version_num FROM alembic_version"))
+                == CURRENT_MIGRATION_HEAD
+            )
+            assert (await session.scalar(select(FormalBudgetBindingRecord))).content_hash == result[
+                "binding_hash"
+            ]
         # Execute the real host action and normal trigger transaction. Only
         # preparation/provider authority are substituted with seeded evidence.
         now = AT
@@ -414,22 +481,15 @@ async def test_protected_file_freezes_exact_v8_profile(
             assert binding.payload["pricing_version"] == version
             assert binding.payload["runtime_spec"]["research_job_timeout_seconds"] == 180
             assert binding.payload["runtime_spec"]["research_handler_timeout_seconds"] == 195
-        # Normal applied facts prohibit destructive branch rollback. Alembic
-        # must roll back the attempted unmerge too, retaining the merged head.
-        monkeypatch.setenv("DATABASE_URL", migrated_database_url)
-        migration_config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-        with pytest.raises(Exception, match="FORMAL_BUDGET_BINDING_ROLLBACK_REQUIRES_EMPTY"):
-            await asyncio.to_thread(
-                command.downgrade,
-                migration_config,
-                "0067_formal_budget_binding@0066_research_identity_binding",
-            )
-        from sqlalchemy import text
-
+        # This same account now also owns staged Jobs. Their newer guard
+        # must preserve the routes, original binding and cycle as one unit.
+        with pytest.raises(Exception, match="RESEARCH_STAGE_DOWNGRADE_FORBIDDEN"):
+            await downgrade()
         async with sessions() as session:
             assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
                 CURRENT_MIGRATION_HEAD
             )
+            assert await session.scalar(text("SELECT count(*) FROM research_stage_route")) == 3
             retained = await session.get(FormalBudgetBindingRecord, binding.id)
             assert retained is not None and retained.content_hash == result["binding_hash"]
             assert (

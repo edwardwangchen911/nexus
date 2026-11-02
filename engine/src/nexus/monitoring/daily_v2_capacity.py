@@ -122,8 +122,13 @@ async def preview_daily_event_capacity(session: AsyncSession, run: AgentResearch
         return
     scope.activate()
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
-    if model is None or model.version not in (
-        ISOLATED_CAPACITY_CONFIG_VERSIONS | {FORMAL_STAGE_CAPACITY_CONFIG_VERSION}
+    from nexus.agents.platform_profile import sol_business_model_matches
+
+    platform = model is not None and sol_business_model_matches(model)
+    if model is None or (
+        not platform
+        and model.version
+        not in (ISOLATED_CAPACITY_CONFIG_VERSIONS | {FORMAL_STAGE_CAPACITY_CONFIG_VERSION})
     ):
         return
     if (
@@ -143,6 +148,20 @@ async def preview_daily_event_capacity(session: AsyncSession, run: AgentResearch
     ):
         raise ValueError("MONITOR_DAILY_EVENT_CONTEXT_INVALID")
     context = bound[0].pending_monitoring_v2
+    if platform:
+        from nexus.agents.platform_native import native_run_allocation
+
+        scope.check_deadline()
+        try:
+            await native_run_allocation(session, run=run, model=model)
+        except ValueError as error:
+            if str(error) == "PLATFORM_INPUT_TOO_LARGE" and context is not None:
+                raise DailyEventCapacityExceeded(
+                    run.instrument_id, len(context.trigger_checks)
+                ) from error
+            raise
+        scope.check_deadline()
+        return
     evidence = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
     prompts = await load_frozen_prompts(session, run)
     if not evidence or prompts is None:

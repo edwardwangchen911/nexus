@@ -6,6 +6,7 @@ from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
+from nexus.agents.http_failure import HttpFailureKind, HttpFailurePhase
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.paper.models import InternalOrderStatus
@@ -121,7 +122,16 @@ class AgentPaperSynthesisChoiceResponse(_StrictSchema):
     invalidation: str = Field(min_length=1, max_length=2000)
 
 
+class PortfolioResponsesUsage(_StrictSchema):
+    requested_model: str = Field(min_length=1, max_length=100)
+    reported_model: str | None = Field(max_length=100)
+    failure_phase: HttpFailurePhase | None
+    failure_kind: HttpFailureKind | None
+    settled_cost_usd: DecimalString | None
+
+
 class AgentPaperSynthesisResponse(_StrictSchema):
+    responses_usage: PortfolioResponsesUsage | None = None
     synthesis_run_id: UUID
     synthesis_output_id: UUID
     candidate_batch_id: UUID

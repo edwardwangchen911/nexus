@@ -112,6 +112,12 @@ async def _native_usage(
         from nexus.agents.research_usage import research_reserved_occupancy
 
         return await research_reserved_occupancy(session, row)
+    if isinstance(row, AgentPortfolioSynthesisBudgetReservationRecord) and row.state == "reserved":
+        from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+
+        overrun = await portfolio_reserved_overrun(session, row)
+        if overrun is not None:
+            return max(usage, overrun)
     return usage
 
 
@@ -381,9 +387,14 @@ async def apply_protection(
         "synthesis_max_provider_calls": 1,
     }
     if formal_model_config_id is not None:
+        from nexus.agents.codex_bounded_budget import bounded_stage_config
         from nexus.agents.codex_formal_stage import formal_stage_config
+        from nexus.agents.platform_profile import sol_business_model_matches
 
-        stage = json.loads(str(formal_stage_config()["stage_time_budget"]))
+        config = (
+            bounded_stage_config() if sol_business_model_matches(model) else formal_stage_config()
+        )
+        stage = json.loads(str(config["stage_time_budget"]))
         runtime_spec["research_job_timeout_seconds"] = stage["job_absolute_seconds"]
         runtime_spec["research_handler_timeout_seconds"] = stage["handler_absolute_seconds"]
     payload: dict[str, object] = {

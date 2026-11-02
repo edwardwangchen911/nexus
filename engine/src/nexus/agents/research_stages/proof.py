@@ -25,7 +25,6 @@ from nexus.jobs.repository import job_lease_consumed
 from nexus.monitoring import admission
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
-    AgentModelConfigRecord,
     AgentResearchEventRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
@@ -100,7 +99,9 @@ async def read_terminal_proof(
         await admission.require_increment_binding(session, run)
     elif await selected_route(session, job.id) is None:
         raise ProtocolRejected(invalid)
-    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    from nexus.agents.platform_stage_accounting import read_stage_accounting_model
+
+    model = await read_stage_accounting_model(session, run.model_config_id)
     budget = await session.scalar(
         select(AgentDailyBudgetReservationRecord).where(
             AgentDailyBudgetReservationRecord.run_id == run.id
@@ -226,17 +227,17 @@ async def read_terminal_proof(
         or evidence_digest(rows) != terminal["chain_hash"]
         or terminal["observed_stages"]
         != [r["stage"] for r in rows if r["response_hash"] is not None]
-        or terminal["known"] is not usage_known(rows)
+        or terminal["known"] is not usage_known(rows, model=model)
     ):
         raise ProtocolRejected(invalid)
     from nexus.agents.platform_stage_accounting import (
-        platform_stage_accounting,
+        is_platform_stage_model,
+        platform_accounting_for_model,
         require_platform_stage_cost,
     )
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
 
-    platform = model.version in PLATFORM_PRICE_VERSIONS
-    accounting = platform_stage_accounting(rows, price_version=model.version) if platform else None
+    platform = is_platform_stage_model(model)
+    accounting = platform_accounting_for_model(model, rows) if platform else None
     known = terminal["known"]
     settled = budget.state == "settled"
     held = (

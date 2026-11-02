@@ -385,6 +385,7 @@ async def execute_research_run(
             reason="conflicting_facts",
         )
     from nexus.agents.comparison_authority import platform_comparison_semantics
+    from nexus.agents.platform_native import native_platform_semantics
 
     intent = synthesize_intent(
         run,
@@ -395,6 +396,7 @@ async def execute_research_run(
         evidence_refs,
         role_outputs,
         comparison_semantics_verified=await platform_comparison_semantics(session, run, model),
+        native_platform_semantics_verified=await native_platform_semantics(session, run, model),
         price_authority_valid=(
             final_price_authority_status is FrozenPriceAuthorityStatus.VALID
             or final_paper_context_status is FrozenAgentPaperContextStatus.VALID
@@ -695,9 +697,9 @@ async def _settle_or_hold_usage(
     # Include deterministic pricing refusal (even zero cost) in the same short
     # financial boundary as verification and new money admission, across dates.
     await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
+    from nexus.agents.platform_stage_accounting import is_platform_stage_model
 
-    if model.version in PLATFORM_PRICE_VERSIONS:
+    if is_platform_stage_model(model):
         from nexus.agents.platform_stage_accounting import require_platform_stage_cost
         from nexus.agents.research_stages.protocol import stage_evidence
 
@@ -705,7 +707,7 @@ async def _settle_or_hold_usage(
         # Preserve the original exception so the entire closeout rolls back.
         platform_rows = await stage_evidence(session, run.id)
     try:
-        if model.version in PLATFORM_PRICE_VERSIONS:
+        if is_platform_stage_model(model):
             actual_usd = require_platform_stage_cost(
                 model,
                 platform_rows,

@@ -53,6 +53,19 @@ async def capacity_output_mode_qualified(
                 return False
             runs.append(member)
         paired = derive_cycle_members(cycle, events, runs)
+        from nexus.agents.platform_native import native_platform_semantics
+        from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT, sol_business_model_matches
+        from nexus.persistence.models.agents import AgentModelConfigRecord
+
+        platform = False
+        if run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"):
+            model = await session.get(AgentModelConfigRecord, run.model_config_id)
+            if not formal or model is None or not sol_business_model_matches(model):
+                return False
+            for member in runs:
+                if not await native_platform_semantics(session, member, model):
+                    return False
+            platform = True
         mode = "formal" if formal else "candidate"
         other = "candidate" if formal else "formal"
         facts = events[0].fact_ids
@@ -66,12 +79,15 @@ async def capacity_output_mode_qualified(
                 member.model_config_id == run.model_config_id
                 and member.model_hash == run.model_hash
                 and member.pricing_version == run.pricing_version
-                and run.pricing_version
-                in {
-                    FULL_INPUT_CAPACITY_CONFIG_VERSION,
-                    FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
-                    BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
-                }
+                and (
+                    platform
+                    or run.pricing_version
+                    in {
+                        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+                        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+                        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+                    }
+                )
                 for _, member in paired
             )
         )

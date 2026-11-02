@@ -11,9 +11,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.platform_pricing import sol_price_record
 from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS, price_platform_usage
 from nexus.agents.platform_wire import PlatformStageWire
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
@@ -29,17 +31,31 @@ class PlatformStageAccounting:
 
 
 def platform_stage_accounting(
-    rows: Sequence[Mapping[str, Any]], *, price_version: str | None = None
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    price_version: str | None = None,
+    price_record: object = None,
 ) -> PlatformStageAccounting:
-    cost, inp, out = Decimal(0), 0, 0
+    picodollars, inp, out = 0, 0, 0
+    priced_stages = 0
     complete, exceeded = bool(rows), False
+    allowed_versions = set(PLATFORM_PRICE_VERSIONS)
+    binding_version, price_hash = 1, None
+    if price_record is not None:
+        binding_version = 2
+        try:
+            pricing = sol_price_record(price_record)
+            allowed_versions = {pricing.version}
+            price_hash = pricing.content_hash
+        except ValueError:
+            allowed_versions = set()
     versions = {
         r["platform_binding"].get("price_version")
         for r in rows
         if isinstance(r.get("platform_binding"), dict)
         and isinstance(r["platform_binding"].get("price_version"), str)
     }
-    complete &= len(versions) == 1 and versions.issubset(PLATFORM_PRICE_VERSIONS)
+    complete &= len(versions) == 1 and versions.issubset(allowed_versions)
     if price_version is not None:
         complete &= versions == {price_version}
     for index, row in enumerate(rows, 1):
@@ -59,8 +75,10 @@ def platform_stage_accounting(
         if (
             row.get("stage") != index
             or not isinstance(binding, dict)
-            or binding.get("version") != 1
-            or binding.get("price_version") not in PLATFORM_PRICE_VERSIONS
+            or binding.get("version") != binding_version
+            or binding.get("price_version") not in allowed_versions
+            or binding_version == 2
+            and binding.get("price_record_hash") != price_hash
             or price_version is not None
             and binding.get("price_version") != price_version
             or binding.get("body_sha256") != row.get("wire_hash")
@@ -89,6 +107,7 @@ def platform_stage_accounting(
             service_tier=response.get("service_tier"),
             cache_mode=binding.get("cache_mode"),
             cache_ttl=binding.get("cache_ttl"),
+            price_record=price_record,
         )
         if (
             not usage.totals_verified
@@ -97,9 +116,44 @@ def platform_stage_accounting(
         ):
             complete = False
             continue
-        cost += usage.exact_cost_usd
+        numerator, denominator = usage.exact_cost_usd.as_integer_ratio()
+        picodollars += numerator * 1_000_000_000_000 // denominator
+        priced_stages += 1
     exceeded |= out > 8192
+    # Preserve the legacy textual scale used by frozen receipts, including the
+    # distinction between no priced evidence (0) and a measured zero (0E-7).
+    cost = Decimal(0)
+    if priced_stages:
+        cost = (
+            Decimal(f"{picodollars // 100000}e-7")
+            if price_record is None
+            else Decimal(f"{picodollars}e-12")
+        )
     return PlatformStageAccounting(inp, out, cost, cost if complete else None, exceeded)
+
+
+def is_platform_stage_model(model: AgentModelConfigRecord) -> bool:
+    return (
+        model.version in PLATFORM_PRICE_VERSIONS
+        or getattr(model, "platform_profile", None) is not None
+    )
+
+
+def platform_accounting_for_model(
+    model: AgentModelConfigRecord, rows: Sequence[Mapping[str, Any]]
+) -> PlatformStageAccounting:
+    """Use only this immutable model's original price, including historical reads."""
+    from nexus.agents.platform_profile import platform_model_matches, sol_business_model_matches
+
+    if sol_business_model_matches(model):
+        assert model.platform_profile is not None
+        record = model.platform_profile["price_record"]
+        return platform_stage_accounting(
+            rows, price_version=sol_price_record(record).version, price_record=record
+        )
+    if not platform_model_matches(model):
+        raise ValueError("PLATFORM_USAGE_ACCOUNTING_UNCONFIRMED")
+    return platform_stage_accounting(rows, price_version=model.version)
 
 
 async def platform_authorization_binding(
@@ -116,43 +170,57 @@ async def platform_authorization_binding(
     from nexus.agents.codex_sdk import BASE_INSTRUCTIONS, DEVELOPER_INSTRUCTIONS
     from nexus.agents.comparison_manifest import parse_comparison_manifest
     from nexus.agents.platform_manifest import PlatformManifest
-    from nexus.agents.platform_profile import platform_profile_hash
+    from nexus.agents.platform_profile import platform_profile_hash, sol_business_model_matches
     from nexus.agents.platform_wire import PlatformStageWire, _hash
 
-    if (
-        not isinstance(compiled, PlatformStageWire)
-        or run.pricing_version not in PLATFORM_PRICE_VERSIONS
-        or run.model_hash != platform_profile_hash(run.pricing_version)
-    ):
+    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    native = model is not None and sol_business_model_matches(model)
+    price_record = None
+    native_binding = None
+    if not isinstance(compiled, PlatformStageWire) or not 1 <= stage <= 3:
         raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
     compiled.verify_wire(wire)
-    record = (
-        (
-            await session.execute(
-                text(
-                    "SELECT m.payload,c.ordinal FROM research_comparison_chain c "
-                    "JOIN research_comparison_manifest m "
-                    "ON m.id=c.experiment_id WHERE c.run_id=:run"
-                ),
-                {"run": run.id},
+    if native:
+        from nexus.agents.platform_native import read_native_allocation
+
+        native_binding, allocation = await read_native_allocation(session, run=run)
+        assert model is not None and model.platform_profile is not None
+        price_record = model.platform_profile["price_record"]
+        version = sol_price_record(price_record).version
+        input_hash = allocation.input_hash
+    else:
+        if (
+            run.pricing_version not in PLATFORM_PRICE_VERSIONS
+            or run.model_hash != platform_profile_hash(run.pricing_version)
+        ):
+            raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
+        record = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT m.payload,c.ordinal FROM research_comparison_chain c "
+                        "JOIN research_comparison_manifest m ON m.id=c.experiment_id "
+                        "WHERE c.run_id=:run"
+                    ),
+                    {"run": run.id},
+                )
             )
+            .mappings()
+            .one_or_none()
         )
-        .mappings()
-        .one_or_none()
-    )
-    if record is None:
-        raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
-    manifest = parse_comparison_manifest(record["payload"])
-    if (
-        not isinstance(manifest, PlatformManifest)
-        or manifest.price_version != run.pricing_version
-        or not 1 <= stage <= 3
-    ):
-        raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
-    allocation = manifest.allocations[record["ordinal"] - 1]
+        if record is None:
+            raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
+        manifest = parse_comparison_manifest(record["payload"])
+        if (
+            not isinstance(manifest, PlatformManifest)
+            or manifest.price_version != run.pricing_version
+        ):
+            raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
+        allocation = manifest.allocations[record["ordinal"] - 1]
+        input_hash, version = run.input_hash, run.pricing_version
     # Pydantic retains the typed frozen dataclass allocation.
     if (
-        allocation.input_hash != run.input_hash
+        allocation.input_hash != input_hash
         or compiled.allocation_hash != allocation.allocation_hash
         or compiled.stage != allocation.stage_order[stage - 1]
         or compiled.input_upper_bound != allocation.stage_input_upper_bounds[stage - 1]
@@ -172,7 +240,7 @@ async def platform_authorization_binding(
     from nexus.agents.research_stages.protocol import stage_evidence
 
     prior = await stage_evidence(session, run.id)
-    accounting = platform_stage_accounting(prior, price_version=run.pricing_version)
+    accounting = platform_stage_accounting(prior, price_version=version, price_record=price_record)
     if len(prior) != stage - 1 or (
         stage > 1
         and (
@@ -188,6 +256,8 @@ async def platform_authorization_binding(
     ):
         raise ValueError("PLATFORM_PRIOR_USAGE_INVALID")
     body = json.loads(wire)
+    # Allocation stores the maximal schema envelope. The actual stage narrows
+    # prior claim enums; its exact schema is already frozen in body_sha256.
     if (
         body.get("model") != allocation.profile.model
         or body.get("service_tier") != "default"
@@ -203,10 +273,10 @@ async def platform_authorization_binding(
         or body["max_output_tokens"] != 8192 - accounting.output_tokens
     ):
         raise ValueError("PLATFORM_AUTHORIZATION_BINDING_INVALID")
-    return dict(
-        version=1,
-        price_version=run.pricing_version,
-        input_hash=run.input_hash,
+    binding = dict(
+        version=2 if native else 1,
+        price_version=version,
+        input_hash=input_hash,
         allocation_hash=compiled.allocation_hash,
         binding_hash=compiled.binding_hash,
         body_sha256=compiled.body_sha256,
@@ -215,6 +285,15 @@ async def platform_authorization_binding(
         cache_ttl="30m",
     )
 
+    if native_binding is not None:
+        binding.update(
+            price_record_hash=native_binding["price_record_hash"],
+            model_config_id=native_binding["model_config_id"],
+            model_hash=native_binding["model_hash"],
+            credential_binding_hash=native_binding["credential_binding_hash"],
+        )
+    return binding
+
 
 def require_platform_stage_cost(
     model: AgentModelConfigRecord,
@@ -222,11 +301,17 @@ def require_platform_stage_cost(
     input_tokens: int,
     output_tokens: int,
 ) -> Decimal:
-    from nexus.agents.platform_profile import platform_model_matches
+    from nexus.agents.platform_profile import platform_model_matches, sol_business_model_matches
 
-    result = platform_stage_accounting(rows, price_version=model.version)
+    normal_sol = sol_business_model_matches(model)
+    record = None
+    if normal_sol:
+        assert model.platform_profile is not None
+        record = model.platform_profile["price_record"]
+    version = sol_price_record(record).version if normal_sol else model.version
+    result = platform_stage_accounting(rows, price_version=version, price_record=record)
     if (
-        not platform_model_matches(model)
+        not (normal_sol or platform_model_matches(model))
         or result.exact_cost_usd is None
         or result.limit_exceeded
         or input_tokens > model.max_input_tokens
@@ -235,3 +320,10 @@ def require_platform_stage_cost(
     ):
         raise ValueError("PLATFORM_USAGE_ACCOUNTING_UNCONFIRMED")
     return result.exact_cost_usd
+
+
+async def read_stage_accounting_model(
+    session: AsyncSession, model_id: UUID
+) -> AgentModelConfigRecord | None:
+    """Reload original prices and their optional profile from the stored model row."""
+    return await session.get(AgentModelConfigRecord, model_id, populate_existing=True)

@@ -1451,6 +1451,16 @@ export const runtimeContractSchemas = {
         "title": "Input Hash",
         "type": "string"
       },
+      "responses_usage": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioResponsesUsage"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "status": {
         "enum": [
           "completed",
@@ -5247,6 +5257,34 @@ export const runtimeContractSchemas = {
     ],
     "title": "HistoricalAssessmentSourceResponse",
     "type": "object"
+  },
+  "HttpFailureKind": {
+    "enum": [
+      "local_guard",
+      "http_status",
+      "stream_protocol",
+      "timeout",
+      "connection",
+      "transport_protocol",
+      "cancelled",
+      "output_validation",
+      "persistence",
+      "cleanup",
+      "unexpected"
+    ],
+    "type": "string"
+  },
+  "HttpFailurePhase": {
+    "enum": [
+      "pre_send",
+      "send",
+      "headers",
+      "stream",
+      "response_validation",
+      "publication",
+      "cleanup"
+    ],
+    "type": "string"
   },
   "IntegrationStatusResponse": {
     "additionalProperties": false,
@@ -10498,6 +10536,71 @@ export const runtimeContractSchemas = {
     "title": "PortfolioResearchIntentV1",
     "type": "object"
   },
+  "PortfolioResponsesUsage": {
+    "additionalProperties": false,
+    "properties": {
+      "failure_kind": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/HttpFailureKind"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "failure_phase": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/HttpFailurePhase"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reported_model": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reported Model"
+      },
+      "requested_model": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Requested Model",
+        "type": "string"
+      },
+      "settled_cost_usd": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Settled Cost Usd"
+      }
+    },
+    "required": [
+      "requested_model",
+      "reported_model",
+      "failure_phase",
+      "failure_kind",
+      "settled_cost_usd"
+    ],
+    "title": "PortfolioResponsesUsage",
+    "type": "object"
+  },
   "PortfolioScenarioResponse": {
     "additionalProperties": false,
     "properties": {
@@ -14917,7 +15020,10 @@ export const runtimeContractSchemas = {
       "billing_mode": {
         "anyOf": [
           {
-            "const": "chatgpt_subscription",
+            "enum": [
+              "chatgpt_subscription",
+              "platform_responses"
+            ],
             "type": "string"
           },
           {

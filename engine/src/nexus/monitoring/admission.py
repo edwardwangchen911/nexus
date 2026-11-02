@@ -2,8 +2,11 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from nexus.ops.platform_credentials import PlatformCredential
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -197,6 +200,7 @@ async def admit_trigger(
     daily_limit_usd: Decimal,
     daily_sdk_call_limit: int,
     now: datetime,
+    platform_credential: "PlatformCredential | None" = None,
 ) -> MonitorIncrement:
     """One new identity only; failed eligibility rolls back all admission writes."""
     from nexus.agents import research_maintenance
@@ -220,6 +224,7 @@ async def admit_trigger(
             daily_limit_usd=daily_limit_usd,
             daily_sdk_call_limit=daily_sdk_call_limit,
             now=now,
+            platform_credential=platform_credential,
         )
 
 
@@ -234,6 +239,7 @@ async def _admit_trigger(
     daily_limit_usd: Decimal,
     daily_sdk_call_limit: int,
     now: datetime,
+    platform_credential: "PlatformCredential | None" = None,
 ) -> MonitorIncrement:
     import hashlib
     from decimal import Decimal, localcontext
@@ -387,11 +393,15 @@ async def _admit_trigger(
         raise ValueError("MONITOR_DAILY_CALL_LIMIT")
     parent = await session.get(AgentResearchRunRecord, plan.source_run_id)
     output = await session.get(AgentResearchOutputRecord, plan.source_output_id)
+    from nexus.agents.platform_native import native_increment_model_allowed
+
     if (
         parent is None
         or output is None
         or output.intent is None
-        or parent.model_config_id != model_config_id
+        or not await native_increment_model_allowed(
+            session, parent=parent, model_config_id=model_config_id
+        )
     ):
         raise ValueError("MONITOR_SOURCE_INVALID")
     projection = await load_paper_projection(
@@ -458,7 +468,7 @@ async def _admit_trigger(
             instrument_id=trigger.instrument_id, data_snapshot_id=snapshot.id, decision_time=now
         ),
         prompt_version_id=parent.prompt_version_id,
-        model_config_id=parent.model_config_id,
+        model_config_id=model_config_id,
         daily_limit_usd=daily_limit_usd,
         now=now,
         job_type=JobType.AGENT_PAPER_RESEARCH,
@@ -510,7 +520,12 @@ async def _admit_trigger(
     )
     from nexus.agents.research_stages.routes import register_new_prepared_runs
 
-    await register_new_prepared_runs(session, (member.run_id,))
+    if platform_credential is None:
+        await register_new_prepared_runs(session, (member.run_id,))
+    else:
+        await register_new_prepared_runs(
+            session, (member.run_id,), platform_credential=platform_credential
+        )
     return member
 
 

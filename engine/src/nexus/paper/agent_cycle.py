@@ -3,9 +3,12 @@
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from hashlib import sha256
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from nexus.ops.platform_credentials import PlatformCredential
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -803,6 +806,7 @@ async def start_schwab_agent_paper_cycle(
     formal_model_config_id: UUID | None = None,
     manual_request_id: UUID | None = None,
     manual_execution_id: UUID | None = None,
+    platform_credential: "PlatformCredential | None" = None,
 ) -> AgentPaperCycleResult:
     """Start one same-session cycle after its external facts are frozen."""
     _validate_formal_cycle_arguments(
@@ -935,6 +939,7 @@ async def start_schwab_agent_paper_cycle(
         formal_model_config_id=formal_model_config_id,
         manual_request_id=manual_request_id,
         manual_execution_id=manual_execution_id,
+        platform_credential=platform_credential,
     )
 
 
@@ -1047,6 +1052,38 @@ async def resume_schwab_agent_paper_cycle(
             {"scope": f"nexus:agent-paper-cycle:{cycle.account_id}"},
         )
         recovery_events = await _events(session, cycle.id)
+        if (
+            recovery_events
+            and recovery_events[-1].to_status == "unavailable"
+            and recovery_events[-1].result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+            and recovery_events[-1].fact_ids
+            == {"failure_phase": "synthesis_readback", "failure_code": "LEASE_EXPIRED"}
+        ):
+            from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+            from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
+
+            original = await session.scalar(
+                select(AgentPortfolioSynthesisRunRecord).where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
+                )
+            )
+            if original is not None and original.pricing_version.startswith(
+                SOL_BUSINESS_CONTRACT + "-"
+            ):
+                # This receipt was appended atomically with orphan closeout. Validate
+                # its original owner without turning a historical read into a new claim.
+                if original.status != "failed" or recovery_events[-1].occurred_at > now:
+                    raise ValueError("PORTFOLIO_SYNTHESIS_ORPHAN_BINDING_INVALID")
+                frozen = await load_frozen_synthesis_authority(session, original)
+                await _require_cycle_candidate_profile(
+                    session,
+                    cycle=cycle,
+                    candidate_stage_capacity=False,
+                    formal_stage_capacity=True,
+                    expected_formal_model_id=original.model_config_id,
+                    now=frozen.admitted_at,
+                )
+                return _result(cycle.id, recovery_events, replayed=True)
         if (
             recovery_events
             and recovery_events[-1].to_status == "researching"
@@ -1415,6 +1452,7 @@ async def _start_cycle(
     economic_lane_ref: EconomicLaneRef | None = None,
     manual_request_id: UUID | None = None,
     manual_execution_id: UUID | None = None,
+    platform_credential: "PlatformCredential | None" = None,
 ) -> AgentPaperCycleResult:
     from nexus.agents.research_maintenance import require_research_open
 
@@ -1752,6 +1790,7 @@ async def _start_cycle(
         version_model_id=version_model_id,
         candidate_stage_capacity=candidate_stage_capacity,
         formal_stage_capacity=formal_stage_capacity,
+        platform_credential=platform_credential,
     )
 
 
@@ -1771,6 +1810,7 @@ async def _admit_cycle_research(
     formal_stage_capacity: bool = False,
     omit_monitor_events_for: frozenset[UUID] = frozenset(),
     daily_event_preview_deadline: float | None = None,
+    platform_credential: "PlatformCredential | None" = None,
 ) -> AgentPaperCycleResult:
     from nexus.agents.research_maintenance import require_research_open
 
@@ -1939,6 +1979,23 @@ async def _admit_cycle_research(
                         # or reservation from this nested transaction may be committed.
                         raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
                     run_ids.append(admission.run_id)
+            await _append_event(
+                session,
+                cycle,
+                "prepared",
+                "researching",
+                "RESEARCH_JOBS_PREPARED",
+                {"research_run_ids": [str(value) for value in run_ids]},
+            )
+            if formal_stage_capacity:
+                from nexus.agents.research_stages.routes import register_new_prepared_runs
+
+                if platform_credential is None:
+                    await register_new_prepared_runs(session, tuple(run_ids))
+                else:
+                    await register_new_prepared_runs(
+                        session, tuple(run_ids), platform_credential=platform_credential
+                    )
     except ValueError as error:
         # Rollback of the complete pool has finished before handling the error.
         # Never reuse a Run, pending Job, hold, or ORM state from that savepoint.
@@ -1969,6 +2026,7 @@ async def _admit_cycle_research(
                 formal_stage_capacity=formal_stage_capacity,
                 omit_monitor_events_for=omit_monitor_events_for | {error.instrument_id},
                 daily_event_preview_deadline=capacity_scope.deadline,
+                platform_credential=platform_credential,
             )
         await _append_event(
             session,
@@ -1979,18 +2037,6 @@ async def _admit_cycle_research(
             {},
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
-    await _append_event(
-        session,
-        cycle,
-        "prepared",
-        "researching",
-        "RESEARCH_JOBS_PREPARED",
-        {"research_run_ids": [str(value) for value in run_ids]},
-    )
-    if formal_stage_capacity:
-        from nexus.agents.research_stages.routes import register_new_prepared_runs
-
-        await register_new_prepared_runs(session, tuple(run_ids))
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)
 
 

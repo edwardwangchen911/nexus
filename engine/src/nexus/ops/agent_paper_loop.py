@@ -39,8 +39,8 @@ from nexus.domain.time import require_utc
 from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
 from nexus.ops.agent_capacity_rejection import (
-    CAPACITY_REJECTION_CODES,
     close_capacity_rejected_cycle_once,
+    dispatch_preclaim_code,
 )
 from nexus.ops.agent_paper_formal import (
     require_formal_host_configuration_match,
@@ -189,9 +189,14 @@ def agent_paper_host_identity(
 
     if not _safe_agent_paper_worker_id(worker_id) or ":manual:" in worker_id:
         raise ValueError("MANUAL_HOST_NOT_READY")
+    from nexus.agents.platform_native import native_runtime_matches
+
     legacy = (worker_id, agent_paper_process_version(settings.release_revision))
     if (
-        settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        (
+            settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            and not native_runtime_matches(settings)
+        )
         or not settings.agent_paper_manual_enabled
         or not settings.agent_paper_cycle_enabled
         or settings.formal_budget_protection_enabled
@@ -514,7 +519,7 @@ class _FileDailySettings(_FileOnlySources, DailyOnceSettings):
     pass
 
 
-def load_agent_paper_service_environment(
+def load_local_host_environment(
     repo_root: Path, process_environment: Mapping[str, str], *, env_file: Path | None = None
 ) -> dict[str, str]:
     """Load configuration and restore loopback endpoints required by host networking."""
@@ -543,6 +548,25 @@ def load_agent_paper_service_environment(
             environment["OBJECT_STORE_ENDPOINT"] = urlunsplit(
                 object_store._replace(netloc=f"127.0.0.1:{host_port}")
             )
+    return environment
+
+
+def load_agent_paper_service_environment(
+    repo_root: Path, process_environment: Mapping[str, str], *, env_file: Path | None = None
+) -> dict[str, str]:
+    environment = load_local_host_environment(repo_root, process_environment, env_file=env_file)
+    if (
+        environment.get("AGENT_RUNTIME_MODE", "").strip().lower() == "responses"
+        and environment.get("OPENAI_REASONING_MODEL", environment.get("AGENT_REASONING_MODEL_ID"))
+        == "gpt-6.1-sol"
+        and environment.get("OPENAI_EXTRACTION_MODEL", environment.get("AGENT_EXTRACTION_MODEL_ID"))
+        == "gpt-6.1-sol"
+        and environment.get("NEXUS_AGENT_PAPER_CYCLE_ENABLED", "").lower()
+        not in {"false", "0", "off", "no"}
+    ):
+        from nexus.ops.platform_credentials import bind_host_project_key
+
+        bind_host_project_key(repo_root, environment)
     return environment
 
 
@@ -623,6 +647,20 @@ def _codex_sdk_preflight_blocker() -> str | None:
     return asyncio.run(_codex_sdk_preflight_blocker_async())
 
 
+def _native_service_configuration_valid(environment: Mapping[str, str]) -> bool:
+    from nexus.agents.platform_native import native_runtime_matches
+
+    if environment.get("AGENT_RUNTIME_MODE", "").strip().lower() != "responses":
+        return False
+    try:
+        settings = _FileEngineSettings.model_validate(environment)
+        return settings.agent_paper_formal_model_config_id is not None and native_runtime_matches(
+            settings
+        )
+    except ValueError:
+        return False
+
+
 def agent_paper_service_startup_preflight(
     environment: Mapping[str, str], *, repo_root: Path
 ) -> dict[str, object]:
@@ -655,7 +693,7 @@ def agent_paper_service_startup_preflight(
     runtime_mode = environment.get("AGENT_RUNTIME_MODE", "").strip().lower()
     if not runtime_mode:
         blocking_codes.add("AGENT_PAPER_MODEL_CONFIG_REQUIRED")
-    elif runtime_mode != "codex_sdk":
+    elif runtime_mode != "codex_sdk" and not _native_service_configuration_valid(environment):
         blocking_codes.add("AGENT_PAPER_MODEL_RUNTIME_MISMATCH")
     try:
         _FileEngineSettings.model_validate(environment)
@@ -706,7 +744,9 @@ def agent_paper_service_preflight(
     if not engine_config_valid:
         blocking_codes.add("AGENT_PAPER_ENGINE_CONFIG_INVALID")
     runtime_mode = environment.get("AGENT_RUNTIME_MODE", "").strip().lower()
-    model_config_valid = runtime_mode == "codex_sdk"
+    model_config_valid = runtime_mode == "codex_sdk" or _native_service_configuration_valid(
+        environment
+    )
     if not runtime_mode:
         blocking_codes.add("AGENT_PAPER_MODEL_CONFIG_REQUIRED")
     elif not model_config_valid:
@@ -717,8 +757,9 @@ def agent_paper_service_preflight(
         except Exception:
             blocking_codes.add("AGENT_PAPER_RUNTIME_CONFIG_INVALID")
         else:
-            if model_blocker := _codex_sdk_preflight_blocker():
-                blocking_codes.add(model_blocker)
+            if runtime_mode == "codex_sdk":
+                if model_blocker := _codex_sdk_preflight_blocker():
+                    blocking_codes.add(model_blocker)
     if not _nonempty_environment_values(
         environment, ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY")
     ):
@@ -3603,7 +3644,12 @@ async def execute_agent_paper_loop_action(
             snapshot.cycle_id, UUID
         ):
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-        if await _codex_sdk_preflight_blocker_async():
+        from nexus.agents.platform_native import native_runtime_matches
+
+        native = native_runtime_matches(settings)
+        if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES and not native:
+            raise ValueError("AGENT_PAPER_MODEL_RUNTIME_MISMATCH")
+        if not native and await _codex_sdk_preflight_blocker_async():
             await asyncio.sleep(5)
             return None
         research_settings = (
@@ -3614,12 +3660,16 @@ async def execute_agent_paper_loop_action(
                         if pinned_calendar is not None
                         else load_agent_paper_service_environment(repo_root, {}, env_file=env_file)
                     ),
-                    "OPENAI_API_KEY": None,
+                    **({} if native else {"OPENAI_API_KEY": None}),
                     "NEXUS_PROVIDER_JOBS_ENABLED": "false",
                 }
             )
             if pinned_calendar is not None or env_file is not None
-            else local_settings(repo_root, backend="codex_sdk")
+            else (
+                settings.model_copy(update={"provider_jobs_enabled": False})
+                if native
+                else local_settings(repo_root, backend="codex_sdk")
+            )
         )
         if formal_stage_capacity or settings.agent_paper_formal_model_config_id is not None:
             require_formal_host_configuration_match(settings, research_settings)
@@ -3630,14 +3680,15 @@ async def execute_agent_paper_loop_action(
                 **({"formal_stage_capacity": True} if formal_stage_capacity else {}),
             )
         except ValueError as error:
-            if not formal_stage_capacity or str(error) not in CAPACITY_REJECTION_CODES:
+            code = dispatch_preclaim_code(error, research_settings)
+            if not formal_stage_capacity or code is None:
                 raise
             await close_capacity_rejected_cycle_once(
                 research_settings,
                 account_id=account_id,
                 cycle_id=snapshot.cycle_id,
                 job_id=snapshot.research_job_id,
-                code=str(error),
+                code=code,
             )
             return None
         if not worked:
@@ -5222,7 +5273,9 @@ def main(argv: list[str] | None = None) -> int:
             except (AttributeError, TypeError, ValueError):
                 print(json.dumps({"error_code": "AGENT_PAPER_ACCOUNT_INVALID"}))
                 return 1
-        if environment.get("AGENT_RUNTIME_MODE", "").strip().lower() != "codex_sdk":
+        if environment.get(
+            "AGENT_RUNTIME_MODE", ""
+        ).strip().lower() != "codex_sdk" and not _native_service_configuration_valid(environment):
             print(json.dumps({"error_code": "AGENT_PAPER_MODEL_RUNTIME_MISMATCH"}))
             return 1
         settings = (_FileEngineSettings if env_file is not None else EngineSettings).model_validate(

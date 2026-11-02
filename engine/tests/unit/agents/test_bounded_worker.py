@@ -190,3 +190,46 @@ def test_preclaim_error_other_action_does_not_claim_research_stage(capsys):
     )
     result = json.loads(capsys.readouterr().err)
     assert "failure_phase" not in result and "failure_code" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synchronous", [False, True])
+async def test_native_preclaim_uses_same_outer_195_second_deadline(monkeypatch, synchronous):
+    loop = asyncio.get_running_loop()
+    original = loop.time
+    offset = 0
+    original_timeout = asyncio.timeout_at
+    allowance = None
+
+    def clock():
+        return original() + offset
+
+    def timeout_at(deadline):
+        nonlocal allowance
+        allowance = original_timeout(deadline)
+        return allowance
+
+    async def prepare(*args, **kwargs):
+        nonlocal offset
+        assert kwargs["deadline"] - clock() == pytest.approx(195, abs=1)
+        if synchronous:
+            offset = 196
+        else:
+            allowance.reschedule(loop.time())
+            await asyncio.Future()
+
+    monkeypatch.setattr(loop, "time", clock)
+    monkeypatch.setattr(asyncio, "timeout_at", timeout_at)
+    monkeypatch.setattr("nexus.agents.platform_native.prepare_native_pool", prepare)
+    with pytest.raises(CapacityPreclaimTimeout, match="CODEX_CAPACITY_PRECLAIM_TIMEOUT"):
+        await _prepare_preclaim_capacity_pool(
+            None,
+            EngineSettings(
+                agent_runtime_mode="responses",
+                openai_api_key="synthetic-only",
+                openai_extraction_model="gpt-6.1-sol",
+                openai_reasoning_model="gpt-6.1-sol",
+            ),
+            SimpleNamespace(pricing_version="native-sol"),
+            formal_stage_capacity=True,
+        )

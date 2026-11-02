@@ -5,6 +5,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
@@ -54,8 +55,23 @@ async def bind_runtime_environment(
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
             )
+            from nexus.agents.platform_profile import (
+                SOL_BUSINESS_CONTRACT,
+                read_sol_business_profile,
+            )
 
-            if p["pricing_version"] in {
+            if str(p["pricing_version"]).startswith(SOL_BUSINESS_CONTRACT + "-"):
+                model = await read_sol_business_profile(
+                    session, model_config_id=UUID(str(p["model_id"]))
+                )
+                if (
+                    model is None
+                    or model.config_hash != p["model_hash"]
+                    or model.version != p["pricing_version"]
+                ):
+                    raise ValueError("FORMAL_BUDGET_BINDING_INVALID")
+                bound["NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID"] = str(model.id)
+            elif p["pricing_version"] in {
                 FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
                 FULL_INPUT_CAPACITY_CONFIG_VERSION,
                 BOUNDED_STAGE_BUDGET_CONFIG_VERSION,

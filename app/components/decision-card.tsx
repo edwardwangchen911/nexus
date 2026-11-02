@@ -74,6 +74,14 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
         </p>
       ) : null}
 
+      {research.billing_mode === "platform_responses" ? (
+        <p className="research-page__gate" role="note" aria-label="个股模型用量">
+          Responses API · {research.settled_cost_usd === null
+            ? "费用尚未结算，预算保留"
+            : `已结算 USD ${research.settled_cost_usd}`}。
+        </p>
+      ) : null}
+
       {isHongKongGap ? (
         <div className="decision-card__warning" role="note">
           <ShieldAlert aria-hidden="true" size={19} />

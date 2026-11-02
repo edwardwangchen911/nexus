@@ -184,8 +184,16 @@ async def _legacy_cancel_unused_manual_research(
             or model.version != run.pricing_version
         ):
             raise ValueError("MANUAL_RESULT_UNKNOWN")
+        from nexus.agents.platform_native import read_native_allocation
+        from nexus.agents.platform_profile import sol_business_model_matches
+
+        platform = sol_business_model_matches(model)
+        if platform:
+            # Cancellation uses the original immutable route, never today's Key or prices.
+            await read_native_allocation(session, run=run)
+        budget_profile = BOUNDED_STAGE_BUDGET_CONFIG_VERSION if platform else run.pricing_version
         legacy = allow_legacy and run.pricing_version in ACTIONABLE_CONFIG_VERSIONS
-        if not legacy and run.pricing_version not in {
+        if not legacy and budget_profile not in {
             FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
             FULL_INPUT_CAPACITY_CONFIG_VERSION,
             BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
@@ -204,12 +212,12 @@ async def _legacy_cancel_unused_manual_research(
             lease_seconds=30
             if legacy
             else 330
-            if run.pricing_version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            if budget_profile == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
             else 210,
             job_ids=(job.id,),
             job_types=("agent.paper.research",),
             locked_job_guard=guard,
-            research_budget_profile=None if legacy else run.pricing_version,
+            research_budget_profile=None if legacy else budget_profile,
         )
         if claim is None:
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")

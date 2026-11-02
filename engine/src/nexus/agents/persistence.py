@@ -79,6 +79,7 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
     PortfolioDecisionBudgetReservationRecord,
     PortfolioDecisionRunRecord,
+    platform_profile_projection,
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
@@ -132,6 +133,7 @@ async def load_actionable_research_output(
             if not candidate_verified:
                 raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         formal_verified = False
+        native_formal_model = None
         if formal_stage_capacity:
             from nexus.agents.codex_formal_stage import formal_stage_output_qualified
 
@@ -140,6 +142,15 @@ async def load_actionable_research_output(
             )
             if not formal_verified:
                 raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+            from nexus.agents.platform_profile import (
+                SOL_BUSINESS_CONTRACT,
+                read_sol_business_profile,
+            )
+
+            if run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"):
+                native_formal_model = await read_sol_business_profile(
+                    session, model_config_id=run.model_config_id
+                )
         terminals = tuple(
             await session.scalars(
                 select(AgentResearchOutputRecord)
@@ -234,6 +245,7 @@ async def load_actionable_research_output(
             ),
             candidate_identity_verified=candidate_verified,
             formal_identity_verified=formal_verified,
+            native_formal_model=native_formal_model,
         )
     except ActionableResearchError:
         raise
@@ -1065,6 +1077,8 @@ async def _admit_research_run(
     if protected_model_id is not None:
         model_config_id = protected_model_id
     if monitor_increment:
+        from nexus.agents.platform_native import native_increment_model_allowed
+
         binding = await read_monitor_context(
             session,
             snapshot_id=request.data_snapshot_id,
@@ -1078,7 +1092,9 @@ async def _admit_research_run(
         )
         if (
             parent is None
-            or parent.model_config_id != model_config_id
+            or not await native_increment_model_allowed(
+                session, parent=parent, model_config_id=model_config_id
+            )
             or parent.prompt_version_id != prompt_version_id
         ):
             raise ValueError("MONITOR_VERSION_BINDING_INVALID")
@@ -1131,6 +1147,9 @@ async def _admit_research_run(
                 AgentModelConfigRecord.pricing_expires_at > now,
                 AgentModelConfigRecord.version != API_PROFILE_VERSION,
                 AgentModelConfigRecord.config_hash != api_profile_hash(),
+                platform_profile_projection(AgentModelConfigRecord.platform_profile.expression).is_(
+                    None
+                ),
                 # Staged research is explicit; strategy generation is a separate consumer.
                 AgentModelConfigRecord.version.not_in(
                     (
@@ -1150,6 +1169,10 @@ async def _admit_research_run(
         )
     if model is not None and is_comparison_profile(model):
         raise ValueError("COMPARISON_MODEL_BUSINESS_FORBIDDEN")
+    if model is not None and model.platform_profile is not None and not formal_stage_capacity:
+        # New normal Platform identities must use original native owner preparation.
+        # A registry row must never leak into the generic/legacy Responses handler.
+        raise ValueError("PLATFORM_NATIVE_PREPARATION_REQUIRED")
     if formal_stage_capacity:
         from nexus.agents.codex_formal_stage import require_formal_preparation_model_profile
 
@@ -1547,6 +1570,22 @@ async def _shared_daily_budget_used(session: AsyncSession, *, business_date: dat
             ).where(model.business_date == business_date)
         )
         totals.append(Decimal(str(used)))
+    from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+
+    # Reserved amounts were included above. Add only the verified excess on this day.
+    for hold in await session.scalars(
+        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+            AgentPortfolioSynthesisBudgetReservationRecord.business_date == business_date,
+            AgentPortfolioSynthesisBudgetReservationRecord.state == "reserved",
+            AgentPortfolioSynthesisBudgetReservationRecord.pricing_version.startswith(
+                SOL_BUSINESS_CONTRACT + "-"
+            ),
+        )
+    ):
+        overrun = await portfolio_reserved_overrun(session, hold)
+        if overrun is not None:
+            totals.append(max(Decimal("0"), overrun - hold.reserved_usd))
     from nexus.paper.economic_budget_hold import held_pair_budget
 
     return sum(totals, Decimal("0")) + await held_pair_budget(session, business_date=business_date)

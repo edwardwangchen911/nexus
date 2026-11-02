@@ -1808,6 +1808,7 @@ export interface components {
             content_hash: string;
             /** Input Hash */
             input_hash: string;
+            responses_usage?: components["schemas"]["PortfolioResponsesUsage"] | null;
             /**
              * Status
              * @enum {string}
@@ -3484,6 +3485,10 @@ export interface components {
              */
             observed_started_at: string;
         };
+        /** @enum {string} */
+        HttpFailureKind: "local_guard" | "http_status" | "stream_protocol" | "timeout" | "connection" | "transport_protocol" | "cancelled" | "output_validation" | "persistence" | "cleanup" | "unexpected";
+        /** @enum {string} */
+        HttpFailurePhase: "pre_send" | "send" | "headers" | "stream" | "response_validation" | "publication" | "cleanup";
         /**
          * IntegrationConnectivityTestRequest
          * @description A deliberately empty non-trading fixture connectivity request.
@@ -5583,6 +5588,17 @@ export interface components {
              */
             schema_version: "portfolio_research_intent_v1";
         };
+        /** PortfolioResponsesUsage */
+        PortfolioResponsesUsage: {
+            failure_kind: components["schemas"]["HttpFailureKind"] | null;
+            failure_phase: components["schemas"]["HttpFailurePhase"] | null;
+            /** Reported Model */
+            reported_model: string | null;
+            /** Requested Model */
+            requested_model: string;
+            /** Settled Cost Usd */
+            settled_cost_usd: string | null;
+        };
         /** PortfolioScenarioEnvelope */
         PortfolioScenarioEnvelope: {
             data: components["schemas"]["PortfolioScenarioResponse"];
@@ -7584,7 +7600,7 @@ export interface components {
             /** Abstention Reason */
             abstention_reason?: string | null;
             /** Billing Mode */
-            billing_mode?: "chatgpt_subscription" | null;
+            billing_mode?: ("chatgpt_subscription" | "platform_responses") | null;
             /** Budget Reason */
             budget_reason: "budget_exhausted" | null;
             /**

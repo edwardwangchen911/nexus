@@ -351,6 +351,33 @@ async def _hydrate_response(
             portfolio_context=context,
             observation_verified=observation_verified,
         )
+        from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+
+        if run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-") and run.status in {
+            "completed",
+            "abstained",
+            "failed",
+        }:
+            from nexus.agents.platform_native import native_platform_semantics
+            from nexus.agents.platform_profile import read_sol_business_profile
+            from nexus.agents.research_stages.proof import read_terminal_proof
+
+            try:
+                model = await read_sol_business_profile(
+                    session, model_config_id=run.model_config_id
+                )
+                if model is None or not await native_platform_semantics(session, run, model):
+                    raise ValueError("PLATFORM_NATIVE_SYNTHESIS_AUTHORITY_INVALID")
+                proof = await read_terminal_proof(session, run_id=run.id, now=reader.read_at)
+                if proof is None or (run.settled_cost_usd is not None and not proof.budget_settled):
+                    raise ValueError("STAGED_TERMINAL_PROOF_INVALID")
+            except ValueError as error:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "Research usage evidence is incomplete.",
+                    status_code=409,
+                ) from error
+            response = response.model_copy(update={"billing_mode": "platform_responses"})
         return response.model_copy(
             update={
                 "monitoring": (

@@ -106,7 +106,7 @@ class ResearchRunResponse(_StrictAgentSchema):
     retry_count: int
     reserved_cost_usd: DecimalString
     settled_cost_usd: DecimalString | None
-    billing_mode: Literal["chatgpt_subscription"] | None = None
+    billing_mode: Literal["chatgpt_subscription", "platform_responses"] | None = None
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     intent: ResearchIntent | None

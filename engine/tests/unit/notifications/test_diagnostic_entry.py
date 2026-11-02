@@ -39,7 +39,7 @@ def test_typed_rejection_identifies_operation_without_denying_prior_notification
 
     monkeypatch.setattr(notification_test, "_validate_local_env", lambda *args: tmp_path)
     monkeypatch.setattr(
-        notification_test, "load_agent_paper_service_environment", lambda *args, **kwargs: {}
+        notification_test, "load_local_host_environment", lambda *args, **kwargs: {}
     )
 
     async def rejected(*args, **kwargs):
@@ -64,7 +64,7 @@ def test_untyped_commit_error_keeps_unknown_even_with_known_text(
 
     monkeypatch.setattr(notification_test, "_validate_local_env", lambda *args: tmp_path)
     monkeypatch.setattr(
-        notification_test, "load_agent_paper_service_environment", lambda *args, **kwargs: {}
+        notification_test, "load_local_host_environment", lambda *args, **kwargs: {}
     )
 
     async def ambiguous(*args, **kwargs):

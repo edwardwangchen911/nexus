@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.synthesis import observed_usage_cost
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
-    AgentModelConfigRecord,
     AgentResearchRunRecord,
 )
 
@@ -41,6 +40,9 @@ async def research_reserved_occupancy(
     ).one_or_none()
     if run is None:
         raise ValueError("RESEARCH_USAGE_AUTHORITY_INVALID")
+    from nexus.agents.platform_stage_accounting import read_stage_accounting_model
+
+    model = await read_stage_accounting_model(session, run.model_config_id)
     rows = None
     tokens = (run.input_tokens, run.output_tokens)
     if await session.scalar(
@@ -78,13 +80,15 @@ async def research_reserved_occupancy(
             reported = (run.input_tokens, run.output_tokens)
             if reported != tokens and not (tokens == (0, 0) and reported == (None, None)):
                 raise ValueError("RESEARCH_USAGE_EVIDENCE_INVALID")
-        if not any(usage_known((row,)) for row in rows):
+        if not any(usage_known((row,), model=model) for row in rows):
             return reservation.reserved_usd
     if tokens == (None, None):
         return reservation.reserved_usd
     if tokens[0] is None or tokens[1] is None:
         raise ValueError("RESEARCH_USAGE_EVIDENCE_INVALID")
-    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    from nexus.agents.platform_stage_accounting import read_stage_accounting_model
+
+    model = await read_stage_accounting_model(session, run.model_config_id)
     if (
         model is None
         or run.model_hash != model.config_hash
@@ -92,17 +96,16 @@ async def research_reserved_occupancy(
         or run.reserved_cost_usd != reservation.reserved_usd
     ):
         raise ValueError("RESEARCH_USAGE_AUTHORITY_INVALID")
-    from nexus.agents.platform_usage import PLATFORM_PRICE_VERSIONS
+    from nexus.agents.platform_stage_accounting import is_platform_stage_model
 
-    if model.version in PLATFORM_PRICE_VERSIONS:
-        from nexus.agents.platform_profile import platform_model_matches
-        from nexus.agents.platform_stage_accounting import platform_stage_accounting
+    if is_platform_stage_model(model):
+        from nexus.agents.platform_stage_accounting import platform_accounting_for_model
 
-        if rows is None or not platform_model_matches(model):
+        if rows is None:
             raise ValueError("RESEARCH_USAGE_EVIDENCE_INVALID")
         return max(
             reservation.reserved_usd,
-            platform_stage_accounting(rows, price_version=model.version).known_cost_usd,
+            platform_accounting_for_model(model, rows).known_cost_usd,
         )
     return max(reservation.reserved_usd, observed_usage_cost(model, tokens[0], tokens[1]))
 
@@ -164,4 +167,18 @@ async def require_research_accounting_clear(session: AsyncSession) -> None:
             .limit(1)
         )
         if known_terminal is True or last_reason == "usage_accounting_failed":
+            raise BudgetExhausted("RESEARCH_ACCOUNTING_UNSETTLED")
+    from nexus.agents.platform_portfolio import portfolio_reserved_overrun
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisBudgetReservationRecord
+
+    for hold in await session.scalars(
+        select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+            AgentPortfolioSynthesisBudgetReservationRecord.state == "reserved",
+            AgentPortfolioSynthesisBudgetReservationRecord.pricing_version.startswith(
+                SOL_BUSINESS_CONTRACT + "-"
+            ),
+        )
+    ):
+        if await portfolio_reserved_overrun(session, hold) is not None:
             raise BudgetExhausted("RESEARCH_ACCOUNTING_UNSETTLED")
