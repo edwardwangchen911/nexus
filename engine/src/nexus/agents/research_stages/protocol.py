@@ -306,6 +306,23 @@ class StagedProtocol:
             if member["stopped"] or self.local_stopped or now >= cutoff:
                 raise ProtocolRejected("STOPPED_OR_DEADLINE")
             job, lease, _ = await _lock_active_claim(session, claim=claim, now=now)
+            if (
+                route is not None
+                and route["kind"] == "formal"
+                and route.get("platform_binding") is not None
+            ):
+                from nexus.paper.preparation_unknown_ack import require_formal_grant_history
+
+                try:
+                    await require_formal_grant_history(
+                        session,
+                        cycle_id=route["scope_id"],
+                        run_id=route["run_id"],
+                        now=self._now(now),
+                    )
+                except ValueError as error:
+                    # The history read is before any new ticket or commit attempt.
+                    raise ProtocolRejected("FORMAL_SUCCESSOR_HISTORY_BLOCKED") from error
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
             budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)

@@ -162,7 +162,10 @@ async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
 
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session:
-        now = await session.scalar(text("SELECT clock_timestamp()"))
+        wall = await session.scalar(text("SELECT clock_timestamp()"))
+    # Synthetic source authority from the previous session must already exist
+    # at the real PostgreSQL trigger clock. Keep registration and research ordered.
+    now = wall - timedelta(days=4)
     target = now.replace(hour=15, minute=0, second=0, microsecond=0)
     while target <= now or target.weekday() >= 5:
         target += timedelta(days=1)
@@ -178,6 +181,7 @@ async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
         from nexus.agents.platform_profile import register_sol_business_profile
 
         record = await current_record(factory)
+        record["verified_at"] = (now - timedelta(minutes=1)).isoformat()
         record["expires_at"] = (now + timedelta(days=6)).isoformat()
         model = await register_sol_business_profile(
             session, price_record=record, source_evidence=SOURCE

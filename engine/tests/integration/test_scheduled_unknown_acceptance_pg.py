@@ -27,6 +27,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
     "fault",
     [
         "none",
+        "sol_next_slot",
         "wrong_hash",
         "other_unknown",
         "queued",
@@ -349,6 +350,101 @@ async def test_normal_scheduled_check_and_accept_preserve_unknown(
                 assert started.cycle_id is not None
             args.action = "check-scheduled-acceptance"
             assert (await manual_paper.run(settings, args)).status == "already_acknowledged"
+            return
+        if fault == "sol_next_slot":
+            from integration.test_candidate_multistock_path import _set_test_insert_clock
+            from integration.test_sol_profile_pg import current_record, register
+            from nexus.paper.preparation_unknown_ack import require_formal_successor_scope
+
+            monkeypatch.setattr(
+                "nexus.paper.preparation_unknown_ack._FORMAL_SUCCESSOR_POLICY_AT",
+                AT + timedelta(hours=1),
+            )
+            next_slot = AT + timedelta(days=3)
+            priced_at = next_slot - timedelta(hours=1)
+            await _set_test_insert_clock(sessions, priced_at)
+
+            async def price_clock(session, statement, *args, **kwargs):
+                if str(statement) == "SELECT clock_timestamp()":
+                    return priced_at
+                return await clock(session, statement, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(AsyncSession, "scalar", price_clock)
+                sol_id = await register(sessions, await current_record(sessions))
+            from nexus.agents import persistence
+            from nexus.paper.formal_budget_protection import apply_protection
+
+            entered = asyncio.Event()
+            original_lock = persistence._lock_budget_day
+
+            async def economic_before_slot():
+                async with sessions.begin() as writer:
+
+                    async def signal_lock(session, day):
+                        if session is writer:
+                            entered.set()
+                        await original_lock(session, day)
+
+                    async def published_clock(session, statement, *args, **kwargs):
+                        if (
+                            session is writer
+                            and str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1"
+                        ):
+                            return next_slot + timedelta(seconds=1)
+                        return await clock(session, statement, *args, **kwargs)
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(persistence, "_lock_budget_day", signal_lock)
+                        patch.setattr(AsyncSession, "scalar", published_clock)
+                        await apply_protection(
+                            writer,
+                            account_id=authority.account_id,
+                            batch_id=batch.batch_id,
+                            enabled=True,
+                            daily_limit_usd=Decimal("1000"),
+                            configuration_hash="b" * 64,
+                            idempotency_key="economic-before-natural",
+                            now=next_slot - timedelta(minutes=5),
+                            formal_model_config_id=sol_id,
+                        )
+
+            async with sessions.begin() as session:
+                with pytest.raises(ValueError, match="SCHEDULED_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await agent_cycle.reserve_schwab_agent_paper_trigger(
+                        session,
+                        account_id=authority.account_id,
+                        candidate_batch_id=batch.batch_id,
+                        client_idempotency_key=f"agent-paper-loop:{AT.isoformat()}",
+                        now=AT,
+                        formal_stage_capacity=True,
+                        formal_model_config_id=sol_id,
+                    )
+                successor = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                    session,
+                    account_id=authority.account_id,
+                    candidate_batch_id=batch.batch_id,
+                    client_idempotency_key=f"agent-paper-loop:{next_slot.isoformat()}",
+                    now=next_slot,
+                    formal_stage_capacity=True,
+                    formal_model_config_id=sol_id,
+                )
+                assert successor.claim_id != reservation.claim_id
+                economic = asyncio.create_task(economic_before_slot())
+                await asyncio.wait_for(entered.wait(), timeout=10)
+            with pytest.raises(ValueError, match="^FORMAL_BUDGET_APPLY_WINDOW_PASSED$"):
+                await asyncio.wait_for(economic, timeout=10)
+            async with sessions.begin() as session:
+                # This new empty claim is not one of the accepted originals.
+                with pytest.raises(ValueError, match="MANUAL_PREPARATION_ACK_BLOCKED"):
+                    await require_formal_successor_scope(
+                        session,
+                        account_id=authority.account_id,
+                        model_config_id=sol_id,
+                        now=next_slot,
+                    )
+                old_claim = await session.get(IdempotencyRecord, reservation.claim_id)
+                assert old_claim.response_payload["external_effects"] == "unknown"
             return
         # A new independent manual request is admitted; it cannot consume the old slot.
         async with sessions.begin() as s:

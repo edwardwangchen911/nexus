@@ -25,7 +25,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, WorkerHeartbeat
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
@@ -35,6 +35,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
     "fault",
     [
         "none",
+        "sol-successor",
         "missing",
         "extra",
         "extra-malformed",
@@ -50,6 +51,7 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
         "audit-tamper",
         "concurrent-claim",
         "concurrent-budget",
+        "concurrent-sol-budget",
         "occupied",
         "active-cycle",
         "wrong-cycle",
@@ -78,7 +80,10 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
     original = AsyncSession.scalar
 
     async def db_clock(self, statement, *args, **kwargs):
-        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1" or (
+            fault in {"sol-successor", "concurrent-sol-budget"}
+            and str(statement) == "SELECT clock_timestamp()"
+        ):
             return clock[0]
         return await original(self, statement, *args, **kwargs)
 
@@ -302,11 +307,13 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
             ]
         successful = fault in {
             "none",
+            "sol-successor",
             "late-claim",
             "changed-claim",
             "audit-tamper",
             "concurrent-claim",
             "concurrent-budget",
+            "concurrent-sol-budget",
         }
         if not successful:
             with pytest.raises(ValueError):
@@ -451,7 +458,7 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                 )
             with pytest.raises(ValueError):
                 await asyncio.wait_for(task, 10)
-        if fault == "concurrent-budget":
+        if fault in {"concurrent-budget", "concurrent-sol-budget"}:
             from nexus.agents.persistence import _lock_budget_day
             from nexus.audit.service import append_audit_event
             from nexus.paper import formal_budget_protection as protection
@@ -482,13 +489,23 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
             monkeypatch.setattr(AsyncSession, "execute", observed_execute)
             monkeypatch.setattr(protection, "latest_binding", observed_binding)
 
+            scope_model_id = model.id
+            scope_check = ack.require_acknowledged_operation_scope
+            if fault == "concurrent-sol-budget":
+                from integration.test_candidate_multistock_path import _set_test_insert_clock
+                from integration.test_sol_profile_pg import current_record, register
+
+                await _set_test_insert_clock(sessions, clock[0] - timedelta(seconds=1))
+                scope_model_id = await register(sessions, await current_record(sessions))
+                scope_check = ack.require_formal_successor_scope
+
             async def waiting_scope():
                 async with sessions.begin() as worker:
                     worker_session.append(worker)
-                    await ack.require_acknowledged_operation_scope(
+                    await scope_check(
                         worker,
                         account_id=authority.account_id,
-                        model_config_id=model.id,
+                        model_config_id=scope_model_id,
                         now=clock[0],
                     )
 
@@ -522,8 +539,44 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
             committed.set()
             with pytest.raises(ValueError):
                 await asyncio.wait_for(task, 10)
+        if fault == "sol-successor":
+            from integration.test_candidate_multistock_path import _set_test_insert_clock
+            from integration.test_sol_profile_pg import current_record, register
+
+            monkeypatch.setattr(ack, "_FORMAL_SUCCESSOR_POLICY_AT", AT + timedelta(minutes=1))
+            clock[0] = (AT + timedelta(days=3)).replace(hour=13, minute=45)
+            following = clock[0] + timedelta(days=1)
+            async with sessions.begin() as session:
+                session.add(
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=CALENDAR_ID,
+                        session=following.date(),
+                        decision_at=following.replace(hour=21, minute=0),
+                        market_open_at=following.replace(hour=13, minute=30),
+                        market_close_at=following.replace(hour=20, minute=0),
+                        created_at=AT - timedelta(hours=1),
+                    )
+                )
+
+            await _set_test_insert_clock(sessions, clock[0] - timedelta(seconds=1))
+
+            sol_id = await register(sessions, await current_record(sessions))
+            settings = settings.model_copy(
+                update={
+                    "agent_paper_formal_model_config_id": sol_id,
+                    "agent_runtime_mode": AgentRuntimeMode.RESPONSES,
+                    "openai_reasoning_model": "gpt-6.1-sol",
+                    "openai_extraction_model": "gpt-6.1-sol",
+                }
+            )
         async with sessions.begin() as s:
-            if fault not in {"none", "audit-tamper", "concurrent-budget"}:
+            if fault not in {
+                "none",
+                "sol-successor",
+                "audit-tamper",
+                "concurrent-budget",
+                "concurrent-sol-budget",
+            }:
                 with pytest.raises(ValueError):
                     await manual_request.require_manual_account_available(
                         s, account_id=authority.account_id, now=clock[0]
@@ -550,6 +603,83 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                         seen_at=clock[0],
                     )
                 )
+        if fault == "sol-successor":
+            from decimal import Decimal
+
+            from nexus.agents import persistence
+            from nexus.paper.formal_budget_protection import apply_protection
+            from nexus.paper.manual_entry import start_configured_manual_request
+
+            check = await manual_paper.run(settings, Namespace(action="check-formal-admission"))
+            assert check.status == "formal_request_queueable" and not check.budget_reserved
+            async with sessions() as session:
+                assert (
+                    await session.scalar(
+                        select(ManualPaperRequest.id).where(
+                            ManualPaperRequest.model_config_id == sol_id
+                        )
+                    )
+                    is None
+                )
+
+            entered = asyncio.Event()
+            lock_day = persistence._lock_budget_day
+
+            async def economic_writer():
+                async with sessions.begin() as writer:
+
+                    async def observed_lock(session, day):
+                        if session is writer:
+                            entered.set()
+                        await lock_day(session, day)
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(persistence, "_lock_budget_day", observed_lock)
+                        await apply_protection(
+                            writer,
+                            account_id=authority.account_id,
+                            batch_id=batch.batch_id,
+                            enabled=True,
+                            daily_limit_usd=Decimal("1000"),
+                            configuration_hash="c" * 64,
+                            idempotency_key="conflicting-economic-binding",
+                            now=clock[0],
+                            formal_model_config_id=sol_id,
+                        )
+
+            async with sessions.begin() as session:
+                successor = await start_configured_manual_request(
+                    session, settings, mode="research_and_paper", idempotency_key="new-sol"
+                )
+                assert successor.request_id != old.request_id and successor.status == "queued"
+                assert (
+                    await session.get(ManualPaperRequest, successor.request_id)
+                ).model_config_id == sol_id
+                writer = asyncio.create_task(economic_writer())
+                await asyncio.wait_for(entered.wait(), timeout=10)
+            with pytest.raises(ValueError, match="^FORMAL_BUDGET_SLOT_ALREADY_CLAIMED$"):
+                await asyncio.wait_for(writer, timeout=10)
+            async with sessions.begin() as session:
+                # Neither a terminal historical request nor a merely queued new
+                # request owns a running formal cycle or may exclude itself.
+                for request_id in (old.request_id, successor.request_id):
+                    with pytest.raises(ValueError, match="^MANUAL_PREPARATION_ACK_BLOCKED$"):
+                        await ack.require_formal_successor_scope(
+                            session,
+                            account_id=authority.account_id,
+                            model_config_id=sol_id,
+                            now=clock[0],
+                            slot=clock[0],
+                            manual_request_id=request_id,
+                        )
+                assert (
+                    await manual_request.read_manual_request(
+                        session, await session.get(ManualPaperRequest, old.request_id)
+                    )
+                ).status == "unknown"
+                assert (await ack._validate(session, audits[0], now=clock[0]))[
+                    "historical_fees"
+                ] == "unknown"
         if fault == "none":
             fresh = await manual_paper.run(
                 settings,

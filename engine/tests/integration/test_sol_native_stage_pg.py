@@ -1336,3 +1336,106 @@ async def _verify_native_portfolio_boundary(
             )
         held = await session.get(AgentPortfolioSynthesisBudgetReservationRecord, hold.id)
         assert held.state == "reserved" and held.settled_usd is None
+
+
+@pytest.mark.asyncio
+async def test_late_invalid_history_fences_only_the_unsent_formal_sol_stages(
+    migrated_database_url,
+    monkeypatch,
+):
+    from integration.test_sol_native_preparation_pg import (
+        test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes as prepare,
+    )
+    from nexus.audit.service import append_audit_event
+    from nexus.paper import preparation_unknown_ack as legacy
+    from nexus.worker import run_agent_worker_once
+
+    async def after_prepared(factory, settings, cycle_id):
+        async with factory() as session:
+            account_id = await session.scalar(
+                text("SELECT account_id FROM agent_paper_cycles WHERE id=:cycle"),
+                {"cycle": cycle_id},
+            )
+            decision_time = await session.scalar(
+                text("SELECT decision_time FROM agent_paper_cycles WHERE id=:cycle"),
+                {"cycle": cycle_id},
+            )
+            monkeypatch.setattr(
+                legacy, "_FORMAL_SUCCESSOR_POLICY_AT", decision_time - timedelta(minutes=1)
+            )
+            assert account_id is not None
+            run_id, job_id = (
+                await session.execute(
+                    text(
+                        "SELECT run_id,job_id FROM research_stage_route WHERE scope_id=:cycle "
+                        "ORDER BY run_id LIMIT 1"
+                    ),
+                    {"cycle": cycle_id},
+                )
+            ).one()
+
+        async def late_history(payload):
+            if payload["stage"] == "research":
+                async with factory.begin() as session:
+                    await append_audit_event(
+                        session,
+                        actor_id=legacy.ACTOR,
+                        action=legacy.ACTION,
+                        schema_version=legacy.SCHEMA,
+                        payload={"account_id": str(account_id)},
+                        occurred_at=await session.scalar(text("SELECT clock_timestamp()")),
+                    )
+
+        import asyncio
+
+        from nexus.agents.persistence import try_lock_budget_day
+        from nexus.agents.research_stages.protocol import StagedProtocol
+        from nexus.jobs.repository import _lock_active_claim
+
+        authorize = StagedProtocol.authorize
+        lock_order_checked = []
+
+        async def verify_then_authorize(protocol, claim, **kwargs):
+            if kwargs["stage"] != 2:
+                return await authorize(protocol, claim, **kwargs)
+            async with factory.begin() as closing:
+                await protocol._member(closing, claim)
+                await _lock_active_claim(closing, claim=claim, now=kwargs["now"])
+                pid = await closing.scalar(text("SELECT pg_backend_pid()"))
+                pending = asyncio.create_task(authorize(protocol, claim, **kwargs))
+                try:
+                    async with asyncio.timeout(10):
+                        while not await closing.scalar(
+                            text(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                                "WHERE :pid=ANY(pg_blocking_pids(pid)))"
+                            ),
+                            {"pid": pid},
+                        ):
+                            await asyncio.sleep(0.02)
+                    assert await try_lock_budget_day(closing, kwargs["now"].date().isoformat())
+                    lock_order_checked.append(True)
+                except BaseException:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                    raise
+            return await pending
+
+        monkeypatch.setattr(StagedProtocol, "authorize", verify_then_authorize)
+        requests, clients = install_sol_http(monkeypatch, object(), on_request=late_history)
+        assert await run_agent_worker_once(settings, job_ids=(job_id,), formal_stage_capacity=True)
+        assert lock_order_checked == [True]
+        assert requests == ["research"]
+        assert all(client.is_closed for client in clients)
+        async with factory() as session:
+            rows = await stage_evidence(session, run_id)
+            assert len(rows) == 1 and rows[0]["response_hash"] is not None
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM research_stage_authorization WHERE run_id=:r"),
+                    {"r": run_id},
+                )
+                == 1
+            )
+
+    await prepare(migrated_database_url, monkeypatch, after_prepared=after_prepared)

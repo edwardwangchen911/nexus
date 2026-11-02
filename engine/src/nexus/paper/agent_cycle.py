@@ -377,11 +377,24 @@ async def reserve_schwab_agent_paper_trigger(
         await require_scheduled_execution_open(
             session, account_id=account_id, slot=decision_slot_at
         )
-    from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
-
-    await require_acknowledged_operation_scope(
-        session, account_id=account_id, model_config_id=formal_model_config_id, now=now
+    from nexus.paper.preparation_unknown_ack import (
+        require_acknowledged_operation_scope,
+        require_formal_successor_scope,
     )
+
+    if formal_stage_capacity and trigger_mode in {"scheduled", "manual"}:
+        await require_formal_successor_scope(
+            session,
+            account_id=account_id,
+            model_config_id=formal_model_config_id,
+            now=now,
+            slot=decision_slot_at,
+            manual_request_id=manual_request_id,
+        )
+    else:
+        await require_acknowledged_operation_scope(
+            session, account_id=account_id, model_config_id=formal_model_config_id, now=now
+        )
     account = await session.get(PaperAccountRecord, account_id)
     if account is None or account.capability != "simulation_write_internal":
         raise AgentPaperCycleError("CANDIDATE_BATCH_INVALID")
@@ -1484,15 +1497,28 @@ async def _start_cycle(
             account_id=authority.account_id,
             slot=decision_slot_at,
         )
-    from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
-
-    await require_acknowledged_operation_scope(
-        session,
-        account_id=authority.account_id,
-        model_config_id=formal_model_config_id,
-        now=authority.decision_time,
-        economic=economic_lane_ref is not None,
+    from nexus.paper.preparation_unknown_ack import (
+        require_acknowledged_operation_scope,
+        require_formal_successor_scope,
     )
+
+    if formal_stage_capacity and economic_lane_ref is None:
+        await require_formal_successor_scope(
+            session,
+            account_id=authority.account_id,
+            model_config_id=formal_model_config_id,
+            now=authority.decision_time,
+            slot=decision_slot_at,
+            manual_request_id=manual_request_id,
+        )
+    else:
+        await require_acknowledged_operation_scope(
+            session,
+            account_id=authority.account_id,
+            model_config_id=formal_model_config_id,
+            now=authority.decision_time,
+            economic=economic_lane_ref is not None,
+        )
     from nexus.paper.economic_cycle import require_economic_creation
 
     economic = await require_economic_creation(
