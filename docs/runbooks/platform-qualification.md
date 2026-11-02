@@ -2,6 +2,11 @@
 
 ## Sol 正常业务价档（0113；独立于历史资格轮）
 
+正式日研究、独立研究和受影响股票的增量研究默认使用直接 Platform API 的 Responses 路线，
+模型为 `gpt-6.1-sol`，推理档位为 `medium`。运维可显式切回 SDK。回切只适用于按原共享预算和
+门禁准入的新任务。已发送的 API 请求仍按原身份核对，结果或费用未知时保留原预留。
+[业务路线决策](../design/nexus-direct-responses-evaluation-v0.1.md)
+
 `nexus-platform-local register-sol-profile --price-record /absolute/price.json
 --source-evidence /absolute/source-evidence` 登记已核验的 Sol 价档与请求配置，
 `nexus-platform-local inspect-sol-profile --model-config-id UUID` 只读回原记录。
@@ -25,7 +30,7 @@ SQL 与应用共同核对完整价档、配置 hash、Sol medium 请求格式、
 凭据指纹、三阶段输入与容量，并与原共享预算预留一起提交；拒绝时不留下部分股票的
 Job 或预留。仅登记新价档不改变旧请求路线。旧路线读回不要求当前 Key 或未过期价档；
 新的阶段发送仍须匹配其冻结路线与正式阶段授权，不能借 SDK 授权或实验身份发送。
-单股接替可以明确选择已登记 Sol 配置；运维回切仅支持原合格 SDK 配置，不自动重发。
+单股接替保留前驱的模型、价档和输出。子任务冻结本次选定的已登记配置。
 正常 Worker 复用既有三阶段执行器、HTTP 生命周期和短事务工具；领取前重验整个原候选池，
 发送前核对原模型、价档、凭据、输入及容量。阶段授权 v2 绑定这五类原始事实及实际请求体，
 SQL 与应用同时拒绝错配；不借历史比较身份发送。预检查仍受原 195 秒外层上限约束，
@@ -109,7 +114,7 @@ Worker、监控接替或 Sol 自然运行已贯通。
 
 ---
 
-适用于 schema 0111 及以上的稳定用途 `platform-qualification-v1`。同一受支持配置下，
+以下步骤适用于 schema 0111 及以上的历史 Terra 资格轮，用途为 `platform-qualification-v1`。同一受支持配置下，
 后续轮次只登记新的实验 UUID 和冻结预算，不增加用途枚举、迁移或发布版本。
 旧用途和旧结果保持原身份、原唯一约束及只读核对能力。
 
@@ -142,12 +147,12 @@ Worker、监控接替或 Sol 自然运行已贯通。
 
 登记不调用模型、不预留原生位置预算、不启动宿主。回执
 `bound_frozen_positions_unreserved` 仅表示整轮上界已冻结；实际预留、领取和发送仍逐位置走
-原 `admit-position`、`run-position` 路径，消费共享账本和全部门禁。登记成功不等于允许发送，
-更不等于质量合格或正式决策许可；质量达标前业务默认仍为 SDK。
+原 `admit-position`、`run-position` 路径，受共享账本和全部门禁约束。
+实验质量按该轮冻结输出和原评分规则核对，正式决策仍须通过独立门禁。
 
 ### 显式选择 medium 诊断配置（0112）
 
-默认仍为原 low 配置。已评审的 medium 单变量诊断须在正常
+历史 Terra 资格轮的默认推理档位为 low。已评审的 medium 单变量诊断须在正常
 `register-profile` / `inspect-profile` 上同时指定
 `--purpose platform-qualification-v1` 和
 `--profile-version platform-terra-medium-implicit30m-20261101-v1`；
