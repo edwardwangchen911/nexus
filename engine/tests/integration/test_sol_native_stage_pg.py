@@ -29,7 +29,7 @@ from unit.agents.test_platform_usage import usage
 
 async def prepared_stage(url, tmp_path):
     factory, settings, store, _ = await scope(url, tmp_path)
-    request_id = await admit(factory, settings, store)
+    request_id = await admit(factory, settings, store, two_flight=False)
     async with factory.begin() as session:
         session.info["sec_exhibit_store"] = store
         result = await prepare_research_request(session, settings, request_id=request_id)
@@ -133,30 +133,22 @@ async def test_sol_normal_and_orphan_consume_identical_original_price(
         await factory.kw["bind"].dispose()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("audit_veto", [False, True])
-async def test_normal_worker_sends_native_sol_three_stages_and_settles_original_price(
-    migrated_database_url, tmp_path, monkeypatch, audit_veto
-):
+def install_sol_http(monkeypatch, store, *, audit_veto=False, on_request=None):
     import httpx
-    from nexus import worker
     from nexus.agents import platform_native
     from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _staged_batch
     from unit.agents.test_http_stage_lifecycle import Body, terminal
 
-    factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
-    request_id = await admit(factory, settings, store)
-    async with factory.begin() as session:
-        session.info["sec_exhibit_store"] = store
-        result = await prepare_research_request(session, settings, request_id=request_id)
     requests, clients = [], []
 
-    def handle(request):
+    async def handle(request):
         body = json.loads(request.content)
         assert body["model"] == "gpt-6.1-sol" and body["reasoning"] == {"effort": "medium"}
         assert body["store"] is False and body["tools"] == []
         payload = _restore_view(json.loads(body["input"][1]["content"]))
         requests.append(payload["stage"])
+        if on_request is not None:
+            await on_request(payload)
         if payload["stage"] == "synthesis":
             response = _assessment_payload(payload["previous_claims"])
             response["synthesis_assessment"]["stance"] = "watch"
@@ -178,6 +170,21 @@ async def test_normal_worker_sends_native_sol_three_stages_and_settles_original_
                         f"daily_pending_{suffix}": None,
                     }
                 )
+        # The normal formal prompt has no monitor fields. Omit only absent
+        # optional-null fixture fields; keep every substantive value for validation.
+        properties = body["text"]["format"]["schema"]["properties"]
+        response = {k: v for k, v in response.items() if v is not None or k in properties}
+        if "roles" in response:
+            role_schema = properties["roles"]["items"]
+            if "$ref" in role_schema:
+                role_schema = body["text"]["format"]["schema"]["$defs"][
+                    role_schema["$ref"].split("/")[-1]
+                ]
+            role_properties = role_schema["properties"]
+            response["roles"] = [
+                {k: v for k, v in role.items() if v is not None or k in role_properties}
+                for role in response["roles"]
+            ]
         value = terminal()
         value["response"].update(model="gpt-6.1-sol", service_tier="default", usage=usage())
         value["response"]["output"][0]["content"][0]["text"] = json.dumps(response)
@@ -199,6 +206,22 @@ async def test_normal_worker_sends_native_sol_three_stages_and_settles_original_
     monkeypatch.setattr(
         "nexus.monitoring.disclosure_context.configured_exhibit_store", lambda s: store
     )
+    return requests, clients
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_veto", [False, True])
+async def test_normal_worker_sends_native_sol_three_stages_and_settles_original_price(
+    migrated_database_url, tmp_path, monkeypatch, audit_veto
+):
+    from nexus import worker
+
+    factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
+    request_id = await admit(factory, settings, store, two_flight=False)
+    async with factory.begin() as session:
+        session.info["sec_exhibit_store"] = store
+        result = await prepare_research_request(session, settings, request_id=request_id)
+    requests, clients = install_sol_http(monkeypatch, store, audit_veto=audit_veto)
     try:
         for member in result.research.members:
             assert await worker.run_agent_worker_once(
@@ -236,6 +259,45 @@ async def test_normal_worker_sends_native_sol_three_stages_and_settles_original_
                     now=await session.scalar(text("SELECT clock_timestamp()")),
                 )
                 assert proof.known and proof.cleanup_confirmed and not proof.orphan
+                from nexus.api.research_stages import read_stage_trace
+                from nexus.monitoring.source_qualification import load_qualified_source
+                from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                trace = await read_stage_trace(session, run)
+                assert trace is not None and trace.status == "verified"
+                output = await session.scalar(
+                    select(AgentResearchOutputRecord).where(
+                        AgentResearchOutputRecord.run_id == run.id,
+                        AgentResearchOutputRecord.status == "completed",
+                    )
+                )
+                source = await load_qualified_source(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    output_id=output.id,
+                    now=await session.scalar(text("SELECT clock_timestamp()")),
+                )
+                assert source.intent.model_dump(mode="json") == intent
+                from nexus.agents.codex_formal_stage import formal_stage_output_qualified
+
+                assert not await formal_stage_output_qualified(
+                    session,
+                    run.id,
+                    decision_time=await session.scalar(text("SELECT clock_timestamp()")),
+                )
+        async with factory.begin() as session:
+            from nexus.paper.manual_request import require_manual_account_available
+            from nexus.paper.research_request import finish_research_request
+            from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+            row = await session.get(ManualPaperRequest, request_id)
+            done = await finish_research_request(session, row=row)
+            assert done.status == "completed"
+            await require_manual_account_available(
+                session,
+                account_id=settings.agent_paper_account_id,
+                now=await session.scalar(text("SELECT clock_timestamp()")),
+            )
         assert requests == ["research", "critique", "synthesis"] * 3
         assert len(clients) == 9 and all(c.is_closed for c in clients)
     finally:
@@ -418,7 +480,7 @@ async def test_native_worker_failure_never_retries_or_falls_back_and_preserves_a
     from unit.agents.test_http_stage_lifecycle import Body, terminal
 
     factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
-    request_id = await admit(factory, settings, store)
+    request_id = await admit(factory, settings, store, two_flight=False)
     async with factory.begin() as session:
         session.info["sec_exhibit_store"] = store
         result = await prepare_research_request(session, settings, request_id=request_id)
@@ -518,6 +580,29 @@ async def test_native_worker_failure_never_retries_or_falls_back_and_preserves_a
                     now=await session.scalar(text("SELECT clock_timestamp()")),
                 )
                 assert proof is not None and proof.known is known
+        if fault in {"cache_unknown", "timeout"}:
+            from nexus.paper.independent_unknown_proof import independent_unknown_proof
+            from nexus.paper.manual_request import require_manual_account_available
+            from nexus.paper.research_request import finish_research_request
+            from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+            async with factory.begin() as session:
+                row = await session.get(ManualPaperRequest, request_id)
+                ended = await finish_research_request(session, row=row, cancel_unused=True)
+                assert ended.status == "unknown"
+                now = await session.scalar(text("SELECT clock_timestamp()"))
+                native_proof = await independent_unknown_proof(session, row=row, now=now)
+                assert native_proof["unknown_run_ids"] == [str(member.run_id)]
+                with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                    await require_manual_account_available(
+                        session, account_id=settings.agent_paper_account_id, now=now
+                    )
+                held = await session.scalar(
+                    select(AgentDailyBudgetReservationRecord).where(
+                        AgentDailyBudgetReservationRecord.run_id == member.run_id
+                    )
+                )
+                assert held.state == "reserved" and held.settled_usd is None
     finally:
         await factory.kw["bind"].dispose()
 
@@ -534,7 +619,7 @@ async def test_native_preclaim_rejects_changed_authority_without_claim_or_send(
     from pydantic import SecretStr
 
     factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
-    request_id = await admit(factory, settings, store)
+    request_id = await admit(factory, settings, store, two_flight=False)
     async with factory.begin() as session:
         session.info["sec_exhibit_store"] = store
         result = await prepare_research_request(session, settings, request_id=request_id)
@@ -583,3 +668,299 @@ async def test_native_preclaim_rejects_changed_authority_without_claim_or_send(
             )
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_host_preclaim_refusal_closes_only_proved_unused_members(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.agents import platform_native
+    from nexus.ops.manual_paper_host import dispatch_pure_research_request
+    from nexus.paper.manual_request import read_manual_request, require_manual_account_available
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+    from pydantic import SecretStr
+
+    factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
+    request_id = await admit(factory, settings, store, claim=False)
+    from nexus.paper import research_request
+
+    prepare = research_request.prepare_research_request
+
+    async def changed_after_prepare(session, *args, **kwargs):
+        session.info["sec_exhibit_store"] = store
+        result = await prepare(session, *args, **kwargs)
+        settings.openai_api_key = SecretStr("different-synthetic")
+        return result
+
+    monkeypatch.setattr(research_request, "prepare_research_request", changed_after_prepare)
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    monkeypatch.setattr(
+        "nexus.monitoring.disclosure_context.configured_exhibit_store", lambda *_: store
+    )
+
+    def forbidden():
+        pytest.fail("pure preparation refusal must not send")
+
+    monkeypatch.setattr(platform_native, "native_http_client", forbidden)
+    try:
+        assert await dispatch_pure_research_request(settings, request_id=request_id)
+        async with factory() as session:
+            row = await session.get(ManualPaperRequest, request_id)
+            result = await read_manual_request(session, row)
+            assert result.status == "unavailable"
+            assert (
+                await session.scalar(text("SELECT count(*) FROM research_stage_authorization")) == 0
+            )
+            holds = (await session.scalars(select(AgentDailyBudgetReservationRecord))).all()
+            assert len(holds) == 3 and all(
+                h.state == "released" and h.settled_usd is None for h in holds
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM audit_events WHERE action='research.request_failure' "
+                        "AND payload->>'failure_code'='PLATFORM_HTTP_CREDENTIAL_CHANGED'"
+                    )
+                )
+                == 1
+            )
+            await require_manual_account_available(
+                session,
+                account_id=settings.agent_paper_account_id,
+                now=await session.scalar(text("SELECT clock_timestamp()")),
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_host_two_flight_uses_existing_dispatch_and_public_closeout(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from nexus.ops.manual_paper_host import dispatch_pure_research_request
+    from nexus.paper.manual_request import read_manual_request, require_manual_account_available
+    from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+    factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
+    request_id = await admit(factory, settings, store, claim=False)
+    first = asyncio.Event()
+    research = []
+    running = []
+
+    async def concurrent(payload):
+        async with factory() as session:
+            running.append(
+                await session.scalar(text("SELECT count(*) FROM jobs WHERE status='running'"))
+            )
+        if payload["stage"] == "research":
+            research.append(payload)
+            if len(research) == 2:
+                first.set()
+            await first.wait()
+
+    requests, clients = install_sol_http(monkeypatch, store, on_request=concurrent)
+    try:
+        async with asyncio.timeout(30):
+            assert await dispatch_pure_research_request(settings, request_id=request_id)
+        assert max(running) == 2 and all(n <= 2 for n in running)
+        assert len(requests) == 9 and all(
+            requests.count(stage) == 3 for stage in ["research", "critique", "synthesis"]
+        )
+        assert len(clients) == 9 and all(c.is_closed for c in clients)
+        async with factory() as session:
+            row = await session.get(ManualPaperRequest, request_id)
+            result = await read_manual_request(session, row)
+            assert result.status == "completed"
+            assert all(m.usage_known for m in result.research.members)
+            await require_manual_account_available(
+                session,
+                account_id=settings.agent_paper_account_id,
+                now=await session.scalar(text("SELECT clock_timestamp()")),
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_parallel_manifest_requires_original_dispatch_authority(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus import worker
+    from nexus.agents import platform_native
+
+    factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
+    request_id = await admit(factory, settings, store)
+    async with factory.begin() as session:
+        session.info["sec_exhibit_store"] = store
+        prepared = await prepare_research_request(session, settings, request_id=request_id)
+
+    def forbidden():
+        pytest.fail("missing dispatch proof must reject before HTTP")
+
+    monkeypatch.setattr(platform_native, "native_http_client", forbidden)
+    monkeypatch.setattr(
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+    )
+    try:
+        with pytest.raises(ValueError, match="RESEARCH_ONLY_POOL_BINDING_INVALID"):
+            await worker.run_agent_worker_once(
+                settings, job_ids=(prepared.research.members[0].job_id,), formal_stage_capacity=True
+            )
+        async with factory() as session:
+            assert await session.scalar(text("SELECT count(*) FROM job_attempts")) == 0
+            assert (
+                await session.scalar(text("SELECT count(*) FROM research_stage_authorization")) == 0
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_formal_worker_retains_original_cycle_and_output_gate(
+    migrated_database_url, monkeypatch
+):
+    from integration.test_sol_native_preparation_pg import (
+        test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes as prepare,
+    )
+    from nexus import worker
+    from nexus.agents.capacity_cycle import capacity_output_mode_qualified
+    from nexus.agents.codex_formal_stage import formal_stage_output_qualified
+    from nexus.api.research_stages import read_stage_trace
+    from sqlalchemy import func
+
+    requests, clients = install_sol_http(monkeypatch, None)
+
+    async def validate(factory, settings, cycle_id):
+        async with factory() as session:
+            routes = (
+                await session.execute(
+                    text("SELECT run_id,job_id FROM research_stage_route ORDER BY run_id")
+                )
+            ).all()
+        from nexus.ops.agent_paper_formal import (
+            require_formal_host_trigger_profile,
+            resolve_formal_host_cycle_profile,
+        )
+        from nexus.persistence.models.paper import AgentPaperCycleRecord
+
+        async with factory() as session:
+            at = await session.scalar(select(func.clock_timestamp()))
+            cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+        await require_formal_host_trigger_profile(settings, now=at)
+        from nexus.settings import AgentRuntimeMode
+
+        sdk_with_native_identity = settings.model_copy(
+            update={"agent_runtime_mode": AgentRuntimeMode.CODEX_SDK}
+        )
+        with pytest.raises(ValueError, match="CODEX_FORMAL_HOST_PROFILE_INVALID"):
+            await require_formal_host_trigger_profile(sdk_with_native_identity, now=at)
+        with pytest.raises(ValueError, match="CODEX_FORMAL_HOST_PROFILE_INVALID"):
+            await resolve_formal_host_cycle_profile(
+                sdk_with_native_identity,
+                account_id=cycle.account_id,
+                cycle_id=cycle_id,
+                research_job_id=routes[0].job_id,
+            )
+        assert await resolve_formal_host_cycle_profile(
+            settings,
+            account_id=cycle.account_id,
+            cycle_id=cycle_id,
+            research_job_id=routes[0].job_id,
+        )
+        for rid, jid in routes:
+            assert await worker.run_agent_worker_once(
+                settings, job_ids=(jid,), formal_stage_capacity=True
+            )
+            async with factory() as session:
+                run = await session.get(AgentResearchRunRecord, rid)
+                if run.status != "completed":
+                    print(
+                        "synthetic formal diagnostic",
+                        await session.scalar(
+                            text(
+                                "SELECT payload->'diagnostic' FROM agent_research_outputs "
+                                "WHERE run_id=:id AND status='failed'"
+                            ),
+                            {"id": run.id},
+                        ),
+                    )
+                assert run.status == "completed"
+                now = await session.scalar(select(func.clock_timestamp()))
+                assert await formal_stage_output_qualified(session, rid, decision_time=now)
+                assert await capacity_output_mode_qualified(session, run, formal=True)
+                assert not await capacity_output_mode_qualified(session, run, formal=False)
+                trace = await read_stage_trace(session, run)
+                assert trace.status == "verified"
+        assert len(requests) == 9 and all(c.is_closed for c in clients)
+
+    await prepare(migrated_database_url, monkeypatch, after_prepared=validate)
+
+
+@pytest.mark.asyncio
+async def test_native_increment_worker_settles_only_child_and_retains_parent(
+    migrated_database_url, monkeypatch
+):
+    from integration.test_sol_native_preparation_pg import (
+        test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor as prepare,
+    )
+    from nexus import worker
+    from nexus.monitoring.admission import finish_increment, require_monitor_account_available
+    from nexus.monitoring.source_qualification import load_qualified_source
+    from nexus.persistence.models.agents import AgentResearchOutputRecord
+    from sqlalchemy import func
+
+    async def validate(factory, settings, member, trigger, parent):
+        requests, clients = install_sol_http(monkeypatch, None)
+        async with factory() as session:
+            before = tuple(
+                await session.scalars(
+                    text(
+                        "SELECT to_jsonb(o)::text FROM agent_research_outputs o "
+                        "WHERE run_id=:id ORDER BY sequence"
+                    ),
+                    {"id": parent.id},
+                )
+            )
+        assert await worker.run_agent_worker_once(
+            settings, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
+        async with factory.begin() as session:
+            child = await session.get(AgentResearchRunRecord, member.run_id)
+            assert child.status == "completed"
+            assert child.settled_cost_usd == Decimal("0.0897")
+            now = await session.scalar(select(func.clock_timestamp()))
+            result = await finish_increment(
+                session, account_id=settings.agent_paper_account_id, trigger_id=trigger.id, now=now
+            )
+            assert result.status == "completed"
+            output = await session.scalar(
+                select(AgentResearchOutputRecord).where(
+                    AgentResearchOutputRecord.run_id == child.id,
+                    AgentResearchOutputRecord.status == "completed",
+                )
+            )
+            source = await load_qualified_source(
+                session, account_id=settings.agent_paper_account_id, output_id=output.id, now=now
+            )
+            assert source.run.id == child.id and source.context.parent_run_id == parent.id
+            await require_monitor_account_available(
+                session, account_id=settings.agent_paper_account_id, now=now
+            )
+            after = tuple(
+                await session.scalars(
+                    text(
+                        "SELECT to_jsonb(o)::text FROM agent_research_outputs o "
+                        "WHERE run_id=:id ORDER BY sequence"
+                    ),
+                    {"id": parent.id},
+                )
+            )
+            assert before == after
+        assert requests == ["research", "critique", "synthesis"] and len(clients) == 3
+        assert all(c.is_closed for c in clients)
+
+    await prepare(migrated_database_url, monkeypatch, after_admitted=validate)

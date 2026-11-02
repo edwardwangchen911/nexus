@@ -57,6 +57,21 @@ def credential_for_preparation(settings: EngineSettings) -> PlatformCredential:
     return credential
 
 
+def native_runtime_matches(settings: EngineSettings) -> bool:
+    """Static supported request configuration; not a model/price or dispatch grant."""
+    if (
+        settings.agent_runtime_mode is not AgentRuntimeMode.RESPONSES
+        or settings.openai_extraction_model != "gpt-6.1-sol"
+        or settings.openai_reasoning_model != "gpt-6.1-sol"
+    ):
+        return False
+    try:
+        credential_for_preparation(settings)
+    except ValueError:
+        return False
+    return True
+
+
 async def native_increment_model_allowed(
     session: AsyncSession, *, parent: AgentResearchRunRecord, model_config_id: UUID | None
 ) -> bool:
@@ -251,7 +266,9 @@ async def prepare_native_pool(
     )
     if root is None:
         raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+    parallel = False
     if root["kind"] == "independent":
+        from nexus.agents.research_dispatch import require_dispatch_pool, uses_two_flight
         from nexus.paper.research_request import read_research_manifest
         from nexus.persistence.models.manual_paper import ManualPaperRequest
 
@@ -259,7 +276,12 @@ async def prepare_native_pool(
         if request_record is None:
             raise ValueError("PLATFORM_NATIVE_POOL_NOT_READY")
         manifest = await read_research_manifest(session, request_record)
-        expected_ids = set() if manifest is None else {m.run_id for m in manifest.members}
+        if manifest is None:
+            raise ValueError("PLATFORM_NATIVE_POOL_NOT_READY")
+        parallel = uses_two_flight(request_record.research_profile)
+        if parallel:
+            await require_dispatch_pool(session, request_record, manifest, run.id)
+        expected_ids = {m.run_id for m in manifest.members}
     elif root["kind"] == "formal":
         from nexus.paper.agent_cycle import _events, _fact_uuids
 
@@ -282,18 +304,28 @@ async def prepare_native_pool(
             if route is None or member is None or route.get("platform_binding") is None:
                 raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
             model = await session.get(AgentModelConfigRecord, member.model_config_id)
-            if model is None or not sol_business_model_matches(model):
+            if (
+                model is None
+                or not sol_business_model_matches(model)
+                or member.model_config_id != run.model_config_id
+                or member.model_hash != run.model_hash
+                or member.pricing_version != run.pricing_version
+            ):
                 raise ValueError("PLATFORM_NATIVE_MODEL_BINDING_INVALID")
-            if member.status not in {"prepared", "completed"}:
+            if member.status not in (
+                {"prepared", "running", "completed"} if parallel else {"prepared", "completed"}
+            ):
                 raise ValueError("PLATFORM_NATIVE_POOL_NOT_READY")
             bound_pool.append(
                 dict(
                     run_id=str(run_id), allocation_hash=route["platform_binding"]["allocation_hash"]
                 )
             )
-            if member.status != "prepared":
-                continue
             binding, allocation = await read_native_allocation(session, run=member)
+            if member.status == "completed" or (
+                parallel and member.id != run.id and member.status == "running"
+            ):
+                continue
             if credential.binding_hash != binding["credential_binding_hash"]:
                 raise ValueError("PLATFORM_HTTP_CREDENTIAL_CHANGED")
             assert model.platform_profile is not None

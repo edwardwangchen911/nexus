@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.synthesis import observed_usage_cost
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
-    AgentModelConfigRecord,
     AgentResearchRunRecord,
 )
 
@@ -41,7 +40,9 @@ async def research_reserved_occupancy(
     ).one_or_none()
     if run is None:
         raise ValueError("RESEARCH_USAGE_AUTHORITY_INVALID")
-    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    from nexus.agents.platform_stage_accounting import read_stage_accounting_model
+
+    model = await read_stage_accounting_model(session, run.model_config_id)
     rows = None
     tokens = (run.input_tokens, run.output_tokens)
     if await session.scalar(
@@ -85,7 +86,9 @@ async def research_reserved_occupancy(
         return reservation.reserved_usd
     if tokens[0] is None or tokens[1] is None:
         raise ValueError("RESEARCH_USAGE_EVIDENCE_INVALID")
-    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    from nexus.agents.platform_stage_accounting import read_stage_accounting_model
+
+    model = await read_stage_accounting_model(session, run.model_config_id)
     if (
         model is None
         or run.model_hash != model.config_hash

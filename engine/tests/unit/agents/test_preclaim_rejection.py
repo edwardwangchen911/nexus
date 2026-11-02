@@ -43,3 +43,31 @@ async def test_untyped_or_unknown_preclaim_failure_is_unchanged(monkeypatch, err
             None, None, SimpleNamespace(pricing_version=BOUNDED_STAGE_BUDGET_CONFIG_VERSION)
         )
     assert captured.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code",
+    [
+        "PLATFORM_HTTP_CREDENTIAL_CHANGED",
+        "PLATFORM_PRICE_WINDOW_INVALID",
+        "PLATFORM_NATIVE_INPUT_CHANGED",
+        "PLATFORM_NATIVE_ROUTE_INVALID",
+    ],
+)
+async def test_native_platform_preclaim_has_fixed_safe_receipt(monkeypatch, code):
+    from nexus.paper.research_failure import CapacityPreclaimRejected
+    from nexus.settings import AgentRuntimeMode
+
+    async def rejected(*a, **kw):
+        raise ValueError(code)
+
+    monkeypatch.setattr("nexus.agents.platform_native.prepare_native_pool", rejected)
+    with pytest.raises(CapacityPreclaimRejected) as caught:
+        await worker._prepare_preclaim_capacity_pool(
+            None,
+            SimpleNamespace(agent_runtime_mode=AgentRuntimeMode.RESPONSES),
+            SimpleNamespace(pricing_version="native-sol"),
+            formal_stage_capacity=True,
+        )
+    assert caught.value.code == code and caught.value.__cause__.args == (code,)

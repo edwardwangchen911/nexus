@@ -25,7 +25,6 @@ from nexus.jobs.repository import job_lease_consumed
 from nexus.monitoring import admission
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
-    AgentModelConfigRecord,
     AgentResearchEventRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
@@ -100,7 +99,9 @@ async def read_terminal_proof(
         await admission.require_increment_binding(session, run)
     elif await selected_route(session, job.id) is None:
         raise ProtocolRejected(invalid)
-    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    from nexus.agents.platform_stage_accounting import read_stage_accounting_model
+
+    model = await read_stage_accounting_model(session, run.model_config_id)
     budget = await session.scalar(
         select(AgentDailyBudgetReservationRecord).where(
             AgentDailyBudgetReservationRecord.run_id == run.id

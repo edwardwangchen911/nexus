@@ -20,7 +20,21 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
-PRECLAIM_CODES = frozenset(
+PLATFORM_PRECLAIM_CODES = frozenset(
+    {
+        "PLATFORM_HTTP_CREDENTIAL_CHANGED",
+        "PLATFORM_PRICE_WINDOW_INVALID",
+        "PLATFORM_NATIVE_INPUT_CHANGED",
+        "PLATFORM_NATIVE_ROUTE_INVALID",
+        "PLATFORM_NATIVE_MODEL_BINDING_INVALID",
+        "PLATFORM_NATIVE_POOL_NOT_READY",
+        "PLATFORM_NATIVE_INPUT_REQUIRED",
+        "PLATFORM_CREDENTIAL_REQUIRED",
+        "CODEX_TOOL_CITATION_BINDING_INVALID",
+    }
+)
+
+PRECLAIM_CODES = PLATFORM_PRECLAIM_CODES | frozenset(
     {"CODEX_CAPACITY_POOL_WIRE_EXCEEDED", "CODEX_CAPACITY_POOL_INPUT_EXCEEDED"}
 )
 

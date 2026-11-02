@@ -217,20 +217,19 @@ async def formal_stage_output_qualified(
     if not isinstance(decision_time, datetime) or decision_time.tzinfo != UTC:
         return False
     run = await session.get(AgentResearchRunRecord, run_id, populate_existing=True)
-    if (
-        run is None
-        or run.status != "completed"
-        or run.retry_count != 0
-        or run.pricing_version
-        not in {
-            FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
-            FULL_INPUT_CAPACITY_CONFIG_VERSION,
-            BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
-            FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
-        }
-    ):
+    if run is None or run.status != "completed" or run.retry_count != 0:
         return False
     model = await session.get(AgentModelConfigRecord, run.model_config_id, populate_existing=True)
+    from nexus.agents.platform_profile import sol_business_model_matches
+
+    platform = model is not None and sol_business_model_matches(model)
+    if not platform and run.pricing_version not in {
+        FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
+        FULL_INPUT_CAPACITY_CONFIG_VERSION,
+        BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
+        FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
+    }:
+        return False
     checked_at = await session.scalar(select(func.clock_timestamp()))
     if (
         model is None
@@ -244,7 +243,7 @@ async def formal_stage_output_qualified(
         or run.pricing_version != model.version
     ):
         return False
-    if run.pricing_version in {
+    if platform or run.pricing_version in {
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
         BOUNDED_STAGE_BUDGET_CONFIG_VERSION,
         FLEXIBLE_STAGE_BUDGET_CONFIG_VERSION,
@@ -252,6 +251,15 @@ async def formal_stage_output_qualified(
         from nexus.agents.capacity_cycle import capacity_output_mode_qualified
 
         if not await capacity_output_mode_qualified(session, run, formal=True):
+            return False
+    if platform:
+        from nexus.agents.research_stages.proof import read_terminal_proof
+
+        try:
+            proof = await read_terminal_proof(session, run_id=run.id, now=checked_at)
+        except ValueError:
+            return False
+        if proof is None or not proof.known or not proof.cleanup_confirmed:
             return False
     jobs = tuple(
         await session.scalars(

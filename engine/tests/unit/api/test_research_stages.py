@@ -271,3 +271,12 @@ async def test_platform_reader_rejects_invalid_native_authority(monkeypatch, dam
     session.scalars.assert_not_called()
     if damage == "binding":
         binding.assert_awaited_once_with(session, run)
+
+
+@pytest.mark.asyncio
+async def test_old_unstructured_trace_does_not_query_new_profile_columns():
+    from nexus.api.research_stages import read_stage_trace
+
+    run = SimpleNamespace(pricing_version="codex-sdk-chatgpt-v1")
+    # The historical reader returned before any model/0113-column lookup.
+    assert await read_stage_trace(None, run) is None

@@ -10,6 +10,8 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+from nexus.agents.platform_native import native_runtime_matches
+from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.jobs.models import JobType
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.agent_cycle import _require_cycle_candidate_profile
@@ -21,6 +23,12 @@ from nexus.settings import AgentRuntimeMode, EngineSettings
 _CODE = "CODEX_FORMAL_HOST_PROFILE_INVALID"
 
 
+def _runtime_supported(settings: EngineSettings) -> bool:
+    return settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK or native_runtime_matches(
+        settings
+    )
+
+
 def require_formal_host_configuration_match(
     original: EngineSettings, loaded: EngineSettings
 ) -> None:
@@ -30,8 +38,9 @@ def require_formal_host_configuration_match(
     ) and (
         original.agent_paper_formal_model_config_id != loaded.agent_paper_formal_model_config_id
         or original.database_url != loaded.database_url
-        or original.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
-        or loaded.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        or original.agent_runtime_mode is not loaded.agent_runtime_mode
+        or not _runtime_supported(original)
+        or not _runtime_supported(loaded)
     ):
         raise ValueError(_CODE)
 
@@ -58,10 +67,14 @@ async def require_formal_host_trigger_profile(settings: EngineSettings, *, now: 
     model_id = settings.agent_paper_formal_model_config_id
     if model_id is None:
         return
-    if settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+    if not _runtime_supported(settings):
         raise ValueError(_CODE)
     async with _read_session(settings) as session:
-        await require_formal_stage_model_profile(session, model_config_id=model_id, now=now)
+        model = await require_formal_stage_model_profile(session, model_config_id=model_id, now=now)
+        if sol_business_model_matches(model) != (
+            settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+        ):
+            raise ValueError(_CODE)
 
 
 async def resolve_formal_host_cycle_profile(
@@ -88,7 +101,14 @@ async def resolve_formal_host_cycle_profile(
         }.intersection(first.fact_ids):
             return False
         model_id = settings.agent_paper_formal_model_config_id
-        if model_id is None or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+        if model_id is None or not _runtime_supported(settings):
+            raise ValueError(_CODE)
+        model = await require_formal_stage_model_profile(
+            session, model_config_id=model_id, now=cycle.decision_time
+        )
+        if sol_business_model_matches(model) != (
+            settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+        ):
             raise ValueError(_CODE)
         await _require_cycle_candidate_profile(
             session,

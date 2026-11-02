@@ -49,7 +49,7 @@ async def scope(url, tmp_path):
     return factory, settings, store, ids
 
 
-async def admit(factory, settings, store):
+async def admit(factory, settings, store, *, two_flight=True, claim=True):
     async with factory.begin() as session:
         session.info["sec_exhibit_store"] = store
         receipt = await admit_manual_request(
@@ -62,9 +62,10 @@ async def admit(factory, settings, store):
             idempotency_key="native-sol-one",
             runtime_mode="responses",
             daily_limit_usd=settings.agent_daily_budget_usd,
-            two_flight=True,
+            two_flight=two_flight,
         )
-        await claim_manual_request(session, request_id=receipt.request_id)
+        if claim:
+            await claim_manual_request(session, request_id=receipt.request_id)
     return receipt.request_id
 
 
@@ -152,7 +153,7 @@ async def test_normal_sol_preparation_freezes_all_three_native_routes_and_shared
 
 @pytest.mark.asyncio
 async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
-    migrated_database_url, monkeypatch
+    migrated_database_url, monkeypatch, after_prepared=None
 ):
     from integration import test_candidate_multistock_path as candidates
     from nexus.agents.platform_native import credential_for_preparation
@@ -200,6 +201,14 @@ async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
         )
         assert result.status == "researching"
         captured["cycle"] = result.cycle_id
+        captured["settings"] = settings.model_copy(
+            update={
+                "openai_extraction_model": "gpt-6.1-sol",
+                "openai_reasoning_model": "gpt-6.1-sol",
+                "agent_daily_budget_usd": Decimal("10"),
+                "agent_paper_formal_model_config_id": model.id,
+            }
+        )
         await session.commit()
         raise Prepared()
 
@@ -219,6 +228,8 @@ async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
             assert (
                 await session.scalar(text("SELECT count(*) FROM research_stage_authorization")) == 0
             )
+        if after_prepared is not None:
+            await after_prepared(factory, captured["settings"], captured["cycle"])
     finally:
         await factory.kw["bind"].dispose()
 
@@ -311,7 +322,7 @@ async def test_native_pool_preparation_cannot_leave_partial_jobs_or_holds(
 
 @pytest.mark.asyncio
 async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
-    migrated_database_url, monkeypatch
+    migrated_database_url, monkeypatch, after_admitted=None
 ):
     from helpers.paper_batch import CALENDAR_ID
     from integration import test_candidate_multistock_path as candidates
@@ -415,6 +426,19 @@ async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
             )
             assert not await native_increment_model_allowed(
                 session, parent=changed_parent, model_config_id=parent.model_config_id
+            )
+        if after_admitted is not None:
+            await after_admitted(
+                factory,
+                settings.model_copy(
+                    update={
+                        "openai_extraction_model": "gpt-6.1-sol",
+                        "openai_reasoning_model": "gpt-6.1-sol",
+                    }
+                ),
+                member,
+                trigger,
+                parent,
             )
     finally:
         await factory.kw["bind"].dispose()

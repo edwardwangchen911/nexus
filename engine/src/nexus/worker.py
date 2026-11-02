@@ -452,7 +452,7 @@ async def _prepare_preclaim_capacity_pool(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + CAPACITY_PRECLAIM_TIMEOUT_SECONDS
-    native = settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+    native = getattr(settings, "agent_runtime_mode", None) is AgentRuntimeMode.RESPONSES
     if native and not formal_stage_capacity:
         raise ValueError("PLATFORM_NATIVE_PREPARATION_REQUIRED")
     if not native and run.pricing_version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION:
@@ -487,9 +487,14 @@ async def _prepare_preclaim_capacity_pool(
             raise CapacityPreclaimTimeout("CODEX_CAPACITY_PRECLAIM_TIMEOUT") from error
         raise
     except ValueError as error:
-        from nexus.paper.research_failure import PRECLAIM_CODES, CapacityPreclaimRejected
+        from nexus.paper.research_failure import (
+            PLATFORM_PRECLAIM_CODES,
+            PRECLAIM_CODES,
+            CapacityPreclaimRejected,
+        )
 
-        if type(error) is ValueError and str(error) in PRECLAIM_CODES:
+        allowed = PRECLAIM_CODES if native else PRECLAIM_CODES - PLATFORM_PRECLAIM_CODES
+        if type(error) is ValueError and str(error) in allowed:
             raise CapacityPreclaimRejected(str(error)) from error
         raise
 

@@ -87,11 +87,12 @@ async def independent_unknown_proof(
     for table, predicate in FACT_FILTERS.items():
         projection = "to_jsonb(t)"
         column = {
+            "research_stage_route": "platform_binding",
             "research_stage_authorization": "platform_binding",
             "research_stage_observation": "platform_response",
         }.get(table)
         if column is not None:
-            # 0106's absent Platform evidence must not rewrite a 0105 acceptance.
+            # 0106/0113 nullable extensions must not rewrite historical acceptances.
             # Preserve every other NULL and every non-NULL new value: late facts
             # must still invalidate the original proof rather than disappear.
             projection = (
