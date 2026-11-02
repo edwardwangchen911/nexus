@@ -1065,6 +1065,8 @@ async def _admit_research_run(
     if protected_model_id is not None:
         model_config_id = protected_model_id
     if monitor_increment:
+        from nexus.agents.platform_native import native_increment_model_allowed
+
         binding = await read_monitor_context(
             session,
             snapshot_id=request.data_snapshot_id,
@@ -1078,7 +1080,9 @@ async def _admit_research_run(
         )
         if (
             parent is None
-            or parent.model_config_id != model_config_id
+            or not await native_increment_model_allowed(
+                session, parent=parent, model_config_id=model_config_id
+            )
             or parent.prompt_version_id != prompt_version_id
         ):
             raise ValueError("MONITOR_VERSION_BINDING_INVALID")
@@ -1131,6 +1135,7 @@ async def _admit_research_run(
                 AgentModelConfigRecord.pricing_expires_at > now,
                 AgentModelConfigRecord.version != API_PROFILE_VERSION,
                 AgentModelConfigRecord.config_hash != api_profile_hash(),
+                AgentModelConfigRecord.platform_profile.is_(None),
                 # Staged research is explicit; strategy generation is a separate consumer.
                 AgentModelConfigRecord.version.not_in(
                     (
@@ -1150,6 +1155,10 @@ async def _admit_research_run(
         )
     if model is not None and is_comparison_profile(model):
         raise ValueError("COMPARISON_MODEL_BUSINESS_FORBIDDEN")
+    if model is not None and model.platform_profile is not None and not formal_stage_capacity:
+        # New normal Platform identities must use original native owner preparation.
+        # A registry row must never leak into the generic/legacy Responses handler.
+        raise ValueError("PLATFORM_NATIVE_PREPARATION_REQUIRED")
     if formal_stage_capacity:
         from nexus.agents.codex_formal_stage import require_formal_preparation_model_profile
 

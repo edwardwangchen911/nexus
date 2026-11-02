@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID
@@ -24,7 +25,7 @@ from nexus.agents.research_stages.protocol import (
 )
 from nexus.monitoring.independent_storage import read_independent_context
 from nexus.paper.research_request import read_research_manifest
-from nexus.persistence.models.agents import AgentResearchRunRecord
+from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.monitoring import MonitorIncrement
 from nexus.persistence.models.paper import AgentPaperCycleRecord
@@ -90,7 +91,9 @@ async def ensure_routes(session: AsyncSession) -> None:
     await ensure_schema(session)
 
 
-async def register_prepared_runs(session: AsyncSession, run_ids: Sequence[UUID]) -> None:
+async def register_prepared_runs(
+    session: AsyncSession, run_ids: Sequence[UUID], *, platform_credential: Any = None
+) -> None:
     """Called inside the original preparation transaction, before Jobs become visible."""
     await ensure_routes(session)
     for run_id in run_ids:
@@ -119,6 +122,33 @@ async def register_prepared_runs(session: AsyncSession, run_ids: Sequence[UUID])
             )
         else:
             await _register_business_scope(session, scope, kind)
+        model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
+        if platform_credential is not None and model.platform_profile is None:
+            raise ProtocolRejected("PLATFORM_RUNTIME_MODEL_MISMATCH")
+        if model.platform_profile is not None:
+            from nexus.agents.platform_native import freeze_native_route_binding
+
+            if kind not in {"formal", "independent", "increment"}:
+                raise ProtocolRejected("PLATFORM_NATIVE_OWNER_REQUIRED")
+            binding = await freeze_native_route_binding(
+                session, run=run, model=model, credential=platform_credential
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO research_stage_route "
+                    "(run_id,job_id,scope_id,kind,version,platform_binding) "
+                    "VALUES(:run,:job,:scope,:kind,:version,CAST(:binding AS jsonb))"
+                ),
+                {
+                    "run": run.id,
+                    "job": job.id,
+                    "scope": scope,
+                    "kind": kind,
+                    "version": VERSION,
+                    "binding": json.dumps(binding),
+                },
+            )
+            continue
         await session.execute(
             text("INSERT INTO research_stage_route VALUES(:run,:job,:scope,:kind,:version)"),
             {"run": run.id, "job": job.id, "scope": scope, "kind": kind, "version": VERSION},
@@ -154,6 +184,13 @@ async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, An
     )
     if row is None:
         return None
+    if row.get("platform_binding") is not None and not await session.scalar(
+        text(
+            "SELECT nexus_sol_native_route_valid(r) FROM research_stage_route r WHERE job_id=:job"
+        ),
+        {"job": job_id},
+    ):
+        raise ProtocolRejected("PLATFORM_NATIVE_ROUTE_INVALID")
     job = required(await session.get(Job, job_id))
     run = required(await session.get(AgentResearchRunRecord, research_run_id(job)))
     scope, kind = await owner(session, run, job)
@@ -167,7 +204,9 @@ async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, An
     return dict(row)
 
 
-async def register_new_prepared_runs(session: AsyncSession, run_ids: Sequence[UUID]) -> None:
+async def register_new_prepared_runs(
+    session: AsyncSession, run_ids: Sequence[UUID], *, platform_credential: Any = None
+) -> None:
     for run_id in run_ids:
         job = (
             await session.scalars(select(Job).where(Job.payload["run_id"].astext == str(run_id)))
@@ -182,4 +221,9 @@ async def register_new_prepared_runs(session: AsyncSession, run_ids: Sequence[UU
             {"job": job.id},
         )
         if born and await formal_stage_job_qualified(session, job):
-            await register_prepared_runs(session, (run_id,))
+            if platform_credential is None:
+                await register_prepared_runs(session, (run_id,))
+            else:
+                await register_prepared_runs(
+                    session, (run_id,), platform_credential=platform_credential
+                )

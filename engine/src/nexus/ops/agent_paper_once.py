@@ -997,6 +997,13 @@ async def trigger_in_session(
         manual_market_window=request.trigger_mode == "manual",
         formal_stage_capacity=request.formal_stage_capacity,
     )
+    from nexus.agents.platform_native import credential_for_preparation
+
+    platform = (
+        credential_for_preparation(settings)
+        if settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+        else None
+    )
     return await start_schwab_agent_paper_cycle(
         session,
         authority=authority,
@@ -1010,6 +1017,7 @@ async def trigger_in_session(
         formal_model_config_id=request.formal_model_config_id,
         manual_request_id=request.manual_request_id,
         manual_execution_id=request.manual_execution_id,
+        platform_credential=platform,
     )
 
 

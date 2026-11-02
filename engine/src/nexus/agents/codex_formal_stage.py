@@ -172,6 +172,10 @@ async def require_formal_stage_model_profile(
 def formal_preparation_model_matches(model: AgentModelConfigRecord) -> bool:
     """Exact preparation/Worker identity; output eligibility is checked separately."""
     from nexus.agents.codex_versions import FULL_INPUT_CAPACITY_CONFIG_VERSION
+    from nexus.agents.platform_profile import sol_business_model_matches
+
+    if getattr(model, "platform_profile", None) is not None:
+        return sol_business_model_matches(model)
 
     if model.version in {
         FULL_INPUT_CAPACITY_CONFIG_VERSION,

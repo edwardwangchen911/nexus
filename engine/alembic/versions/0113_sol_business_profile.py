@@ -1,7 +1,7 @@
-"""Renewable Sol prices in the existing immutable model registry.
+"""Renewable Sol prices and normal preparation in the existing immutable route.
 
-No existing row or comparison authority changes. This does not authorize a
-normal producer/stage yet. Once registered, retain this schema for rollback.
+No existing row or comparison authority changes. Native stage dispatch still
+requires its matching version-2 proof. Retain this schema once Sol is registered.
 """
 
 import sqlalchemy as sa
@@ -78,6 +78,82 @@ def upgrade() -> None:
     CREATE TRIGGER trg_sol_model_profile BEFORE INSERT ON public.agent_model_configs
       FOR EACH ROW EXECUTE FUNCTION public.nexus_sol_model_profile_guard();
     """)
+    op.add_column("research_stage_route", sa.Column("platform_binding", JSONB(), nullable=True))
+    op.execute("""
+    CREATE FUNCTION public.nexus_sol_native_route_valid(v public.research_stage_route)
+    RETURNS boolean LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $$
+    DECLARE m public.agent_model_configs; r public.agent_research_runs;
+      b jsonb:=v.platform_binding; a jsonb:=b->'allocation'; price_hash text; item jsonb;
+    BEGIN
+      SELECT * INTO r FROM public.agent_research_runs WHERE id=v.run_id;
+      SELECT * INTO m FROM public.agent_model_configs WHERE id=r.model_config_id;
+      IF m.id IS NULL THEN RETURN false; END IF;
+      IF m.platform_profile IS NULL THEN RETURN b IS NULL; END IF;
+      IF NOT public.nexus_sol_model_profile_valid(m) OR v.kind NOT IN ('formal','independent','increment')
+        OR jsonb_typeof(b) IS DISTINCT FROM 'object' OR jsonb_typeof(a) IS DISTINCT FROM 'object'
+        OR (SELECT count(*) FROM jsonb_object_keys(b))<>9
+        OR (SELECT count(*) FROM jsonb_object_keys(a))<>8
+        OR jsonb_typeof(a->'stage_input_upper_bounds') IS DISTINCT FROM 'array'
+        OR jsonb_array_length(a->'stage_input_upper_bounds')<>3
+        OR jsonb_typeof(a->'stage_schema_envelope_hashes') IS DISTINCT FROM 'array'
+        OR jsonb_array_length(a->'stage_schema_envelope_hashes')<>3 THEN RETURN false; END IF;
+      FOR item IN SELECT value FROM jsonb_array_elements(a->'stage_input_upper_bounds') LOOP
+        IF jsonb_typeof(item)<>'number' OR item::text !~ '^[0-9]+$'
+          OR item::text::numeric<=8192 OR item::text::numeric>272000 THEN RETURN false; END IF;
+      END LOOP;
+      FOR item IN SELECT value FROM jsonb_array_elements(a->'stage_schema_envelope_hashes') LOOP
+        IF jsonb_typeof(item)<>'string' OR (item#>>'{}') !~ '^[0-9a-f]{64}$'
+          THEN RETURN false; END IF;
+      END LOOP;
+      price_hash:=encode(sha256(convert_to(public.nexus_economic_json_text(
+        m.platform_profile->'price_record',true),'UTF8')),'hex');
+      RETURN COALESCE(b->'version'='1'::jsonb AND b->>'transport'='platform_responses'
+        AND b->>'model_config_id'=m.id::text AND b->>'model_hash'=m.config_hash
+        AND r.model_hash=m.config_hash AND r.pricing_version=m.version
+        AND r.reserved_cost_usd=(m.max_input_tokens*m.input_usd_per_million+
+          m.max_output_tokens*m.output_usd_per_million)/1000000
+        AND b->>'price_record_hash'=price_hash
+        AND b->>'price_version'='platform-sol-price-v1-'||price_hash
+        AND b->>'credential_binding_hash' ~ '^[0-9a-f]{64}$'
+        AND b->>'allocation_hash'=encode(sha256(convert_to(
+          public.nexus_economic_json_text(a,false),'UTF8')),'hex')
+        AND a->>'input_hash' ~ '^[0-9a-f]{64}$'
+        AND a->'profile'=m.platform_profile->'wire_profile'
+        AND a->'stage_order'='["research","critique","synthesis"]'::jsonb
+        AND a->'output_limit'='8192'::jsonb AND a->'framing_units'='8192'::jsonb
+        AND a->>'units_version'='platform-structured-http-utf8-plus8192-v2',false);
+    EXCEPTION WHEN OTHERS THEN RETURN false;
+    END $$;
+    """)
+    op.execute("""
+    CREATE FUNCTION public.nexus_sol_native_route_guard() RETURNS trigger
+    LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$ BEGIN
+      IF NOT public.nexus_sol_native_route_valid(NEW) OR
+        (NEW.platform_binding IS NOT NULL AND NOT EXISTS(
+          SELECT 1 FROM public.agent_research_runs r JOIN public.agent_model_configs m
+            ON m.id=r.model_config_id JOIN public.agent_daily_budget_reservations b ON b.run_id=r.id
+          WHERE r.id=NEW.run_id AND b.state='reserved' AND b.reserved_usd=r.reserved_cost_usd
+            AND m.pricing_available_at<=clock_timestamp()
+            AND m.pricing_expires_at>=clock_timestamp()+interval '952 seconds')) THEN
+        RAISE EXCEPTION 'PLATFORM_NATIVE_ROUTE_INVALID' USING ERRCODE='23514';
+      END IF;
+      RETURN NEW;
+    END $$;
+    """)
+    op.execute("""CREATE TRIGGER trg_sol_native_route BEFORE INSERT ON public.research_stage_route
+      FOR EACH ROW EXECUTE FUNCTION public.nexus_sol_native_route_guard()""")
+    op.execute("""
+    CREATE FUNCTION public.nexus_sol_native_transport_guard() RETURNS trigger
+    LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$ BEGIN
+      IF EXISTS(SELECT 1 FROM public.research_stage_route WHERE run_id=NEW.run_id
+          AND platform_binding IS NOT NULL) AND
+         (NEW.platform_binding IS NULL OR NEW.platform_binding->'version' IS DISTINCT FROM '2'::jsonb)
+        THEN RAISE EXCEPTION 'PLATFORM_NATIVE_TRANSPORT_REQUIRED' USING ERRCODE='23514'; END IF;
+      RETURN NEW;
+    END $$;
+    """)
+    op.execute("""CREATE TRIGGER trg_sol_native_transport BEFORE INSERT ON public.research_stage_authorization
+      FOR EACH ROW EXECUTE FUNCTION public.nexus_sol_native_transport_guard()""")
 
 
 def downgrade() -> None:
@@ -88,6 +164,12 @@ def downgrade() -> None:
         )
     ):
         raise RuntimeError("PLATFORM_SOL_COMPATIBLE_READER_ROLLBACK_REQUIRED")
+    op.execute("DROP TRIGGER trg_sol_native_transport ON research_stage_authorization")
+    op.execute("DROP FUNCTION public.nexus_sol_native_transport_guard()")
+    op.execute("DROP TRIGGER trg_sol_native_route ON research_stage_route")
+    op.execute("DROP FUNCTION public.nexus_sol_native_route_guard()")
+    op.execute("DROP FUNCTION public.nexus_sol_native_route_valid(public.research_stage_route)")
+    op.drop_column("research_stage_route", "platform_binding")
     op.execute("DROP TRIGGER trg_sol_model_profile ON agent_model_configs")
     op.execute("DROP FUNCTION public.nexus_sol_model_profile_guard()")
     op.execute("DROP FUNCTION public.nexus_sol_model_profile_valid(public.agent_model_configs)")
