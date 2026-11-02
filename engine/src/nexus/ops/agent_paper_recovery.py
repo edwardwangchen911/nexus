@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, text
 
+from nexus.agents.platform_native import native_runtime_matches
+from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.agents.research_usage import require_research_accounting_clear
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
@@ -42,6 +44,19 @@ def require_recovery_process_quiescence() -> None:
     require_research_processes_quiescent()
 
 
+def _recovery_model_matches(
+    model: AgentModelConfigRecord | None, now: datetime, *, sol: bool
+) -> bool:
+    if model is None or model.created_at > now:
+        return False
+    if sol:
+        return (
+            sol_business_model_matches(model)
+            and model.pricing_available_at <= now < model.pricing_expires_at
+        )
+    return model.platform_profile is None
+
+
 async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, object]:
     """Check cross-session occupancy without creating a heartbeat or invoking I/O producers.
 
@@ -53,9 +68,10 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
     code = None
     try:
         _validate_local_database(settings.database_url)
+        sol = native_runtime_matches(settings)
         if (
             not settings.agent_paper_cycle_enabled
-            or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            or (settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK and not sol)
             or settings.agent_paper_account_id is None
             or settings.agent_paper_candidate_batch_id is None
             or settings.agent_paper_formal_model_config_id is None
@@ -100,8 +116,7 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     or batch is None
                     or batch.account_id != account.id
                     or batch.created_at > now
-                    or model is None
-                    or model.created_at > now
+                    or not _recovery_model_matches(model, now, sol=sol)
                 ):
                     raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
                 # Existing acceptance/seal and consumed-lease proofs remain authoritative.
