@@ -31,6 +31,7 @@ from nexus.api.routes.system import router as system_router
 from nexus.api.routes.workbench import router as workbench_router
 from nexus.api.schemas.optimization import PortfolioScenarioRequest, WhatIfRequest
 from nexus.api.schemas.portfolio_decisions import PortfolioDecisionCreateRequest
+from nexus.api.settings import load_api_settings
 from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.domain.ids import new_uuid7
 from nexus.market.ingestion import MarketObjectStore
@@ -49,7 +50,7 @@ def create_engine_app(
 ) -> FastAPI:
     """Create the stateless API application without probing dependencies."""
     app = FastAPI(title="NEXUS Engine", version="0.1.0")
-    app.state.settings = settings or EngineSettings()
+    app.state.settings = settings or load_api_settings()
     app.state.session_factory = session_factory(app.state.settings)
     app.state.diagnostic_artifact_reader = (
         diagnostic_artifact_reader

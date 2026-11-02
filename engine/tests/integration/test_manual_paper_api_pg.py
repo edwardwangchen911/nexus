@@ -618,3 +618,111 @@ async def test_v10_three_stock_normal_host_path(
         foreground_dispatch=True,
         profile="v10",
     )
+
+
+@pytest.mark.asyncio
+async def test_keyless_http_admits_same_sol_profile_as_the_host(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET
+    from integration.test_sol_native_preparation_pg import scope
+    from nexus.agents.research_dispatch import two_flight_policy
+    from nexus.paper.manual_entry import manual_host_scope
+    from nexus.persistence.models.runtime import Job
+    from sqlalchemy import func, select
+
+    factory, settings, _, _ = await scope(migrated_database_url, tmp_path)
+    host = settings.model_copy(
+        update={
+            "agent_paper_manual_enabled": True,
+            "agent_paper_cycle_enabled": True,
+            "release_revision": "a" * 40,
+        }
+    )
+    for key, value in {
+        "NEXUS_ENV": "test",
+        "DATABASE_URL": migrated_database_url,
+        "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID": TEST_HMAC_KEY_ID,
+        "NEXUS_ENGINE_HMAC_CURRENT_SECRET": TEST_HMAC_SECRET,
+        "AGENT_RUNTIME_MODE": "responses",
+        "NEXUS_AGENT_PAPER_ACCOUNT_ID": str(host.agent_paper_account_id),
+        "NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID": str(host.agent_paper_candidate_batch_id),
+        "NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID": str(host.agent_paper_formal_model_config_id),
+        "NEXUS_AGENT_PAPER_MANUAL_ENABLED": "true",
+        "NEXUS_AGENT_PAPER_CYCLE_ENABLED": "true",
+        "AGENT_DAILY_BUDGET_USD": str(host.agent_daily_budget_usd),
+        "NEXUS_RELEASE_REVISION": host.release_revision,
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    app = create_engine_app()
+    try:
+        assert app.state.settings.openai_api_key is None
+        assert manual_host_scope(app.state.settings) == manual_host_scope(host)
+        async with factory() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            initial_jobs = await session.scalar(select(func.count()).select_from(Job))
+        await heartbeat_agent_paper_loop(
+            host,
+            account_id=host.agent_paper_account_id,
+            worker_id=f"agent-paper-loop-{UUID(int=1)}",
+            started_at=now - timedelta(minutes=1),
+            seen_at=now,
+        )
+        path = "/internal/v1/paper/manual-requests"
+        body = b'{"mode":"research_and_monitor"}'
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r = await client.post(
+                path,
+                content=body,
+                headers={**headers("POST", path, body), "Idempotency-Key": "isolated-sol-api"},
+            )
+            assert r.status_code == 200, r.text
+            data = r.json()["data"]
+            assert data["status"] == "queued"
+            lookup = await client.get(
+                path, headers={**headers("GET", path), "Idempotency-Key": "isolated-sol-api"}
+            )
+            assert lookup.json()["data"]["request_id"] == data["request_id"]
+            # The generic research endpoint also runs in this HTTP process. Its
+            # local executor mode must not authorize fixture pricing for Sol.
+            prices = []
+
+            async def observe_price_policy(*args, allow_fixture_price_authority, **kwargs):
+                prices.append(allow_fixture_price_authority)
+                raise ValueError("synthetic unpriced request")
+
+            monkeypatch.setattr(
+                "nexus.api.routes.research.admit_research_run", observe_price_policy
+            )
+            generic_path = "/internal/v1/research-runs"
+            generic_body = json.dumps(
+                dict(
+                    instrument_id=str(UUID(int=1)),
+                    data_snapshot_id=str(UUID(int=2)),
+                    decision_time=now.isoformat(),
+                )
+            ).encode()
+            denied = await client.post(
+                generic_path,
+                content=generic_body,
+                headers={
+                    **headers("POST", generic_path, generic_body),
+                    "Idempotency-Key": "isolated-sol-prices",
+                },
+            )
+            assert denied.status_code == 409 and prices == [False]
+        async with factory() as session:
+            request = await session.get(ManualPaperRequest, UUID(data["request_id"]))
+            assert request.model_config_id == host.agent_paper_formal_model_config_id
+            assert request.research_profile["runtime_mode"] == "responses"
+            assert (
+                Decimal(request.research_profile["daily_limit_usd"]) == host.agent_daily_budget_usd
+            )
+            assert request.research_profile["execution_policy"] == two_flight_policy()
+            assert await session.scalar(select(func.count()).select_from(Job)) == initial_jobs
+    finally:
+        await app.state.session_factory.kw["bind"].dispose()
+        await factory.kw["bind"].dispose()

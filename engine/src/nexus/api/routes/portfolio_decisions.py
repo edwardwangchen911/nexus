@@ -182,7 +182,7 @@ async def create_portfolio_decision_run(
 
 
 def _runtime_model_authority(settings: EngineSettings) -> tuple[str | None, str | None]:
-    runtime_mode = settings.portfolio_decision_runtime_mode or settings.agent_runtime_mode
+    runtime_mode = settings.portfolio_decision_runtime_mode or settings.research_admission_mode
     if runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import MODEL_ID
         from nexus.agents.codex_versions import PORTFOLIO_DECISION_CONFIG_VERSION
@@ -220,9 +220,7 @@ async def get_latest_portfolio_decision_run(
                 PortfolioDecisionRunRecord.actor_id == actor.actor_id,
                 PortfolioDecisionRunRecord.portfolio_snapshot_id == portfolio_snapshot_id,
                 PortfolioDecisionRunRecord.diagnostic_report_id == diagnostic_report_id,
-                PortfolioDecisionRunRecord.frozen_input[
-                    "expected_scenario_result_hash"
-                ].as_string()
+                PortfolioDecisionRunRecord.frozen_input["expected_scenario_result_hash"].as_string()
                 == expected_scenario_result_hash,
             )
             .order_by(

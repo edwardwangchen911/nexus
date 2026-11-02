@@ -94,7 +94,7 @@ def manual_host_scope(settings: EngineSettings) -> str:
             "model_id": str(settings.agent_paper_formal_model_config_id),
             "budget_protection": settings.formal_budget_protection_enabled,
             "manual_enabled": settings.agent_paper_manual_enabled,
-            "runtime_mode": settings.agent_runtime_mode,
+            "runtime_mode": settings.research_admission_mode,
         }
     )
 
@@ -233,6 +233,7 @@ async def start_configured_manual_request(
         ):
             raise ValueError("MANUAL_SESSION_UNAVAILABLE")
     from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+    from nexus.agents.platform_profile import sol_business_model_matches
     from nexus.persistence.models.agents import AgentModelConfigRecord
 
     model = await session.get(AgentModelConfigRecord, model_id)
@@ -249,12 +250,15 @@ async def start_configured_manual_request(
         if mode == "research_only"
         else 1,
         runtime_mode=""
-        if settings.agent_runtime_mode is None
-        else settings.agent_runtime_mode.value,
+        if settings.research_admission_mode is None
+        else settings.research_admission_mode.value,
         daily_limit_usd=settings.agent_daily_budget_usd,
         two_flight=(
             mode in {"research_only", "research_and_monitor"}
             and model is not None
-            and model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+            and (
+                model.version == BOUNDED_STAGE_BUDGET_CONFIG_VERSION
+                or sol_business_model_matches(model)
+            )
         ),
     )

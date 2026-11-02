@@ -38,6 +38,11 @@ class _SafeSettings(BaseSettings):
 
 class EngineSettings(_SafeSettings):
     @property
+    def research_admission_mode(self) -> AgentRuntimeMode | None:
+        """Route included in research admission and host identity."""
+        return self.agent_runtime_mode
+
+    @property
     def object_store_prefix(self) -> Literal["provider/market"]:
         """Read the same frozen market namespace used by the provider collector."""
         return "provider/market"

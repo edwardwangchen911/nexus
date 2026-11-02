@@ -109,10 +109,8 @@ def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> Non
 def test_compose_separates_api_model_selection_from_worker_credentials() -> None:
     compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
 
-    assert (
-        "- PORTFOLIO_DECISION_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}"
-        in _service_block(compose, "api")
-    )
+    portfolio_mode = "${PORTFOLIO_DECISION_RUNTIME_MODE:-${AGENT_RUNTIME_MODE:-fixture}}"
+    assert f"- PORTFOLIO_DECISION_RUNTIME_MODE={portfolio_mode}" in _service_block(compose, "api")
     assert "OPENAI_API_KEY" not in _service_block(compose, "api")
     worker = _service_block(compose, "worker")
     assert "- AGENT_RUNTIME_MODE=fixture" in worker
