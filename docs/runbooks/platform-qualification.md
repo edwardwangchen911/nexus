@@ -65,6 +65,8 @@ SDK 运维回切或自然监控验收。
 宿主在内存中读取 `nexus-platform-local save-key` 已保存的项目 Key。已有显式 Key
 须与文件一致。组织、项目或 API 目的地冲突时，配置读取失败。
 
+HTTP API 使用同一宿主路线生成准入身份，Responses 模式下不加载项目 Key。独立研究请求只登记到宿主领取队列，合格的 Sol 档案沿用受限双并发策略。通用研究入口仍按宿主路线执行价格门禁。通用组合决策可用既有的 `PORTFOLIO_DECISION_RUNTIME_MODE` 单独指定路线，未指定时沿用宿主配置。
+
 启用正式预算保护时，在自然槽前通过 `nexus-engine-formal-budget-protection` 应用
 当日配置，并以 `--status` 读回。该日已应用的绑定决定模型 ID、hash 和价档。
 改动配置文件后须按原合同重新应用。检查到槽已认领时，保留该槽原来的身份。

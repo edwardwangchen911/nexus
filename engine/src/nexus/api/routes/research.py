@@ -198,7 +198,9 @@ async def create_research_run(
             model_config_id=None,
             daily_limit_usd=settings.agent_daily_budget_usd,
             now=now,
-            allow_fixture_price_authority=(settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE),
+            allow_fixture_price_authority=(
+                settings.research_admission_mode is AgentRuntimeMode.FIXTURE
+            ),
         )
     except BudgetExhausted as error:
         raise NexusError(
