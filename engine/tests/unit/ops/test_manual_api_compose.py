@@ -90,14 +90,26 @@ def test_responses_host_scope_can_boot_keyless_api(tmp_path, monkeypatch):
     assert create_engine_app().state.settings.openai_api_key is None
 
 
-def test_independent_portfolio_mode_survives_research_host_switch(tmp_path):
-    settings = api_environment(
-        tmp_path,
-        {
-            "AGENT_RUNTIME_MODE": "responses",
-            "PORTFOLIO_DECISION_RUNTIME_MODE": "codex_sdk",
-        },
-    )
-    assert settings["AGENT_RUNTIME_MODE"] == "responses"
-    assert settings["PORTFOLIO_DECISION_RUNTIME_MODE"] == "codex_sdk"
-    assert not settings.get("OPENAI_API_KEY")
+@pytest.mark.parametrize(
+    ("keys", "research_mode", "portfolio_mode"),
+    [
+        ({}, "fixture", "fixture"),
+        (
+            {"AGENT_RUNTIME_MODE": "responses", "PORTFOLIO_DECISION_RUNTIME_MODE": ""},
+            "responses",
+            "responses",
+        ),
+        (
+            {"AGENT_RUNTIME_MODE": "responses", "PORTFOLIO_DECISION_RUNTIME_MODE": "codex_sdk"},
+            "responses",
+            "codex_sdk",
+        ),
+    ],
+)
+def test_portfolio_mode_is_resolved_independently_of_api_credentials(
+    tmp_path, keys, research_mode, portfolio_mode
+):
+    settings = api_environment(tmp_path, {**keys, "OPENAI_API_KEY": "synthetic-host-only"})
+    assert settings["AGENT_RUNTIME_MODE"] == research_mode
+    assert settings["PORTFOLIO_DECISION_RUNTIME_MODE"] == portfolio_mode
+    assert "OPENAI_API_KEY" not in settings
