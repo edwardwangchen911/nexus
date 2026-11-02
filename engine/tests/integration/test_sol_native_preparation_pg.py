@@ -462,3 +462,65 @@ async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
             )
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_only_the_configured_current_sol_scope(
+    migrated_database_url, tmp_path
+):
+    from datetime import timedelta
+
+    from nexus.agents.platform_profile import sol_business_model_fields
+    from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
+    from nexus.paper.manual_entry import manual_host_scope
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    factory, settings, store, _ = await scope(migrated_database_url, tmp_path)
+    try:
+        host = settings.model_copy(
+            update={"agent_paper_cycle_enabled": True, "release_revision": "a" * 40}
+        )
+        ready = await inspect_recovery_readiness(host)
+        assert ready["blocking_codes"] == []
+        assert ready["status"] == "ready" and ready["scope_hash"] == manual_host_scope(host)
+        assert ready["external_requests"] == 0 and ready["execution_locked"] is True
+
+        async with factory.begin() as session:
+            now = await session.scalar(text("SELECT clock_timestamp()"))
+            record = await current_record(factory)
+            expired = AgentModelConfigRecord(
+                **sol_business_model_fields(
+                    record
+                    | {
+                        "verified_at": (now - timedelta(days=3)).isoformat(),
+                        "expires_at": (now - timedelta(days=1)).isoformat(),
+                    }
+                )
+            )
+            session.add(expired)
+            await session.flush()
+            expired_id = expired.id
+            legacy_id = await session.scalar(
+                select(AgentModelConfigRecord.id)
+                .where(AgentModelConfigRecord.model_id != "gpt-6.1-sol")
+                .limit(1)
+            )
+            assert legacy_id is not None
+
+        for change in (
+            {"agent_runtime_mode": AgentRuntimeMode.CODEX_SDK},
+            {"openai_reasoning_model": "gpt-5.6-terra"},
+            {"openai_api_key": None},
+            {"agent_paper_formal_model_config_id": legacy_id},
+            {"agent_paper_formal_model_config_id": expired_id},
+        ):
+            blocked = await inspect_recovery_readiness(host.model_copy(update=change))
+            assert blocked["blocking_codes"] == ["AGENT_PAPER_RECOVERY_SCOPE_INVALID"]
+            assert blocked["external_requests"] == 0 and blocked["scope_hash"] is None
+
+        await admit(factory, host, store, claim=False)
+        busy = await inspect_recovery_readiness(host)
+        assert busy["blocking_codes"] == ["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"]
+        assert busy["external_requests"] == 0 and busy["scope_hash"] is None
+    finally:
+        await factory.kw["bind"].dispose()

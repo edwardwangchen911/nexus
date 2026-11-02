@@ -11,6 +11,7 @@ import pytest
 from nexus.ops import agent_paper_loop as loop
 from nexus.ops import agent_paper_recovery as recovery
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.settings import EngineSettings
 
 
@@ -200,8 +201,12 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
             statements.append(str(statement))
             return ()  # No unresolved research reservations in this ready fixture.
 
-        async def get(self, *args):
-            return SimpleNamespace(created_at=at)
+        async def get(self, model, record_id):
+            assert (
+                model is AgentModelConfigRecord
+                and record_id == config.agent_paper_formal_model_config_id
+            )
+            return AgentModelConfigRecord(id=record_id, created_at=at, platform_profile=None)
 
         @asynccontextmanager
         async def begin(self):
