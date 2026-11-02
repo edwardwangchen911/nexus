@@ -48,7 +48,7 @@ from nexus.persistence.models.portfolio import (
 )
 from nexus.providers.broker.gateway_contracts import GatewayClientError
 from nexus.providers.broker.settings import BrokerWorkerSettings
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 _REQUIRED_ENVIRONMENT = (
     "DATABASE_URL",
@@ -113,6 +113,17 @@ class _LocalStatusSettings(BaseSettings):
 
 class LocalDatabaseError(RuntimeError):
     """Value-free failure at the local persisted-status boundary."""
+
+
+def local_read_settings(environment: Mapping[str, str]) -> EngineSettings:
+    """Validate local reader settings without granting a model transport."""
+    values = dict(environment)
+    if (
+        values.get("AGENT_RUNTIME_MODE", os.environ.get("AGENT_RUNTIME_MODE"))
+        == AgentRuntimeMode.RESPONSES
+    ):
+        values["AGENT_RUNTIME_MODE"] = AgentRuntimeMode.FIXTURE.value
+    return EngineSettings.model_validate({**values, "OPENAI_API_KEY": None})
 
 
 def load_local_environment(

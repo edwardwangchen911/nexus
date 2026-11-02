@@ -28,9 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from nexus.market.object_store import S3ProviderEvidenceStore, _version_id_from_frozen_uri
 from nexus.ops.backup_restore import _POSTGRES_IMAGE
-from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.fosun_local import load_local_environment, local_read_settings
 from nexus.persistence.platform_restore import PLATFORM_LOOKUP_REPAIR
-from nexus.settings import EngineSettings
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 _IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
@@ -516,7 +515,7 @@ class LocalRecovery:
 
     async def recover_objects(self, rows: list[dict[str, Any]]) -> int:
         assert self.output is not None
-        settings = EngineSettings.model_validate(self.environment)
+        settings = local_read_settings(self.environment)
         if urlsplit(settings.object_store_endpoint or "").hostname not in _LOOPBACK:
             raise RecoveryError("RECOVERY_LOCAL_OBJECT_STORE_REQUIRED")
         bindings = collect_bindings(rows)
