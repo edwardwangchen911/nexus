@@ -4,9 +4,10 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +23,7 @@ from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.runtime import WorkerHeartbeat
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 # Advertised only by a host that implements timely queue inspection and dispatch.
 # Disabled or incompletely bound hosts keep the scheduled-only protocol.
@@ -166,27 +167,9 @@ async def lookup_configured_manual_request(
     return None if row is None else await _read_presented_manual_request(session, row)
 
 
-async def start_configured_manual_request(
-    session: AsyncSession, settings: EngineSettings, *, mode: ManualMode, idempotency_key: str
-) -> ManualRequestView:
-    account_id = settings.agent_paper_account_id
-    if account_id is None:
-        raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
-    if not idempotency_key.strip() or len(idempotency_key) > 255:
-        raise ValueError("MANUAL_REQUEST_INVALID")
-    await lock_portfolio_account(session, account_id)
-    row = await session.scalar(
-        select(ManualPaperRequest).where(
-            ManualPaperRequest.account_id == account_id,
-            ManualPaperRequest.key_hash == sha256(idempotency_key.encode()).hexdigest(),
-        )
-    )
-    # A response lost in transport is a read of the original immutable intent,
-    # including after disabling the entry or rotating its configured batch/model.
-    if row is not None:
-        if row.mode != mode:
-            raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
-        return await _read_presented_manual_request(session, row)
+async def _configured_admission(
+    session: AsyncSession, settings: EngineSettings, *, mode: ManualMode, account_id: UUID
+) -> tuple[UUID, UUID, datetime]:
     if not settings.agent_paper_manual_enabled or not settings.agent_paper_cycle_enabled:
         raise ValueError("MANUAL_ENTRY_DISABLED")
     batch_id = settings.agent_paper_candidate_batch_id
@@ -199,11 +182,17 @@ async def start_configured_manual_request(
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     now = now.astimezone(UTC)
-    from nexus.paper.preparation_unknown_ack import require_acknowledged_operation_scope
-
-    await require_acknowledged_operation_scope(
-        session, account_id=account_id, model_config_id=model_id, now=now
+    from nexus.paper.preparation_unknown_ack import (
+        require_acknowledged_operation_scope,
+        require_formal_successor_scope,
     )
+
+    scope_check = (
+        require_formal_successor_scope
+        if mode == "research_and_paper"
+        else require_acknowledged_operation_scope
+    )
+    await scope_check(session, account_id=account_id, model_config_id=model_id, now=now)
     from nexus.paper.manual_host_exit import valid_host_exit
 
     heartbeats = (
@@ -232,6 +221,72 @@ async def start_configured_manual_request(
             calendar.market_open_at <= now < calendar.market_close_at
         ):
             raise ValueError("MANUAL_SESSION_UNAVAILABLE")
+    return batch_id, model_id, now
+
+
+class FormalAdmissionCheck(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    status: Literal["formal_request_queueable"] = "formal_request_queueable"
+    checked_at: datetime
+    budget_reserved: Literal[False] = False
+    execution_locked: Literal[True] = True
+    external_requests: Literal[0] = 0
+
+
+async def check_configured_formal_admission(
+    session: AsyncSession, settings: EngineSettings
+) -> FormalAdmissionCheck:
+    from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
+    from nexus.agents.platform_profile import sol_business_model_matches
+    from nexus.agents.research_maintenance import require_research_open
+    from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
+    from nexus.paper.manual_request import require_manual_account_available
+
+    require_research_open()
+    account_id = settings.agent_paper_account_id
+    if account_id is None:
+        raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+    await lock_portfolio_account(session, account_id)
+    batch_id, model_id, now = await _configured_admission(
+        session, settings, mode="research_and_paper", account_id=account_id
+    )
+    await require_manual_account_available(session, account_id=account_id, now=now, read_only=True)
+    await validate_agent_paper_candidate_batch(
+        session, account_id=account_id, batch_id=batch_id, as_of=now
+    )
+    model = await require_formal_stage_model_profile(session, model_config_id=model_id, now=now)
+    if (
+        sol_business_model_matches(model)
+        and settings.research_admission_mode != AgentRuntimeMode.RESPONSES
+    ):
+        raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+    return FormalAdmissionCheck(checked_at=now)
+
+
+async def start_configured_manual_request(
+    session: AsyncSession, settings: EngineSettings, *, mode: ManualMode, idempotency_key: str
+) -> ManualRequestView:
+    account_id = settings.agent_paper_account_id
+    if account_id is None:
+        raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+    if not idempotency_key.strip() or len(idempotency_key) > 255:
+        raise ValueError("MANUAL_REQUEST_INVALID")
+    await lock_portfolio_account(session, account_id)
+    row = await session.scalar(
+        select(ManualPaperRequest).where(
+            ManualPaperRequest.account_id == account_id,
+            ManualPaperRequest.key_hash == sha256(idempotency_key.encode()).hexdigest(),
+        )
+    )
+    # A response lost in transport is a read of the original immutable intent,
+    # including after disabling the entry or rotating its configured batch/model.
+    if row is not None:
+        if row.mode != mode:
+            raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
+        return await _read_presented_manual_request(session, row)
+    batch_id, model_id, _ = await _configured_admission(
+        session, settings, mode=mode, account_id=account_id
+    )
     from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
     from nexus.agents.platform_profile import sol_business_model_matches
     from nexus.persistence.models.agents import AgentModelConfigRecord

@@ -180,6 +180,15 @@ async def lock_portfolio_account(session: AsyncSession, account_id: UUID) -> Non
     )
 
 
+async def try_lock_portfolio_account(session: AsyncSession, account_id: UUID) -> bool:
+    return bool(
+        await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:scope, 1818))"),
+            {"scope": f"internal-paper:{account_id}"},
+        )
+    )
+
+
 def require_unoccupied_projection(projection: PaperPortfolioProjection) -> None:
     if (
         projection.open_orders

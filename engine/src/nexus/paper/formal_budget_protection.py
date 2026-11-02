@@ -194,6 +194,9 @@ async def apply_protection(
         ):
             raise ValueError("FORMAL_BUDGET_APPLY_CONFLICT")
         return existing
+    from nexus.paper.preparation_unknown_ack import require_no_conflicting_formal_successor
+
+    await require_no_conflicting_formal_successor(session, account_id=account_id, now=now)
     if prior is not None:
         await _validate_binding(session, prior)
         previous_claim = await session.scalar(

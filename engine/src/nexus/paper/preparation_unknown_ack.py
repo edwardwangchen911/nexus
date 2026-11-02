@@ -26,6 +26,8 @@ ACTION = "paper.preparation.unknown_acknowledged"
 SCHEMA = "paper_prep_unknown_ack_v1"
 ACTOR = "local-user:preparation-unknown-maintenance"
 BLOCKED = "MANUAL_PREPARATION_ACK_BLOCKED"
+# The approved exception covers dispositions already recorded before the policy change.
+_FORMAL_SUCCESSOR_POLICY_AT = datetime(2026, 11, 2, 17, 25, tzinfo=UTC)
 
 
 class UnknownPreparationReceipt(BaseModel):
@@ -376,6 +378,7 @@ async def require_acknowledged_native_claims(
     now: datetime,
     excluding_request_id: UUID | None = None,
     current_trigger_key: str | None = None,
+    successor_slot: datetime | None = None,
 ) -> None:
     audits = await _audits(session, account_id)
     from nexus.paper.current_preparation_acceptance import accepted_claim_ids
@@ -390,6 +393,17 @@ async def require_acknowledged_native_claims(
         proof = await _validate(session, audits[0], now=now)
         allowed.update(_claim_ids(proof))
         prior_request_id = proof["request_id"]
+        if successor_slot is not None and (
+            str(excluding_request_id) == prior_request_id
+            or await session.scalar(
+                select(IdempotencyRecord.id).where(
+                    IdempotencyRecord.id.in_(_claim_ids(proof)),
+                    IdempotencyRecord.idempotency_key == successor_slot.isoformat(),
+                )
+            )
+            is not None
+        ):
+            raise ValueError(BLOCKED)
     allowed_current = current_trigger_key
     current_route, current_schema = (
         ("agent-paper-manual-trigger-v1", "agent_paper_manual_trigger_v1")
@@ -441,13 +455,51 @@ async def require_acknowledged_operation_scope(
     now: datetime,
     economic: bool = False,
 ) -> None:
+    await _require_operation_scope(
+        session, account_id, model_config_id, now, economic=economic, formal=False
+    )
+
+
+async def require_formal_successor_scope(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    model_config_id: UUID | None,
+    now: datetime,
+    slot: datetime | None = None,
+    manual_request_id: UUID | None = None,
+) -> None:
+    """Only called by formal paper admission, its bound producer and stage authority."""
+    await _require_operation_scope(
+        session,
+        account_id,
+        model_config_id,
+        now,
+        economic=False,
+        formal=True,
+        slot=slot,
+        manual_request_id=manual_request_id,
+    )
+
+
+async def _require_operation_scope(
+    session: AsyncSession,
+    account_id: UUID,
+    model_config_id: UUID | None,
+    now: datetime,
+    *,
+    economic: bool,
+    formal: bool,
+    slot: datetime | None = None,
+    manual_request_id: UUID | None = None,
+) -> None:
+    from nexus.agents.persistence import _lock_budget_day
+    from nexus.agents.platform_profile import sol_business_model_matches
+    from nexus.paper.formal_budget_protection import latest_binding
     from nexus.paper.scheduled_unknown_acceptance import _audits as scheduled_audits
 
     if not await _audits(session, account_id) and not await scheduled_audits(session, account_id):
         return
-    from nexus.agents.persistence import _lock_budget_day
-    from nexus.paper.formal_budget_protection import latest_binding
-
     await lock_portfolio_account(session, account_id)
     await _lock_budget_day(session, now.date().isoformat())
     if economic or await latest_binding(session, business_date=now.date()) is not None:
@@ -455,12 +507,145 @@ async def require_acknowledged_operation_scope(
     model = await require_formal_stage_model_profile(
         session, model_config_id=model_config_id, now=now
     )
-    if (
-        model.input_usd_per_million != 0
-        or model.output_usd_per_million != 0
-        or model.max_tool_calls != 0
+    if model.max_tool_calls != 0:
+        raise ValueError(BLOCKED)
+    if model.input_usd_per_million == 0 and model.output_usd_per_million == 0:
+        return
+    if not formal or not sol_business_model_matches(model):
+        raise ValueError(BLOCKED)
+
+    from sqlalchemy import text
+
+    from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1 as policy
+
+    if await session.scalar(text("SHOW transaction_isolation")) != "read committed":
+        raise ValueError(BLOCKED)
+    if now < _FORMAL_SUCCESSOR_POLICY_AT or (
+        slot is not None and slot < _FORMAL_SUCCESSOR_POLICY_AT
     ):
         raise ValueError(BLOCKED)
+    legacy = await _audits(session, account_id)
+    scheduled = await scheduled_audits(session, account_id)
+    if (
+        len(legacy) > 1
+        or len(scheduled) > 1
+        or any(audit.occurred_at >= _FORMAL_SUCCESSOR_POLICY_AT for audit in (*legacy, *scheduled))
+    ):
+        raise ValueError(BLOCKED)
+    if manual_request_id is not None:
+        from nexus.paper.manual_request import read_manual_request
+
+        row = await session.get(ManualPaperRequest, manual_request_id, populate_existing=True)
+        if (
+            slot is None
+            or row is None
+            or row.account_id != account_id
+            or row.mode != "research_and_paper"
+            or row.model_config_id != model.id
+            or row.model_hash != model.config_hash
+            or row.requested_at < _FORMAL_SUCCESSOR_POLICY_AT
+            or row.requested_at.date() != now.date()
+            or (await read_manual_request(session, row)).status not in {"preparing", "active"}
+        ):
+            raise ValueError(BLOCKED)
+    elif slot is not None:
+        local = slot.astimezone(ZoneInfo(policy.decision_timezone))
+        if local.time() != policy.decision_local_time or slot.date() != now.date():
+            raise ValueError(BLOCKED)
+    # Old histories are revalidated under the account/day locks. Accepting their
+    # scheduling impact never supplies send authority for the old identities.
+    from nexus.paper.manual_request import require_manual_request_history
+
+    await require_manual_request_history(
+        session,
+        account_id=account_id,
+        now=now,
+        excluding_request_id=manual_request_id,
+    )
+    await require_acknowledged_native_claims(
+        session,
+        account_id=account_id,
+        now=now,
+        excluding_request_id=manual_request_id,
+        current_trigger_key=str(manual_request_id)
+        if manual_request_id
+        else slot.isoformat()
+        if slot is not None
+        else None,
+        successor_slot=slot,
+    )
+    if slot is not None:
+        from nexus.paper.scheduled_unknown_acceptance import require_scheduled_execution_open
+
+        await require_scheduled_execution_open(session, account_id=account_id, slot=slot)
+
+
+async def require_formal_grant_history(
+    session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime
+) -> None:
+    """Recheck only before issuing a new send right; observations and cleanup must still work."""
+    from nexus.paper.manual_request import manual_request_for_cycle
+    from nexus.paper.scheduled_unknown_acceptance import _audits as scheduled_audits
+    from nexus.persistence.models.agents import AgentResearchRunRecord
+
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if cycle is None:
+        raise ValueError(BLOCKED)
+    if not await _audits(session, cycle.account_id) and not await scheduled_audits(
+        session, cycle.account_id
+    ):
+        return
+    # A verifier/closer may already hold scope and claim. Never wait for an
+    # account or shared budget lock in this stage transaction.
+    from nexus.agents.budget import ResearchAccountingBusy
+    from nexus.agents.persistence import try_lock_budget_day
+    from nexus.paper.target_service import try_lock_portfolio_account
+
+    if not await try_lock_portfolio_account(
+        session, cycle.account_id
+    ) or not await try_lock_budget_day(session, now.date().isoformat()):
+        raise ResearchAccountingBusy()
+    run = await session.get(AgentResearchRunRecord, run_id)
+    if run is None or cycle.formal_budget_binding_id is not None:
+        raise ValueError(BLOCKED)
+    manual = await manual_request_for_cycle(session, cycle_id=cycle.id)
+    await require_formal_successor_scope(
+        session,
+        account_id=cycle.account_id,
+        model_config_id=run.model_config_id,
+        now=now,
+        slot=cycle.decision_slot_at,
+        manual_request_id=manual.id if manual else None,
+    )
+
+
+async def require_no_conflicting_formal_successor(
+    session: AsyncSession, *, account_id: UUID, now: datetime
+) -> None:
+    """Caller holds the shared budget-day lock. A manual root outlives its first transaction."""
+    from nexus.agents.platform_profile import sol_business_model_matches
+    from nexus.paper.scheduled_unknown_acceptance import _audits as scheduled_audits
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+
+    if not await _audits(session, account_id) and not await scheduled_audits(session, account_id):
+        return
+    from sqlalchemy import text
+
+    if await session.scalar(text("SHOW transaction_isolation")) != "read committed":
+        raise ValueError(BLOCKED)
+    start = datetime.combine(now.date(), time.min, UTC)
+    models = await session.scalars(
+        select(AgentModelConfigRecord)
+        .join(ManualPaperRequest, ManualPaperRequest.model_config_id == AgentModelConfigRecord.id)
+        .where(
+            ManualPaperRequest.account_id == account_id,
+            ManualPaperRequest.mode == "research_and_paper",
+            ManualPaperRequest.requested_at >= start,
+            ManualPaperRequest.requested_at < start + timedelta(days=1),
+        )
+    )
+    if any(sol_business_model_matches(model) for model in models):
+        raise ValueError("FORMAL_BUDGET_SLOT_ALREADY_CLAIMED")
 
 
 async def acknowledge_unknown_preparations(

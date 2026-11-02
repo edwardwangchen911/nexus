@@ -48,6 +48,8 @@ from nexus.paper.manual_cancel import (
 )
 from nexus.paper.manual_entry import (
     SAFE_ENTRY_CODES,
+    FormalAdmissionCheck,
+    check_configured_formal_admission,
     manual_host_scope,
     read_configured_manual_request,
     require_manual_host,
@@ -207,6 +209,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.add_argument("--env-file", type=Path, default=Path("infra/.env.local"))
     commands = result.add_subparsers(dest="action", required=True)
+    commands.add_parser(
+        "check-formal-admission",
+        help="Read formal queue eligibility without reserving a budget or submitting",
+    )
     start = commands.add_parser("start")
     start.add_argument(
         "--mode",
@@ -277,6 +283,7 @@ async def run(
     settings: EngineSettings, args: argparse.Namespace
 ) -> (
     ManualRequestView
+    | FormalAdmissionCheck
     | TerminalCycleCancelReceipt
     | HistorySealReceipt
     | PreparationCloseReceipt
@@ -331,6 +338,12 @@ async def run(
                 )
                 _require_maintenance_code(args.repo_root, settings.release_revision)
                 return independent_receipt
+        if args.action == "check-formal-admission":
+            async with factory.begin() as session:
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+                )
+                return await check_configured_formal_admission(session, settings)
         if args.action == "run-research":
             from nexus.ops.manual_paper_host import run_pure_research_once
 
