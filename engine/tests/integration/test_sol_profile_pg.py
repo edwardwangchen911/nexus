@@ -11,11 +11,11 @@ from alembic import command
 from alembic.config import Config
 from nexus.agents import platform_profile as profiles
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
-from nexus.persistence.models.agents import AgentModelConfigRecord
+from nexus.persistence.models.agents import AgentModelConfigRecord, platform_profile_projection
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select, text
+from sqlalchemy import JSON, func, select, text
 from sqlalchemy.exc import DBAPIError
 from unit.agents.test_sol_pricing import sol_price_record as record_fixture
 
@@ -104,7 +104,16 @@ async def test_sol_registration_checks_db_time_and_source_without_renewing_old_r
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mutation",
-    ["fee", "wire", "extra_price", "hash", "old_reader", "numeric_source_hash", "long_window_dst"],
+    [
+        "fee",
+        "wire",
+        "extra_price",
+        "hash",
+        "old_reader",
+        "numeric_source_hash",
+        "long_window_dst",
+        "json_null",
+    ],
 )
 async def test_database_rejects_unbound_sol_profile_even_without_python_registration(
     migrated_database_url,
@@ -113,7 +122,9 @@ async def test_database_rejects_unbound_sol_profile_even_without_python_registra
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     record = await current_record(factory)
     fields = profiles.sol_business_model_fields(record)
-    if mutation == "fee":
+    if mutation == "json_null":
+        fields["platform_profile"] = JSON.NULL
+    elif mutation == "fee":
         fields["input_usd_per_million"] = 0
     elif mutation == "wire":
         fields["platform_profile"]["wire_profile"]["effort"] = "low"
@@ -157,10 +168,23 @@ async def test_sol_migration_preserves_legacy_and_requires_compatible_reader_aft
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     config = Config("engine/alembic.ini")
     async with factory() as session, session.begin():
-        old = AgentModelConfigRecord(id=uuid4(), **profiles.platform_model_fields())
+        old = AgentModelConfigRecord(
+            id=uuid4(), platform_profile=None, **profiles.platform_model_fields()
+        )
         session.add(old)
         await session.flush()
         old_id = old.id
+        assert await session.scalar(
+            text("SELECT platform_profile IS NULL FROM agent_model_configs WHERE id=:id"),
+            {"id": old_id},
+        )
+        no_profile = select(AgentModelConfigRecord.id).where(
+            AgentModelConfigRecord.id == old_id,
+            platform_profile_projection(AgentModelConfigRecord.platform_profile.expression).is_(
+                None
+            ),
+        )
+        assert await session.scalar(no_profile) == old_id
         before = await session.scalar(
             text("SELECT to_jsonb(m)-'platform_profile' FROM agent_model_configs m WHERE id=:id"),
             {"id": old_id},
@@ -173,10 +197,14 @@ async def test_sol_migration_preserves_legacy_and_requires_compatible_reader_aft
             )
             == before
         )
+        legacy = await session.get(AgentModelConfigRecord, old_id)
+        assert legacy.platform_profile is None and profiles.platform_model_matches(legacy)
+        assert await session.scalar(no_profile) == old_id
     await asyncio.to_thread(command.upgrade, config, "head")
     async with factory() as session:
         legacy = await session.get(AgentModelConfigRecord, old_id)
         assert legacy.platform_profile is None and profiles.platform_model_matches(legacy)
+        assert await session.scalar(no_profile) == old_id
     await register(factory, await current_record(factory))
     with pytest.raises(RuntimeError, match="PLATFORM_SOL_COMPATIBLE_READER_ROLLBACK_REQUIRED"):
         await asyncio.to_thread(command.downgrade, config, "0112_platform_medium_profile")

@@ -79,6 +79,7 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
     PortfolioDecisionBudgetReservationRecord,
     PortfolioDecisionRunRecord,
+    platform_profile_projection,
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
@@ -1146,7 +1147,9 @@ async def _admit_research_run(
                 AgentModelConfigRecord.pricing_expires_at > now,
                 AgentModelConfigRecord.version != API_PROFILE_VERSION,
                 AgentModelConfigRecord.config_hash != api_profile_hash(),
-                AgentModelConfigRecord.platform_profile.is_(None),
+                platform_profile_projection(AgentModelConfigRecord.platform_profile.expression).is_(
+                    None
+                ),
                 # Staged research is explicit; strategy generation is a separate consumer.
                 AgentModelConfigRecord.version.not_in(
                     (

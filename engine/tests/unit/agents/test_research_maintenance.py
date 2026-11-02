@@ -167,6 +167,7 @@ async def test_unprepared_independent_request_cannot_create_manifest(monkeypatch
     row = SimpleNamespace(id=uuid4(), account_id=uuid4(), contract_version=3)
     settings = SimpleNamespace(agent_paper_account_id=row.account_id)
     session = AsyncMock()
+    session.begin_nested = Mock(return_value=AsyncMock())
     session.get.return_value = row
 
     # The v3 replay guard reads isolation and existing acceptance tombstones
@@ -185,6 +186,7 @@ async def test_unprepared_independent_request_cannot_create_manifest(monkeypatch
     )
     with pytest.raises(ValueError, match="RESEARCH_MAINTENANCE"):
         await research_request.prepare_research_request(session, settings, request_id=row.id)
+    session.begin_nested.assert_called_once_with()
     session.add.assert_not_called()
     session.execute.assert_not_called()
 

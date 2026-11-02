@@ -65,7 +65,8 @@ async def test_formal_research_orphan_preserves_completed_and_unknown(
 
     execute_staged = executor.execute_staged_claim
 
-    async def interrupted_staged(*, factory, claim, clock, execute):
+    async def interrupted_staged(*, factory, claim, clock, execute, native_settings=None):
+        assert native_settings is None  # This orphan belongs to the SDK route.
         dispatches.append(claim.job_id)
         if len(dispatches) != 2:
             return await execute_staged(factory=factory, claim=claim, clock=clock, execute=execute)

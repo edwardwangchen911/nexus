@@ -325,24 +325,5 @@ def require_platform_stage_cost(
 async def read_stage_accounting_model(
     session: AsyncSession, model_id: UUID
 ) -> AgentModelConfigRecord | None:
-    """Read original prices across the nullable 0113 extension without inventing a profile.
-
-    to_jsonb preserves the exact current value and yields SQL NULL on old schemas.
-    All other original model fields retain their ordinary typed ORM projection.
-    """
-    from sqlalchemy import literal_column, select
-    from sqlalchemy.dialects.postgresql import JSONB
-    from sqlalchemy.orm import with_expression
-
-    result: AgentModelConfigRecord | None = await session.scalar(
-        select(AgentModelConfigRecord)
-        .where(AgentModelConfigRecord.id == model_id)
-        .options(
-            with_expression(
-                AgentModelConfigRecord.platform_profile,
-                literal_column("to_jsonb(agent_model_configs)->'platform_profile'", type_=JSONB),
-            )
-        )
-        .execution_options(populate_existing=True)
-    )
-    return result
+    """Reload original prices and their optional profile from the stored model row."""
+    return await session.get(AgentModelConfigRecord, model_id, populate_existing=True)

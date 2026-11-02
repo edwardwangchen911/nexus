@@ -176,7 +176,12 @@ async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, An
     row = (
         (
             await session.execute(
-                text("SELECT * FROM research_stage_route WHERE job_id=:job"), {"job": job_id}
+                text(
+                    "SELECT run_id,job_id,scope_id,kind,version,"
+                    "to_jsonb(r)->'platform_binding' AS platform_binding "
+                    "FROM research_stage_route r WHERE job_id=:job"
+                ),
+                {"job": job_id},
             )
         )
         .mappings()
@@ -201,7 +206,11 @@ async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, An
         VERSION,
     ):
         raise ProtocolRejected("STAGED_ROUTE_BINDING_INVALID")
-    return dict(row)
+    result = dict(row)
+    if result["platform_binding"] is None:
+        # Preserve the original SDK and comparison route shape across 0113.
+        del result["platform_binding"]
+    return result
 
 
 async def register_new_prepared_runs(

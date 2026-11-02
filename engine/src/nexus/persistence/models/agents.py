@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -14,12 +15,18 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
+    literal_column,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.schema import conv
+from sqlalchemy.sql.elements import ColumnClause, ColumnElement
+from sqlalchemy.sql.operators import OperatorType
+from sqlalchemy.sql.selectable import NamedFromClause
+from sqlalchemy.types import TypeDecorator, TypeEngine
 
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
@@ -78,6 +85,33 @@ class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
     )
 
 
+def platform_profile_projection[T](column: ColumnElement[T]) -> ColumnElement[T]:
+    """Project a stored profile, preserving SQL NULL for both absent and unset columns."""
+    if isinstance(column, ColumnClause) and isinstance(column.table, NamedFromClause):
+        value = func.to_jsonb(column.table.table_valued()).op("->", return_type=JSONB)(
+            literal_column("'platform_profile'")
+        )
+        # A present SQL NULL in a composite row becomes a JSON null.
+        return func.nullif(value, literal_column("'null'::jsonb"), type_=JSONB)
+    return column
+
+
+class _PlatformProfile(TypeDecorator[dict[str, object]]):
+    # Explicit None binds SQL NULL. Omitted fields stay omitted, so older producers
+    # can still insert rows on schemas that do not have the column.
+    impl = JSONB(none_as_null=True)
+    should_evaluate_none = True
+    cache_ok = True
+
+    def column_expression(
+        self, column: ColumnElement[dict[str, object]]
+    ) -> ColumnElement[dict[str, object]]:
+        return platform_profile_projection(column)
+
+    def coerce_compared_value(self, op: OperatorType | None, value: object) -> TypeEngine[Any]:
+        return self.impl.coerce_compared_value(op, value)
+
+
 class AgentModelConfigRecord(ImmutableCreatedAt, Base):
     __tablename__ = "agent_model_configs"
     __table_args__ = (
@@ -102,7 +136,9 @@ class AgentModelConfigRecord(ImmutableCreatedAt, Base):
     output_usd_per_million: Mapped[Decimal]
     pricing_available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     pricing_expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    platform_profile: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    platform_profile: Mapped[dict[str, object] | None] = mapped_column(
+        _PlatformProfile(), nullable=True
+    )
 
     @property
     def worst_case_cost_usd(self) -> Decimal:
