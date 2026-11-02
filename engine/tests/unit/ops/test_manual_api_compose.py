@@ -66,6 +66,7 @@ def test_responses_host_scope_can_boot_keyless_api(tmp_path, monkeypatch):
         "NEXUS_ENV": "test",
         "DATABASE_URL": "postgresql+asyncpg://localhost/unused",
         "AGENT_RUNTIME_MODE": "responses",
+        "AGENT_DAILY_BUDGET_USD": "1.7345",
         "OPENAI_EXTRACTION_MODEL": "gpt-6.1-sol",
         "OPENAI_REASONING_MODEL": "gpt-6.1-sol",
     }
@@ -80,6 +81,7 @@ def test_responses_host_scope_can_boot_keyless_api(tmp_path, monkeypatch):
     host = EngineSettings(**(keys | {"OPENAI_API_KEY": "synthetic-host-only"}))
     api = create_engine_app().state.settings
     assert manual_host_scope(api) == manual_host_scope(host)
+    assert api.agent_daily_budget_usd == host.agent_daily_budget_usd
     assert api.research_admission_mode is AgentRuntimeMode.RESPONSES
     assert api.agent_runtime_mode is AgentRuntimeMode.FIXTURE
     assert api.portfolio_decision_runtime_mode is AgentRuntimeMode.RESPONSES

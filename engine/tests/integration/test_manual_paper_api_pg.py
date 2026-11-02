@@ -718,6 +718,9 @@ async def test_keyless_http_admits_same_sol_profile_as_the_host(
             request = await session.get(ManualPaperRequest, UUID(data["request_id"]))
             assert request.model_config_id == host.agent_paper_formal_model_config_id
             assert request.research_profile["runtime_mode"] == "responses"
+            assert (
+                Decimal(request.research_profile["daily_limit_usd"]) == host.agent_daily_budget_usd
+            )
             assert request.research_profile["execution_policy"] == two_flight_policy()
             assert await session.scalar(select(func.count()).select_from(Job)) == initial_jobs
     finally:
