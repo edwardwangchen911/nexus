@@ -1015,6 +1015,16 @@ async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
         host = loop._FileEngineSettings.model_validate(
             loop.load_agent_paper_service_environment(tmp_path, {}, env_file=env_file)
         )
+        async with factory.begin() as session:
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert not await claim_next_job(
+                session,
+                queue=QueueName.GENERAL,
+                worker_id="generic",
+                now=at,
+                lease_seconds=120,
+                job_ids=tuple(route.job_id for route in routes),
+            )
         from unit.agents.test_monitoring_producer import proposal_wire
 
         def reviewed_response(body, payload):
@@ -1101,5 +1111,206 @@ async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
                 await session.scalar(select(func.count()).select_from(MonitorCoverageReceipt)) == 3
             )
         assert len(requests) == 9 and all(c.is_closed for c in clients)
+        await _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch)
+        assert len(requests) == 9
 
     await prepare(migrated_database_url, monkeypatch, after_prepared=validate, monitoring=True)
+
+
+async def _verify_native_portfolio_boundary(factory, host, cycle_id, monkeypatch):
+    from nexus.paper.agent_cycle import resume_schwab_agent_paper_cycle
+    from nexus.persistence.models.agents import AgentPortfolioSynthesisRunRecord
+    from nexus.persistence.models.paper import AgentPaperCycleEventRecord
+    from sqlalchemy import func
+
+    async with factory.begin() as session:
+        at = await session.scalar(select(func.clock_timestamp()))
+        result = await resume_schwab_agent_paper_cycle(
+            session,
+            cycle_id=cycle_id,
+            idempotency_key="sol-formal-portfolio-admit",
+            now=at,
+            daily_limit_usd=host.agent_daily_budget_usd,
+            formal_stage_capacity=True,
+        )
+        last = await session.scalar(
+            select(AgentPaperCycleEventRecord)
+            .where(AgentPaperCycleEventRecord.cycle_id == cycle_id)
+            .order_by(AgentPaperCycleEventRecord.sequence.desc())
+        )
+        assert result.status == "researching", (last.result_code, last.fact_ids)
+        portfolio = await session.scalar(
+            select(AgentPortfolioSynthesisRunRecord).where(
+                AgentPortfolioSynthesisRunRecord.cycle_id == cycle_id
+            )
+        )
+        assert (
+            portfolio is not None
+            and portfolio.model_config_id == host.agent_paper_formal_model_config_id
+        )
+        from nexus.agents.portfolio_synthesis_worker import read_synthesis_job
+
+        portfolio_job = await read_synthesis_job(session, cycle_id=cycle_id)
+        assert portfolio_job is not None
+        at = await session.scalar(select(func.clock_timestamp()))
+        assert portfolio_job.available_at <= at
+        ordinary = await claim_next_job(
+            session,
+            queue=QueueName.GENERAL,
+            worker_id="generic",
+            now=at,
+            lease_seconds=120,
+            job_ids=(portfolio_job.id,),
+        )
+        assert ordinary is None
+    from nexus.agents.portfolio_synthesis_worker import (
+        CodexSynthesisTransport,
+        run_synthesis_job_once,
+    )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("SDK attempted native portfolio I/O")
+
+    monkeypatch.setattr(CodexSynthesisTransport, "invoke", forbidden)
+    assert not await run_synthesis_job_once(
+        factory,
+        transport=CodexSynthesisTransport(formal_stage_capacity=True),
+        worker_id="sdk",
+        clock=lambda: at,
+        job_ids=(portfolio_job.id,),
+        formal_stage_capacity=True,
+    )
+    async with factory.begin() as session:
+        from nexus.persistence.models.agents import (
+            AgentPortfolioSynthesisBudgetReservationRecord,
+        )
+        from nexus.persistence.models.runtime import Job
+
+        repeated = await resume_schwab_agent_paper_cycle(
+            session,
+            cycle_id=cycle_id,
+            idempotency_key="sol-formal-portfolio-reread",
+            now=await session.scalar(select(func.clock_timestamp())),
+            daily_limit_usd=host.agent_daily_budget_usd,
+            formal_stage_capacity=True,
+        )
+        assert repeated.result_code == "PORTFOLIO_SYNTHESIS_PENDING"
+        assert (await read_synthesis_job(session, cycle_id=cycle_id)).id == portfolio_job.id
+        job = await session.get(Job, portfolio_job.id)
+        hold = await session.scalar(
+            select(AgentPortfolioSynthesisBudgetReservationRecord).where(
+                AgentPortfolioSynthesisBudgetReservationRecord.run_id == portfolio.id
+            )
+        )
+        from nexus.agents.portfolio_synthesis_persistence import (
+            persist_portfolio_synthesis_terminal,
+        )
+
+        for unproven in (False, None):
+            with pytest.raises(
+                ValueError, match="PORTFOLIO_SYNTHESIS_PLATFORM_USAGE_PROOF_REQUIRED"
+            ):
+                await persist_portfolio_synthesis_terminal(
+                    session,
+                    run_id=portfolio.id,
+                    input_hash=portfolio.input_hash,
+                    status="failed",
+                    intent=None,
+                    input_tokens=None,
+                    output_tokens=None,
+                    now=at,
+                    provider_call_started=unproven,
+                )
+        assert job.status == "queued" and job.attempt_count == 0
+        assert hold.state == "reserved" and hold.reserved_usd > 0 and hold.settled_usd is None
+    # A committed claim can outlive its process. Exercise normal cycle
+    # recovery with no provider I/O or made-up zero-call settlement.
+    from nexus.agents.portfolio_synthesis_worker import formal_synthesis_job_qualified
+
+    async with factory.begin() as session:
+        claim_at = await session.scalar(select(func.clock_timestamp()))
+
+        async def original_owner(locked_session, job):
+            return await formal_synthesis_job_qualified(locked_session, job, now=claim_at)
+
+        claim = await claim_next_job(
+            session,
+            queue=QueueName.GENERAL,
+            worker_id="isolated-exit",
+            now=claim_at,
+            lease_seconds=120,
+            job_ids=(portfolio_job.id,),
+            job_types=("agent.portfolio_synthesis",),
+            formal_synthesis_profile=True,
+            locked_job_guard=original_owner,
+        )
+        assert claim is not None
+        member = await session.get(AgentPortfolioSynthesisRunRecord, portfolio.id)
+        member.status = "running"
+    from datetime import timedelta
+
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async with factory() as session:
+        model = await session.get(AgentModelConfigRecord, portfolio.model_config_id)
+        after_price = model.pricing_expires_at + timedelta(seconds=1)
+    original_scalar = AsyncSession.scalar
+
+    async def historical_clock(self, statement, *args, **kwargs):
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return after_price
+        return await original_scalar(self, statement, *args, **kwargs)
+
+    for instant, key, expected in (
+        (claim_at, "live", "researching"),
+        (after_price, "expired", "unavailable"),
+    ):
+        if key == "expired":
+            monkeypatch.setattr(AsyncSession, "scalar", historical_clock)
+            from nexus.ops.agent_paper_formal import require_formal_host_trigger_profile
+
+            with pytest.raises(ValueError, match="CODEX_FORMAL_AUTHORITY_INVALID"):
+                await require_formal_host_trigger_profile(host, now=instant)
+        async with factory.begin() as session:
+            resumed = await resume_schwab_agent_paper_cycle(
+                session,
+                cycle_id=cycle_id,
+                idempotency_key="sol-synthesis-" + key,
+                now=instant,
+                daily_limit_usd=host.agent_daily_budget_usd,
+                formal_stage_capacity=True,
+            )
+            assert resumed.status == expected, resumed
+            held = await session.get(AgentPortfolioSynthesisBudgetReservationRecord, hold.id)
+            original = await session.get(AgentPortfolioSynthesisRunRecord, portfolio.id)
+            assert (
+                held.state == "reserved"
+                and held.reserved_usd == hold.reserved_usd
+                and held.settled_usd is None
+            )
+            assert original.status == ("running" if key == "live" else "failed")
+            assert original.input_tokens is None and original.settled_cost_usd is None
+            assert (await session.get(Job, portfolio_job.id)).attempt_count == 1
+    async with factory.begin() as session:
+        reread = await resume_schwab_agent_paper_cycle(
+            session,
+            cycle_id=cycle_id,
+            idempotency_key="sol-synthesis-expired",
+            now=after_price,
+            daily_limit_usd=host.agent_daily_budget_usd,
+            formal_stage_capacity=True,
+        )
+        assert reread.replayed and reread.status == "unavailable"
+        assert reread.result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+        from nexus.paper.manual_request import require_manual_account_available
+
+        with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            await require_manual_account_available(
+                session,
+                account_id=host.agent_paper_account_id,
+                now=after_price,
+                read_only=True,
+            )
+        held = await session.get(AgentPortfolioSynthesisBudgetReservationRecord, hold.id)
+        assert held.state == "reserved" and held.settled_usd is None

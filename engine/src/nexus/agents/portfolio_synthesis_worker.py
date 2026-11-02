@@ -112,7 +112,7 @@ class CodexSynthesisTransport:
 
     def supports(self, model: AgentModelConfigRecord) -> bool:
         if self._formal_stage_capacity:
-            return formal_preparation_model_matches(model)
+            return model.model_id == MODEL_ID and formal_preparation_model_matches(model)
         if self._candidate_stage_capacity:
             return isolated_candidate_model_matches(model)
         return (
@@ -263,13 +263,14 @@ async def formal_synthesis_job_qualified(
     now: datetime,
     claimed: bool = False,
     expired_recovery: bool = False,
+    transport: SynthesisTransport | None = None,
 ) -> bool:
     """Verify frozen formal synthesis authority under the selected Job lock."""
     if (
         type(claimed) is not bool
         or type(expired_recovery) is not bool
         or expired_recovery
-        and not claimed
+        and (not claimed or transport is not None)
         or job.job_type != JobType.AGENT_PORTFOLIO_SYNTHESIS.value
         or job.queue != QueueName.GENERAL.value
         or job.schema_version not in SYNTHESIS_JOB_VERSIONS
@@ -310,6 +311,8 @@ async def formal_synthesis_job_qualified(
     )
     if (
         model is None
+        or transport is not None
+        and not transport.supports(model)
         or not formal_preparation_model_matches(model)
         or run.model_hash != model.config_hash
         or run.pricing_version != model.version
@@ -383,6 +386,33 @@ async def formal_synthesis_job_qualified(
                 != f"agent-paper:{frozen.cycle_id}:{source.instrument_id}"
             ):
                 return False
+            if expired_recovery and model.platform_profile is not None:
+                # An orphan can only close an existing fenced attempt. Bind its already
+                # admitted source and cleanup facts without applying today's price window.
+                from nexus.agents.actionable_research import frozen_source_matches
+                from nexus.agents.research_stages.proof import read_terminal_proof
+                from nexus.persistence.models.agents import AgentResearchOutputEvidenceRecord
+
+                proof = await read_terminal_proof(
+                    session, run_id=research.id, now=frozen.admitted_at
+                )
+                bindings = (
+                    await session.scalars(
+                        select(AgentResearchOutputEvidenceRecord).where(
+                            AgentResearchOutputEvidenceRecord.output_id == output.id
+                        )
+                    )
+                ).all()
+                if (
+                    proof is None
+                    or not proof.known
+                    or not proof.cleanup_confirmed
+                    or not frozen_source_matches(
+                        output, source.intent, source.intent_hash, source.evidence_ref_ids, bindings
+                    )
+                ):
+                    return False
+                continue
             action = await load_actionable_research_output(
                 session,
                 run_id=research.id,
@@ -546,7 +576,7 @@ async def _run_synthesis_job_once(
         return await candidate_synthesis_job_qualified(session, job, now=clock())
 
     async def formal_guard(session: AsyncSession, job: Job) -> bool:
-        return await formal_synthesis_job_qualified(session, job, now=clock())
+        return await formal_synthesis_job_qualified(session, job, now=clock(), transport=transport)
 
     async with factory.begin() as session:
         await require_candidate_consumer_profile(

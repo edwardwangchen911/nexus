@@ -1054,6 +1054,38 @@ async def resume_schwab_agent_paper_cycle(
         recovery_events = await _events(session, cycle.id)
         if (
             recovery_events
+            and recovery_events[-1].to_status == "unavailable"
+            and recovery_events[-1].result_code == "PORTFOLIO_SYNTHESIS_UNAVAILABLE"
+            and recovery_events[-1].fact_ids
+            == {"failure_phase": "synthesis_readback", "failure_code": "LEASE_EXPIRED"}
+        ):
+            from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
+            from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
+
+            original = await session.scalar(
+                select(AgentPortfolioSynthesisRunRecord).where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id
+                )
+            )
+            if original is not None and original.pricing_version.startswith(
+                SOL_BUSINESS_CONTRACT + "-"
+            ):
+                # This receipt was appended atomically with orphan closeout. Validate
+                # its original owner without turning a historical read into a new claim.
+                if original.status != "failed":
+                    raise ValueError("PORTFOLIO_SYNTHESIS_ORPHAN_BINDING_INVALID")
+                frozen = await load_frozen_synthesis_authority(session, original)
+                await _require_cycle_candidate_profile(
+                    session,
+                    cycle=cycle,
+                    candidate_stage_capacity=False,
+                    formal_stage_capacity=True,
+                    expected_formal_model_id=original.model_config_id,
+                    now=frozen.admitted_at,
+                )
+                return _result(cycle.id, recovery_events, replayed=True)
+        if (
+            recovery_events
             and recovery_events[-1].to_status == "researching"
             and await recover_formal_synthesis_orphan(session, cycle_id=cycle.id, now=now)
         ):

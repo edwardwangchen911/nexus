@@ -84,3 +84,76 @@ async def test_formal_synthesis_invalid_modes_precede_reads(flags):
             **flags,
         )
     assert session.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "valid",
+        "no_proof",
+        "candidate",
+        "foreign_id",
+        "foreign_hash",
+        "wrong_price",
+        "invalid_price_authority",
+    ],
+)
+def test_native_formal_consumer_requires_exact_model_and_original_gates(change):
+    from uuid import UUID
+
+    from nexus.agents.actionable_research import (
+        ActionableResearchError,
+        admit_actionable_research_output,
+    )
+    from nexus.agents.platform_profile import sol_business_model_fields
+    from nexus.agents.price_authority import FrozenPriceAuthorityStatus
+    from nexus.persistence.models.agents import AgentModelConfigRecord
+    from unit.agents.test_sol_pricing import sol_price_record
+
+    case = _case()
+    model = AgentModelConfigRecord(id=UUID(int=71), **sol_business_model_fields(sol_price_record()))
+    run = case["run"]
+    run.model_config_id = UUID(int=99) if change == "foreign_id" else model.id
+    run.model_hash = "a" * 64 if change == "foreign_hash" else model.config_hash
+    run.pricing_version = model.version
+    if change == "wrong_price":
+        model.platform_profile = {**model.platform_profile, "max_output_tokens": 1}
+    if change == "invalid_price_authority":
+        case["price_authority_status"] = FrozenPriceAuthorityStatus.INVALID
+    flags = dict(
+        native_formal_model=model,
+        formal_identity_verified=change != "no_proof",
+        candidate_identity_verified=change == "candidate",
+    )
+    if change == "valid":
+        assert admit_actionable_research_output(**case, **flags).stance == "buy_candidate"
+    else:
+        with pytest.raises(ActionableResearchError):
+            admit_actionable_research_output(**case, **flags)
+
+
+@pytest.mark.parametrize(
+    "changed", ["nothing", "intent_hash", "foreign_source", "foreign_output", "evidence_hash"]
+)
+def test_orphan_can_only_read_the_exact_already_admitted_source(changed):
+    from uuid import UUID
+
+    from nexus.agents.actionable_research import (
+        admit_actionable_research_output,
+        frozen_source_matches,
+    )
+
+    case = _case()
+    action = admit_actionable_research_output(**case)
+    refs = action.evidence_ref_ids if changed != "foreign_source" else (UUID(int=333),)
+    if changed == "evidence_hash":
+        case["bound_evidence"][0].content_hash = "a" * 64
+    if changed == "foreign_output":
+        case["bound_evidence"][0].output_id = UUID(int=334)
+    assert frozen_source_matches(
+        case["output"],
+        case["intent"],
+        "f" * 64 if changed == "intent_hash" else action.intent_hash,
+        refs,
+        case["bound_evidence"],
+    ) is (changed == "nothing")

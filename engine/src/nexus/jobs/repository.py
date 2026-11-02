@@ -51,6 +51,7 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
         FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
         FULL_INPUT_CAPACITY_CONFIG_VERSION,
     )
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT
 
     # Compare UUID text to JSON text; never cast an untrusted payload to UUID.
     # The frozen binding is immutable, so generic claim/recovery cannot consume
@@ -66,6 +67,8 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
             Job.job_type.in_((JobType.AGENT_RESEARCH.value, JobType.AGENT_PAPER_RESEARCH.value)),
             cast(AgentResearchRunRecord.id, String) == Job.payload["run_id"].astext,
             or_(
+                AgentResearchRunRecord.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"),
+                AgentModelConfigRecord.version.startswith(SOL_BUSINESS_CONTRACT + "-"),
                 AgentResearchRunRecord.pricing_version.in_(
                     (
                         CANDIDATE_BUDGET_CONFIG_VERSION,
@@ -100,6 +103,10 @@ def _not_candidate_agent_job() -> ColumnElement[bool]:
             Job.job_type == JobType.AGENT_PORTFOLIO_SYNTHESIS.value,
             cast(AgentPortfolioSynthesisRunRecord.id, String) == Job.payload["run_id"].astext,
             or_(
+                AgentPortfolioSynthesisRunRecord.pricing_version.startswith(
+                    SOL_BUSINESS_CONTRACT + "-"
+                ),
+                AgentModelConfigRecord.version.startswith(SOL_BUSINESS_CONTRACT + "-"),
                 AgentPortfolioSynthesisRunRecord.pricing_version == CANDIDATE_BUDGET_CONFIG_VERSION,
                 AgentModelConfigRecord.version.in_(
                     (

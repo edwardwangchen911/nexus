@@ -132,6 +132,7 @@ async def load_actionable_research_output(
             if not candidate_verified:
                 raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
         formal_verified = False
+        native_formal_model = None
         if formal_stage_capacity:
             from nexus.agents.codex_formal_stage import formal_stage_output_qualified
 
@@ -140,6 +141,15 @@ async def load_actionable_research_output(
             )
             if not formal_verified:
                 raise ActionableResearchError(RESEARCH_OUTPUT_NOT_ACTIONABLE)
+            from nexus.agents.platform_profile import (
+                SOL_BUSINESS_CONTRACT,
+                read_sol_business_profile,
+            )
+
+            if run.pricing_version.startswith(SOL_BUSINESS_CONTRACT + "-"):
+                native_formal_model = await read_sol_business_profile(
+                    session, model_config_id=run.model_config_id
+                )
         terminals = tuple(
             await session.scalars(
                 select(AgentResearchOutputRecord)
@@ -234,6 +244,7 @@ async def load_actionable_research_output(
             ),
             candidate_identity_verified=candidate_verified,
             formal_identity_verified=formal_verified,
+            native_formal_model=native_formal_model,
         )
     except ActionableResearchError:
         raise

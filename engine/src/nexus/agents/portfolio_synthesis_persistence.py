@@ -66,7 +66,7 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
     StrategyDecisionTargetRecord,
 )
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 from nexus.strategy.intents import ResearchIntent
 
 if TYPE_CHECKING:
@@ -780,6 +780,40 @@ async def persist_portfolio_synthesis_terminal(
         or reservation.reserved_usd != model.worst_case_cost_usd
     ):
         raise ValueError("PORTFOLIO_SYNTHESIS_BUDGET_INVALID")
+    from nexus.agents.platform_profile import SOL_BUSINESS_CONTRACT, sol_business_model_matches
+
+    native = model.platform_profile is not None or run.pricing_version.startswith(
+        SOL_BUSINESS_CONTRACT + "-"
+    )
+    if native:
+        # The legacy terminal has neither a native response usage breakdown nor
+        # a send/cleanup receipt. Only an exact expired orphan may close unknown.
+        orphan = await session.scalar(
+            select(JobAttempt.id)
+            .join(Job, Job.id == JobAttempt.job_id)
+            .join(JobLease, JobLease.job_id == Job.id)
+            .where(
+                Job.id == diagnostic_job_id,
+                Job.job_type == JobType.AGENT_PORTFOLIO_SYNTHESIS.value,
+                Job.input_hash == run.input_hash,
+                Job.payload["run_id"].astext == str(run.id),
+                Job.status == "dead_letter",
+                JobAttempt.attempt_no == diagnostic_attempt_no,
+                JobAttempt.fence_token == diagnostic_fence_token,
+                JobAttempt.lease_token == JobLease.lease_token,
+                JobAttempt.fence_token == JobLease.fence_token,
+                JobAttempt.outcome == "lost",
+                JobLease.expires_at <= now,
+            )
+        )
+        if (
+            not sol_business_model_matches(model)
+            or status != "failed"
+            or input_tokens is not None
+            or provider_call_started is False
+            or orphan is None
+        ):
+            raise ValueError("PORTFOLIO_SYNTHESIS_PLATFORM_USAGE_PROOF_REQUIRED")
     await _lock_budget_day(session, reservation.business_date.isoformat())
     cost = (
         None
@@ -790,7 +824,7 @@ async def persist_portfolio_synthesis_terminal(
         if cost is not None:
             reservation.state = "settled"
             reservation.settled_usd = cost
-        elif run.status == "prepared" or provider_call_started is False:
+        elif not native and (run.status == "prepared" or provider_call_started is False):
             reservation.state = "released"
             reservation.settled_usd = Decimal("0")
             cost = Decimal("0")
