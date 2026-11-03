@@ -1,6 +1,6 @@
 """Store and revalidate every original in one explicitly imported 8-K exhibit bundle."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from hashlib import sha256
 from typing import Protocol, cast
@@ -33,14 +33,19 @@ class ExhibitStore(IdentityStore, Protocol):
     async def read_evidence(self, key: str, *, uri: str) -> bytes: ...
 
 
-def configured_exhibit_store(session: AsyncSession) -> ExhibitStore:
+def exhibit_store_factory(session: AsyncSession) -> Callable[[], ExhibitStore]:
+    """Capture the original store binding before a read-local wrapper is installed."""
     override = session.info.get("sec_exhibit_store")
     if override is not None:
-        return cast(ExhibitStore, override)
+        return lambda: cast(ExhibitStore, override)
     settings = session.info.get("engine_settings")
     if not isinstance(settings, EngineSettings):
         raise ValueError("SEC_EXHIBIT_STORE_UNAVAILABLE")
-    return S3ProviderEvidenceStore(settings)
+    return lambda: S3ProviderEvidenceStore(settings)
+
+
+def configured_exhibit_store(session: AsyncSession) -> ExhibitStore:
+    return exhibit_store_factory(session)()
 
 
 async def _read_identity(

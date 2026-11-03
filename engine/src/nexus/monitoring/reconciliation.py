@@ -14,6 +14,7 @@ from nexus.audit.service import append_audit_event
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 from nexus.jobs.repository import job_lease_consumed
+from nexus.market.current_identity import identity_parse_scope
 from nexus.monitoring.admission import finish_increment, require_increment_binding
 from nexus.monitoring.installation import install_plan_from_output
 from nexus.monitoring.storage import lock_security
@@ -31,6 +32,7 @@ from nexus.persistence.models.monitoring import (
 )
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobLease
+from nexus.workbench.evidence_read_scope import evidence_read_scope
 
 _CONTEXT_SOURCES = frozenset({"nexus_agent_paper_context", "nexus_price_monitor_increment"})
 
@@ -219,6 +221,15 @@ async def _scope_evidence(
 
 
 async def reconcile_account_results(
+    session: AsyncSession, *, account_id: UUID, instrument_ids: tuple[UUID, ...], now: datetime
+) -> dict[str, object]:
+    with identity_parse_scope(), evidence_read_scope(session):
+        return await _reconcile_candidates(
+            session, account_id=account_id, instrument_ids=instrument_ids, now=now
+        )
+
+
+async def _reconcile_candidates(
     session: AsyncSession, *, account_id: UUID, instrument_ids: tuple[UUID, ...], now: datetime
 ) -> dict[str, object]:
     from nexus.paper.candidate_batch import CandidateBatchInput
@@ -670,8 +681,15 @@ async def _record_validated_kind(
                 for row in qualified.role_outputs:
                     review = row.monitoring_review if kind == "price" else row.disclosure_review
                     vetoed = vetoed or review is not None and review.decision == "rejected"
+                declared = (
+                    qualified.intent.monitoring_proposal
+                    if kind == "price"
+                    else qualified.intent.disclosure_proposal
+                )
                 if vetoed:
                     reason = "MONITOR_AUDIT_REJECTED"
+                elif declared is None:
+                    reason = "MONITOR_NO_APPROVED_CONDITION"
                 else:
                     from nexus.monitoring.disclosure_installation import install_disclosure_plan
 
@@ -702,12 +720,7 @@ async def _record_validated_kind(
                             else "MONITOR_INSTALLED"
                         )
                     except ValueError as error:
-                        declared = (
-                            qualified.intent.monitoring_proposal
-                            if kind == "price"
-                            else qualified.intent.disclosure_proposal
-                        )
-                        if atomic_pair and declared is not None:
+                        if atomic_pair:
                             raise _OrdinaryReplacementRejected(
                                 "MONITOR_SOURCE_SUPERSEDED"
                                 if str(error)
