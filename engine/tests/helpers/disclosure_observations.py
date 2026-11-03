@@ -6,6 +6,7 @@ from hashlib import sha256
 from uuid import UUID, uuid4
 
 from helpers.current_identity import MemoryStore
+from helpers.database_clock import is_fixture_clock_read
 from helpers.disclosure_baseline import import_baseline_capture, import_baseline_identity
 from integration.test_candidate_multistock_path import AT, _set_test_insert_clock
 from integration.test_candidate_multistock_path import (
@@ -153,7 +154,7 @@ async def reader_source(
             # Synthetic archive custody must precede the fixed research cutoff.
             # Setup latency is not evidence availability; stages resume the
             # advancing native fixture clock after this preparation scope.
-            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            if is_fixture_clock_read(statement):
                 return clock_at[0]
             return await original_scalar(session, statement, *args, **kwargs)
 
