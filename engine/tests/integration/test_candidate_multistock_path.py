@@ -8,6 +8,7 @@ from time import monotonic
 from uuid import UUID
 
 import pytest
+from helpers.database_clock import is_fixture_clock_read
 from helpers.paper_batch import INSTRUMENTS
 from integration.test_candidate_research_authority import OPTIONS
 from integration.test_portfolio_same_day_research_pg import seed_normal_path
@@ -140,7 +141,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
         async def database_clock(self, statement, *args, **kwargs):
             # This dated scenario controls both clocks; a live database clock
             # would correctly reject admission after its historical session closed.
-            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            if is_fixture_clock_read(statement):
                 # A read after a committed stage observes the same advancing clock.
                 return WorkerClock.now(UTC)
             return await original_scalar(self, statement, *args, **kwargs)
@@ -1522,7 +1523,7 @@ async def _start_manual_http_request(
     scalar = AsyncSession.scalar
 
     async def clock(self, statement, *args, **kwargs):
-        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+        if is_fixture_clock_read(statement):
             return clock_at[0]
         return await scalar(self, statement, *args, **kwargs)
 

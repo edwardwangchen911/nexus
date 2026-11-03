@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from helpers.database_clock import is_fixture_clock_read
 from integration.test_candidate_multistock_path import _set_test_insert_clock
 from integration.test_formal_research_orphan_pg import (
     test_formal_research_orphan_preserves_completed_and_unknown as recover_case,
@@ -110,7 +111,7 @@ async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
         scalar = AsyncSession.scalar
 
         async def database_clock(self, statement, *args, **kwargs):
-            if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            if is_fixture_clock_read(statement):
                 return now
             return await scalar(self, statement, *args, **kwargs)
 
