@@ -16,6 +16,7 @@ from nexus.agents.codex_versions import (
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import ResearchAdmission, admit_research_run
 from nexus.agents.portfolio_context import read_portfolio_context
+from nexus.agents.research_job_identity import research_run_job_input_hash
 from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.jobs.daily_manual import (
@@ -149,20 +150,7 @@ async def resolve_daily_research_job(
     )
     # The run stores the caller request hash; the native job additionally binds
     # its immutable data/model/prompt/tool authority. They are not the same hash.
-    durable_hash = job_input_hash(
-        {
-            "instrument_id": str(run.instrument_id),
-            "data_snapshot_id": str(run.data_snapshot_id),
-            "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "request_hash": run.input_hash,
-            "schema_hash": run.schema_hash,
-            "model_hash": run.model_hash,
-            "prompt_hash": run.prompt_hash,
-            "evidence_hash": run.evidence_hash,
-            "tool_hash": run.tool_hash,
-            "pricing_version": run.pricing_version,
-        }
-    )
+    durable_hash = research_run_job_input_hash(run)
     if (
         run.idempotency_key != expected_hash
         or run.input_hash != expected_hash
