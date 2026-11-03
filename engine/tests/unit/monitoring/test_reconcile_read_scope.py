@@ -2,9 +2,12 @@
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+from helpers.current_identity import filing, profile
+from nexus.market import current_identity
 from nexus.monitoring import reconciliation
 from nexus.research import sec_exhibit_storage
 from nexus.settings import EngineSettings
@@ -46,6 +49,9 @@ async def test_scan_reuses_exact_bytes_but_next_scan_reads_again(monkeypatch):
             reads.append((key, uri))
             return b"original"
 
+    parse = Mock(wraps=current_identity._parse_current_common_stock)
+    monkeypatch.setattr(current_identity, "_parse_current_common_stock", parse)
+    profile_bytes, filing_bytes = profile(), filing()
     source = Source()
     session = SimpleNamespace(info={"sec_exhibit_store": source})
 
@@ -56,12 +62,17 @@ async def test_scan_reuses_exact_bytes_but_next_scan_reads_again(monkeypatch):
                 await reader.read_raw("raw/a", uri=f"s3://test/raw/a?versionId={version}")
                 == b"original"
             )
+        for _ in range(2):
+            current_identity.parse_current_common_stock(
+                symbol="AAPL", fmp_raw=profile_bytes, sec_raw=filing_bytes
+            )
         return {"recorded": 0}
 
     monkeypatch.setattr(reconciliation, "_reconcile_candidates", consume)
-    for count in (2, 4):
+    for scan in (1, 2):
         await reconciliation.reconcile_account_results(
             session, account_id=uuid4(), instrument_ids=(), now=datetime.now(UTC)
         )
-        assert len(reads) == count
+        assert len(reads) == scan * 2
+        assert parse.call_count == scan
         assert session.info["sec_exhibit_store"] is source
