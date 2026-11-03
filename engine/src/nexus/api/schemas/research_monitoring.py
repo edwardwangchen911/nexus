@@ -34,6 +34,14 @@ class MonitoringViewModel(BaseModel):
     )
 
 
+type MonitorApplicability = Literal["applicable", "not_applicable", "unknown"]
+
+
+class MonitoringApplicability(MonitoringViewModel):
+    price: MonitorApplicability
+    disclosure: MonitorApplicability
+
+
 class ResearchMonitorCheck(MonitoringViewModel):
     result: Literal["true", "false", "unknown"]
     scheduled_at: datetime
@@ -53,6 +61,15 @@ class ResearchMonitorTrigger(MonitoringViewModel):
     run_id: UUID | None
     usage_status: UsageStatus
     notification_status: Literal["queued", "delivering", "published", "dead_letter", "unknown"]
+
+
+class PriceCheckWindows(MonitoringViewModel):
+    expected: int = Field(ge=0)
+    recorded: int = Field(ge=0)
+    missing: tuple[datetime, ...]
+    uncertain: int = Field(ge=0)
+    scope_complete: bool
+    recorded_outside_verified_windows: int = Field(ge=0)
 
 
 class ResearchMonitoringView(MonitoringViewModel):

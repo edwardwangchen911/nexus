@@ -145,6 +145,15 @@ describe("saved price monitoring readback", () => {
     expect(links[4]).toHaveAttribute("href", `/research/${instrumentId}?run_id=run-2`);
   });
 
+  it("keeps legacy missing evidence separate from confirmed scope and from an unreadable plan", () => {
+    const props = { state: "partial" as const, admission: null, submitting: false, notice: null, replay: true, onRefresh: vi.fn(), onRun: vi.fn() };
+    const { rerender } = render(<ResearchPanel {...props} research={researchData()} />);
+    expect(screen.getByText(/价格监控 · 缺少可核验的版本信息/)).toBeVisible();
+    rerender(<ResearchPanel {...props} research={{ ...researchData(), monitoring_applicability: { price: "applicable", disclosure: "not_applicable" } }} />);
+    expect(screen.getByText(/价格监控 · 此版本支持监控，但计划记录暂不可核验/)).toBeVisible();
+    expect(screen.getByText(/SEC 公告监控 · 此研究版本未启用这项监控/)).toBeVisible();
+  });
+
   it("mounts after frozen research when provided and leaves legacy payloads unchanged", () => {
     const research = { ...researchData(), monitoring: monitoring() };
     const props = { state: "partial" as const, admission: null, submitting: false, notice: null, replay: true, onRefresh: vi.fn(), onRun: vi.fn() };

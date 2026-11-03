@@ -29,6 +29,7 @@ export function ResearchDisclosureMonitoring({ monitoring, instrumentId }: { mon
         <Badge>{stateLabels[monitoring.state]}</Badge>
       </header>
       <p>读取时点：<time className="numeric-data" dateTime={monitoring.observed_at}>{formatDisplayTime(monitoring.observed_at)}</time>。冻结研究内容保持原样。</p>
+      <p>公告按披露事件核对；这里不按五分钟推算应有公告数。</p>
       <p role="note">计划状态不代表监控进程当前在线。官方 SEC 披露触发仅表示收录变化，不是经营影响结论；交易保持锁定。</p>
       {monitoring.coverage_reason ? <p role="note">{monitoring.coverage_reason === "no_condition" ? "研究未提供可安装的披露复核条件。" : coverageReasons[monitoring.coverage_reason]}</p> : null}
       {monitoring.condition ? <section className="decision-card__section" aria-label="披露复核条件">

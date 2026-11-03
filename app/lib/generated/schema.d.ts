@@ -3982,6 +3982,13 @@ export interface components {
             delta: string | null;
         };
         /** @enum {string} */
+        MonitorApplicability: "applicable" | "not_applicable" | "unknown";
+        /** MonitoringApplicability */
+        MonitoringApplicability: {
+            disclosure: components["schemas"]["MonitorApplicability"];
+            price: components["schemas"]["MonitorApplicability"];
+        };
+        /** @enum {string} */
         MonitoringState: "not_installed" | "valid" | "expired" | "superseded" | "withdrawn" | "unknown";
         /** NewsArticle */
         NewsArticle: {
@@ -5943,6 +5950,21 @@ export interface components {
              */
             external_effects: "not_started" | "unknown" | "cycle_recorded";
         };
+        /** PriceCheckWindows */
+        PriceCheckWindows: {
+            /** Expected */
+            expected: number;
+            /** Missing */
+            missing: string[];
+            /** Recorded */
+            recorded: number;
+            /** Recorded Outside Verified Windows */
+            recorded_outside_verified_windows: number;
+            /** Scope Complete */
+            scope_complete: boolean;
+            /** Uncertain */
+            uncertain: number;
+        };
         /**
          * PriceMonitoringProposal
          * @description One proposed review condition; it requires independent bear and audit approval.
@@ -7631,8 +7653,10 @@ export interface components {
             /** Invalidation Conditions */
             invalidation_conditions: components["schemas"]["ResearchCondition"][];
             monitoring?: components["schemas"]["ResearchMonitoringView"] | null;
+            monitoring_applicability?: components["schemas"]["MonitoringApplicability"] | null;
             /** Output Tokens */
             output_tokens?: number | null;
+            price_check_windows?: components["schemas"]["PriceCheckWindows"] | null;
             /** Quality Status */
             quality_status: ("complete" | "partial") | null;
             /** Reserved Cost Usd */
@@ -9582,7 +9606,9 @@ export interface operations {
             query: {
                 as_of: string;
             };
-            header?: never;
+            header?: {
+                "X-Nexus-Monitor-View"?: string | null;
+            };
             path: {
                 instrument_id: string;
             };
@@ -12016,6 +12042,7 @@ export interface operations {
             query?: never;
             header: {
                 "Idempotency-Key": string;
+                "X-Nexus-Monitor-View"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -12067,7 +12094,9 @@ export interface operations {
     getResearchRun: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Nexus-Monitor-View"?: string | null;
+            };
             path: {
                 run_id: string;
             };

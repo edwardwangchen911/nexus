@@ -18,8 +18,6 @@ from nexus.agents.codex_versions import (
     STAGED_CONFIG_VERSIONS,
 )
 from nexus.agents.committee import (
-    DISCLOSURE_SCOPE_PROMPT_VERSIONS,
-    MONITORING_SCOPE_PROMPT_VERSIONS,
     StageInputIdentity,
 )
 from nexus.agents.concentration import condition_evaluations_match
@@ -35,6 +33,8 @@ from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfo
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.monitoring_applicability import read_applicability
+from nexus.api.price_check_windows import read_run_price_windows
 from nexus.api.research_disclosure_monitoring import read_disclosure_monitoring_view
 from nexus.api.research_inputs import read_research_inputs
 from nexus.api.research_monitoring import read_monitoring_view
@@ -163,6 +163,27 @@ async def get_research_admission(
     )
 
 
+def _research_wire(
+    payload: ResearchRunEnvelope,
+    view_version: str | None,
+    *,
+    status: int = 200,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    # A previous BFF rejects unknown keys. Negotiate the additive fields so
+    # either service can roll back independently, including the create receipt.
+    exclude = (
+        None
+        if view_version == "1"
+        else {"data": {"monitoring_applicability", "price_check_windows"}}
+    )
+    return JSONResponse(
+        status_code=status,
+        headers=headers,
+        content=payload.model_dump(mode="json", exclude=exclude),
+    )
+
+
 @router.post(
     "/internal/v1/research-runs",
     response_model=ResearchRunEnvelope,
@@ -177,6 +198,7 @@ async def get_research_admission(
 async def create_research_run(
     body: ResearchRunCreateRequest,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)],
+    monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     settings: EngineSettings = Depends(get_settings),
     session: AsyncSession = Depends(transactional_session),
@@ -223,9 +245,10 @@ async def create_research_run(
         data=_response(run, None),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )
-    return JSONResponse(
-        status_code=202,
-        content=payload.model_dump(mode="json"),
+    return _research_wire(
+        payload,
+        monitor_view,
+        status=202,
         headers={"Location": f"/api/v1/research-runs/{run.id}"},
     )
 
@@ -242,17 +265,21 @@ async def create_research_run(
 )
 async def get_research_run(
     run_id: UUID,
+    monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
-) -> ResearchRunEnvelope:
+) -> JSONResponse:
     """Return one persisted run and its latest schema-validated immutable output."""
     run = await session.get(AgentResearchRunRecord, run_id)
     if run is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Research run was not found.", status_code=404)
     output = await _latest_output(session, run.id)
-    return ResearchRunEnvelope(
-        data=await _hydrate_response(session, run, output),
-        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
+    return _research_wire(
+        ResearchRunEnvelope(
+            data=await _hydrate_response(session, run, output, window_summary=monitor_view == "1"),
+            meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
+        ),
+        monitor_view,
     )
 
 
@@ -269,9 +296,10 @@ async def get_research_run(
 async def get_instrument_research(
     instrument_id: UUID,
     as_of: Annotated[datetime, Query()],
+    monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
-) -> ResearchRunEnvelope:
+) -> JSONResponse:
     """Select the latest immutable research record by stable timestamp/id ordering."""
     try:
         bounded_as_of = require_utc(as_of)
@@ -300,9 +328,12 @@ async def get_instrument_research(
         and output.created_at > bounded_as_of
     ):
         output = None
-    return ResearchRunEnvelope(
-        data=await _hydrate_response(session, run, output),
-        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
+    return _research_wire(
+        ResearchRunEnvelope(
+            data=await _hydrate_response(session, run, output, window_summary=monitor_view == "1"),
+            meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
+        ),
+        monitor_view,
     )
 
 
@@ -324,6 +355,7 @@ async def _hydrate_response(
     output: AgentResearchOutputRecord | None,
     *,
     observation_reader: ObservationReadback | None = None,
+    window_summary: bool = False,
 ) -> ResearchRunResponse:
     with identity_parse_scope():
         evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = ()
@@ -380,11 +412,17 @@ async def _hydrate_response(
                     status_code=409,
                 ) from error
             response = response.model_copy(update={"billing_mode": "platform_responses"})
+        monitoring = (
+            await read_monitoring_view(session, run, now=reader.read_at)
+            if _declares_monitoring(run)
+            else None
+        )
         return response.model_copy(
             update={
-                "monitoring": (
-                    await read_monitoring_view(session, run, now=reader.read_at)
-                    if _declares_monitoring(run)
+                "monitoring": monitoring,
+                "price_check_windows": (
+                    await read_run_price_windows(session, run, monitoring.plan_id, reader.read_at)
+                    if window_summary and monitoring is not None and monitoring.plan_id is not None
                     else None
                 ),
                 "disclosure_monitoring": (
@@ -404,19 +442,11 @@ async def _hydrate_response(
 
 
 def _declares_disclosure_monitoring(run: AgentResearchRunRecord) -> bool:
-    manifest = run.prompt_manifest
-    portfolio = manifest.get("portfolio") if isinstance(manifest, dict) else None
-    return (
-        isinstance(portfolio, dict) and portfolio.get("version") in DISCLOSURE_SCOPE_PROMPT_VERSIONS
-    )
+    return read_applicability(run.prompt_manifest).disclosure == "applicable"
 
 
 def _declares_monitoring(run: AgentResearchRunRecord) -> bool:
-    manifest = run.prompt_manifest
-    portfolio = manifest.get("portfolio") if isinstance(manifest, dict) else None
-    return (
-        isinstance(portfolio, dict) and portfolio.get("version") in MONITORING_SCOPE_PROMPT_VERSIONS
-    )
+    return read_applicability(run.prompt_manifest).price == "applicable"
 
 
 def _declares_current_trends(run: AgentResearchRunRecord) -> bool:
@@ -486,6 +516,7 @@ def _response(
     if abstention_reason is not None and status == "completed" and not semantics_invalid:
         status = "abstained"
     return ResearchRunResponse(
+        monitoring_applicability=read_applicability(run.prompt_manifest),
         run_id=run.id,
         instrument_id=run.instrument_id,
         data_snapshot_id=run.data_snapshot_id,

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import String, cast, or_, select
+from sqlalchemy import Select, String, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS
@@ -79,18 +79,10 @@ async def latest_coverage(
     return row
 
 
-async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetime) -> bool:
-    if plan.kind != "price":
-        return False
-    receipt = await latest_coverage(
-        session, account_id=plan.account_id, instrument_id=plan.instrument_id, now=now
-    )
-    source = await session.get(AgentResearchRunRecord, plan.source_run_id)
-    if source is None:
-        return False
-    # Native completion and monitoring adoption are separate. Until a newer
-    # result is reconciled, pending old triggers cannot bypass its possible veto.
-    successor = await session.scalar(
+def terminal_successors(
+    plan: MonitorPlan, source: AgentResearchRunRecord, now: datetime
+) -> Select[tuple[AgentResearchRunRecord]]:
+    return (
         select(AgentResearchRunRecord)
         .join(DataSnapshot, DataSnapshot.id == AgentResearchRunRecord.data_snapshot_id)
         .outerjoin(
@@ -115,8 +107,21 @@ async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetim
             ),
         )
         .order_by(AgentResearchRunRecord.decision_time.desc(), AgentResearchRunRecord.id.desc())
-        .limit(1)
     )
+
+
+async def plan_covered(session: AsyncSession, *, plan: MonitorPlan, now: datetime) -> bool:
+    if plan.kind != "price":
+        return False
+    receipt = await latest_coverage(
+        session, account_id=plan.account_id, instrument_id=plan.instrument_id, now=now
+    )
+    source = await session.get(AgentResearchRunRecord, plan.source_run_id)
+    if source is None:
+        return False
+    # Native completion and monitoring adoption are separate. Until a newer
+    # result is reconciled, pending old triggers cannot bypass its possible veto.
+    successor = await session.scalar(terminal_successors(plan, source, now).limit(1))
     if successor is not None:
         successor_receipt = await session.scalar(
             select(MonitorCoverageReceipt).where(

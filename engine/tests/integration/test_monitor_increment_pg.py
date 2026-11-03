@@ -24,7 +24,7 @@ from nexus.settings import EngineSettings
 from sqlalchemy import func, select
 
 
-async def ready_trigger(database_url, monkeypatch):
+async def ready_trigger(database_url, monkeypatch, *, monitoring_lifetime_days=None):
     captured = {}
 
     async def capture_clock(settings, sessions, authority, manifest, clock):
@@ -38,6 +38,7 @@ async def ready_trigger(database_url, monkeypatch):
         "formal_v11",
         monitoring=True,
         monitoring_threshold="100000",
+        monitoring_lifetime_days=monitoring_lifetime_days,
         before_research=capture_clock,
     )
     factory = session_factory(EngineSettings(database_url=database_url))

@@ -41,6 +41,7 @@ export async function engineFetch<Path extends InternalPath>(target: EngineTarge
   const method = (init.method ?? "GET").toUpperCase();
   const body = exactBodyBytes(init.body);
   const headers = allowedCallerHeaders(init.headers);
+  if (/^\/internal\/v1\/(research-runs(?:\/[^/?]+)?|instruments\/[^/?]+\/research)(?:\?|$)/.test(resolved.pathAndQuery)) headers.set("X-Nexus-Monitor-View", "1");
   const protectedHeaders = createEngineHmacHeaders({ keyId: config.keyId, secret: config.secret, method, pathAndQuery: resolved.pathAndQuery, timestamp: Math.floor(Date.now() / 1000), nonce: uuidv7(), actorId: init.actor.userId, requestId: init.actor.requestId || uuidv7(), body });
   for (const name of Object.keys(protectedHeaders)) headers.delete(name);
   for (const [name, value] of Object.entries(protectedHeaders)) headers.set(name, value);
