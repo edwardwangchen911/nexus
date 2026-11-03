@@ -6521,6 +6521,31 @@ export const runtimeContractSchemas = {
     "title": "MetricPairResponse",
     "type": "object"
   },
+  "MonitorApplicability": {
+    "enum": [
+      "applicable",
+      "not_applicable",
+      "unknown"
+    ],
+    "type": "string"
+  },
+  "MonitoringApplicability": {
+    "additionalProperties": false,
+    "properties": {
+      "disclosure": {
+        "$ref": "#/components/schemas/MonitorApplicability"
+      },
+      "price": {
+        "$ref": "#/components/schemas/MonitorApplicability"
+      }
+    },
+    "required": [
+      "price",
+      "disclosure"
+    ],
+    "title": "MonitoringApplicability",
+    "type": "object"
+  },
   "MonitoringState": {
     "enum": [
       "not_installed",
@@ -11316,6 +11341,53 @@ export const runtimeContractSchemas = {
     "title": "PreparationRecoveryView",
     "type": "object"
   },
+  "PriceCheckWindows": {
+    "additionalProperties": false,
+    "properties": {
+      "expected": {
+        "minimum": 0,
+        "title": "Expected",
+        "type": "integer"
+      },
+      "missing": {
+        "items": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "title": "Missing",
+        "type": "array"
+      },
+      "recorded": {
+        "minimum": 0,
+        "title": "Recorded",
+        "type": "integer"
+      },
+      "recorded_outside_verified_windows": {
+        "minimum": 0,
+        "title": "Recorded Outside Verified Windows",
+        "type": "integer"
+      },
+      "scope_complete": {
+        "title": "Scope Complete",
+        "type": "boolean"
+      },
+      "uncertain": {
+        "minimum": 0,
+        "title": "Uncertain",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "expected",
+      "recorded",
+      "missing",
+      "uncertain",
+      "scope_complete",
+      "recorded_outside_verified_windows"
+    ],
+    "title": "PriceCheckWindows",
+    "type": "object"
+  },
   "PriceMonitoringProposal": {
     "additionalProperties": false,
     "description": "One proposed review condition; it requires independent bear and audit approval.",
@@ -15149,6 +15221,16 @@ export const runtimeContractSchemas = {
           }
         ]
       },
+      "monitoring_applicability": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MonitoringApplicability"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "output_tokens": {
         "anyOf": [
           {
@@ -15160,6 +15242,16 @@ export const runtimeContractSchemas = {
           }
         ],
         "title": "Output Tokens"
+      },
+      "price_check_windows": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PriceCheckWindows"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "quality_status": {
         "anyOf": [

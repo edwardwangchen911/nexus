@@ -9,6 +9,8 @@ from nexus.agents.committee import AgentRole, StageInputIdentity
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.api.schemas.research_monitoring import (
+    MonitoringApplicability,
+    PriceCheckWindows,
     ResearchDisclosureMonitoringView,
     ResearchMonitoringView,
 )
@@ -119,6 +121,8 @@ class ResearchRunResponse(_StrictAgentSchema):
     abstention_reason: str | None = Field(default=None, max_length=100)
     stage_trace: ResearchStageTrace | None = None
     failed_stage_input: StageInputIdentity | None = None
+    price_check_windows: PriceCheckWindows | None = None
+    monitoring_applicability: MonitoringApplicability | None = None
     monitoring: ResearchMonitoringView | None = None
     disclosure_monitoring: ResearchDisclosureMonitoringView | None = None
     inputs: "ResearchInputsSummary | None" = None

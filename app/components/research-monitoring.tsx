@@ -53,7 +53,7 @@ export function researchHref(instrumentId: string, runId: string): string {
   return `/research/${encodeURIComponent(instrumentId)}?run_id=${encodeURIComponent(runId)}`;
 }
 
-export function ResearchMonitoring({ monitoring, instrumentId }: { monitoring: PriceMonitoringView; instrumentId: string }): React.ReactElement {
+export function ResearchMonitoring({ monitoring, instrumentId, windows }: { monitoring: PriceMonitoringView; instrumentId: string; windows?: components["schemas"]["PriceCheckWindows"] | null }): React.ReactElement {
   const check = monitoring.latest_check;
   const condition = monitoring.condition;
   const recent = [...monitoring.triggers].sort((a, b) => Date.parse(b.checked_at) - Date.parse(a.checked_at)).slice(0, 5);
@@ -81,6 +81,17 @@ export function ResearchMonitoring({ monitoring, instrumentId }: { monitoring: P
       {monitoring.state === "superseded" ? (monitoring.replacement_run_id
         ? <a href={researchHref(instrumentId, monitoring.replacement_run_id)}>查看替代研究</a>
         : <p>替代研究的精确记录暂不可用。</p>) : null}
+      {monitoring.plan_id ? <section className="decision-card__section" aria-label="五分钟价格检查覆盖">
+        <h3>五分钟价格检查覆盖</h3>
+        {windows ? <>
+          <p>已到期且可核验的计划时段：应查 {windows.expected} 次，已有记录 {windows.recorded} 次。</p>
+          <p>{windows.missing.length ? "缺记录的计划时间：" : windows.expected ? "已核验时段均有记录。" : "尚无可核验的已到期价格时段。"}{windows.missing.map(formatDisplayTime).join("、")}</p>
+          {windows.uncertain > 0 ? <p>另有 {windows.uncertain} 个时段的应查资格无法确定。</p> : null}
+          {!windows.scope_complete ? <p>部分时段的宿主范围或交易日历无法核验，应查总数未知。</p> : null}
+          {windows.recorded_outside_verified_windows > 0 ? <p>另有 {windows.recorded_outside_verified_windows} 个已记录时段不在可核验的计划时段内。</p> : null}
+          <p>缺记录的原因未知。有记录的检查仍可能结果未知。</p>
+        </> : <p>交易日历或计划覆盖证据不足，无法核定应查时段。</p>}
+      </section> : null}
       <section className="decision-card__section" aria-label="最近一次检查">
         <h3>最近一次检查</h3>
         {check ? <>

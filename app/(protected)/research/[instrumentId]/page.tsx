@@ -155,8 +155,14 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
+        {([["价格监控", research.monitoring, research.monitoring_applicability?.price],
+          ["SEC 公告监控", research.disclosure_monitoring, research.monitoring_applicability?.disclosure]] as const).map(([label, view, applicability]) =>
+          view ? null : <p key={label} className="research-page__gate">{label} · {applicability === "not_applicable"
+            ? "此研究版本未启用这项监控。"
+            : applicability === "applicable" ? "此版本支持监控，但计划记录暂不可核验。"
+            : "缺少可核验的版本信息，监控适用性未知。"}</p>)}
         {research.disclosure_monitoring ? <ResearchDisclosureMonitoring monitoring={research.disclosure_monitoring} instrumentId={research.instrument_id} /> : null}
-        {research.monitoring ? <ResearchMonitoring monitoring={research.monitoring} instrumentId={research.instrument_id} /> : null}
+        {research.monitoring ? <ResearchMonitoring windows={research.price_check_windows} monitoring={research.monitoring} instrumentId={research.instrument_id} /> : null}
       </>}
     </section>
   );
