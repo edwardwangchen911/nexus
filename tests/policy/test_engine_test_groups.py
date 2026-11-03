@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ci.engine_test_groups import MERGE_SELECTORS, selectors_for
+from scripts.ci.engine_test_groups import EXIT_RECONCILIATION, MERGE_SELECTORS, selectors_for
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts/ci/engine_test_groups.py"
@@ -55,6 +55,7 @@ def test_postgres_runner_selects_group_and_propagates_failure(tmp_path: Path, gr
     assert result.returncode == 1
     args = json.loads((tmp_path / "args.json").read_text())
     assert args[:5] == ["-q", "--import-mode=importlib", "-m", "not performance", "--durations=30"]
+    assert f"--ignore={EXIT_RECONCILIATION}" not in args
     assert "-vv" in args
     assert f"--junitxml=test-results/engine-{group}.xml" in args
     assert args[-len(selectors_for(group)) :] == list(selectors_for(group))
@@ -79,6 +80,8 @@ def test_runner_preserves_pytest_exit_code(tmp_path: Path, exit_code: int) -> No
     assert result.returncode == exit_code
     args = json.loads((tmp_path / "args.json").read_text())
     assert args[:5] == ["-q", "--import-mode=importlib", "-m", "not performance", "--durations=30"]
+    assert args.count(f"--ignore={EXIT_RECONCILIATION}") == 1
+    assert selectors_for("pg-a").count(EXIT_RECONCILIATION) == 1
     assert args[-5:] == [
         "engine/tests/unit",
         "engine/tests/contract",

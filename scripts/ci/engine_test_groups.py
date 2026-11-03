@@ -7,13 +7,17 @@ import os
 import subprocess
 import sys
 
-# The previous merge-gate inventory, in its original order. Add new selectors here.
+# This unit module runs in pg-a; the other unit tests are still discovered by fast.
+EXIT_RECONCILIATION = "engine/tests/unit/ops/test_cross_schema_exit_reconciliation.py"
+
+# Each selector belongs to one serial lane. Add new selectors here.
 MERGE_SELECTORS = (
     "engine/tests/unit",
     "engine/tests/contract",
     "engine/tests/evals",
     "engine/tests/property",
     "engine/tests/test_health.py",
+    EXIT_RECONCILIATION,
     "engine/tests/integration/test_temporary_database_lifecycle.py",
     "engine/tests/integration/test_job_checkpoint.py",
     "engine/tests/integration/test_job_worker.py",
@@ -60,6 +64,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_synthesis_sdk_lifecycle_pg.py",
     "engine/tests/integration/test_synthesis_failure_facts_pg.py",
     "engine/tests/integration/test_observation_readback_pg.py",
+    "engine/tests/integration/test_daily_v2_capacity_pg.py",
     "engine/tests/integration/test_formal_cycle_admission.py",
     "engine/tests/integration/test_formal_synthesis_orphan_pg.py",
     "engine/tests/integration/test_formal_research_orphan_pg.py",
@@ -142,9 +147,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_daily_v2_frozen_context_pg.py",
     "engine/tests/integration/test_daily_v2_historical_handoff_pg.py",
     "engine/tests/integration/test_daily_v2_readback_pg.py",
-    "engine/tests/integration/test_daily_v2_capacity_pg.py",
     "engine/tests/integration/test_monitor_daily_v2_native_pg.py",
-    "engine/tests/integration/test_monitor_mixed_increment_pg.py",
     "engine/tests/integration/test_monitor_mixed_host_pg.py",
     "engine/tests/integration/test_monitor_batch_prepare_pg.py",
     "engine/tests/integration/test_monitor_market_prepare_pg.py",
@@ -164,6 +167,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_platform_execution_pg.py",
     "engine/tests/integration/test_platform_preparation_pg.py",
     "engine/tests/integration/test_monitor_validation_work_pg.py",
+    "engine/tests/integration/test_monitor_mixed_increment_pg.py",
     "engine/tests/integration/test_research_monitor_notification_pg.py",
     "engine/tests/integration/test_monitor_single_delivery_pg.py",
     "engine/tests/integration/test_bark_outbox_pg.py",
@@ -188,16 +192,14 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_independent_unknown_acceptance_pg.py",
 )
 
-# Run 41091864148 completed pg-g tests in 39m20s but hit the 40m job limit.
-# Rebalance the seven existing lanes using all per-phase timings, retaining
-# whole modules, the selector inventory and its order. Recheck these boundaries
-# when the inventory grows; new modules must not silently overload the tail.
+# Runs #321 and #322 put pg-c near 27 minutes. Keep whole modules together
+# and retain pg-a's tokenizer setup for the independent-monitor tests.
 PG_SPLITS = (
     "engine/tests/integration/test_formal_cycle_admission.py",
-    "engine/tests/integration/test_monitor_image_compat_pg.py",
+    "engine/tests/integration/test_disclosure_monitoring_api_pg.py",
     "engine/tests/integration/test_monitor_batches_pg.py",
     "engine/tests/integration/test_monitor_daily_v2_native_pg.py",
-    "engine/tests/integration/test_monitor_mixed_host_pg.py",
+    "engine/tests/integration/test_monitor_batch_prepare_pg.py",
     "engine/tests/integration/test_monitor_validation_work_pg.py",
 )
 MERGE_GROUPS = ("fast", "pg-a", "pg-b", "pg-c", "pg-d", "pg-e", "pg-f", "pg-g")
@@ -227,6 +229,8 @@ def main() -> int:
         command += ["-m", "not performance"]
     command += ["--durations=30", "--durations-min=1"]
     command += ["-p", "scripts.ci.engine_test_progress"]
+    if args.group == "fast":
+        command.append(f"--ignore={EXIT_RECONCILIATION}")
     if args.group.startswith("pg-"):
         command.append("-vv")
     if args.collect_only:
