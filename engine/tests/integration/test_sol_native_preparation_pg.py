@@ -528,3 +528,51 @@ async def test_recovery_accepts_only_the_configured_current_sol_scope(
         assert busy["external_requests"] == 0 and busy["scope_hash"] is None
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_reads_versioned_identity_once_and_rechecks_the_next_activation(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from collections import Counter
+
+    from nexus.ops import agent_paper_recovery as recovery
+    from nexus.research.current_identity_storage import read_identity_bindings
+
+    factory, settings, store, instruments = await scope(migrated_database_url, tmp_path)
+    host = settings.model_copy(
+        update={"agent_paper_cycle_enabled": True, "release_revision": "a" * 40}
+    )
+    factory.kw["info"] = {"engine_settings": host, "sec_exhibit_store": store}
+    monkeypatch.setattr(recovery, "session_factory", lambda _: factory)
+    original_read = store.read_raw
+    reads = Counter()
+    corrupt = False
+
+    async def read_raw(key, *, uri):
+        reads[uri] += 1
+        data = await original_read(key, uri=uri)
+        return b"changed" if corrupt else data
+
+    monkeypatch.setattr(store, "read_raw", read_raw)
+    original_check = recovery.require_manual_account_available
+
+    async def historical_identity(session, **kwargs):
+        await original_check(session, **kwargs)
+        for _ in range(2):
+            if not await read_identity_bindings(
+                session, instrument_id=instruments[0], as_of=kwargs["now"]
+            ):
+                raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+    monkeypatch.setattr(recovery, "require_manual_account_available", historical_identity)
+    try:
+        ready = await recovery.inspect_recovery_readiness(host)
+        assert ready["status"] == "ready"
+        assert reads and all(count == 1 for count in reads.values())
+        corrupt = True
+        reads.clear()
+        refused = await recovery.inspect_recovery_readiness(host)
+        assert reads and refused["blocking_codes"] == ["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"]
+    finally:
+        await factory.kw["bind"].dispose()
