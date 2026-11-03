@@ -1,23 +1,26 @@
-"""Bounded reuse of exact versioned bytes during one workbench read only.
+"""Bounded reuse of exact versioned bytes during one evidence-reading operation.
 
 This cache stores no validation result. Every caller still validates its own
 hash, receipt, time, database binding and policy against the frozen bytes.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.research.sec_exhibit_storage import ExhibitStore, configured_exhibit_store
+from nexus.research.sec_exhibit_storage import ExhibitStore, exhibit_store_factory
 from nexus.settings import EngineSettings
 
 
 class _ReadStore:
-    def __init__(self, source: ExhibitStore, max_bytes: int, max_entries: int) -> None:
-        self.source = source
+    def __init__(
+        self, create_store: Callable[[], ExhibitStore], max_bytes: int, max_entries: int
+    ) -> None:
+        self.create_store = create_store
+        self.source: ExhibitStore | None = None
         self.max_bytes = max_bytes
         self.max_entries = max_entries
         self.bytes = 0
@@ -39,6 +42,8 @@ class _ReadStore:
         identity = (kind, key, uri)
         if reusable and identity in self.cache:
             return self.cache[identity]
+        if self.source is None:
+            self.source = self.create_store()
         method = self.source.read_raw if kind == "raw" else self.source.read_evidence
         # The underlying store verifies namespace, frozen version and size.
         # Exceptions and unversioned reads are never retained.
@@ -59,21 +64,15 @@ def evidence_read_scope(
     session: AsyncSession, *, max_bytes: int = 32 * 1024 * 1024, max_entries: int = 512
 ) -> Iterator[None]:
     """Restore the original store on every exit; never persist bytes across reads."""
-    if session.info.get("sec_exhibit_store") is None and not isinstance(
-        session.info.get("engine_settings"), EngineSettings
+    present = "sec_exhibit_store" in session.info
+    previous = session.info.get("sec_exhibit_store")
+    settings = session.info.get("engine_settings")
+    if previous is None and (
+        not isinstance(settings, EngineSettings) or not settings.object_store_endpoint
     ):
         yield
         return
-    present = "sec_exhibit_store" in session.info
-    previous = session.info.get("sec_exhibit_store")
-    try:
-        source = configured_exhibit_store(session)
-    except ValueError:
-        # Optional byte reuse must not make empty projections require storage.
-        # Actual source consumers retain their normal missing-store rejection.
-        yield
-        return
-    reader = _ReadStore(source, max_bytes, max_entries)
+    reader = _ReadStore(exhibit_store_factory(session), max_bytes, max_entries)
     session.info["sec_exhibit_store"] = reader
     try:
         yield

@@ -776,3 +776,68 @@ async def test_new_ordinary_daily_sec_refusal_preserves_native_facts(
         assert (await run(settings, parser().parse_args(["reconcile"])))["recorded"] == 0
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_three_terminal_stocks_without_proposals_record_both_reasons_once(
+    migrated_database_url, monkeypatch
+):
+    from collections import Counter
+
+    from nexus.monitoring import source_qualification
+    from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+
+    await normal_cycle(
+        migrated_database_url,
+        monkeypatch,
+        3,
+        False,
+        "formal_v11",
+        monitoring=True,
+        disclosure=True,
+        no_monitor_conditions=True,
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    calls = []
+    qualify = source_qualification._qualify_source
+
+    async def counted(session, **kwargs):
+        calls.append(kwargs["output"].id)
+        return await qualify(session, **kwargs)
+
+    monkeypatch.setattr(source_qualification, "_qualify_source", counted)
+    try:
+        async with factory.begin() as session:
+            cycle = await session.scalar(select(AgentPaperCycleRecord))
+            monday = AT + timedelta(days=3)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=CALENDAR_ID,
+                    session=monday.date(),
+                    market_open_at=monday.replace(hour=13, minute=30),
+                    market_close_at=monday.replace(hour=20),
+                    decision_at=monday.replace(hour=21),
+                )
+            )
+            settings = EngineSettings(
+                database_url=migrated_database_url,
+                agent_paper_account_id=cycle.account_id,
+                agent_paper_candidate_batch_id=cycle.candidate_batch_id,
+            )
+        args = parser().parse_args(["scan", "--calendar-authority-id", str(CALENDAR_ID)])
+        result = await run(settings, args)
+        assert result["reconciled_results"] == 6 and result["checks"] == 0
+        assert result["provider_requests"] == result["model_requests"] == 0
+        async with factory() as session:
+            rows = tuple(await session.scalars(select(MonitorCoverageReceipt)))
+            for kind in ("price", "disclosure"):
+                assert Counter(r.reason for r in rows if r.kind == kind) == {
+                    "MONITOR_NO_APPROVED_CONDITION": 3
+                }
+            assert not await session.scalar(select(MonitorPlan.id))
+            # Each kind verifies authority at consumption time, even for the same output.
+            assert sorted(Counter(calls).values()) == [2, 2, 2]
+        again = await run(settings, args)
+        assert again["reconciled_results"] == 0 and len(calls) == 6
+    finally:
+        await factory.kw["bind"].dispose()

@@ -48,6 +48,7 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
     sdk_lifecycle_case=None,
     monitoring=False,
     monitoring_rejected=False,
+    no_monitor_conditions=False,
     monitoring_threshold="123.45",
     disclosure=False,
     before_research=None,
@@ -293,6 +294,10 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                     if baseline is not None and payload.get("disclosure_proposal") is not None
                     else None
                 )
+        if no_monitor_conditions:
+            for row in response.get("roles", ()):
+                if stage == "research":
+                    row["monitoring_proposal"] = row["disclosure_proposal"] = None
         return json.dumps(response), UsageSnapshot(input_tokens=100, output_tokens=100)
 
     monkeypatch.setattr("nexus.worker._ONCE_STARTED_AT", AT)
