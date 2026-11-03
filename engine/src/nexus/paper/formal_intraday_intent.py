@@ -23,6 +23,8 @@ from nexus.settings import EngineSettings
 
 _WAIT_CODES = {
     "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
+    "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
+    "MANUAL_HOST_NOT_READY",
     "MANUAL_PREPARATION_ACK_BLOCKED",
     "MANUAL_PREPARATION_CLOSE_BLOCKED",
     "MANUAL_PREPARATION_RECOVERY_BLOCKED",
@@ -68,6 +70,7 @@ def _account(settings: EngineSettings) -> UUID:
 
 
 async def _scope(session: AsyncSession, settings: EngineSettings, now: datetime) -> str:
+    from nexus.agents.platform_native import native_runtime_matches
     from nexus.agents.platform_profile import sol_business_model_matches
 
     account = _account(settings)
@@ -80,8 +83,11 @@ async def _scope(session: AsyncSession, settings: EngineSettings, now: datetime)
     model = await require_formal_stage_model_profile(
         session, model_config_id=settings.agent_paper_formal_model_config_id, now=now
     )
-    if settings.research_admission_mode != (
-        "responses" if sol_business_model_matches(model) else "codex_sdk"
+    platform = sol_business_model_matches(model)
+    if (
+        settings.research_admission_mode != ("responses" if platform else "codex_sdk")
+        or platform
+        and not native_runtime_matches(settings)
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     return job_input_hash(
@@ -93,6 +99,26 @@ async def _scope(session: AsyncSession, settings: EngineSettings, now: datetime)
             "daily_limit": str(settings.agent_daily_budget_usd.normalize()),
         }
     )
+
+
+async def _expire_unsent(session: AsyncSession, row: FormalIntradayIntent, now: datetime) -> None:
+    # Caller holds the same account lock as both conversion transactions.
+    if row.state not in {"pending", "checking"} or now < row.expires_at:
+        raise ValueError("FORMAL_INTENT_CONVERSION_UNCONFIRMED")
+    existing = await session.scalar(
+        select(ManualPaperRequest.id)
+        .where(
+            or_(
+                ManualPaperRequest.id == row.id,
+                (ManualPaperRequest.account_id == row.account_id)
+                & (ManualPaperRequest.key_hash == row.key_hash),
+            )
+        )
+        .limit(1)
+    )
+    if existing is not None:
+        raise ValueError("FORMAL_INTENT_CONVERSION_UNCONFIRMED")
+    row.state, row.code, row.checked_at = "expired", "FORMAL_INTENT_EXPIRED", now
 
 
 async def intent_command(
@@ -112,9 +138,10 @@ async def intent_command(
     now = await _now(session)
     if row is not None:
         if action == "cancel-formal-intent" and row.state == "pending":
-            row.state = "expired" if now >= row.expires_at else "cancelled"
-            row.code = "FORMAL_INTENT_" + row.state.upper()
-            row.checked_at = now
+            if now >= row.expires_at:
+                await _expire_unsent(session, row, now)
+            else:
+                row.state, row.code, row.checked_at = "cancelled", "FORMAL_INTENT_CANCELLED", now
         return _view(row, now)
     if action != "register-formal-intent":
         raise ValueError("MANUAL_NOT_FOUND")
@@ -139,9 +166,9 @@ async def intent_command(
         )
     )
     if current is not None:
-        if current.state != "pending" or now < current.expires_at:
+        if now < current.expires_at:
             raise ValueError("FORMAL_INTENT_ALREADY_REGISTERED")
-        current.state, current.code, current.checked_at = "expired", "FORMAL_INTENT_EXPIRED", now
+        await _expire_unsent(session, current, now)
         await session.flush()
     digest = await _scope(session, settings, now)
     assert settings.agent_paper_candidate_batch_id and settings.agent_paper_formal_model_config_id
@@ -170,15 +197,22 @@ async def due_intent(session: AsyncSession, account_id: UUID) -> UUID | None:
     now = await _now(session)
     return (
         await session.scalars(
-            select(FormalIntradayIntent.id).where(
+            select(FormalIntradayIntent.id)
+            .where(
                 FormalIntradayIntent.account_id == account_id,
-                FormalIntradayIntent.state == "pending",
+                or_(
+                    FormalIntradayIntent.state == "pending",
+                    (FormalIntradayIntent.state == "checking")
+                    & (FormalIntradayIntent.expires_at <= now),
+                ),
                 or_(
                     FormalIntradayIntent.checked_at.is_(None),
                     FormalIntradayIntent.expires_at <= now,
                     FormalIntradayIntent.checked_at <= now - timedelta(seconds=30),
                 ),
             )
+            .order_by(FormalIntradayIntent.expires_at, FormalIntradayIntent.id)
+            .limit(1)
         )
     ).one_or_none()
 
@@ -213,13 +247,14 @@ async def advance_intent(
     if (
         row is None
         or row.account_id != _account(settings)
-        or row.state != ("checking" if convert else "pending")
+        or row.state not in {"pending", "checking"}
     ):
         return False
     now = await _now(session)
     if now >= row.expires_at:
-        row.checked_at = now
-        row.state, row.code = "expired", "FORMAL_INTENT_EXPIRED"
+        await _expire_unsent(session, row, now)
+        return False
+    if row.state != ("checking" if convert else "pending"):
         return False
     try:
         cal = await select_agent_paper_service_calendar_authority(session, now=now)
@@ -297,30 +332,41 @@ async def consume_intent(settings: EngineSettings, *, intent_id: UUID) -> None:
     from nexus.persistence.session import session_factory
 
     factory = session_factory(settings)
-    converting = False
     try:
-        async with factory.begin() as session:
-            allowed = await advance_intent(session, settings, intent_id=intent_id, convert=False)
-        if not allowed:
-            return
-        converting = True
-        async with factory.begin() as session:
-            await advance_intent(session, settings, intent_id=intent_id, convert=True)
-    except (ResearchAccountingBusy, ValueError) as error:
-        # Only known body refusals after a completed rollback may resume waiting.
-        if not isinstance(error, ResearchAccountingBusy) and str(error) != "FORMAL_INTENT_EXPIRED":
-            raise
-        async with factory.begin() as session:
-            await lock_portfolio_account(session, _account(settings))
-            row = await session.get(FormalIntradayIntent, intent_id)
-            if row is not None and row.state == ("checking" if converting else "pending"):
-                now = await _now(session)
-                row.checked_at = now
-                if now >= row.expires_at:
-                    row.state, row.code = "expired", "FORMAL_INTENT_EXPIRED"
-                elif converting:
-                    row.state, row.code = "pending", "RESEARCH_ACCOUNTING_BUSY"
-                else:
-                    row.code = "RESEARCH_ACCOUNTING_BUSY"
+        for converting in (False, True):
+            refused = False
+            async with factory.begin() as session:
+                try:
+                    allowed = await advance_intent(
+                        session, settings, intent_id=intent_id, convert=converting
+                    )
+                except (ResearchAccountingBusy, ValueError) as error:
+                    if (
+                        not isinstance(error, ResearchAccountingBusy)
+                        and str(error) != "FORMAL_INTENT_EXPIRED"
+                    ):
+                        raise
+                    # Only an exception raised by the body enters this branch.
+                    # A rollback, commit or context-exit failure skips compensation.
+                    await session.rollback()
+                    refused = True
+                    allowed = False
+            if refused:
+                async with factory.begin() as session:
+                    await lock_portfolio_account(session, _account(settings))
+                    row = await session.get(FormalIntradayIntent, intent_id)
+                    if row is not None and row.state == ("checking" if converting else "pending"):
+                        now = await _now(session)
+                        if now >= row.expires_at:
+                            await _expire_unsent(session, row, now)
+                        else:
+                            row.state, row.code, row.checked_at = (
+                                "pending",
+                                "RESEARCH_ACCOUNTING_BUSY",
+                                now,
+                            )
+                return
+            if not allowed:
+                return
     finally:
         await factory.kw["bind"].dispose()
