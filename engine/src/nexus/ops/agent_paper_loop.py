@@ -4285,7 +4285,7 @@ async def inspect_agent_version_evaluation_loop(
 
 
 async def _read_portfolio_security_job(session: AsyncSession, cycle: AgentPaperCycleRecord) -> Job:
-    from nexus.jobs.models import job_input_hash
+    from nexus.agents.research_job_identity import research_run_job_input_hash
     from nexus.paper.agent_cycle_models import candidate_manifest_hash, parse_candidate_manifest
     from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
     from nexus.persistence.models.agents import AgentResearchRunRecord
@@ -4344,20 +4344,7 @@ async def _read_portfolio_security_job(session: AsyncSession, cycle: AgentPaperC
         run = by_run.get(str(job.payload.get("run_id")))
         if run is None:
             raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
-        durable_hash = job_input_hash(
-            {
-                "instrument_id": str(run.instrument_id),
-                "data_snapshot_id": str(run.data_snapshot_id),
-                "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                "request_hash": run.input_hash,
-                "schema_hash": run.schema_hash,
-                "model_hash": run.model_hash,
-                "prompt_hash": run.prompt_hash,
-                "evidence_hash": run.evidence_hash,
-                "tool_hash": run.tool_hash,
-                "pricing_version": run.pricing_version,
-            }
-        )
+        durable_hash = research_run_job_input_hash(run)
         if (
             run.actor_id != "local-agent-paper-cycle"
             or run.idempotency_key != f"agent-paper:{cycle.id}:{run.instrument_id}"

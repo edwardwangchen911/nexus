@@ -58,6 +58,7 @@ from nexus.agents.price_authority import (
     freeze_price_authority,
     revalidate_frozen_price_authority,
 )
+from nexus.agents.research_job_identity import research_job_input_hash
 from nexus.agents.research_maintenance import claim_research_identity as claim_or_lock
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.jobs.models import (
@@ -66,8 +67,8 @@ from nexus.jobs.models import (
     QueueName,
     RetryPolicy,
     canonical_job_key,
-    job_input_hash,
 )
+from nexus.jobs.models import job_input_hash as job_input_hash
 from nexus.jobs.repository import enqueue_job
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -1345,19 +1346,17 @@ async def _admit_research_run(
     ).hexdigest()
     prompt = prompts["orchestrator"]
     worst_case = model.worst_case_cost_usd
-    durable_input_hash = job_input_hash(
-        {
-            "instrument_id": str(request.instrument_id),
-            "data_snapshot_id": str(request.data_snapshot_id),
-            "decision_time": request.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "request_hash": request_hash,
-            "schema_hash": _schema_hash(portfolio_prompt_version=prompts["portfolio"].version),
-            "model_hash": model.config_hash,
-            "prompt_hash": prompt_manifest_hash,
-            "evidence_hash": evidence_manifest_hash,
-            "tool_hash": _tool_hash(),
-            "pricing_version": model.version,
-        }
+    durable_input_hash = research_job_input_hash(
+        instrument_id=request.instrument_id,
+        data_snapshot_id=request.data_snapshot_id,
+        decision_time=request.decision_time,
+        request_hash=request_hash,
+        schema_hash=_schema_hash(portfolio_prompt_version=prompts["portfolio"].version),
+        model_hash=model.config_hash,
+        prompt_hash=prompt_manifest_hash,
+        evidence_hash=evidence_manifest_hash,
+        tool_hash=_tool_hash(),
+        pricing_version=model.version,
     )
     job_key = canonical_job_key(
         JobKeyV1(

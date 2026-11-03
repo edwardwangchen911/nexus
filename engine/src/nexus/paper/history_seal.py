@@ -20,6 +20,7 @@ from nexus.agents.codex_formal_stage import formal_preparation_model_matches
 from nexus.agents.codex_sdk import MODEL_ID
 from nexus.agents.codex_versions import ACTIONABLE_CONFIG_VERSIONS
 from nexus.agents.committee import CommitteeRoleOutput, StageFailureDiagnostic, StageInputIdentity
+from nexus.agents.research_job_identity import research_run_job_input_hash
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import job_input_hash
@@ -569,20 +570,7 @@ async def _legacy_proof(
     if len(jobs) != 1:
         raise ValueError(_BLOCKED)
     job = jobs[0]
-    expected = job_input_hash(
-        {
-            "instrument_id": str(run.instrument_id),
-            "data_snapshot_id": str(run.data_snapshot_id),
-            "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "request_hash": run.input_hash,
-            "schema_hash": run.schema_hash,
-            "model_hash": run.model_hash,
-            "prompt_hash": run.prompt_hash,
-            "evidence_hash": run.evidence_hash,
-            "tool_hash": run.tool_hash,
-            "pricing_version": run.pricing_version,
-        }
-    )
+    expected = research_run_job_input_hash(run)
     if (
         job.status not in {"failed", "dead_letter"}
         or job.finished_at is None

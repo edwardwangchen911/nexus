@@ -12,6 +12,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.research_job_identity import research_run_job_input_hash
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import JobKeyV1, JobType, canonical_job_key, job_input_hash
@@ -258,20 +259,7 @@ async def require_no_live_research_runs(session: AsyncSession, *, now: datetime)
         if len(jobs) != 1:
             raise ValueError(BLOCKED)
         job = jobs[0]
-        expected = job_input_hash(
-            {
-                "instrument_id": str(run.instrument_id),
-                "data_snapshot_id": str(run.data_snapshot_id),
-                "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                "request_hash": run.input_hash,
-                "schema_hash": run.schema_hash,
-                "model_hash": run.model_hash,
-                "prompt_hash": run.prompt_hash,
-                "evidence_hash": run.evidence_hash,
-                "tool_hash": run.tool_hash,
-                "pricing_version": run.pricing_version,
-            }
-        )
+        expected = research_run_job_input_hash(run)
         if (
             job.job_type not in {"agent.research", "agent.paper.research"}
             or job.schema_version != "agent_research_job_v1"

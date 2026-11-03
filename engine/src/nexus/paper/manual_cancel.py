@@ -17,7 +17,9 @@ from nexus.agents.codex_versions import (
 )
 from nexus.agents.execution import _terminal_without_usage
 from nexus.agents.persistence import require_reserved_daily_budget, try_lock_budget_day
-from nexus.jobs.models import QueueName, job_input_hash
+from nexus.agents.research_job_identity import research_run_job_input_hash
+from nexus.jobs.models import QueueName
+from nexus.jobs.models import job_input_hash as job_input_hash
 from nexus.jobs.repository import claim_next_job, finalize_job
 from nexus.paper.agent_cycle_models import CycleStatus, canonical_cycle_event_hash
 from nexus.paper.projection import load_paper_projection
@@ -140,21 +142,7 @@ async def _legacy_cancel_unused_manual_research(
             or job.payload != {"run_id": str(run.id)}
             or job.scope_id != str(run.instrument_id)
             or job.effective_at != cutoff
-            or job.input_hash
-            != job_input_hash(
-                {
-                    "instrument_id": str(run.instrument_id),
-                    "data_snapshot_id": str(run.data_snapshot_id),
-                    "decision_time": run.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                    "request_hash": run.input_hash,
-                    "schema_hash": run.schema_hash,
-                    "model_hash": run.model_hash,
-                    "prompt_hash": run.prompt_hash,
-                    "evidence_hash": run.evidence_hash,
-                    "tool_hash": run.tool_hash,
-                    "pricing_version": run.pricing_version,
-                }
-            )
+            or job.input_hash != research_run_job_input_hash(run)
         ):
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
         if (

@@ -15,7 +15,9 @@ from nexus.agents.codex_versions import (
     FORMAL_STAGE_CAPACITY_CONFIG_VERSION,
     FULL_INPUT_CAPACITY_CONFIG_VERSION,
 )
-from nexus.jobs.models import JobType, QueueName, RetryPolicy, job_input_hash
+from nexus.agents.research_job_identity import research_run_job_input_hash
+from nexus.jobs.models import JobType, QueueName, RetryPolicy
+from nexus.jobs.models import job_input_hash as job_input_hash
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job, JobAttempt
 
@@ -132,20 +134,7 @@ async def formal_stage_job_qualified(
 
 
 def _formal_stage_job_hash(run: AgentResearchRunRecord) -> str:
-    return job_input_hash(
-        {
-            "instrument_id": str(run.instrument_id),
-            "data_snapshot_id": str(run.data_snapshot_id),
-            "decision_time": run.decision_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "request_hash": run.input_hash,
-            "schema_hash": run.schema_hash,
-            "model_hash": run.model_hash,
-            "prompt_hash": run.prompt_hash,
-            "evidence_hash": run.evidence_hash,
-            "tool_hash": run.tool_hash,
-            "pricing_version": run.pricing_version,
-        }
-    )
+    return research_run_job_input_hash(run, decision_time=run.decision_time.astimezone(UTC))
 
 
 async def require_formal_stage_model_profile(
