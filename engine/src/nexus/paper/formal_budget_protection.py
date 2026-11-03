@@ -9,7 +9,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
@@ -195,7 +195,23 @@ async def apply_protection(
             raise ValueError("FORMAL_BUDGET_APPLY_CONFLICT")
         return existing
     from nexus.paper.preparation_unknown_ack import require_no_conflicting_formal_successor
+    from nexus.persistence.models.manual_paper import FormalIntradayIntent
 
+    if await session.scalar(text("SHOW transaction_isolation")) != "read committed":
+        raise ValueError("FORMAL_BUDGET_BINDING_INVALID")
+    if (
+        await session.scalar(
+            select(FormalIntradayIntent.id)
+            .where(
+                FormalIntradayIntent.account_id == account_id,
+                FormalIntradayIntent.session_date == now.date(),
+                FormalIntradayIntent.state == "converted",
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise ValueError("FORMAL_BUDGET_SLOT_ALREADY_CLAIMED")
     await require_no_conflicting_formal_successor(session, account_id=account_id, now=now)
     if prior is not None:
         await _validate_binding(session, prior)

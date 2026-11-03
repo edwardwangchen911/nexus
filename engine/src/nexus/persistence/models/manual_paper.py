@@ -1,6 +1,6 @@
 """Immutable identity and append-only receipts for explicit manual Paper requests."""
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, UniqueConstraint, text
@@ -9,6 +9,26 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
+
+
+class FormalIntradayIntent(Base):
+    """One same-session consent. It has no execution or reservation authority."""
+
+    __tablename__ = "formal_intraday_intents"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("paper_accounts.id"))
+    batch_id: Mapped[UUID] = mapped_column(ForeignKey("agent_paper_candidate_batches.id"))
+    model_id: Mapped[UUID] = mapped_column(ForeignKey("agent_model_configs.id"))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    scope_hash: Mapped[str] = mapped_column(String(64))
+    calendar_id: Mapped[UUID]
+    session_date: Mapped[date]
+    registered_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    state: Mapped[str]
+    code: Mapped[str]
+    checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    request_id: Mapped[UUID | None] = mapped_column(ForeignKey("manual_paper_requests.id"))
 
 
 class ManualPaperRequest(ImmutableCreatedAt, Base):

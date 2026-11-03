@@ -32,6 +32,7 @@ from nexus.paper.current_preparation_recovery import (
     PreparationRecoveryReceipt,
     recover_current_preparation,
 )
+from nexus.paper.formal_intraday_intent import IntentReceipt, intent_command
 from nexus.paper.history_seal import (
     HistorySealReceipt,
     ResearchProcessDiagnosticError,
@@ -213,6 +214,8 @@ def parser() -> argparse.ArgumentParser:
         "check-formal-admission",
         help="Read formal queue eligibility without reserving a budget or submitting",
     )
+    for action in ("register-formal-intent", "read-formal-intent", "cancel-formal-intent"):
+        commands.add_parser(action).add_argument("--idempotency-key", required=True)
     start = commands.add_parser("start")
     start.add_argument(
         "--mode",
@@ -283,6 +286,7 @@ async def run(
     settings: EngineSettings, args: argparse.Namespace
 ) -> (
     ManualRequestView
+    | IntentReceipt
     | FormalAdmissionCheck
     | TerminalCycleCancelReceipt
     | HistorySealReceipt
@@ -338,6 +342,13 @@ async def run(
                 )
                 _require_maintenance_code(args.repo_root, settings.release_revision)
                 return independent_receipt
+        if args.action in {"register-formal-intent", "read-formal-intent", "cancel-formal-intent"}:
+            async with diagnostic.transaction(factory) as session:
+                if args.action == "read-formal-intent":
+                    await session.execute(text("SET TRANSACTION READ ONLY"))
+                return await intent_command(
+                    session, settings, action=args.action, key=args.idempotency_key
+                )
         if args.action == "check-formal-admission":
             async with factory.begin() as session:
                 await session.execute(

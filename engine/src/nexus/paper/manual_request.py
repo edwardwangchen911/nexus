@@ -468,6 +468,7 @@ async def admit_manual_request(
     runtime_mode: str = "codex_sdk",
     daily_limit_usd: Decimal = Decimal("3.00"),
     two_flight: bool = False,
+    intent_id: UUID | None = None,
 ) -> ManualRequestView:
     ManualRequestInput(mode=mode)
     if (
@@ -482,6 +483,31 @@ async def admit_manual_request(
         raise ValueError("MANUAL_REQUEST_INVALID")
     await lock_portfolio_account(session, account_id)
     key_hash = sha256(idempotency_key.encode()).hexdigest()
+    from nexus.persistence.models.manual_paper import FormalIntradayIntent
+
+    if intent_id is not None:
+        consent = await session.get(FormalIntradayIntent, intent_id)
+        if (
+            consent is None
+            or consent.state != "checking"
+            or consent.account_id != account_id
+            or mode != "research_and_paper"
+            or consent.batch_id != batch_id
+            or consent.model_id != model_config_id
+            or idempotency_key != str(consent.id)
+        ):
+            raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
+        key_hash = consent.key_hash
+    elif (
+        await session.scalar(
+            select(FormalIntradayIntent.id).where(
+                FormalIntradayIntent.account_id == account_id,
+                FormalIntradayIntent.key_hash == key_hash,
+            )
+        )
+        is not None
+    ):
+        raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
     identity = manual_request_hash(
         account_id=account_id, batch_id=batch_id, mode=mode, contract_version=contract_version
     )
@@ -569,6 +595,8 @@ async def admit_manual_request(
         request_hash=identity,
         requested_at=now,
     )
+    if intent_id is not None:
+        row.id = intent_id
     session.add(row)
     await session.flush()
     return await _append(session, row, status="queued", code="MANUAL_REQUEST_QUEUED", at=now)
@@ -812,6 +840,22 @@ async def claim_manual_request(
     )
     if batch.batch_hash != row.batch_hash or model.config_hash != row.model_hash:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
+    # Other gates may have waited on locks. Check the frozen intent deadline
+    # again immediately before granting the first execution.
+    from nexus.persistence.models.manual_paper import FormalIntradayIntent
+
+    if row.mode == "research_and_paper":
+        consent = await session.get(FormalIntradayIntent, row.id)
+        if consent is not None:
+            now = await _database_now(session)
+            if (
+                consent.state != "converted"
+                or consent.request_id != row.id
+                or now >= consent.expires_at
+            ):
+                return await _append(
+                    session, row, status="unavailable", code="MANUAL_INPUTS_UNAVAILABLE", at=now
+                ), False
     return await _append(
         session, row, status="preparing", code="MANUAL_PREPARATION_STARTED", at=now
     ), True

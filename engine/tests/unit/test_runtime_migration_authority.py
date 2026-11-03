@@ -42,6 +42,12 @@ def test_medium_profile_preserves_stable_round_predecessor():
 
 def test_sol_business_profile_preserves_medium_profile_predecessor():
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-    revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
+    revision = ScriptDirectory.from_config(config).get_revision("0113_sol_business_profile")
     assert revision.revision == "0113_sol_business_profile"
     assert revision.down_revision == "0112_platform_medium_profile"
+
+
+def test_intent_migration_retains_sol_predecessor():
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
+    assert revision.down_revision == "0113_sol_business_profile"
