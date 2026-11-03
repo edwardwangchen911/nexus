@@ -739,6 +739,21 @@ uv run --project engine nexus-engine-manual-paper --repo-root "$PWD" \
 正式定时预算保护开启时返回 `MANUAL_BUDGET_PROTECTED`，不动定时专用分配，不提高额度。
 GET、CLI read、刷新及重复 POST 均不能领取、恢复或重跑未知请求。
 
+### 盘中显式授权，条件满足后由同一宿主领取
+
+仅在用户明确授权“本交易日内条件满足后执行一次正式研究”时，通过受保护配置登记一次。将唯一键先保存在私有目录，正常 CLI 为：
+
+```bash
+.venv/bin/nexus-engine-manual-paper --repo-root "$PWD" --env-file infra/.env.local \
+  register-formal-intent --idempotency-key "$NEW_REQUEST_KEY"
+.venv/bin/nexus-engine-manual-paper --repo-root "$PWD" --env-file infra/.env.local \
+  read-formal-intent --idempotency-key "$NEW_REQUEST_KEY"
+```
+
+登记返回意图编号和当日交易所收盘截止。待准入意图没有正常请求、预算预留或模型派发权。宿主优先处理原自然槽及现有工作，在同日原日槽五分钟认领窗口结束后复查；仍阻塞时保留原因。转换成功后，用回执的 `request_id` 走既有 `read --request-id` 跟踪。旧未知、有效租约、经济预算绑定及正式准备沿原入口判断。到期后仅查原键；未转换的 pending 可显式 `cancel-formal-intent --idempotency-key`。
+
+`checking` 表示转换事务尚无可消费的确定结果。仅查原身份，宿主重启也不重新转换。维护镜像可读，禁止登记、转换和派发。已有意图时保留 0114 数据，应用回滚到同 schema 的维护镜像。聊天中的授权须由操作者调用一次登记入口才能落盘，宿主只消费数据库事实。
+
 0075 迁移增加不可变请求及回执、仅研究原生终态分支和数据库执行门禁；只在隔离库验证。
 有手动事实时不得直接降级删除，应用回退保留 head 与原始事实；尚无主库迁移或服务部署。
 旧应用对新 head 的兼容性须单独验证；不能把保留 schema 等同于旧镜像可直接启动。

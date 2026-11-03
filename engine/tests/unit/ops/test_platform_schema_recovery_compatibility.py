@@ -27,6 +27,20 @@ TARGET = "0106_platform_qualification"
     [
         (
             3,
+            "0114_formal_intraday_intent",
+            "0114_formal_intraday_intent",
+            "pending_consumer_exit_0114_v1",
+            True,
+        ),
+        (
+            3,
+            "0113_sol_business_profile",
+            "0114_formal_intraday_intent",
+            "pending_consumer_exit_0114_v1",
+            False,
+        ),
+        (
+            3,
             "0112_platform_medium_profile",
             "0112_platform_medium_profile",
             "pending_consumer_exit_0112_v1",

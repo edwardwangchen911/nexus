@@ -258,7 +258,11 @@ async def inspect_manual_queue(
         async with factory.begin() as session:
             await session.execute(text("SET TRANSACTION READ ONLY"))
             view = await peek_manual_request(session, account_id=account_id)
-            return snapshot if view is None else bind_manual_queue(snapshot, view)
+            if view is not None:
+                return bind_manual_queue(snapshot, view)
+            from nexus.paper.formal_intraday_intent import due_intent
+
+            return replace(snapshot, formal_intent_id=await due_intent(session, account_id))
     finally:
         await factory.kw["bind"].dispose()
 
@@ -365,7 +369,12 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
     try:
         async with factory.begin() as session:
             await session.execute(text("SET TRANSACTION READ ONLY"))
-            return await peek_manual_request(session, account_id=account_id) is not None
+            from nexus.paper.formal_intraday_intent import due_intent
+
+            return (
+                await peek_manual_request(session, account_id=account_id) is not None
+                or await due_intent(session, account_id) is not None
+            )
     finally:
         await factory.kw["bind"].dispose()
 
@@ -412,6 +421,10 @@ async def claim_configured_manual_request(
                 calendar.local_date == calendar.session
                 and calendar.market_open_at <= now < calendar.market_close_at
             )
+    if available and row.mode == "research_and_paper":
+        from nexus.paper.formal_intraday_intent import intent_claim_available
+
+        available = await intent_claim_available(session, settings, request_id=row.id, now=now)
     if not available:
         return await record_manual_request_event(
             session, row, status="unavailable", code="MANUAL_INPUTS_UNAVAILABLE"

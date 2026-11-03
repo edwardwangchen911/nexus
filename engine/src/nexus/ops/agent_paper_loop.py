@@ -242,6 +242,7 @@ class AgentPaperLoopAction(StrEnum):
     TRIGGER = "trigger"
     FINISH_MANUAL = "finish_manual"
     TRIGGER_MANUAL = "trigger_manual"
+    ADMIT_FORMAL_INTENT = "admit_formal_intent"
     PREPARE_INPUTS = "prepare_inputs"
     RUN_RESEARCH_JOB = "run_research_job"
     RESUME = "resume"
@@ -300,6 +301,7 @@ class AgentPaperLoopSnapshot:
     manual_pending_request_id: UUID | None = None
     manual_pending_status: str | None = None
     manual_research_only: bool = False
+    formal_intent_id: UUID | None = None
     monitor_trigger_id: UUID | None = None
     monitor_trigger_status: str | None = None
     monitor_batch_id: UUID | None = None
@@ -1872,6 +1874,14 @@ def choose_loop_action(
         return AgentPaperLoopAction.STOP_DISABLED
     if prepared_market_open_at is None:
         prepared_market_open_at = snapshot.host_prepared_market_open_at
+    if snapshot.formal_intent_id is not None:
+        ordinary = choose_loop_action(
+            replace(snapshot, formal_intent_id=None),
+            prepared_market_open_at=prepared_market_open_at,
+        )
+        if ordinary in {AgentPaperLoopAction.WAIT_FOR_SESSION, AgentPaperLoopAction.WAIT_FOR_SLOT}:
+            return AgentPaperLoopAction.ADMIT_FORMAL_INTENT
+        return ordinary
     if snapshot.monitor_trigger_id is not None:
         ordinary = choose_loop_action(
             replace(snapshot, monitor_trigger_id=None, monitor_trigger_status=None),
@@ -3099,6 +3109,17 @@ async def execute_agent_paper_loop_action(
             if result["status"] in {"unknown", "unconfirmed"}
             else None
         )
+    if action == AgentPaperLoopAction.ADMIT_FORMAL_INTENT:
+        from nexus.paper.formal_intraday_intent import consume_intent
+
+        if (
+            choose_loop_action(snapshot) != action
+            or snapshot.formal_intent_id is None
+            or account_id != settings.agent_paper_account_id
+        ):
+            raise RuntimeError("AGENT_PAPER_LOOP_RESULT_UNKNOWN")
+        await consume_intent(settings, intent_id=snapshot.formal_intent_id)
+        return None
     if action == AgentPaperLoopAction.TRIGGER_MANUAL:
         from nexus.ops.manual_paper_host import dispatch_manual_request
 
