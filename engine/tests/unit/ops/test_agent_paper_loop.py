@@ -450,15 +450,18 @@ def test_foreground_prepares_once_then_waits_for_formal_slot(monkeypatch, tmp_pa
     checked_intents = []
 
     async def consume(_settings, *, intent_id):
+        assert not checked_intents, "the original daily slot must run before another intent check"
         checked_intents.append(intent_id)
 
     monkeypatch.setattr(formal_intraday_intent, "consume_intent", consume)
 
     async def inspect():
+        now = market_open + timedelta(seconds=elapsed)
+        # The pending intent is eligible for inspection again at the daily slot.
         return replace(
             base,
-            now=market_open + timedelta(seconds=elapsed),
-            formal_intent_id=intent_id if not checked_intents else None,
+            now=now,
+            formal_intent_id=intent_id if not checked_intents or now >= slot else None,
         )
 
     async def execute(action, state):
@@ -473,6 +476,17 @@ def test_foreground_prepares_once_then_waits_for_formal_slot(monkeypatch, tmp_pa
                 snapshot=state,
             )
         if action == A.TRIGGER:
+            assert state.now >= slot and state.formal_intent_id == intent_id
+            if intent_id is not None:
+                account = UUID(int=1)
+                with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
+                    await loop.execute_agent_paper_loop_action(
+                        loop.EngineSettings(agent_paper_account_id=account),
+                        account_id=account,
+                        repo_root=tmp_path,
+                        action=A.ADMIT_FORMAL_INTENT,
+                        snapshot=state,
+                    )
             return A.STOP_REQUESTED
         return None
 
