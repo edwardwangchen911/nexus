@@ -2332,7 +2332,9 @@ async def run_foreground_loop(
             raise
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
-        action = choose_loop_action(snapshot, prepared_market_open_at=prepared_market_open_at)
+        if prepared_market_open_at is not None:
+            snapshot = replace(snapshot, host_prepared_market_open_at=prepared_market_open_at)
+        action = choose_loop_action(snapshot)
         if action in {
             AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
             AgentPaperLoopAction.STOP_CYCLE_UNAVAILABLE,
@@ -2400,8 +2402,6 @@ async def run_foreground_loop(
             if stopped is not None:
                 return stopped
             continue
-        if action == AgentPaperLoopAction.RUN_MONITOR_INCREMENT:
-            snapshot = replace(snapshot, host_prepared_market_open_at=prepared_market_open_at)
         action_task: asyncio.Future[AgentPaperLoopAction | None] = asyncio.ensure_future(
             execute(action, snapshot)
         )

@@ -430,7 +430,10 @@ def test_opening_preparation_reports_safe_failure_phase(
     assert "private-provider-detail" not in diagnostic
 
 
-def test_foreground_prepares_once_then_waits_for_formal_slot() -> None:
+@pytest.mark.parametrize("intent_id", [None, UUID(int=17)], ids=["ordinary", "formal-intent"])
+def test_foreground_prepares_once_then_waits_for_formal_slot(monkeypatch, tmp_path, intent_id):
+    from nexus.paper import formal_intraday_intent
+
     market_open = datetime(2026, 9, 23, 13, 30, tzinfo=UTC)
     slot = market_open + timedelta(minutes=30)
     base = loop.AgentPaperLoopSnapshot(
@@ -444,12 +447,46 @@ def test_foreground_prepares_once_then_waits_for_formal_slot() -> None:
     elapsed = 0.0
     actions = []
 
-    async def inspect():
-        return replace(base, now=market_open + timedelta(seconds=elapsed))
+    checked_intents = []
 
-    async def execute(action, _snapshot):
+    async def consume(_settings, *, intent_id):
+        assert not checked_intents, "the original daily slot must run before another intent check"
+        checked_intents.append(intent_id)
+
+    monkeypatch.setattr(formal_intraday_intent, "consume_intent", consume)
+
+    async def inspect():
+        now = market_open + timedelta(seconds=elapsed)
+        # The pending intent is eligible for inspection again at the daily slot.
+        return replace(
+            base,
+            now=now,
+            formal_intent_id=intent_id if not checked_intents or now >= slot else None,
+        )
+
+    async def execute(action, state):
         actions.append(action)
+        if action == A.ADMIT_FORMAL_INTENT:
+            account = UUID(int=1)
+            await loop.execute_agent_paper_loop_action(
+                loop.EngineSettings(agent_paper_account_id=account),
+                account_id=account,
+                repo_root=tmp_path,
+                action=action,
+                snapshot=state,
+            )
         if action == A.TRIGGER:
+            assert state.now >= slot and state.formal_intent_id == intent_id
+            if intent_id is not None:
+                account = UUID(int=1)
+                with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_RESULT_UNKNOWN"):
+                    await loop.execute_agent_paper_loop_action(
+                        loop.EngineSettings(agent_paper_account_id=account),
+                        account_id=account,
+                        repo_root=tmp_path,
+                        action=A.ADMIT_FORMAL_INTENT,
+                        snapshot=state,
+                    )
             return A.STOP_REQUESTED
         return None
 
@@ -471,7 +508,12 @@ def test_foreground_prepares_once_then_waits_for_formal_slot() -> None:
         )
     )
     assert result == A.STOP_REQUESTED
-    assert actions == [A.PREPARE_INPUTS, A.TRIGGER]
+    if intent_id is None:
+        assert actions == [A.PREPARE_INPUTS, A.TRIGGER]
+        assert not checked_intents
+    else:
+        assert actions == [A.PREPARE_INPUTS, A.ADMIT_FORMAL_INTENT, A.TRIGGER]
+        assert checked_intents == [intent_id]
     assert elapsed >= 30 * 60
 
 
