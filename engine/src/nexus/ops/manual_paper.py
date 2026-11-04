@@ -69,6 +69,7 @@ from nexus.paper.scheduled_unknown_acceptance import (
     ScheduledAcceptanceReceipt,
     inspect_or_accept_scheduled_unknown,
 )
+from nexus.paper.single_sol_research import SingleSolSelection, inspect_single_sol
 from nexus.paper.synthesis_usage_acceptance import (
     SynthesisUsageDiagnosticError,
     SynthesisUsageReceipt,
@@ -214,6 +215,10 @@ def parser() -> argparse.ArgumentParser:
         "check-formal-admission",
         help="Read formal queue eligibility without reserving a budget or submitting",
     )
+    commands.add_parser(
+        "inspect-single-sol",
+        help="Read a selected Sol batch member and full-session budget estimate",
+    ).add_argument("--instrument-id", type=UUID, required=True)
     for action in ("register-formal-intent", "read-formal-intent", "cancel-formal-intent"):
         commands.add_parser(action).add_argument("--idempotency-key", required=True)
     start = commands.add_parser("start")
@@ -288,6 +293,7 @@ async def run(
     ManualRequestView
     | IntentReceipt
     | FormalAdmissionCheck
+    | SingleSolSelection
     | TerminalCycleCancelReceipt
     | HistorySealReceipt
     | PreparationCloseReceipt
@@ -349,11 +355,15 @@ async def run(
                 return await intent_command(
                     session, settings, action=args.action, key=args.idempotency_key
                 )
-        if args.action == "check-formal-admission":
+        if args.action in {"check-formal-admission", "inspect-single-sol"}:
             async with factory.begin() as session:
                 await session.execute(
                     text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
                 )
+                if args.action == "inspect-single-sol":
+                    return await inspect_single_sol(
+                        session, settings, instrument_id=args.instrument_id
+                    )
                 return await check_configured_formal_admission(session, settings)
         if args.action == "run-research":
             from nexus.ops.manual_paper_host import run_pure_research_once
