@@ -13,7 +13,6 @@ from typing import Any, cast, get_args
 
 import httpx
 
-from nexus.agents.codex_sdk import _MAX_OUTPUT_BYTES
 from nexus.agents.http_failure import HttpResponseRejected, ProviderErrorCode
 from nexus.agents.responses_stream import (
     HttpCleanupResult,
@@ -21,6 +20,52 @@ from nexus.agents.responses_stream import (
     StreamProtocolError,
     close_owned_stream,
 )
+
+# The response envelope includes instructions, schema and usage in addition to
+# business output. Bound encoded SSE separately from the validated output text.
+_MAX_EVENT_WIRE_BYTES = 1024 * 1024
+_MAX_STREAM_WIRE_BYTES = 16 * _MAX_EVENT_WIRE_BYTES
+
+
+async def _sse_lines(stream: httpx.AsyncByteStream, deadline: float) -> AsyncIterator[str]:
+    """Count wire bytes in order, including comments, delimiters and split lines."""
+    loop = asyncio.get_running_loop()
+    pending = bytearray()
+    event_remaining = _MAX_EVENT_WIRE_BYTES
+    stream_remaining = _MAX_STREAM_WIRE_BYTES
+    async for chunk in stream:
+        if not chunk and loop.time() >= deadline:
+            raise TimeoutError("RESPONSES_WORK_DEADLINE")
+        offset = 0
+        while offset < len(chunk):
+            if loop.time() >= deadline:
+                raise TimeoutError("RESPONSES_WORK_DEADLINE")
+            # Search and copy a bounded slice even for one oversized transport chunk.
+            end = min(offset + 65536, len(chunk))
+            lf = chunk.find(b"\n", offset, end)
+            stop = end if lf < 0 else lf + 1
+            size = stop - offset
+            if size > min(event_remaining, stream_remaining):
+                if event_remaining < stream_remaining:
+                    raise StreamProtocolError("RESPONSES_EVENT_TOO_LARGE")
+                raise StreamProtocolError("RESPONSES_STREAM_TOO_LARGE")
+            event_remaining -= size
+            stream_remaining -= size
+            line_end = end if lf < 0 else lf
+            pending.extend(chunk[offset:line_end])
+            offset = stop
+            if lf >= 0:
+                if pending.endswith(b"\r"):
+                    pending.pop()
+                line = pending.decode("utf-8")
+                pending.clear()
+                if not line:
+                    event_remaining = _MAX_EVENT_WIRE_BYTES
+                yield line
+    if loop.time() >= deadline:
+        raise TimeoutError("RESPONSES_WORK_DEADLINE")
+    if pending:
+        raise StreamProtocolError("RESPONSES_STREAM_TRUNCATED")
 
 
 @dataclass(frozen=True)
@@ -110,66 +155,48 @@ async def collect_response_stage(
             raise StreamProtocolError("RESPONSES_STREAM_UNAVAILABLE")
         response.is_stream_consumed = True
 
-        owned_stream = response.stream
-
-        async def chunks() -> AsyncIterator[bytes]:
-            # Read available bytes immediately: httpx chunk_size buffering can
-            # lose an already-received terminal when the next read disconnects.
-            # Own the final close ourselves; implicit EOF close must not hide a
-            # close failure behind Response.is_closed on a later second close.
-            async for raw_chunk in owned_stream:
-                for offset in range(0, len(raw_chunk), 4096):
-                    yield raw_chunk[offset : offset + 4096]
-
-        buffer = b""
         data: list[str] = []
         event_name: str | None = None
         ended = False
-        async for chunk in chunks():
-            buffer += chunk
-            while b"\n" in buffer:
-                raw, buffer = buffer.split(b"\n", 1)
-                line = raw.removesuffix(b"\r").decode("utf-8")
-                if line == "":
-                    if not data:
-                        event_name = None
-                        continue
-                    value = "\n".join(data)
-                    data = []
-                    if value == "[DONE]":
-                        if ended or terminal is None:
-                            raise StreamProtocolError("RESPONSES_TERMINAL_MISSING")
-                        ended = True
-                        event_name = None
-                        continue
-                    if ended:
-                        raise StreamProtocolError("RESPONSES_EVENT_AFTER_TERMINAL")
-                    event = json.loads(value)
-                    if not isinstance(event, dict) or (
-                        event_name is not None and event.get("type") != event_name
-                    ):
-                        raise StreamProtocolError("RESPONSES_EVENT_INVALID")
-                    if terminal is not None:
-                        raise StreamProtocolError("RESPONSES_EVENT_AFTER_TERMINAL")
-                    facts.observe(event)
-                    if facts.terminal_status is not None:
-                        terminal = event["response"]
-                        if on_terminal is not None:
-                            on_terminal(terminal, facts)
+        async for line in _sse_lines(response.stream, work_deadline):
+            if line == "":
+                if not data:
                     event_name = None
-                elif line.startswith(":"):
                     continue
-                elif line.startswith("data:"):
-                    data.append(line[5:].removeprefix(" "))
-                elif line.startswith("event:"):
-                    if event_name is not None:
-                        raise StreamProtocolError("RESPONSES_EVENT_INVALID")
-                    event_name = line[6:].removeprefix(" ")
-                if sum(len(item.encode()) for item in data) > _MAX_OUTPUT_BYTES:
-                    raise StreamProtocolError("RESPONSES_EVENT_TOO_LARGE")
-            if len(buffer) > _MAX_OUTPUT_BYTES:
-                raise StreamProtocolError("RESPONSES_EVENT_TOO_LARGE")
-        if buffer.strip() or data:
+                value = "\n".join(data)
+                data = []
+                if value == "[DONE]":
+                    if ended or terminal is None:
+                        raise StreamProtocolError("RESPONSES_TERMINAL_MISSING")
+                    ended = True
+                    event_name = None
+                    continue
+                if ended:
+                    raise StreamProtocolError("RESPONSES_EVENT_AFTER_TERMINAL")
+                event = json.loads(value)
+                if not isinstance(event, dict) or (
+                    event_name is not None and event.get("type") != event_name
+                ):
+                    raise StreamProtocolError("RESPONSES_EVENT_INVALID")
+                if terminal is not None:
+                    raise StreamProtocolError("RESPONSES_EVENT_AFTER_TERMINAL")
+                if loop.time() >= work_deadline:
+                    raise TimeoutError("RESPONSES_WORK_DEADLINE")
+                facts.observe(event)
+                if facts.terminal_status is not None:
+                    terminal = event["response"]
+                    if on_terminal is not None:
+                        on_terminal(terminal, facts)
+                event_name = None
+            elif line.startswith(":"):
+                continue
+            elif line.startswith("data:"):
+                data.append(line[5:].removeprefix(" "))
+            elif line.startswith("event:"):
+                if event_name is not None:
+                    raise StreamProtocolError("RESPONSES_EVENT_INVALID")
+                event_name = line[6:].removeprefix(" ")
+        if data or event_name is not None:
             raise StreamProtocolError("RESPONSES_STREAM_TRUNCATED")
         if terminal is None:
             raise StreamProtocolError("RESPONSES_TERMINAL_MISSING")

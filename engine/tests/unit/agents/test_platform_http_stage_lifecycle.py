@@ -427,3 +427,38 @@ async def test_platform_accounting_busy_retains_original_control_exception(
     failure = error.value.http_stage_failure
     assert failure.primary is original and not failure.provider_call_started
     assert failure.usage is None and client.is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized_answer", [False, True])
+async def test_large_envelope_preserves_business_limit_and_terminal_proof(
+    frozen, credential, oversized_answer
+):
+    value = terminal()
+    value["response"]["instructions"] = "i" * 150000
+    if oversized_answer:
+        value["response"]["output"][0]["content"][0]["text"] = json.dumps({"answer": "a" * 131072})
+    body = Body(("data: " + json.dumps(value) + "\n\n").encode())
+    calls = []
+
+    async def check():
+        return credential
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
+
+    protocol = Protocol()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    work = call(protocol, client, frozen, credential, check)
+    if oversized_answer:
+        with pytest.raises(HttpStageFailure) as exc:
+            await work
+        assert exc.value.usage.output_tokens == 9
+    else:
+        raw, usage = await work
+        assert json.loads(raw) == {"answer": "own result"} and usage.output_tokens == 9
+    observations = [details for name, details in protocol.events if name == "observe"]
+    assert len(observations) == 1 and observations[0]["valid"] == (not oversized_answer)
+    assert json.loads(observations[0]["payload"]) == value["response"]
+    assert len(calls) == body.closed == 1 and client.is_closed

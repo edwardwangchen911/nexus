@@ -169,6 +169,9 @@ def http_failure_facts(
         and not isinstance(cause, HttpResponseRejected)
         else None
     )
+    # The rollback reader accepts the existing size-rejection code.
+    if code == "RESPONSES_STREAM_TOO_LARGE":
+        code = "RESPONSES_EVENT_TOO_LARGE"
     return HttpFailureFacts(
         phase=phase,
         error_kind=_kind(cause, phase),
