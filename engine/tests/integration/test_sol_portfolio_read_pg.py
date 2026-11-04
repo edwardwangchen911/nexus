@@ -105,6 +105,8 @@ async def test_sol_portfolio_read(migrated_database_url, monkeypatch, tmp_path, 
                 stocks.append(stock)
             reasons = [stock["monitoring"]["coverage_reason"] for stock in stocks]
             assert reasons.count("audit_rejected") == 1
+            rejected = stocks[reasons.index("audit_rejected")]["monitoring"]
+            assert rejected["state"] == "not_installed" and rejected["plan_id"] is None
             assert sum(stock["monitoring"]["plan_id"] is not None for stock in stocks) == 2
         if directory := os.environ.get("NEXUS_SOL_READ_BROWSER_DIR"):
             evidence = Path(directory).resolve() / case
