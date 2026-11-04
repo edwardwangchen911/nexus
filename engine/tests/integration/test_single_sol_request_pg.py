@@ -5,6 +5,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from helpers.single_sol_clock import preopen_fixture_clock
 from integration import test_sol_native_preparation_pg as base
 from integration.test_sol_native_stage_pg import install_sol_http
 from nexus import worker
@@ -22,86 +23,20 @@ from nexus.persistence.models.runtime import WorkerHeartbeat
 from sqlalchemy import func, select, text
 
 
-async def preopen_fixture_clock(url, monkeypatch):
-    """One synthetic morning for archives, DB inserts, claims and model-local clocks."""
-    from helpers import current_identity
-    from integration import test_research_identity_context
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["complete", "late_history", "host", "late_queue", "late_locked", "unknown", "queued"]
+)
+async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
     from integration import test_research_request_pg as pure
-    from nexus.agents import snapshots
-    from nexus.agents.codex_candidate import require_candidate_database
-    from nexus.ops import instrument_identity_local
-    from nexus.persistence.session import session_factory
-    from nexus.research import current_identity_archive
-    from nexus.settings import EngineSettings
-    from sqlalchemy.engine import make_url
 
-    factory = session_factory(EngineSettings(database_url=url))
-    async with factory.begin() as db:
-        await require_candidate_database(db, configured_database=make_url(url).database)
-    account = await pure.seed_paper_batch(url)
+    account = await pure.seed_paper_batch(migrated_database_url)
 
     async def seeded_account(_url):
         return account
 
     monkeypatch.setattr(pure, "seed_paper_batch", seeded_account)
 
-    async with factory.begin() as db:
-        name = await db.scalar(text("SELECT current_database()"))
-        assert name.isidentifier() and name != "postgres"
-        wall = await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
-        target = wall.astimezone(ZoneInfo("America/New_York")).replace(
-            hour=8, minute=0, second=0, microsecond=0
-        )
-        while target >= wall or target.weekday() >= 5:
-            target -= timedelta(days=1)
-        target = target.astimezone(UTC)
-        delta = int((wall - target).total_seconds())
-        await db.execute(text("CREATE SCHEMA fixture_clock"))
-        await db.execute(
-            text(f"""CREATE FUNCTION fixture_clock.clock_timestamp() RETURNS timestamptz
-            LANGUAGE sql VOLATILE AS $$
-            SELECT pg_catalog.clock_timestamp() - interval '{delta} seconds' $$""")
-        )
-        await db.execute(
-            text(f"""CREATE FUNCTION fixture_clock.now() RETURNS timestamptz
-            LANGUAGE sql STABLE AS $$
-            SELECT pg_catalog.transaction_timestamp() - interval '{delta} seconds' $$""")
-        )
-        await db.execute(
-            text(f'ALTER DATABASE "{name}" SET search_path TO fixture_clock,public,pg_catalog')
-        )
-        await db.execute(
-            text("""DO $$ DECLARE obj record; BEGIN
-            FOR obj IN SELECT table_name FROM information_schema.columns
-            WHERE table_schema='public' AND column_name='created_at' AND column_default IS NOT NULL
-            LOOP EXECUTE format('ALTER TABLE public.%I ALTER COLUMN created_at '
-                'SET DEFAULT fixture_clock.now()', obj.table_name);
-            END LOOP; END $$""")
-        )
-    await factory.kw["bind"].dispose()
-
-    class FixtureTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return (datetime.now(UTC) - timedelta(seconds=delta)).astimezone(tz)
-
-    monkeypatch.setattr(worker, "_ONCE_STARTED_AT", target)
-    for module in (
-        current_identity,
-        test_research_identity_context,
-        instrument_identity_local,
-        current_identity_archive,
-        snapshots,
-        worker,
-    ):
-        monkeypatch.setattr(module, "datetime", FixtureTime)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "path", ["complete", "late_history", "host", "late_queue", "late_locked", "unknown", "queued"]
-)
-async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
     await preopen_fixture_clock(migrated_database_url, monkeypatch)
     original = base.current_record
 
