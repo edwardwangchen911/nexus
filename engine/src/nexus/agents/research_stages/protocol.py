@@ -319,6 +319,19 @@ class StagedProtocol:
                     except ValueError as error:
                         # No authorization was inserted. A policy refusal has a known outcome.
                         raise ProtocolRejected("SINGLE_SOL_GRANT_BLOCKED") from error
+            if route is not None and route.get("platform_binding") is not None:
+                from nexus.paper.independent_unknown_acceptance import (
+                    require_single_sol_successor_history,
+                )
+
+                try:
+                    await require_single_sol_successor_history(
+                        session,
+                        account_id=getattr(self.native_settings, "agent_paper_account_id", None),
+                        now=self._now(now),
+                    )
+                except ValueError as error:
+                    raise ProtocolRejected("SINGLE_SOL_SUCCESSOR_HISTORY_BLOCKED") from error
             now = self._now(now)
             cutoff = (
                 member["work_deadline"]

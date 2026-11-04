@@ -59,7 +59,7 @@ export function isManualReceipt(value: unknown): value is ManualReceipt {
 
 function isPureResearchReceipt(value: Record<string, unknown>): boolean {
   if (value.independent_disposition != null && (
-    value.research_contract !== "independent_monitor_research_v1" || value.status !== "unknown"
+    (value.research_contract !== "independent_monitor_research_v1" && value.research_contract !== "single_sol_research_v1") || value.status !== "unknown"
     || value.research == null || !["unknown_acknowledged", "recheck_required"].includes(String(value.independent_disposition))
   )) return false;
   if (value.mode !== (value.research_contract === "independent_monitor_research_v1" ? "research_and_monitor" : "research_only") || value.cycle_id !== null
@@ -74,7 +74,9 @@ function isPureResearchReceipt(value: Record<string, unknown>): boolean {
   if (["queued", "preparing"].includes(value.status)) return !bound;
   if (!bound) return ["unavailable", "unknown"].includes(value.status);
   return isManualResearch(value.research)
-    && (value.research_contract !== "single_sol_research_v1" || value.research.members.length === 1);
+    && (value.research_contract !== "single_sol_research_v1" || (value.research.members.length === 1
+      && (value.independent_disposition !== "unknown_acknowledged"
+        || (value.research.members[0].status === "failed" && !value.research.members[0].usage_known))));
 }
 
 function isManualResearch(value: unknown): value is ManualResearch {

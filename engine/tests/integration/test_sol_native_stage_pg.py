@@ -29,6 +29,10 @@ from unit.agents.test_platform_usage import usage
 
 async def prepared_stage(url, tmp_path):
     factory, settings, store, _ = await scope(url, tmp_path)
+    return await prepare_successor_stage(factory, settings, store)
+
+
+async def prepare_successor_stage(factory, settings, store):
     request_id = await admit(factory, settings, store, two_flight=False)
     async with factory.begin() as session:
         session.info["sec_exhibit_store"] = store

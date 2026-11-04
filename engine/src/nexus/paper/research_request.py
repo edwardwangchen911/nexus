@@ -212,7 +212,7 @@ async def _prepare_research_request(
             raise ResearchAccountingBusy()
     else:
         await lock_portfolio_account(session, row.account_id)
-    if row.contract_version == 3:
+    if row.contract_version in {3, 4}:
         from nexus.paper.independent_unknown_acceptance import require_independent_execution_open
 
         await require_independent_execution_open(session, request_id=row.id)
@@ -608,7 +608,7 @@ async def require_research_jobs_settled(
     # without recursively consulting the historical disposition.
     if (
         not allow_unknown_usage
-        and row.contract_version == 3
+        and row.contract_version in {3, 4}
         and any(not member.usage_known for member in view.members)
     ):
         from nexus.paper.independent_unknown_acceptance import independent_unknown_accepted

@@ -1,4 +1,4 @@
-"""Explicit v3 historical occupancy disposition; unknown money never becomes known."""
+"""Explicit independent historical occupancy disposition; unknown money never becomes known."""
 
 import json
 from datetime import datetime
@@ -26,6 +26,7 @@ from nexus.settings import EngineSettings
 
 ACTION = "paper.independent_unknown.accepted"
 SCHEMA = "independent_unknown_accept_v1"
+SINGLE_SOL_SCHEMA = "single_sol_unknown_accept_v1"
 ACTOR = "local-user:independent-unknown-acceptance"
 
 
@@ -58,7 +59,7 @@ async def _audits(session: AsyncSession, request_id: UUID) -> list[AuditEvent]:
         .where(
             or_(
                 AuditEvent.action == ACTION,
-                AuditEvent.schema_version == SCHEMA,
+                AuditEvent.schema_version.in_((SCHEMA, SINGLE_SOL_SCHEMA)),
                 AuditEvent.actor_id == ACTOR,
             )
         )
@@ -106,6 +107,7 @@ async def _validate(
         raise
     proof = await independent_unknown_proof(session, row=row, now=now)
     digest = job_input_hash(proof)
+    schema = SINGLE_SOL_SCHEMA if row.contract_version == 4 else SCHEMA
     payload = {**proof, "proof_hash": digest}
     canonical = canonical_audit_event(
         AuditChainInput(
@@ -113,7 +115,7 @@ async def _validate(
             occurred_at=audit.occurred_at,
             actor_id=ACTOR,
             action=ACTION,
-            schema_version=SCHEMA,
+            schema_version=schema,
             payload=payload,
         )
     )
@@ -123,7 +125,7 @@ async def _validate(
     if (
         audit.actor_id != ACTOR
         or audit.action != ACTION
-        or audit.schema_version != SCHEMA
+        or audit.schema_version != schema
         or audit.occurred_at > now
         or audit.payload != payload
         or audit.chain_version != "audit_jcs_sha256_v1"
@@ -161,6 +163,30 @@ async def independent_unknown_accepted(
         raise ValueError(BLOCKED)
     await _validate(session, row=row, audit=audits[0], now=now)
     return True
+
+
+async def require_single_sol_successor_history(
+    session: AsyncSession, *, account_id: UUID | None, now: datetime
+) -> None:
+    """Recheck the historical exception before a new paid send, including after claim."""
+    rows = await session.scalars(
+        select(ManualPaperRequest).where(
+            ManualPaperRequest.contract_version == 4,
+            ManualPaperRequest.id.in_(
+                text("SELECT request_id FROM manual_paper_request_events WHERE status='unknown'")
+            ),
+        )
+    )
+    for row in rows:
+        if account_id is not None and row.account_id != account_id:
+            continue
+        if not await independent_unknown_accepted(session, row, now=now):
+            raise ValueError(BLOCKED)
+        # New sends require their own allocation and a protected original day.
+        # This read takes neither money nor a natural-slot credit.
+        from nexus.paper.single_sol_disposition import require_current_capacity
+
+        await require_current_capacity(session, row, now)
 
 
 async def require_independent_execution_open(session: AsyncSession, *, request_id: UUID) -> None:
@@ -217,6 +243,12 @@ async def inspect_or_accept_independent_unknown(
         return IndependentAcceptanceCheck(
             request_id=request_id, checked_at=now, proof_hash=digest, status="already_acknowledged"
         )
+    if row.contract_version == 4 and accept:
+        # The compatibility image may read an existing disposition but cannot
+        # create a new one, even when the source proof and consent match.
+        from nexus.agents.research_maintenance import require_research_open
+
+        require_research_open()
     require_preparation_producers_stopped(repo_root, env_file)
     try:
         await session.execute(
@@ -244,7 +276,14 @@ async def inspect_or_accept_independent_unknown(
             raise ValueError(BLOCKED)
         # Fence inserts too, including absent stage observations. No waiting while
         # holding an earlier lock; competing writers retain their original facts.
-        tables = ", ".join((*FACT_FILTERS, "outbox_events", "outbox_delivery_attempts"))
+        scope_tables = (
+            ("single_sol_budget_scopes", "single_sol_budget_credits")
+            if row.contract_version == 4
+            else ()
+        )
+        tables = ", ".join(
+            (*FACT_FILTERS, *scope_tables, "outbox_events", "outbox_delivery_attempts")
+        )
         await session.execute(text(f"LOCK TABLE {tables} IN SHARE MODE NOWAIT"))
     except DBAPIError as error:
         if getattr(error.orig, "sqlstate", None) == "55P03":
@@ -274,6 +313,24 @@ async def inspect_or_accept_independent_unknown(
         session, account_id=account_id, now=now, excluding_request_id=request_id, read_only=True
     )
     digest = job_input_hash(proof)
+    if row.contract_version == 4:
+        from nexus.paper.single_sol_disposition import (
+            require_current_capacity,
+            require_designated_proof,
+        )
+
+        if (
+            settings.formal_budget_protection_enabled
+            or row.candidate_batch_id != settings.agent_paper_candidate_batch_id
+            or row.model_config_id != settings.agent_paper_formal_model_config_id
+            or await session.scalar(
+                select(AuditEvent.event_seq).where(AuditEvent.schema_version == SINGLE_SOL_SCHEMA)
+            )
+            is not None
+        ):
+            raise ValueError(BLOCKED)
+        require_designated_proof(repo_root, digest)
+        await require_current_capacity(session, row, now)
     require_preparation_producers_stopped(repo_root, env_file)
     if not accept:
         return IndependentAcceptanceCheck(
@@ -285,7 +342,7 @@ async def inspect_or_accept_independent_unknown(
         session,
         actor_id=ACTOR,
         action=ACTION,
-        schema_version=SCHEMA,
+        schema_version=SINGLE_SOL_SCHEMA if row.contract_version == 4 else SCHEMA,
         payload={**proof, "proof_hash": digest},
         occurred_at=now,
     )

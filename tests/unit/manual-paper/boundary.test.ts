@@ -111,3 +111,21 @@ it("reads a single Sol result only with its one locked non-trading member", () =
     expect(read(bad)).toBeNull();
   }
 });
+
+it("preserves the exact single-stock unknown and rejects an acknowledged known receipt", () => {
+  const receipt = {
+    ...independentUnknownReceipt,
+    mode: "research_only",
+    research_contract: "single_sol_research_v1",
+    research: { ...independentUnknownReceipt.research, members: independentUnknownReceipt.research.members.slice(0, 1) },
+  };
+  for (const disposition of ["unknown_acknowledged", "recheck_required"]) {
+    const data = { ...receipt, independent_disposition: disposition };
+    expect(rebuildAllowedEngineResponse(200, { data, meta }, undefined, path, undefined, "GET")).not.toBeNull();
+  }
+  const member = receipt.research.members[0];
+  for (const invalid of [{ ...member, usage_known: true }, { ...member, status: "completed" }]) {
+    const data = { ...receipt, independent_disposition: "unknown_acknowledged", research: { ...receipt.research, members: [invalid] } };
+    expect(rebuildAllowedEngineResponse(200, { data, meta }, undefined, path, undefined, "GET")).toBeNull();
+  }
+});
