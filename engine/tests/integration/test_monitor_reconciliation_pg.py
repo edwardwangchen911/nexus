@@ -784,6 +784,8 @@ async def test_three_terminal_stocks_without_proposals_record_both_reasons_once(
 ):
     from collections import Counter
 
+    from nexus.api.research_disclosure_monitoring import read_disclosure_monitoring_view
+    from nexus.api.research_monitoring import read_monitoring_view
     from nexus.monitoring import source_qualification
     from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 
@@ -835,6 +837,13 @@ async def test_three_terminal_stocks_without_proposals_record_both_reasons_once(
                     "MONITOR_NO_APPROVED_CONDITION": 3
                 }
             assert not await session.scalar(select(MonitorPlan.id))
+            read_at = await session.scalar(select(func.clock_timestamp()))
+            for source in await session.scalars(select(AgentResearchRunRecord)):
+                price = await read_monitoring_view(session, source, now=read_at)
+                sec = await read_disclosure_monitoring_view(session, source, now=read_at)
+                for view in (price, sec):
+                    assert view.state == "not_installed"
+                    assert view.coverage_reason == "no_condition" and view.plan_id is None
             # Each kind verifies authority at consumption time, even for the same output.
             assert sorted(Counter(calls).values()) == [2, 2, 2]
         again = await run(settings, args)

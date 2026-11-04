@@ -300,6 +300,7 @@ async def test_saved_monitoring_api_and_optional_normal_browser(
             }[reason]
             assert price["coverage_reason"] == disclosure["coverage_reason"] == expected
             assert price["state"] == disclosure["state"] == "withdrawn"
+            assert price["plan_id"] and disclosure["plan_id"]
         browser_root = os.environ.get("NEXUS_TEST_MONITOR_BROWSER_DIR")
         if browser_root:
             directory = Path(browser_root).resolve() / (reason or "pending")
