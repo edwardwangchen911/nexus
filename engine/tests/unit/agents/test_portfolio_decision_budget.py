@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
@@ -22,12 +23,25 @@ class _BudgetSession:
         self.queries: list[str] = []
         self.added: list[object] = []
 
-    async def execute(self, statement: object, parameters: object = None) -> None:
-        return None
-
-    async def scalar(self, statement: object, parameters: object = None) -> Decimal | bool | None:
+    async def execute(self, statement: object, parameters: object = None) -> Mock | None:
         query = str(statement)
         self.queries.append(query)
+        if query == (
+            "SELECT to_regclass('public.single_sol_budget_scopes'), "
+            "current_setting('transaction_isolation')"
+        ):
+            result = Mock()
+            result.one.return_value = (None, "read committed")
+            return result
+        return None
+
+    async def scalar(
+        self, statement: object, parameters: object = None
+    ) -> Decimal | datetime | bool | None:
+        query = str(statement)
+        self.queries.append(query)
+        if query == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return _NOW
         if "pg_try_advisory_xact_lock" in query:
             return True
         if "to_regclass" in query:
