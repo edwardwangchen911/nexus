@@ -3,7 +3,7 @@
 import json
 from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -19,7 +19,9 @@ from integration.test_agent_paper_candidate_batch_pg import (
     _seed_scope,
 )
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.monitoring.disclosure_context import freeze_disclosure_baseline
 from nexus.ops import agent_paper_identity as identity
+from nexus.ops import agent_paper_sec_index as indexes
 from nexus.ops import research_identity_local as collector
 from nexus.ops.instrument_identity_local import revise_listing
 from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
@@ -27,6 +29,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.paper import AgentPaperCycleRecord, PaperFillRecord, PaperOrderRecord
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
@@ -44,6 +47,8 @@ from unit.market.test_object_store import FakeS3Client
     "case",
     [
         "ready",
+        "index_interrupted",
+        "index_inapplicable",
         "manual_after_slot",
         "scheduled_after_slot",
         "scheduled_reuse_prior_cycle",
@@ -61,7 +66,7 @@ from unit.market.test_object_store import FakeS3Client
     ],
 )
 async def test_formal_batch_preparation_once_without_cycle_or_order(
-    migrated_database_url, tmp_path, monkeypatch, case, capsys
+    migrated_database_url, tmp_path, monkeypatch, case, capsys, request
 ):
     # Use one coherent synthetic clock in a past NY day, including snapshot
     # compilation; this must also pass before today's market opens.
@@ -116,7 +121,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                 settings, symbol=symbol, fmp_archive=fm, sec_archive=sc, store=store
             )
         async with factory() as session, session.begin():
-            if case == "manual_after_slot":
+            if case in {"manual_after_slot", "scheduled_reuse_prior_cycle"}:
                 await _seed_funded_projection(session, at=now - timedelta(minutes=1))
             await seed_filing(session, instrument_id=AAPL_ID, seed_instrument=False)
             evidence = ResearchEvidenceRef(
@@ -186,6 +191,16 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                 idempotency_key="daily-identity",
                 created_at=now,
             )
+
+        # Match the isolated source clock for database-generated index insert times.
+        def index_insert_clock(_mapper, _connection, snapshot):
+            if snapshot.source == indexes.SOURCE:
+                snapshot.created_at = clock[0]
+
+        event.listen(DataSnapshot, "before_insert", index_insert_clock)
+        request.addfinalizer(
+            lambda: event.remove(DataSnapshot, "before_insert", index_insert_clock)
+        )
         calls = []
         original_client = httpx.AsyncClient
 
@@ -209,6 +224,18 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     "exchanges": ["NYSE", nvda_exchange],
                 }
             )
+            if "tickers" in data and case != "index_inapplicable":
+                accepted = now - timedelta(days=1)
+                data["filings"] = {
+                    "files": [],
+                    "recent": {
+                        "accessionNumber": ["0000123456-26-000001"],
+                        "form": ["8-K"],
+                        "acceptanceDateTime": [accepted.isoformat()],
+                        "filingDate": [accepted.date().isoformat()],
+                        "primaryDocument": ["first.htm"],
+                    },
+                }
             if case == "closed_during_collect" and len(calls) == 3:
                 clock[0] = now + timedelta(minutes=26)
             return httpx.Response(200, content=json.dumps(data).encode())
@@ -226,7 +253,8 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             parent = identity._private_parent(tmp_path)
             (parent / day.strftime("%Y%m%d")).mkdir(mode=0o700)
         if case == "unsafe_parent":
-            (tmp_path / ".secrets").mkdir(mode=0o755)
+            (tmp_path / ".secrets").mkdir()
+            (tmp_path / ".secrets").chmod(0o755)
         if case == "closed_during_import":
             original_import = identity.import_identity_binding
             imports = []
@@ -359,13 +387,31 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                         decision_slot_at=scheduled_slot,
                     ),
                 )
+        if case == "index_interrupted":
+            persist = indexes.persist_index_archive
+            writes = []
+
+            async def fail_second(*args, **kwargs):
+                writes.append(kwargs["identity_snapshot_id"])
+                result = await persist(*args, **kwargs)
+                if len(writes) == 2:
+                    raise OSError("synthetic interruption before commit")
+                return result
+
+            monkeypatch.setattr(indexes, "persist_index_archive", fail_second)
         if case == "unsafe_parent":
             with pytest.raises(ValueError, match="AGENT_PAPER_IDENTITY_DIRECTORY_INVALID"):
                 await identity.prepare_agent_paper_identity_once(settings, **args)
             result = "unavailable"
         else:
             result = await identity.prepare_agent_paper_identity_once(settings, **args)
-        success = case in ("ready", "partially_registered", "manual_after_slot")
+        success = case in (
+            "ready",
+            "partially_registered",
+            "manual_after_slot",
+            "index_interrupted",
+            "index_inapplicable",
+        )
         expected = (
             "ready"
             if case == "scheduled_reuse_prior_cycle"
@@ -397,10 +443,43 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     "existing_incomplete": "archive",
                 }[case]
             )
+
+        async def index_facts():
+            async with factory() as session:
+                rows = list(
+                    await session.scalars(
+                        select(DataSnapshot).where(DataSnapshot.source == indexes.SOURCE)
+                    )
+                )
+                for row in rows:
+                    instrument = UUID(row.payload["index"]["instrument_id"])
+                    before = await freeze_disclosure_baseline(
+                        session,
+                        instrument_id=instrument,
+                        as_of=row.available_at - timedelta(microseconds=1),
+                    )
+                    after = await freeze_disclosure_baseline(
+                        session, instrument_id=instrument, as_of=clock[0]
+                    )
+                    assert before.gap_reason == "SEC_BASELINE_MISSING"
+                    assert after.baseline and after.baseline.snapshot_id == row.id
+                return {row.id for row in rows}
+
+        if case in {"ready", "index_interrupted", "index_inapplicable"}:
+            first = await index_facts()
+            assert len(first) == {"ready": 2, "index_interrupted": 1, "index_inapplicable": 0}[case]
+            if case != "ready":
+                assert diagnostics and all(d["failure_phase"] == "sec_index" for d in diagnostics)
         if case != "unsafe_parent":
             assert await identity.prepare_agent_paper_identity_once(settings, **args) == (
                 "ready" if success or case == "scheduled_reuse_prior_cycle" else "unavailable"
             )
+        if case in {"ready", "index_interrupted", "index_inapplicable"}:
+            second = await index_facts()
+            assert first <= second
+            assert len(second) == (0 if case == "index_inapplicable" else 2)
+            if case == "index_interrupted":
+                assert writes == [writes[0], writes[1], writes[1]] and writes[0] != writes[1]
         assert len(calls) == (
             0
             if case
@@ -411,7 +490,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             if case == "partially_registered"
             else 3
         )
-        if case == "manual_after_slot":
+        if case in {"manual_after_slot", "scheduled_reuse_prior_cycle"}:
             # Freeze with the normal builder after all sources, then prove exact
             # selection and current-session identity on the persisted snapshot.
             context = args["execution"]
@@ -455,6 +534,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                             clock[0],
                             day,
                             batch_id=batch.batch_id,
+                            disclosure_scope=case == "scheduled_reuse_prior_cycle",
                         )
                     finally:
                         await probe.rollback()
@@ -473,7 +553,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
 
 
 async def _assert_final_paper_identity(
-    session, store, base, instrument_id, decision_time, day, *, batch_id
+    session, store, base, instrument_id, decision_time, day, *, batch_id, disclosure_scope
 ):
     """Use the cycle's real final-context consumer with native price/quote rows."""
     from copy import deepcopy
@@ -634,6 +714,7 @@ async def _assert_final_paper_identity(
         decision_time=decision_time,
         candidate=candidate,
         projection=projection,
+        disclosure_scope=disclosure_scope,
     )
     assert final.id != base.id and final.observed_at == decision_time > base.observed_at
     final_ids = set(
@@ -658,6 +739,12 @@ async def _assert_final_paper_identity(
         session, snapshot_id=final.id, instrument_id=instrument_id, as_of=decision_time
     )
     assert context is not None and context[0].decision_time == decision_time
+    if disclosure_scope:
+        frozen = context[0].disclosure_monitoring
+        assert frozen and frozen.ready
+        assert frozen == await freeze_disclosure_baseline(
+            session, instrument_id=instrument_id, as_of=decision_time
+        )
     unchanged = await session.get(DataSnapshot, base.id, populate_existing=True)
     assert (unchanged.payload, unchanged.revision, unchanged.observed_at) == original
     # Preserve the completed snapshot's deferred validation before the caller

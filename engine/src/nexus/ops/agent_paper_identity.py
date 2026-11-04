@@ -14,6 +14,7 @@ from sqlalchemy import func, select, text
 
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.ops.agent_paper_once import _validate_local_database
+from nexus.ops.agent_paper_sec_index import prepare_identity_indexes
 from nexus.ops.preparation_diagnostics import (
     preparation_call,
     preparation_rejected,
@@ -31,6 +32,7 @@ from nexus.persistence.session import session_factory
 from nexus.research.current_identity_storage import (
     CAPACITY_REASON,
     SOURCE,
+    ResearchIdentityBinding,
     _base,
     import_identity_binding,
     inspect_identity_binding_snapshot,
@@ -53,6 +55,7 @@ class IdentityPreparationScope:
     ready: bool
     evidence_ready: bool
     capacity_exhausted: bool
+    bindings: tuple[ResearchIdentityBinding, ...]
 
 
 async def _read_scope(
@@ -125,6 +128,7 @@ async def _read_scope(
             entries = []
             diagnostics = []
             registered = set()
+            verified_bindings: list[ResearchIdentityBinding] = []
             for candidate in sorted(candidates, key=lambda item: item.symbol):
                 snapshot = await select_authoritative_snapshot(
                     session, instrument_id=candidate.instrument_id, as_of=now
@@ -147,6 +151,7 @@ async def _read_scope(
                 base_id = next(iter(bindings.values())).identity_snapshot_id if bindings else None
                 if bindings:
                     registered.add(candidate.instrument_id)
+                    verified_bindings.extend(bindings.values())
                 existing = await session.scalar(
                     select(DataSnapshot.id)
                     .where(
@@ -186,6 +191,7 @@ async def _read_scope(
                 day=calendar.session,
                 slot=slot,
                 candidates=tuple(entries),
+                bindings=tuple(verified_bindings),
                 registered=frozenset(registered),
                 ready=all(item["snapshot_status"] == "ready" for item in diagnostics),
                 evidence_ready=all(item["evidence_status"] == "ready" for item in diagnostics),
@@ -265,6 +271,9 @@ async def prepare_agent_paper_identity_once(
     if scope.capacity_exhausted:
         return preparation_unavailable("research_identity", "scope", "CAPACITY_EXHAUSTED")
     if scope.ready:
+        await prepare_identity_indexes(
+            settings, scope.bindings, day=scope.day, cutoff=scope.slot, execution=execution
+        )
         return "ready"
     if any(base is None for _, _, base in scope.candidates):
         return preparation_unavailable("research_identity", "scope", "IDENTITY_BASE_MISSING")
@@ -397,8 +406,9 @@ async def prepare_agent_paper_identity_once(
             execution=execution,
         ),
     )
-    return (
-        "prepared"
-        if verified is not None and verified.ready
-        else preparation_unavailable("research_identity", "readback", "READBACK_MISMATCH")
+    if verified is None or not verified.ready:
+        return preparation_unavailable("research_identity", "readback", "READBACK_MISMATCH")
+    await prepare_identity_indexes(
+        settings, verified.bindings, day=verified.day, cutoff=verified.slot, execution=execution
     )
+    return "prepared"
