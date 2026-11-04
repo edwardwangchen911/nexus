@@ -252,6 +252,10 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
             path, 0
         ),
     )
+    if path == "oversized_critique":
+        from helpers.single_sol_disposition import capture_second_ticket
+
+        tickets = capture_second_ticket(monkeypatch)
     if path in {"late_queue", "late_locked"}:
         from nexus.jobs import worker as job_worker
         from nexus.paper import research_request
@@ -351,8 +355,9 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     from helpers.single_sol_disposition import verify_disposition
 
                     await db.commit()
+                    (ticket,) = tickets
                     await verify_disposition(
-                        factory, settings, receipt.request_id, member, tmp_path, monkeypatch
+                        factory, settings, receipt.request_id, member, tmp_path, monkeypatch, ticket
                     )
                 return
             if path == "late_history":
