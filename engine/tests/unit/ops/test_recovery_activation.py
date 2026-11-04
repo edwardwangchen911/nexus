@@ -239,11 +239,11 @@ async def test_activation_commit_serializes_with_disable(
     monkeypatch.setattr(readiness, "require_recovery_process_quiescence", quiescent)
     original_save = guard._save
 
-    def save(phase, reason):
+    def save(phase, reason, **kwargs):
         if phase == "activated":
             attempted.set()
             assert complete.wait(5)
-        original_save(phase, reason)
+        original_save(phase, reason, **kwargs)
 
     monkeypatch.setattr(guard, "_save", save)
     try:
@@ -260,6 +260,12 @@ async def test_activation_commit_serializes_with_disable(
             assert json.loads(guard.receipt_path.read_text())["phase"] == "activated"
         if order != "activation_first":
             assert json.loads(guard.receipt_path.read_text())["phase"] != "activated"
+        if order == "contended":
+            rejected = json.loads(guard.receipt_path.read_text())
+            assert rejected["reason"] == "PRE_ACTIVATION_REJECTED"
+            assert rejected["failed_stage"] == "control_lock"
+            assert rejected["safe_code"] == "AGENT_PAPER_SERVICE_CONTROL_BUSY"
+            assert 0 <= rejected["stage_elapsed_ms"] <= rejected["activation_elapsed_ms"]
     finally:
         attempted.set()
         worker.join(5)
@@ -543,3 +549,60 @@ def test_post_replace_failure_leaves_persistent_unconfirmed_write(tmp_path, monk
     assert guard.receipt_path.with_suffix(".write-pending").exists()
     with pytest.raises(FileExistsError):
         guard.finish("stop_requested")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outer_deadline", [True, False])
+async def test_readiness_timeout_provenance_in_durable_rejection(
+    tmp_path, monkeypatch, outer_deadline
+):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock, Mock
+
+    from nexus.ops import agent_paper_recovery as readiness
+    from nexus.ops.agent_paper_recovery_activation import make_recovery_guard
+
+    env, generation, attempt, _ = state(tmp_path)
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://local@127.0.0.1/test",
+        agent_runtime_mode="codex_sdk",
+        agent_paper_cycle_enabled=True,
+        agent_paper_account_id=uuid4(),
+        agent_paper_candidate_batch_id=uuid4(),
+        agent_paper_formal_model_config_id=uuid4(),
+        release_revision="a" * 40,
+    )
+    original_timeout = asyncio.timeout
+    deadlines = []
+
+    def deadline(seconds):
+        deadlines.append(seconds)
+        return original_timeout(0 if outer_deadline else seconds)
+
+    @asynccontextmanager
+    async def connect():
+        await asyncio.sleep(0)
+        raise TimeoutError("private-connect-timeout")
+        yield  # pragma: no cover
+
+    factory = Mock(side_effect=connect)
+    factory.kw = {"bind": AsyncMock()}
+    monkeypatch.setattr(readiness.asyncio, "timeout", deadline)
+    monkeypatch.setattr(readiness, "session_factory", lambda _: factory)
+    monkeypatch.setattr(readiness, "require_recovery_process_quiescence", lambda: None)
+    guard = make_recovery_guard(
+        settings, repo_root=tmp_path, env_file=env, generation=generation, attempt_id=attempt
+    )
+    with pytest.raises(ValueError, match="ACTIVATION_BLOCKED"):
+        await guard(settings)
+    receipt = json.loads(guard.receipt_path.read_text())
+    assert deadlines == [10]
+    assert receipt["attempt_id"] == attempt
+    assert (receipt["phase"], receipt["reason"]) == ("rejected", "PRE_ACTIVATION_REJECTED")
+    assert receipt["failed_stage"] == "database_session"
+    assert receipt["safe_code"] == (
+        "RECOVERY_CHECK_DEADLINE_EXCEEDED" if outer_deadline else "RECOVERY_DEPENDENCY_TIMEOUT"
+    )
+    assert 0 <= receipt["stage_elapsed_ms"] <= receipt["activation_elapsed_ms"]
+    assert "private-connect-timeout" not in json.dumps(receipt)

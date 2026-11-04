@@ -3,8 +3,10 @@
 import asyncio
 import re
 from datetime import UTC, datetime, timedelta
+from time import monotonic_ns
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 
 from nexus.agents.platform_native import native_runtime_matches
 from nexus.agents.platform_profile import sol_business_model_matches
@@ -68,6 +70,9 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
     checked_at = datetime.now(UTC)
     factory = None
     code = None
+    diagnostic: dict[str, object] = {}
+    deadline = None
+    stage, started = "configuration", monotonic_ns()
     try:
         _validate_local_database(settings.database_url)
         sol = native_runtime_matches(settings)
@@ -80,21 +85,26 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
             or re.fullmatch(r"[0-9a-f]{40}", settings.release_revision or "") is None
         ):
             raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
+        stage, started = "database_session", monotonic_ns()
         factory = session_factory(settings)
-        async with asyncio.timeout(10):
+        deadline = asyncio.timeout(10)
+        async with deadline:
             async with factory() as session, session.begin():
                 await session.execute(text("SET TRANSACTION READ ONLY"))
                 await session.execute(text("SET LOCAL statement_timeout='5s'"))
                 await session.execute(text("SET LOCAL lock_timeout='1s'"))
+                stage, started = "database_clock", monotonic_ns()
                 now = await session.scalar(select(func.clock_timestamp()))
                 if not isinstance(now, datetime) or now.utcoffset() is None:
                     raise ValueError("AGENT_PAPER_RECOVERY_UNAVAILABLE")
                 checked_at = now.astimezone(UTC)
+                stage, started = "schema", monotonic_ns()
                 if (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
                     != CURRENT_MIGRATION_HEAD
                 ):
                     raise ValueError("AGENT_PAPER_RECOVERY_SCHEMA_MISMATCH")
+                stage, started = "host_heartbeat", monotonic_ns()
                 live = await session.scalar(
                     select(WorkerHeartbeat.id)
                     .where(
@@ -106,6 +116,7 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                 )
                 if live is not None:
                     raise ValueError("AGENT_PAPER_RECOVERY_HOST_PRESENT")
+                stage, started = "account_scope", monotonic_ns()
                 account, _ = await PaperReadService(session, now).account()
                 batch = await load_agent_paper_candidate_batch(
                     session, batch_id=settings.agent_paper_candidate_batch_id
@@ -123,6 +134,7 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
                 # Existing acceptance/seal and consumed-lease proofs remain authoritative.
                 # Never replace them with a blanket historical cost/lease predicate.
+                stage, started = "account_occupancy", monotonic_ns()
                 with identity_parse_scope(), evidence_read_scope(session):
                     await require_manual_account_available(
                         session,
@@ -133,15 +145,36 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     )
                 # Experimental runs have no business request to enumerate above.
                 # Known-but-unsettled costs still prohibit resuming new work.
+                stage, started = "research_accounting", monotonic_ns()
                 await require_research_accounting_clear(session)
+                stage, started = "database_close", monotonic_ns()
     except Exception as error:
         code = str(error) if isinstance(error, ValueError) else None
         if code not in _KNOWN_CODES:
             code = "AGENT_PAPER_RECOVERY_UNAVAILABLE"
+        safe_code = code
+        if isinstance(error, TimeoutError):
+            safe_code = (
+                "RECOVERY_CHECK_DEADLINE_EXCEEDED"
+                if deadline is not None and deadline.expired()
+                else "RECOVERY_DEPENDENCY_TIMEOUT"
+            )
+        elif isinstance(error, DBAPIError):
+            # SQLSTATE does not identify who cancelled a query.
+            safe_code = {
+                "57014": "RECOVERY_QUERY_CANCELLED",
+                "55P03": "RECOVERY_DB_LOCK_UNAVAILABLE",
+            }.get(getattr(error.orig, "sqlstate", None), code)
+        diagnostic = {
+            "failed_stage": stage,
+            "safe_code": safe_code,
+            "stage_elapsed_ms": (monotonic_ns() - started) // 1_000_000,
+        }
     finally:
         if factory is not None:
             await factory.kw["bind"].dispose()
     return {
+        **diagnostic,
         "status": "ready" if code is None else "blocked",
         "blocking_codes": [] if code is None else [code],
         "checked_at": checked_at.isoformat(),

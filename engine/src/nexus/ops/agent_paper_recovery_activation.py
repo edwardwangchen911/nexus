@@ -10,6 +10,7 @@ import subprocess
 from contextlib import AbstractContextManager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic_ns
 from typing import Any, cast
 from uuid import UUID
 
@@ -116,10 +117,19 @@ class RecoveryActivation:
             spec.loader.exec_module(helper)
             helper.validate_pending_activation(self.root, value, attempt)
 
-    def _save(self, phase: str, reason: str, *, exit_code: str | None = None) -> None:
+    def _save(
+        self,
+        phase: str,
+        reason: str,
+        *,
+        exit_code: str | None = None,
+        diagnostic: dict[str, object] | None = None,
+    ) -> None:
         if self.receipt is None:
             raise ValueError(_BLOCKED)
         receipt = {**self.receipt, "phase": phase, "reason": reason}
+        if diagnostic is not None:
+            receipt.update(diagnostic)
         if exit_code is not None:
             receipt.update(exit_stage="host_loop", exit_code=exit_code)
         # Keep a durable negative witness until every receipt write step has
@@ -166,6 +176,24 @@ class RecoveryActivation:
             require_recovery_process_quiescence,
         )
 
+        activation_started = monotonic_ns()
+
+        def reject(
+            stage: str, code: str, since: int, details: dict[str, object] | None = None
+        ) -> None:
+            now = monotonic_ns()
+            diagnostic: dict[str, object] = {
+                "failed_stage": stage,
+                "safe_code": code,
+                "stage_elapsed_ms": (now - since) // 1_000_000,
+                "activation_elapsed_ms": (now - activation_started) // 1_000_000,
+            }
+            if details is not None:
+                for key in ("failed_stage", "safe_code", "stage_elapsed_ms"):
+                    if key in details:
+                        diagnostic[key] = details[key]
+            self._save("rejected", "PRE_ACTIVATION_REJECTED", diagnostic=diagnostic)
+
         try:
             self._validate(effective)
             descriptor = os.open(
@@ -187,29 +215,42 @@ class RecoveryActivation:
                 json.dump(self.receipt, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
+            started = monotonic_ns()
             try:
                 require_recovery_process_quiescence()
             except (OSError, RuntimeError, ValueError):
-                self._save("rejected", "PRE_ACTIVATION_REJECTED")
+                reject("process_before_check", "PROCESS_QUIESCENCE_UNCONFIRMED", started)
                 raise ValueError(_BLOCKED) from None
+            check_started = monotonic_ns()
             result = await inspect_recovery_readiness(effective)
             self._validate(effective)
+            started = monotonic_ns()
             try:
                 require_recovery_process_quiescence()
             except (OSError, RuntimeError, ValueError):
-                self._save("rejected", "PRE_ACTIVATION_REJECTED")
+                reject("process_after_check", "PROCESS_QUIESCENCE_UNCONFIRMED", started)
                 raise ValueError(_BLOCKED) from None
             if result.get("status") != "ready":
-                self._save("rejected", "PRE_ACTIVATION_REJECTED")
+                reject("readiness", "AGENT_PAPER_RECOVERY_UNAVAILABLE", check_started, result)
                 raise ValueError(_BLOCKED)
+            stage, started = "control_lock", monotonic_ns()
             try:
                 # The engine lifetime lock is already held. Never wait for the
                 # manager, which can hold its lock while dispatching this child.
                 with _service_control_lock(self.root):
+                    stage, started = "identity_recheck", monotonic_ns()
                     self._validate(effective)
+                    stage, started = "activation_receipt", monotonic_ns()
                     self._save("activated", "READY")
-            except (OSError, RuntimeError, ValueError):
-                self._save("rejected", "PRE_ACTIVATION_REJECTED")
+                    stage, started = "control_unlock", monotonic_ns()
+            except (OSError, RuntimeError, ValueError) as error:
+                code = {
+                    "identity_recheck": "ACTIVATION_BINDING_UNCONFIRMED",
+                    "activation_receipt": "ACTIVATION_WRITE_UNCONFIRMED",
+                }.get(stage, "AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE")
+                if stage == "control_lock" and error.args == ("AGENT_PAPER_SERVICE_CONTROL_BUSY",):
+                    code = "AGENT_PAPER_SERVICE_CONTROL_BUSY"
+                reject(stage, code, started)
                 raise ValueError(_BLOCKED) from None
         except (OSError, RuntimeError, ValueError, TypeError, KeyError):
             raise ValueError(_BLOCKED) from None
