@@ -1,6 +1,8 @@
 """Exercise installed images against nonempty synthetic disposition histories."""
 
 import asyncio
+import base64
+import hashlib
 import json
 import re
 import sys
@@ -22,8 +24,9 @@ from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from nexus.worker import run_agent_worker_once
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 
 async def probe(args):
@@ -42,6 +45,26 @@ async def probe(args):
             raise PermissionError("no child processes allowed")
 
     sys.addaudithook(restrict)
+    reads = set()
+    if case == "v3":
+        # Restore the synthetic SEC originals with the SQL dump. The image's
+        # normal readers verify their exact receipts, hashes and DB bindings.
+        originals = args["originals"]
+
+        class RestoredStore:
+            async def read_raw(self, key, *, uri):
+                content = base64.b64decode(originals[key], validate=True)
+                digest = hashlib.sha256(content).hexdigest()
+                assert uri == f"s3://synthetic/{key}?versionId={digest}"
+                reads.add(key)
+                return content
+
+            read_evidence = read_raw
+
+        @event.listens_for(Session, "after_begin")
+        def bind_originals(session, _transaction, _connection):
+            session.info["sec_exhibit_store"] = RestoredStore()
+
     settings = EngineSettings.for_test().model_copy(update={"database_url": args["url"]})
     factory = session_factory(settings)
     try:
@@ -122,6 +145,7 @@ async def probe(args):
                     )
             close = await cli("finish-research", "--request-id", str(row.id))
             assert close.status == receipt.status and close.research == receipt.research
+        assert bool(reads) == (case == "v3")
         assert await frozen_facts(factory) == before
         print(
             json.dumps(

@@ -105,15 +105,19 @@ async def prepare_scope(url, tmp_path, *, bounded=False):
     for index, symbol in enumerate(("AAPL", "NVDA", "AVGO"), 1):
         instrument = await seed(factory, symbol=symbol)
         ids.append(instrument)
-        fm, sc = archives(tmp_path / f"base-{symbol}", symbol=symbol)
-        base = await importlib.import_module("nexus.ops.instrument_identity_local").revise_listing(
-            settings, symbol=symbol, fmp_archive=fm, sec_archive=sc, store=store
-        )
         # The source helper defaults to now minus two minutes, which crosses NY
         # midnight during CI. Synthetic originals belong to the DB clock's NY day;
         # use its start, preserving the real same-session current-identity guard.
         async with factory.begin() as session:
             database_time = await session.scalar(select(func.clock_timestamp()))
+        # The importer enforces its DB cutoff. Stamp synthetic originals from
+        # that same clock before import, even if the host clock runs ahead.
+        fm, sc = archives(
+            tmp_path / f"base-{symbol}", symbol=symbol, received=database_time.isoformat()
+        )
+        base = await importlib.import_module("nexus.ops.instrument_identity_local").revise_listing(
+            settings, symbol=symbol, fmp_archive=fm, sec_archive=sc, store=store
+        )
         source_time = (
             database_time.astimezone(ZoneInfo("America/New_York"))
             .replace(hour=0, minute=0, second=0, microsecond=0)
