@@ -185,6 +185,9 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
     statements = []
 
     class Session:
+        def __init__(self):
+            self.info = {}
+
         async def __aenter__(self):
             return self
 
