@@ -110,7 +110,7 @@ async def _read_presented_manual_request(
     # Keep the canonical event reader independent: acknowledgement validation
     # uses it to verify the original unknown facts and must never recurse.
     view = await read_manual_request(session, row)
-    if row.contract_version == 3 and view.status == "unknown" and view.research is not None:
+    if row.contract_version in {3, 4} and view.status == "unknown" and view.research is not None:
         from nexus.paper.independent_unknown_acceptance import read_independent_disposition
 
         now = await session.scalar(select(func.clock_timestamp()))

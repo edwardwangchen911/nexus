@@ -347,6 +347,13 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     )
                 ).one()
                 assert state == "reserved" and settled is None
+                if path == "oversized_critique":
+                    from helpers.single_sol_disposition import verify_disposition
+
+                    await db.commit()
+                    await verify_disposition(
+                        factory, settings, receipt.request_id, member, tmp_path, monkeypatch
+                    )
                 return
             if path == "late_history":
                 assert requests == ["research"], facts[-2:]

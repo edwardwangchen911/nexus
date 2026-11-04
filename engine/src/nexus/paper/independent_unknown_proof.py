@@ -1,4 +1,4 @@
-"""Stable v3 historical facts, separate from current maintenance eligibility."""
+"""Stable independent historical facts, separate from current maintenance eligibility."""
 
 from datetime import datetime
 from uuid import UUID
@@ -47,8 +47,7 @@ async def independent_unknown_proof(
     """Validate native financial closure and bind all current facts, including absence."""
     view = await read_manual_request(session, row)
     if (
-        row.contract_version != 3
-        or row.mode != "research_and_monitor"
+        (row.contract_version, row.mode) not in {(3, "research_and_monitor"), (4, "research_only")}
         or view.cycle_id is not None
         or view.status != "unknown"
         or view.code != "MANUAL_RESULT_UNKNOWN"
@@ -105,10 +104,16 @@ async def independent_unknown_proof(
             )
         )
         facts[table] = job_input_hash({"rows": rows})
+    extra = {}
+    if row.contract_version == 4:
+        from nexus.paper.single_sol_disposition import single_sol_history
+
+        extra["single_sol"] = await single_sol_history(session, row, view.research)
     return {
+        **extra,
         "account_id": str(row.account_id),
         "request_id": str(row.id),
-        "contract_version": 3,
+        "contract_version": row.contract_version,
         "unknown_run_ids": unknown,
         "facts": facts,
         "disposition": "historical_occupancy_only_usage_and_budget_preserved",

@@ -106,8 +106,25 @@ class ManualRequestView(BaseModel):
     @model_validator(mode="after")
     def require_disposition_scope(self) -> "ManualRequestView":
         if self.independent_disposition is not None and (
-            self.mode != "research_and_monitor"
-            or self.research_contract != "independent_monitor_research_v1"
+            (self.mode, self.research_contract)
+            not in {
+                ("research_and_monitor", "independent_monitor_research_v1"),
+                ("research_only", "single_sol_research_v1"),
+            }
+            or (
+                self.research_contract == "single_sol_research_v1"
+                and (
+                    self.research is None
+                    or len(self.research.members) != 1
+                    or (
+                        self.independent_disposition == "unknown_acknowledged"
+                        and (
+                            self.research.members[0].status != "failed"
+                            or self.research.members[0].usage_known
+                        )
+                    )
+                )
+            )
             or self.research is None
             or self.status != "unknown"
             or self.code != "MANUAL_RESULT_UNKNOWN"
@@ -392,7 +409,7 @@ async def require_manual_request_history(
         if request.id == excluding_request_id:
             continue
         view = await read_manual_request(session, request)
-        if request.contract_version == 3 and view.status == "unknown":
+        if request.contract_version in {3, 4} and view.status == "unknown":
             from nexus.paper.independent_unknown_acceptance import independent_unknown_accepted
 
             if await independent_unknown_accepted(session, request, now=now):
@@ -1044,7 +1061,7 @@ async def require_no_running_manual_request(
                 raise ValueError("MANUAL_PREPARATION_RECOVERY_BLOCKED")
         # A pending click yields to the scheduled entry; started/unknown work never does.
         if view.status == "unknown":
-            if row.contract_version == 3:
+            if row.contract_version in {3, 4}:
                 from nexus.paper.independent_unknown_acceptance import independent_unknown_accepted
 
                 if await independent_unknown_accepted(

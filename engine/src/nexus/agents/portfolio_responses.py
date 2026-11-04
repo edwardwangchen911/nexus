@@ -215,6 +215,16 @@ class NativePortfolioTransport:
 
                 if await read_receipt(session, job.id, "authorized") is not None:
                     raise PortfolioAlreadyDispatched("PORTFOLIO_PLATFORM_ALREADY_AUTHORIZED")
+                from nexus.paper.independent_unknown_acceptance import (
+                    require_single_sol_successor_history,
+                )
+
+                try:
+                    await require_single_sol_successor_history(
+                        session, account_id=self.settings.agent_paper_account_id, now=at
+                    )
+                except ValueError as error:
+                    raise _ScopeRejected("SINGLE_SOL_SUCCESSOR_HISTORY_BLOCKED") from error
                 if not await formal_synthesis_job_qualified(
                     session, job, now=at, claimed=True, transport=self
                 ):

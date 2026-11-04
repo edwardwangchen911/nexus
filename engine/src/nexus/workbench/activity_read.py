@@ -262,7 +262,9 @@ async def _scope(
             raise ValueError("WORKBENCH_ACTIVITY_UNVERIFIED")
         disposition = (
             await read_independent_disposition(session, row, now=now)
-            if row.contract_version == 3 and view.status == "unknown" and view.research is not None
+            if row.contract_version in {3, 4}
+            and view.status == "unknown"
+            and view.research is not None
             else None
         )
         closed = view.status == "unknown" and (
