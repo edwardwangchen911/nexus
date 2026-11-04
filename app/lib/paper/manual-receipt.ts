@@ -27,7 +27,7 @@ export function isManualReceipt(value: unknown): value is ManualReceipt {
     || !["research_only", "research_and_paper", "research_and_monitor"].includes(String(v.mode)) || v.execution_locked !== true
     || typeof v.requested_at !== "string" || !/(Z|\+00:00)$/.test(v.requested_at) || !Number.isFinite(Date.parse(v.requested_at))
     || v.cycle_id !== null && (typeof v.cycle_id !== "string" || !validateUuid(v.cycle_id))) return false;
-  if (v.research_contract === "research_only_v2" || v.research_contract === "independent_monitor_research_v1") return isPureResearchReceipt(v);
+  if (v.research_contract === "single_sol_research_v1" || v.research_contract === "research_only_v2" || v.research_contract === "independent_monitor_research_v1") return isPureResearchReceipt(v);
   if (v.mode === "research_and_monitor" || v.independent_disposition != null) return false;
   if (v.research_contract !== undefined && v.research_contract !== null || v.research !== undefined && v.research !== null) return false;
   if ("preparation_disposition" in v && v.preparation_disposition !== null
@@ -73,7 +73,8 @@ function isPureResearchReceipt(value: Record<string, unknown>): boolean {
   const bound = value.research !== undefined && value.research !== null;
   if (["queued", "preparing"].includes(value.status)) return !bound;
   if (!bound) return ["unavailable", "unknown"].includes(value.status);
-  return isManualResearch(value.research);
+  return isManualResearch(value.research)
+    && (value.research_contract !== "single_sol_research_v1" || value.research.members.length === 1);
 }
 
 function isManualResearch(value: unknown): value is ManualResearch {

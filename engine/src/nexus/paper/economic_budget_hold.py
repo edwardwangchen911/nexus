@@ -494,7 +494,9 @@ async def hold_pair_budget(
     )
     used = await _shared_daily_budget_used(session, business_date=now.date())
     from nexus.paper.formal_budget_protection import protected_demand
+    from nexus.paper.single_sol_budget import require_no_single_sol_guard
 
+    await require_no_single_sol_guard(session, now.date())
     demand = await protected_demand(session, business_date=now.date(), now=now)
     uncovered = request.uncovered_formal_usd
     if demand is not None:

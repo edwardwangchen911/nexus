@@ -159,9 +159,11 @@ class StagedProtocol:
         self,
         factory: async_sessionmaker[AsyncSession],
         *,
+        native_settings: Any = None,
         clock: Callable[[], datetime] | None = None,
         on_failure: Callable[[BaseException], None] | None = None,
     ) -> None:
+        self.native_settings = native_settings
         self.factory = factory
         self.on_failure = on_failure
         # Primitive matrix drivers supply explicit logical instants. The real
@@ -297,6 +299,26 @@ class StagedProtocol:
                 {"run": member["run_id"], "stage": stage},
             ):
                 raise ProtocolRejected("ALREADY_AUTHORIZED")
+            if route is not None and route["kind"] == "independent":
+                from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+                request = required(await session.get(ManualPaperRequest, route["scope_id"]))
+                if request.contract_version == 4:
+                    from nexus.paper.single_sol_research import recheck_single_sol
+
+                    if self.native_settings is None:
+                        raise ProtocolRejected("PLATFORM_NATIVE_EXECUTION_REQUIRED")
+                    try:
+                        await recheck_single_sol(
+                            session,
+                            self.native_settings,
+                            request,
+                            run_id=route["run_id"],
+                            cleanup_deadline=member["cleanup_deadline"],
+                        )
+                    except ValueError as error:
+                        # No authorization was inserted. A policy refusal has a known outcome.
+                        raise ProtocolRejected("SINGLE_SOL_GRANT_BLOCKED") from error
             now = self._now(now)
             cutoff = (
                 member["work_deadline"]

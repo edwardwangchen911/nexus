@@ -50,6 +50,34 @@ async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) ->
 
         await require_increment_binding(session, run)
         return increment.id, "increment"
+    if run.actor_id == "local-single-sol-research-v1":
+        from nexus.persistence.models.manual_paper import (
+            ResearchRequestManifest,
+            ResearchRequestMember,
+        )
+
+        request = required(
+            await session.scalar(
+                select(ManualPaperRequest)
+                .join(
+                    ResearchRequestManifest,
+                    ResearchRequestManifest.request_id == ManualPaperRequest.id,
+                )
+                .join(
+                    ResearchRequestMember,
+                    ResearchRequestMember.manifest_id == ResearchRequestManifest.id,
+                )
+                .where(
+                    ManualPaperRequest.contract_version == 4,
+                    ResearchRequestMember.run_id == run.id,
+                    ResearchRequestMember.job_id == job.id,
+                )
+            )
+        )
+        manifest = await read_research_manifest(session, request)
+        if manifest is None or len(manifest.members) != 1 or manifest.members[0].run_id != run.id:
+            raise ProtocolRejected("ROOT_MANIFEST_BINDING_INVALID")
+        return request.id, "independent"
     independent = await read_independent_context(
         session,
         snapshot_id=run.data_snapshot_id,

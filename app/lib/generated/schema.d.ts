@@ -3873,7 +3873,7 @@ export interface components {
             requested_at: string;
             research?: components["schemas"]["ResearchManifestView"] | null;
             /** Research Contract */
-            research_contract?: ("research_only_v2" | "independent_monitor_research_v1") | null;
+            research_contract?: ("research_only_v2" | "independent_monitor_research_v1" | "single_sol_research_v1") | null;
             /**
              * Status
              * @enum {string}

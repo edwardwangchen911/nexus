@@ -6180,7 +6180,8 @@ export const runtimeContractSchemas = {
           {
             "enum": [
               "research_only_v2",
-              "independent_monitor_research_v1"
+              "independent_monitor_research_v1",
+              "single_sol_research_v1"
             ],
             "type": "string"
           },

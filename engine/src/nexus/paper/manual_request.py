@@ -15,6 +15,7 @@ from nexus.jobs.models import job_input_hash
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
 from nexus.paper.current_preparation_recovery import PreparationRecoveryView
 from nexus.paper.projection import load_paper_projection
+from nexus.paper.single_sol_owner import binding_for
 from nexus.paper.target_service import (
     lock_portfolio_account,
     require_activation_projection_unoccupied,
@@ -27,6 +28,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobLease
+from nexus.settings import EngineSettings
 
 ManualMode = Literal["research_only", "research_and_paper", "research_and_monitor"]
 ManualStatus = Literal["queued", "preparing", "active", "completed", "unavailable", "unknown"]
@@ -84,9 +86,10 @@ class ManualRequestView(BaseModel):
     code: str
     cycle_id: UUID | None
     execution_locked: Literal[True] = True
-    research_contract: Literal["research_only_v2", "independent_monitor_research_v1"] | None = (
-        Field(default=None, exclude_if=lambda value: value is None)
-    )
+    research_contract: (
+        Literal["research_only_v2", "independent_monitor_research_v1", "single_sol_research_v1"]
+        | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     research: ResearchManifestView | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -131,9 +134,9 @@ def manual_request_hash(
     research_profile: dict[str, object] | None = None,
 ) -> str:
     if (
-        contract_version not in {1, 2, 3}
+        contract_version not in {1, 2, 3, 4}
         or (contract_version == 3) != (mode == "research_and_monitor")
-        or contract_version == 2
+        or contract_version in {2, 4}
         and mode != "research_only"
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
@@ -143,11 +146,12 @@ def manual_request_hash(
                 1: "manual_paper_v1",
                 2: "research_only_v2",
                 3: "independent_monitor_research_v1",
+                4: "single_sol_research_v1",
             }[contract_version],
             "account_id": str(account_id),
             "candidate_batch_id": str(batch_id),
             "mode": mode,
-            **({"research_profile": research_profile} if contract_version in {2, 3} else {}),
+            **({"research_profile": research_profile} if contract_version in {2, 3, 4} else {}),
         }
     )
 
@@ -160,6 +164,8 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
             .order_by(ManualPaperRequestEvent.sequence)
         )
     ).all()
+    if row.contract_version == 4:
+        binding_for(row)
     if row.mode not in {"research_only", "research_and_paper", "research_and_monitor"}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     if row.request_hash != manual_request_hash(
@@ -183,7 +189,7 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
     if events[-1].cycle_id is not None:
         await _require_manual_cycle_binding(session, row, events[-1].cycle_id)
     research = None
-    if row.contract_version in {2, 3}:
+    if row.contract_version in {2, 3, 4}:
         from nexus.paper.research_request import read_research_manifest
 
         research = await read_research_manifest(session, row)
@@ -195,6 +201,8 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
             if row.contract_version == 2
             else "independent_monitor_research_v1"
             if row.contract_version == 3
+            else "single_sol_research_v1"
+            if row.contract_version == 4
             else None
         ),
         research=research,
@@ -212,8 +220,12 @@ def _validate_event(
     event: ManualPaperRequestEvent,
     prior: ManualPaperRequestEvent | None,
 ) -> None:
-    pure = getattr(row, "contract_version", 1) in {2, 3}
-    if pure and row.mode != {2: "research_only", 3: "research_and_monitor"}[row.contract_version]:
+    pure = getattr(row, "contract_version", 1) in {2, 3, 4}
+    if (
+        pure
+        and row.mode
+        != {2: "research_only", 3: "research_and_monitor", 4: "research_only"}[row.contract_version]
+    ):
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     codes = {
         "queued": {"MANUAL_REQUEST_QUEUED"},
@@ -385,7 +397,7 @@ async def require_manual_request_history(
 
             if await independent_unknown_accepted(session, request, now=now):
                 continue
-        if request.contract_version in {2, 3} and view.research is not None:
+        if request.contract_version in {2, 3, 4} and view.research is not None:
             from nexus.paper.research_request import require_research_jobs_settled
 
             await require_research_jobs_settled(session, row=request, view=view.research, now=now)
@@ -469,13 +481,35 @@ async def admit_manual_request(
     daily_limit_usd: Decimal = Decimal("3.00"),
     two_flight: bool = False,
     intent_id: UUID | None = None,
+    single_sol_settings: EngineSettings | None = None,
+    selected_instrument_id: UUID | None = None,
+    expected_intent_hash: str | None = None,
 ) -> ManualRequestView:
     ManualRequestInput(mode=mode)
+    if contract_version == 4:
+        if (
+            single_sol_settings is None
+            or selected_instrument_id is None
+            or not expected_intent_hash
+            or mode != "research_only"
+            or two_flight
+            or intent_id is not None
+            or account_id != single_sol_settings.agent_paper_account_id
+            or batch_id != single_sol_settings.agent_paper_candidate_batch_id
+            or model_config_id != single_sol_settings.agent_paper_formal_model_config_id
+            or daily_limit_usd != single_sol_settings.agent_daily_budget_usd
+        ):
+            raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
+    elif any(
+        x is not None for x in (single_sol_settings, selected_instrument_id, expected_intent_hash)
+    ):
+        raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
     if (
         type(two_flight) is not bool
         or two_flight
         and (
-            contract_version not in {2, 3} or mode not in {"research_only", "research_and_monitor"}
+            contract_version not in {2, 3, 4}
+            or mode not in {"research_only", "research_and_monitor"}
         )
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
@@ -517,6 +551,13 @@ async def admit_manual_request(
         )
     )
     if existing is not None:
+        if contract_version == 4 and (
+            existing.contract_version != 4
+            or existing.model_config_id != model_config_id
+            or binding_for(existing).instrument_id != selected_instrument_id
+            or binding_for(existing).intent_hash != expected_intent_hash
+        ):
+            raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         if existing.request_hash != (
             manual_request_hash(
                 account_id=account_id,
@@ -532,6 +573,20 @@ async def admit_manual_request(
     from nexus.agents.research_maintenance import require_research_open
 
     require_research_open()
+    single_sol = None
+    if single_sol_settings is not None and selected_instrument_id is not None:
+        from nexus.paper.manual_entry import require_configured_manual_host
+        from nexus.paper.research_request import database_now
+        from nexus.paper.single_sol_research import single_sol_authority
+
+        single_sol = await single_sol_authority(
+            session, single_sol_settings, instrument_id=selected_instrument_id
+        )
+        if single_sol.intent_hash != expected_intent_hash:
+            raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
+        await require_configured_manual_host(
+            session, single_sol_settings, now=await database_now(session)
+        )
     now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
@@ -546,15 +601,19 @@ async def admit_manual_request(
     from nexus.agents.platform_profile import sol_business_model_matches
 
     platform = sol_business_model_matches(model)
-    if platform and (runtime_mode != "responses" or contract_version not in {1, 3}):
+    if platform and (runtime_mode != "responses" or contract_version not in {1, 3, 4}):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+    if single_sol is not None and (
+        not platform or single_sol.instrument_id not in batch.instrument_ids
+    ):
+        raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
     if two_flight:
         from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
 
         if model.version != BOUNDED_STAGE_BUDGET_CONFIG_VERSION and not platform:
             raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     profile: dict[str, object] | None = None
-    if contract_version in {2, 3}:
+    if contract_version in {2, 3, 4}:
         from nexus.agents.independent_monitor import ensure_prompts
         from nexus.agents.research_only import ensure_research_only_prompts
 
@@ -571,6 +630,8 @@ async def admit_manual_request(
             "orchestrator_id": str(prompts["orchestrator"].id),
             "prompt_hashes": {role: prompt.content_hash for role, prompt in prompts.items()},
         }
+        if single_sol is not None:
+            profile["single_sol"] = single_sol.model_dump(mode="json")
         if two_flight:
             from nexus.agents.research_dispatch import two_flight_policy
 

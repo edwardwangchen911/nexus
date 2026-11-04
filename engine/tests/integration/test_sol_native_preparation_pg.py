@@ -153,7 +153,7 @@ async def test_normal_sol_preparation_freezes_all_three_native_routes_and_shared
 
 @pytest.mark.asyncio
 async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
-    migrated_database_url, monkeypatch, after_prepared=None, monitoring=False
+    migrated_database_url, monkeypatch, after_prepared=None, monitoring=False, natural_time=False
 ):
     from integration import test_candidate_multistock_path as candidates
     from nexus.agents.platform_native import credential_for_preparation
@@ -169,6 +169,12 @@ async def test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes(
     target = now.replace(hour=15, minute=0, second=0, microsecond=0)
     while target <= now or target.weekday() >= 5:
         target += timedelta(days=1)
+    if natural_time:
+        from zoneinfo import ZoneInfo
+
+        target = (
+            target.astimezone(ZoneInfo("America/New_York")).replace(hour=10).astimezone(now.tzinfo)
+        )
     monkeypatch.setattr(candidates, "AT", target)
     native_start = candidates.start_schwab_agent_paper_cycle
     captured = {}
@@ -331,11 +337,18 @@ async def test_native_pool_preparation_cannot_leave_partial_jobs_or_holds(
 
 @pytest.mark.asyncio
 async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
-    migrated_database_url, monkeypatch, after_admitted=None
+    migrated_database_url,
+    monkeypatch,
+    after_admitted=None,
+    *,
+    daily_limit=Decimal("10"),
+    before_slot=False,
 ):
     from helpers.paper_batch import CALENDAR_ID
+    from helpers.single_sol_clock import preopen_fixture_clock, preopen_target
     from integration import test_candidate_multistock_path as candidates
     from integration import test_monitor_increment_pg as price_cases
+    from integration import test_portfolio_same_day_research_pg as parent_fixture
     from nexus.monitoring.admission import require_increment_binding
     from nexus.monitoring.context import read_monitor_context
     from nexus.ops.research_monitor import parser
@@ -345,10 +358,23 @@ async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
     from nexus.persistence.session import session_factory
     from nexus.settings import EngineSettings
 
+    seed = parent_fixture.seed_paper_batch
+
+    async def seed_then_set_clock(url, **kwargs):
+        account = await seed(url, **kwargs)
+        await preopen_fixture_clock(url, monkeypatch)
+        return account
+
+    monkeypatch.setattr(parent_fixture, "seed_paper_batch", seed_then_set_clock)
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session:
-        now = await session.scalar(text("SELECT clock_timestamp()"))
+        now = preopen_target(await session.scalar(text("SELECT pg_catalog.clock_timestamp()")))
     target = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    if before_slot:
+        from zoneinfo import ZoneInfo
+
+        target = target.astimezone(ZoneInfo("America/New_York")).replace(hour=9, minute=40)
+        target = target.astimezone(now.tzinfo)
     while target <= now or target.weekday() >= 5:
         target += timedelta(days=1)
     monkeypatch.setattr(candidates, "AT", target)
@@ -366,7 +392,7 @@ async def test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
             agent_runtime_mode=AgentRuntimeMode.RESPONSES,
             agent_paper_formal_model_config_id=model_id,
             openai_api_key=SecretStr("sk-proj-" + "synthetic-only" * 5),
-            agent_daily_budget_usd=Decimal("10"),
+            agent_daily_budget_usd=daily_limit,
         )
     )
     args = parser().parse_args(

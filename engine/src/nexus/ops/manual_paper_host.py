@@ -132,10 +132,15 @@ async def dispatch_manual_request(
             # Route under the same safe failure and cleanup boundary as the claim.
             async with factory.begin() as session:
                 row = await session.get(ManualPaperRequest, request_id)
-                is_pure = row is not None and row.contract_version in {2, 3}
+                is_pure = row is not None and row.contract_version in {2, 3, 4}
             if is_pure:
                 pure = True
-                await dispatch_pure_research_request(settings, request_id=request_id)
+                if row is not None and row.contract_version == 4:
+                    await dispatch_pure_research_request(
+                        settings, request_id=request_id, calendar_authority_id=calendar_authority_id
+                    )
+                else:
+                    await dispatch_pure_research_request(settings, request_id=request_id)
                 return
             _validate_trigger_dependencies(trigger_settings)
             async with factory.begin() as session:
@@ -380,7 +385,11 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
 
 
 async def claim_configured_manual_request(
-    session: AsyncSession, settings: EngineSettings, *, request_id: UUID
+    session: AsyncSession,
+    settings: EngineSettings,
+    *,
+    request_id: UUID,
+    calendar_authority_id: UUID | None = None,
 ) -> tuple[ManualRequestView, bool]:
     """Seal preparation once, or close a queued request that must not roll to tomorrow."""
     account_id = settings.agent_paper_account_id
@@ -402,16 +411,23 @@ async def claim_configured_manual_request(
         and not settings.formal_budget_protection_enabled
         and row.candidate_batch_id == settings.agent_paper_candidate_batch_id
         and row.model_config_id == settings.agent_paper_formal_model_config_id
-        and (row.contract_version in {2, 3} or row.requested_at.date() == now.date())
+        and (row.contract_version in {2, 3, 4} or row.requested_at.date() == now.date())
     )
-    if available and row.contract_version in {2, 3}:
+    if available and row.contract_version in {2, 3, 4}:
         from nexus.paper.research_request import require_research_profile
 
         try:
+            if row.contract_version == 4:
+                from nexus.paper.single_sol_owner import binding_for
+                from nexus.paper.single_sol_research import recheck_single_sol
+
+                if calendar_authority_id != binding_for(row).calendar_id:
+                    raise ValueError("SINGLE_SOL_HOST_CALENDAR_MISMATCH")
+                await recheck_single_sol(session, settings, row)
             await require_research_profile(session, row=row, settings=settings)
         except ValueError:
             available = False
-    if available and row.contract_version not in {2, 3}:
+    if available and row.contract_version not in {2, 3, 4}:
         try:
             calendar = await select_agent_paper_service_calendar_authority(session, now=now)
         except ValueError:
@@ -449,7 +465,7 @@ async def finish_configured_manual_request(
     row = await session.get(ManualPaperRequest, request_id)
     if row is None or row.account_id != account_id:
         raise ValueError("MANUAL_NOT_FOUND")
-    if row.contract_version in {2, 3}:
+    if row.contract_version in {2, 3, 4}:
         from nexus.paper.research_request import finish_research_request
 
         return await finish_research_request(session, row=row, cancel_unused=cancel_unused)
@@ -480,17 +496,25 @@ async def finish_configured_manual_request(
     return await read_manual_request(session, row)
 
 
-async def dispatch_pure_research_request(settings: EngineSettings, *, request_id: UUID) -> bool:
+async def dispatch_pure_research_request(
+    settings: EngineSettings, *, request_id: UUID, calendar_authority_id: UUID | None = None
+) -> bool:
     from nexus.agents.research_maintenance import require_research_open
 
     require_research_open()
     from nexus.agents.preparation_reuse import research_preparation_scope
 
     with research_preparation_scope():
+        if calendar_authority_id is not None:
+            return await _dispatch_pure_research_request(
+                settings, request_id=request_id, calendar_authority_id=calendar_authority_id
+            )
         return await _dispatch_pure_research_request(settings, request_id=request_id)
 
 
-async def _dispatch_pure_research_request(settings: EngineSettings, *, request_id: UUID) -> bool:
+async def _dispatch_pure_research_request(
+    settings: EngineSettings, *, request_id: UUID, calendar_authority_id: UUID | None = None
+) -> bool:
     """Execute a new claimed manifest once. Restart only closes; it never replays."""
     from nexus.ops.agent_paper_once import run_cycle_job_once
     from nexus.paper.research_request import finish_research_request, prepare_research_request
@@ -502,11 +526,19 @@ async def _dispatch_pure_research_request(settings: EngineSettings, *, request_i
     try:
         async with factory.begin() as session:
             row = await session.get(ManualPaperRequest, request_id)
-            if row is None or row.contract_version not in {2, 3}:
+            if row is None or row.contract_version not in {2, 3, 4}:
                 return False
-            view, claimed = await claim_configured_manual_request(
-                session, settings, request_id=request_id
-            )
+            if row.contract_version == 4:
+                view, claimed = await claim_configured_manual_request(
+                    session,
+                    settings,
+                    request_id=request_id,
+                    calendar_authority_id=calendar_authority_id,
+                )
+            else:
+                view, claimed = await claim_configured_manual_request(
+                    session, settings, request_id=request_id
+                )
         if not claimed:
             if view.status in {"active", "preparing"}:
                 async with factory.begin() as session:

@@ -49,5 +49,14 @@ def test_sol_business_profile_preserves_medium_profile_predecessor():
 
 def test_intent_migration_retains_sol_predecessor():
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-    revision = ScriptDirectory.from_config(config).get_revision(CURRENT_MIGRATION_HEAD)
+    revision = ScriptDirectory.from_config(config).get_revision("0114_formal_intraday_intent")
     assert revision.down_revision == "0113_sol_business_profile"
+
+
+def test_single_sol_revisions_preserve_intent_and_budget_predecessors():
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    migrations = ScriptDirectory.from_config(config)
+    budget = migrations.get_revision("0115_single_sol_budget")
+    request = migrations.get_revision("0116_single_sol_request")
+    assert budget.down_revision == "0114_formal_intraday_intent"
+    assert request.down_revision == budget.revision

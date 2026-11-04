@@ -1,6 +1,7 @@
 """Versioned pure research ownership; never creates a cycle or execution authority."""
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -22,6 +23,7 @@ from nexus.paper.manual_request import (
     record_manual_request_event,
     require_manual_account_available,
 )
+from nexus.paper.single_sol_owner import binding_for, research_identity
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -74,6 +76,8 @@ def manifest_hash(row: ManualPaperRequest, at: datetime, hashes: list[str]) -> s
         {
             "contract": "independent_monitor_research_v1"
             if row.contract_version == 3
+            else "single_sol_research_v1"
+            if row.contract_version == 4
             else "research_only_v2",
             "request_id": str(row.id),
             "request_hash": row.request_hash,
@@ -102,13 +106,20 @@ async def read_research_manifest(
     )
     batch = await load_agent_paper_candidate_batch(session, batch_id=row.candidate_batch_id)
     if (
-        row.contract_version not in {2, 3}
-        or row.mode != {2: "research_only", 3: "research_and_monitor"}.get(row.contract_version)
+        row.contract_version not in {2, 3, 4}
+        or row.mode
+        != {2: "research_only", 3: "research_and_monitor", 4: "research_only"}.get(
+            row.contract_version
+        )
         or batch is None
         or batch.batch_hash != row.batch_hash
         or batch.account_id != row.account_id
         or len(members) != manifest.member_count
-        or tuple(member.instrument_id for member in members) != batch.instrument_ids
+        or tuple(member.instrument_id for member in members)
+        != (
+            (binding_for(row).instrument_id,) if row.contract_version == 4 else batch.instrument_ids
+        )
+        or any(member.instrument_id not in batch.instrument_ids for member in members)
         or manifest.research_as_of < row.requested_at
         or [m.ordinal for m in members] != list(range(len(members)))
         or manifest.manifest_hash
@@ -129,17 +140,9 @@ async def read_research_manifest(
             or run.decision_time != manifest.research_as_of
             or run.model_config_id != row.model_config_id
             or run.model_hash != row.model_hash
-            or run.actor_id
-            != (
-                "local-independent-monitor-research-v1"
-                if row.contract_version == 3
-                else "local-research-only-v2"
-            )
+            or run.actor_id != research_identity(row.contract_version)[0]
             or run.idempotency_key
-            != (
-                f"{'independent-monitor' if row.contract_version == 3 else 'research-only'}"
-                f":{row.id}:{member.instrument_id}"
-            )
+            != f"{research_identity(row.contract_version)[1]}:{row.id}:{member.instrument_id}"
             or snapshot.payload.get("purpose")
             != (
                 "independent_monitor_research_v1"
@@ -194,17 +197,21 @@ async def prepare_research_request(
 async def _prepare_research_request(
     session: AsyncSession, settings: EngineSettings, *, request_id: UUID
 ) -> ManualRequestView:
-    from nexus.agents.snapshots import prepare_research_snapshot
-    from nexus.research.observation_identity_storage import register_observation_identity_binding
-
     row = await session.get(ManualPaperRequest, request_id)
     if (
         row is None
         or row.account_id != settings.agent_paper_account_id
-        or row.contract_version not in {2, 3}
+        or row.contract_version not in {2, 3, 4}
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
-    await lock_portfolio_account(session, row.account_id)
+    if row.contract_version == 4:
+        from nexus.agents.budget import ResearchAccountingBusy
+        from nexus.paper.target_service import try_lock_portfolio_account
+
+        if not await try_lock_portfolio_account(session, row.account_id):
+            raise ResearchAccountingBusy()
+    else:
+        await lock_portfolio_account(session, row.account_id)
     if row.contract_version == 3:
         from nexus.paper.independent_unknown_acceptance import require_independent_execution_open
 
@@ -212,7 +219,30 @@ async def _prepare_research_request(
     view = await read_manual_request(session, row)
     if view.status != "preparing":
         return view
+    if row.contract_version == 4:
+        from nexus.monitoring.host import (
+            BATCH_PREPARATION_HEADROOM_SECONDS,
+            INCREMENT_ACTION_HEADROOM_SECONDS,
+        )
+
+        deadline = binding_for(row).deadline - timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS)
+        seconds = (deadline - await database_now(session)).total_seconds()
+        if seconds < BATCH_PREPARATION_HEADROOM_SECONDS:
+            raise ValueError("SINGLE_SOL_NATURAL_WINDOW_PROTECTED")
+        async with asyncio.timeout(BATCH_PREPARATION_HEADROOM_SECONDS):
+            prepared = await _prepare_members(session, settings, row)
+            if await database_now(session) >= deadline:
+                raise ValueError("SINGLE_SOL_NATURAL_WINDOW_PROTECTED")
+            return prepared
+    return await _prepare_members(session, settings, row)
+
+
+async def _prepare_members(
+    session: AsyncSession, settings: EngineSettings, row: ManualPaperRequest
+) -> ManualRequestView:
     from nexus.agents.research_maintenance import require_research_open
+    from nexus.agents.snapshots import prepare_research_snapshot
+    from nexus.research.observation_identity_storage import register_observation_identity_binding
 
     require_research_open()
     now = await database_now(session)
@@ -227,6 +257,10 @@ async def _prepare_research_request(
         or settings.agent_paper_formal_model_config_id != row.model_config_id
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+    if row.contract_version == 4:
+        from nexus.paper.single_sol_research import recheck_single_sol
+
+        await recheck_single_sol(session, settings, row)
     prompts = await require_research_profile(session, row=row, settings=settings)
     from nexus.agents.platform_profile import sol_business_model_matches
 
@@ -236,12 +270,17 @@ async def _prepare_research_request(
         from nexus.agents.platform_native import credential_for_preparation
 
         platform_credential = credential_for_preparation(settings)
-    for instrument_id in batch.instrument_ids:
+    selected_ids = (
+        (binding_for(row).instrument_id,) if row.contract_version == 4 else batch.instrument_ids
+    )
+    if any(instrument_id not in batch.instrument_ids for instrument_id in selected_ids):
+        raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
+    for instrument_id in selected_ids:
         await register_observation_identity_binding(session, instrument_id=instrument_id)
     await session.flush()
     at = await database_now(session)
     native = []
-    for instrument_id in batch.instrument_ids:
+    for instrument_id in selected_ids:
         snapshot = await prepare_research_snapshot(
             session, instrument_id, as_of=at, research_only=True
         )
@@ -256,16 +295,13 @@ async def _prepare_research_request(
         )
         admission = await admit_research_run(
             session,
-            actor_id="local-independent-monitor-research-v1"
-            if row.contract_version == 3
-            else "local-research-only-v2",
-            route="independent-monitor-research-v1"
-            if row.contract_version == 3
-            else "research-only-v2",
-            idempotency_key=(
-                f"{'independent-monitor' if row.contract_version == 3 else 'research-only'}"
-                f":{row.id}:{instrument_id}"
-            ),
+            actor_id=research_identity(row.contract_version)[0],
+            route={
+                2: "research-only-v2",
+                3: "independent-monitor-research-v1",
+                4: "single-sol-research-v1",
+            }[row.contract_version],
+            idempotency_key=f"{research_identity(row.contract_version)[1]}:{row.id}:{instrument_id}",
             request_hash=job_input_hash(request.model_dump(mode="json")),
             request=request,
             prompt_version_id=prompts["orchestrator"].id,
@@ -274,7 +310,7 @@ async def _prepare_research_request(
             now=at,
             job_type=JobType.AGENT_PAPER_RESEARCH,
             formal_stage_capacity=True,
-            research_only=row.contract_version == 2,
+            research_only=row.contract_version in {2, 4},
             independent_monitor=row.contract_version == 3,
         )
         run = await session.get(AgentResearchRunRecord, admission.run_id)
@@ -309,7 +345,18 @@ async def _prepare_research_request(
             )
         )
     await session.flush()
-    if row.contract_version == 3:
+    if row.contract_version == 4:
+        from nexus.paper.single_sol_budget import freeze_single_sol_budget
+
+        binding = binding_for(row)
+        await freeze_single_sol_budget(
+            session,
+            settings,
+            run_id=native[0][0].id,
+            instrument_id=binding.instrument_id,
+            calendar_authority_id=binding.calendar_id,
+        )
+    if row.contract_version in {3, 4}:
         from nexus.agents.research_stages.routes import register_new_prepared_runs
 
         if platform_credential is not None:
@@ -339,8 +386,7 @@ async def finish_research_request(
             select(AgentResearchRunRecord.id)
             .where(
                 AgentResearchRunRecord.idempotency_key.startswith(
-                    f"{'independent-monitor' if row.contract_version == 3 else 'research-only'}"
-                    f":{row.id}:"
+                    f"{research_identity(row.contract_version)[1]}:{row.id}:"
                 )
             )
             .limit(1)
@@ -508,11 +554,14 @@ async def require_research_profile(
         or set(profile)
         != {"runtime_mode", "daily_limit_usd", "orchestrator_id", "prompt_hashes"}
         | ({"execution_policy"} if parallel else set())
+        | ({"single_sol"} if row.contract_version == 4 else set())
         or settings.agent_runtime_mode is None
         or profile["runtime_mode"] != settings.agent_runtime_mode.value
         or profile["runtime_mode"] != ("responses" if platform else "codex_sdk")
         or platform
-        and row.contract_version != 3
+        and row.contract_version not in {3, 4}
+        or row.contract_version == 4
+        and (not platform or parallel)
         or profile["daily_limit_usd"] != format(settings.agent_daily_budget_usd.normalize(), "f")
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")

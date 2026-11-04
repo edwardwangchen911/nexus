@@ -1,0 +1,363 @@
+import asyncio
+from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+import pytest
+from helpers.single_sol_clock import preopen_fixture_clock
+from integration import test_sol_native_preparation_pg as base
+from integration.test_sol_native_stage_pg import install_sol_http
+from nexus import worker
+from nexus.ops import manual_paper
+from nexus.ops.manual_paper_host import claim_configured_manual_request
+from nexus.paper.manual_entry import manual_host_scope
+from nexus.paper.research_request import finish_research_request, prepare_research_request
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
+from nexus.persistence.models.manual_paper import ManualPaperRequest
+from nexus.persistence.models.runtime import WorkerHeartbeat
+from sqlalchemy import func, select, text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["complete", "late_history", "host", "late_queue", "late_locked", "unknown", "queued"]
+)
+async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
+    from integration import test_research_request_pg as pure
+
+    account = await pure.seed_paper_batch(migrated_database_url)
+
+    async def seeded_account(_url):
+        return account
+
+    monkeypatch.setattr(pure, "seed_paper_batch", seeded_account)
+
+    await preopen_fixture_clock(migrated_database_url, monkeypatch)
+    original = base.current_record
+
+    async def price(factory):
+        record = await original(factory)
+        record["expires_at"] = (
+            datetime.fromisoformat(record["verified_at"]) + timedelta(days=7)
+        ).isoformat()
+        return record
+
+    monkeypatch.setattr(base, "current_record", price)
+    factory, settings, store, ids = await base.scope(migrated_database_url, tmp_path)
+    settings = settings.model_copy(
+        update={"agent_daily_budget_usd": Decimal(13), "release_revision": "a" * 40}
+    )
+    cal = uuid4()
+    async with factory.begin() as db:
+        now = await db.scalar(select(func.clock_timestamp()))
+        day = now.date()
+        db.add(
+            ExchangeCalendarAuthorityRecord(
+                id=cal,
+                exchange="XNYS",
+                version="single-v4-fixture",
+                source="fixture",
+                range_start=day,
+                range_end=day + timedelta(days=8),
+                query_parameters={},
+                completeness_status="complete",
+                content_hash="7" * 64,
+                published_at=now - timedelta(seconds=1),
+            )
+        )
+        await db.flush()
+        for off in range(7):
+            dt = day + timedelta(days=off)
+            if dt.weekday() > 4:
+                continue
+            opening = datetime.combine(dt, time(9, 30), ZoneInfo("America/New_York")).astimezone(
+                UTC
+            )
+            close = opening + timedelta(hours=6, minutes=30)
+            db.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=cal,
+                    session=dt,
+                    market_open_at=opening,
+                    market_close_at=close,
+                    decision_at=close,
+                )
+            )
+        db.add(
+            WorkerHeartbeat(
+                queue="agent_paper",
+                worker_id=f"agent-paper-loop-{uuid4()}:manual:{manual_host_scope(settings)}",
+                process_version="nexus-manual-paper-v1+" + "a" * 40,
+                migration_head=CURRENT_MIGRATION_HEAD,
+                started_at=now,
+                seen_at=now,
+            )
+        )
+
+    async def call(*args):
+        return await manual_paper.run(settings, manual_paper.parser().parse_args(list(args)))
+
+    offer = await call("inspect-single-sol-intent", "--instrument-id", str(ids[0]))
+    args = [
+        "start-single-sol",
+        "--instrument-id",
+        str(ids[0]),
+        "--idempotency-key",
+        "one-v4",
+        "--expected-intent-hash",
+        offer.intent_hash,
+    ]
+    # Contending callers may get BUSY, but cannot both own a key with different inputs.
+    from nexus.agents.budget import ResearchAccountingBusy
+
+    wrong_hash = offer.binding.model_copy(
+        update={"deadline": offer.binding.deadline - timedelta(seconds=1)}
+    ).intent_hash
+    competitors = await asyncio.gather(
+        call(*args), call(*(args[:-1] + [wrong_hash])), return_exceptions=True
+    )
+    assert isinstance(competitors[1], ValueError | ResearchAccountingBusy)
+    assert str(competitors[1]) in {"MANUAL_IDEMPOTENCY_CONFLICT", "RESEARCH_ACCOUNTING_BUSY"}
+    assert not isinstance(competitors[0], BaseException) or isinstance(
+        competitors[0], ResearchAccountingBusy
+    )
+    receipt = await call(*args)
+    assert (await call(*args)).request_id == receipt.request_id
+    with pytest.raises(ValueError, match="MANUAL_IDEMPOTENCY_CONFLICT"):
+        await call(*(args[:-1] + ["a" * 64]))
+    with pytest.raises(ValueError, match="MANUAL_IDEMPOTENCY_CONFLICT"):
+        await call("start", "--mode", "research_only", "--idempotency-key", "one-v4")
+    for change in (
+        {"agent_paper_candidate_batch_id": uuid4()},
+        {"agent_paper_formal_model_config_id": uuid4()},
+    ):
+        with pytest.raises(ValueError, match="MANUAL_IDEMPOTENCY_CONFLICT"):
+            await manual_paper.run(
+                settings.model_copy(update=change), manual_paper.parser().parse_args(args)
+            )
+    different = offer.binding.model_copy(
+        update={"deadline": offer.binding.deadline - timedelta(seconds=1)}
+    )
+    with pytest.raises(ValueError, match="MANUAL_IDEMPOTENCY_CONFLICT"):
+        await call(*(args[:-1] + [different.intent_hash]))
+    with pytest.raises(ValueError, match="MANUAL_IDEMPOTENCY_CONFLICT"):
+        await call(args[0], args[1], str(ids[1]), *args[3:])
+    from nexus.agents import research_maintenance
+
+    with monkeypatch.context() as m:
+        m.setattr(research_maintenance, "IMAGE_MAINTENANCE", True)
+        assert (await call(*args)).request_id == receipt.request_id
+        with pytest.raises(ValueError, match="RESEARCH_MAINTENANCE"):
+            await call(*[("new-v4" if item == "one-v4" else item) for item in args])
+    async with factory.begin() as db:
+        assert await db.scalar(text("SELECT count(*) FROM manual_paper_requests")) == 1
+        assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_scopes")) == 0
+    from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+
+    if path == "queued":
+        assert receipt.status == "queued" and receipt.research is None
+        await factory.kw["bind"].dispose()
+        return
+    from nexus.paper import single_sol_research as authority
+    from nexus.paper.single_sol_obligations import original_slot
+
+    for late_time in (
+        offer.binding.deadline - timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS),
+        original_slot(offer.binding.budget_day) + timedelta(minutes=1),
+    ):
+
+        async def late(_db):
+            return late_time
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(authority, "database_now", late)
+            async with factory.begin() as db:
+                row = await db.get(ManualPaperRequest, receipt.request_id)
+                with pytest.raises(ValueError, match="SINGLE_SOL_NATURAL_WINDOW_PROTECTED"):
+                    await authority.recheck_single_sol(db, settings, row)
+    if path == "host":
+        from nexus.ops.manual_paper_host import dispatch_pure_research_request
+        from nexus.paper.manual_request import read_manual_request
+
+        sent, clients = install_sol_http(monkeypatch, store)
+        try:
+            assert await dispatch_pure_research_request(
+                settings, request_id=receipt.request_id, calendar_authority_id=cal
+            )
+            async with factory.begin() as db:
+                row = await db.get(ManualPaperRequest, receipt.request_id)
+                view = await read_manual_request(db, row)
+                assert view.status == "completed" and view.research.members[0].usage_known
+                assert (
+                    len(view.research.members) == 1
+                    and view.research.members[0].instrument_id == ids[0]
+                )
+                assert sent == ["research", "critique", "synthesis"] and all(
+                    client.is_closed for client in clients
+                )
+            return
+        finally:
+            await factory.kw["bind"].dispose()
+    async with factory.begin() as db:
+        view, claimed = await claim_configured_manual_request(
+            db, settings, request_id=receipt.request_id, calendar_authority_id=cal
+        )
+        assert claimed, view
+    async with factory.begin() as db:
+        db.info["sec_exhibit_store"] = store
+        view = await prepare_research_request(db, settings, request_id=receipt.request_id)
+        assert view.research_contract == "single_sol_research_v1"
+        (member,) = view.research.members
+        assert member.instrument_id == ids[0]
+
+    async def add_late_history(payload):
+        if path == "unknown":
+            import httpx
+
+            raise httpx.ReadTimeout("synthetic peer lost after sending")
+        if path == "late_history" and payload["stage"] == "research":
+            from nexus.audit.service import append_audit_event
+            from nexus.paper import preparation_unknown_ack as legacy
+
+            async with factory.begin() as db:
+                await append_audit_event(
+                    db,
+                    actor_id=legacy.ACTOR,
+                    action=legacy.ACTION,
+                    schema_version=legacy.SCHEMA,
+                    payload={"account_id": str(settings.agent_paper_account_id)},
+                    occurred_at=await db.scalar(select(func.clock_timestamp())),
+                )
+
+    requests, clients = install_sol_http(monkeypatch, store, on_request=add_late_history)
+    if path in {"late_queue", "late_locked"}:
+        from nexus.jobs import worker as job_worker
+        from nexus.paper import research_request
+        from nexus.persistence.models.runtime import Job
+
+        late = offer.binding.deadline - timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS)
+        assert late > view.research.research_as_of
+
+        async def late_now(db):
+            return late
+
+        claim = job_worker.claim_next_job
+        crossed = []
+
+        async def claim_at_boundary(db, **options):
+            guard = options["locked_job_guard"]
+
+            async def after_lock(session, job):
+                crossed.append(job.id)
+                if path == "late_locked":
+                    monkeypatch.setattr(authority, "database_now", late_now)
+                    monkeypatch.setattr(research_request, "database_now", late_now)
+                return await guard(session, job)
+
+            return await claim(db, **(options | {"locked_job_guard": after_lock}))
+
+        monkeypatch.setattr(job_worker, "claim_next_job", claim_at_boundary)
+        if path == "late_queue":
+            monkeypatch.setattr(authority, "database_now", late_now)
+            monkeypatch.setattr(research_request, "database_now", late_now)
+            async with factory.begin() as db:
+                await db.execute(
+                    text("UPDATE worker_heartbeats SET seen_at=:at WHERE queue='agent_paper'"),
+                    {"at": late},
+                )
+        try:
+            with pytest.raises(
+                ValueError,
+                match="SINGLE_SOL_NATURAL_WINDOW_PROTECTED|SINGLE_SOL_BUDGET_SCOPE_INVALID",
+            ):
+                await worker.run_agent_worker_once(
+                    settings, job_ids=(member.job_id,), formal_stage_capacity=True
+                )
+            async with factory() as db:
+                job = await db.get(Job, member.job_id)
+                assert job.status == "queued" and job.attempt_count == 0
+                for table in ("job_attempts", "job_leases", "research_stage_authorization"):
+                    assert await db.scalar(text(f"SELECT count(*) FROM {table}")) == 0
+                assert requests == [] and crossed == (
+                    [member.job_id] if path == "late_locked" else []
+                )
+            return
+        finally:
+            await factory.kw["bind"].dispose()
+    try:
+        assert await worker.run_agent_worker_once(
+            settings, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
+        async with factory.begin() as db:
+            row = await db.get(ManualPaperRequest, receipt.request_id)
+            facts = (
+                await db.execute(
+                    text(
+                        "select state,details from agent_research_events "
+                        "where run_id=:run order by sequence"
+                    ),
+                    {"run": member.run_id},
+                )
+            ).all()
+            if path == "unknown":
+                assert requests == ["research"]
+                done = await finish_research_request(db, row=row)
+                assert done.status == "unknown" and not done.research.members[0].usage_known
+                state, settled = (
+                    await db.execute(
+                        text(
+                            "SELECT state,settled_usd FROM agent_daily_budget_reservations "
+                            "WHERE run_id=:id"
+                        ),
+                        {"id": member.run_id},
+                    )
+                ).one()
+                assert state == "reserved" and settled is None
+                return
+            if path == "late_history":
+                assert requests == ["research"], facts[-2:]
+                assert (
+                    await db.scalar(text("SELECT count(*) FROM research_stage_authorization")) == 1
+                )
+                assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_scopes")) == 1
+                return
+            assert requests == ["research", "critique", "synthesis"], facts[-2:]
+            done = await finish_research_request(db, row=row, cancel_unused=False)
+            assert done.status == "completed" and done.research.members[0].usage_known
+            assert await db.scalar(text("select count(*) from agent_paper_cycles")) == 0
+            from nexus.monitoring.reconciliation import reconcile_account_results
+
+            await reconcile_account_results(
+                db,
+                account_id=row.account_id,
+                instrument_ids=tuple(ids),
+                now=await db.scalar(select(func.clock_timestamp())),
+            )
+            assert await db.scalar(text("select count(*) from research_monitor_plans")) == 0
+            assert await db.scalar(text("select count(*) from research_monitor_coverage")) == 0
+            assert await db.scalar(text("select count(*) from research_stage_authorization")) == 3
+        # A known settled native owner cannot claim a new lease or dispatch again.
+        assert not await worker.run_agent_worker_once(
+            settings, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
+        from nexus.agents.budget import BudgetExhausted
+        from nexus.agents.persistence import require_reserved_daily_budget
+
+        async with factory.begin() as db:
+            with pytest.raises(BudgetExhausted, match="no open budget reservation"):
+                await require_reserved_daily_budget(db, run_id=member.run_id, accounting=True)
+            assert (
+                await db.scalar(
+                    text("SELECT count(*) FROM job_attempts WHERE job_id=:j"), {"j": member.job_id}
+                )
+                == 1
+            )
+            assert await db.scalar(text("select count(*) from research_stage_authorization")) == 3
+        assert requests == ["research", "critique", "synthesis"]
+    finally:
+        await factory.kw["bind"].dispose()

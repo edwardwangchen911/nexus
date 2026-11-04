@@ -267,6 +267,7 @@ async def prepare_native_pool(
     if root is None:
         raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
     parallel = False
+    request_record = None
     if root["kind"] == "independent":
         from nexus.agents.research_dispatch import require_dispatch_pool, uses_two_flight
         from nexus.paper.research_request import read_research_manifest
@@ -386,6 +387,20 @@ async def prepare_native_pool(
                 previous=[],
             )
         )
+        if request_record is not None and request_record.contract_version == 4:
+            from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+            from nexus.paper.research_request import database_now
+            from nexus.paper.single_sol_research import recheck_single_sol
+
+            # Still inside the caller's bounded preclaim transaction; no HTTP or new right yet.
+            await recheck_single_sol(
+                session,
+                settings,
+                request_record,
+                run_id=run.id,
+                cleanup_deadline=await database_now(session)
+                + timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS),
+            )
         return selected
 
 
