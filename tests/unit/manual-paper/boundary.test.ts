@@ -100,3 +100,14 @@ it("preserves independent disposition only on the original unknown v3 receipt", 
     expect(rebuildAllowedEngineResponse(200, { data: invalid, meta }, undefined, path, undefined, "GET")).toBeNull();
   }
 });
+
+it("reads a single Sol result only with its one locked non-trading member", () => {
+  const receipt = { ...researchReceipt, research_contract: "single_sol_research_v1",
+    research: { ...researchReceipt.research, members: researchReceipt.research.members.slice(0, 1) } };
+  const read = (value: unknown) => rebuildAllowedEngineResponse(200, { data: value, meta }, undefined, path, undefined, "GET");
+  expect(read(receipt)).not.toBeNull();
+  for (const bad of [{ ...receipt, research: researchReceipt.research }, { ...receipt, mode: "research_and_paper" },
+    { ...receipt, independent_disposition: "unknown_acknowledged" }, { ...receipt, execution_locked: false }]) {
+    expect(read(bad)).toBeNull();
+  }
+});

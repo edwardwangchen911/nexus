@@ -351,6 +351,29 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
                 is not None
             )
 
+        # A real, unused source release stops covering its original obligation.
+        # Roll this isolated alternative back before running the normal portfolio.
+        from nexus.agents.persistence import release_daily_budget
+        from nexus.paper.single_sol_budget import require_single_sol_capacity
+
+        async with factory() as db:
+            await release_daily_budget(db, run_id=credits[0].run_id)
+            used = await _shared_daily_budget_used(db, business_date=scope["budget_day"])
+            # Two unconverted obligations (portfolio and increment), plus the released stock.
+            available = LIMIT - used - 3 * scope["maximum"]
+            params = dict(
+                kind="dispatch",
+                run_id=scope["source_run_id"],
+                now=scope["slot"],
+                daily_limit_usd=LIMIT,
+            )
+            assert await require_single_sol_capacity(db, **params, amount=available)
+            with pytest.raises(BudgetExhausted, match="SINGLE_SOL_NATURAL_BUDGET_PROTECTED"):
+                await require_single_sol_capacity(
+                    db, **params, amount=available + Decimal("0.000001")
+                )
+            await db.rollback()
+
     from integration import test_sol_native_stage_pg as stages
 
     original_prepare = native.test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes
@@ -364,7 +387,7 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
 
         await original_prepare(*args, **kwargs, after_prepared=run_checks, natural_time=True)
 
-    async def after_portfolio(factory, host, portfolio, job, at, *unused):
+    async def after_portfolio(factory, host, portfolio, job, at, patch, case, root, env_file):
         async with factory() as db:
             rows = (
                 await db.execute(
@@ -386,6 +409,41 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
             ).one()
             assert budget.business_date == budget.budget_day
             assert budget.reserved_usd == budget.maximum
+
+        from integration.test_sol_portfolio_responses_pg import _run_native_portfolio_http
+        from nexus.paper.single_sol_obligations import funded_obligations
+
+        async with factory() as db:
+            guard = (
+                (await db.execute(text("SELECT * FROM single_sol_budget_scopes"))).mappings().one()
+            )
+            members = await db.scalar(
+                text(
+                    "SELECT candidate_instrument_ids FROM agent_paper_candidate_batches "
+                    "WHERE id=:batch"
+                ),
+                {"batch": guard["batch_id"]},
+            )
+            lookup = dict(
+                now=guard["slot"] + timedelta(minutes=5),
+                account=guard["account_id"],
+                batch=guard["batch_id"],
+                model=guard["model_id"],
+                calendar=guard["calendar_id"],
+                members=tuple(members),
+                maximum=guard["maximum"],
+            )
+            with pytest.raises(ValueError, match="SINGLE_SOL_NATURAL_WINDOW_PROTECTED"):
+                await funded_obligations(db, **lookup)
+        await _run_native_portfolio_http(
+            factory, host, portfolio, job, at, patch, "complete", root, env_file
+        )
+        async with factory() as db:
+            credited = await funded_obligations(db, **lookup)
+            assert set(credited) == {"research:" + str(m) for m in members} | {"synthesis"}
+            assert credited["synthesis"] == portfolio.id and len(set(credited.values())) == 4
+            with pytest.raises(ValueError, match="SINGLE_SOL_ORIGINAL_SETTLEMENT_UNPROVEN"):
+                await funded_obligations(db, **(lookup | {"calendar": uuid4()}))
 
     monkeypatch.setattr(
         native, "test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes", prepare
@@ -594,3 +652,154 @@ async def test_old_reservation_cannot_authorize_a_new_scope(
             assert await _shared_daily_budget_used(db, business_date=now.date()) == maximum
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_install_single_protection_after_exact_natural_close(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from integration import test_candidate_multistock_path as candidates
+    from integration import test_sol_native_stage_pg as stages
+    from integration.test_sol_portfolio_responses_pg import _run_native_portfolio_http
+    from nexus.agents import persistence
+    from nexus.paper import agent_cycle, single_sol_budget
+    from nexus.persistence.models.backtest import ExchangeCalendarAuthorityRecord
+    from sqlalchemy import event
+
+    def cover_next_session(_mapper, _connection, calendar):
+        if calendar.id == CALENDAR_ID:
+            calendar.range_end += timedelta(days=7)
+
+    event.listen(ExchangeCalendarAuthorityRecord, "before_insert", cover_next_session, once=True)
+    start = candidates.start_schwab_agent_paper_cycle
+    normal_prepare = native.test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes
+    normal_reserve = persistence.reserve_daily_budget
+    template = {}
+
+    async def scheduled(db, **kwargs):
+        slot = kwargs["decision_slot_at"]
+        # The formal-cycle fixture contains only the prior and current exchange sessions.
+        # The service-calendar reader also needs the next session from that same authority.
+        from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+
+        next_day = slot.date() + timedelta(days=1)
+        while next_day.weekday() >= 5:
+            next_day += timedelta(days=1)
+        next_open = datetime.combine(
+            next_day, time(9, 30), ZoneInfo("America/New_York")
+        ).astimezone(UTC)
+        next_close = next_open + timedelta(hours=6, minutes=30)
+        db.add(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=CALENDAR_ID,
+                session=next_day,
+                market_open_at=next_open,
+                market_close_at=next_close,
+                decision_at=next_close,
+            )
+        )
+        await db.flush()
+        ticket = await agent_cycle.reserve_schwab_agent_paper_trigger(
+            db,
+            account_id=kwargs["authority"].account_id,
+            client_idempotency_key="post-slot",
+            now=slot,
+            candidate_batch_id=kwargs["candidate_batch_id"],
+            formal_stage_capacity=True,
+            formal_model_config_id=kwargs["formal_model_config_id"],
+        )
+        result = await start(db, **(kwargs | {"daily_limit_usd": LIMIT}))
+        await agent_cycle.finish_schwab_agent_paper_trigger(db, reservation=ticket, result=result)
+        return result
+
+    async def reserve(db, **kwargs):
+        if not template:
+            old = await db.get(AgentResearchRunRecord, kwargs["run_id"])
+            template.update({c.name: getattr(old, c.name) for c in old.__table__.columns})
+        return await normal_reserve(db, **kwargs)
+
+    async def prepare(*args, **kwargs):
+        await normal_prepare(*args, **kwargs, natural_time=True)
+
+    async def after(factory, host, portfolio, job, at, patch, case, root, env_file):
+        await _run_native_portfolio_http(
+            factory, host, portfolio, job, at, patch, "complete", root, env_file
+        )
+        async with factory.begin() as db:
+            slot = await db.scalar(
+                text("select decision_slot_at from agent_paper_cycles where id=:id"),
+                {"id": portfolio.cycle_id},
+            )
+            now = slot + timedelta(minutes=20)
+
+            async def observed(_session):
+                return now
+
+            monkeypatch.setattr(single_sol_budget, "database_now", observed)
+            run = uuid4()
+            source = AgentResearchRunRecord(
+                **(
+                    template
+                    | dict(
+                        id=run,
+                        actor_id="local-single-sol-research-v1",
+                        idempotency_key=str(run),
+                        created_at=now,
+                        decision_time=now,
+                        input_hash=run.hex * 2,
+                    )
+                )
+            )
+            db.add(source)
+            await db.flush()
+            await normal_reserve(
+                db,
+                run_id=run,
+                now=now,
+                daily_limit_usd=LIMIT,
+                worst_case_usd=source.reserved_cost_usd,
+                pricing_version=source.pricing_version,
+                pricing_fresh=True,
+            )
+            assert not await has_guard(db, now.date())
+            await freeze_single_sol_budget(
+                db,
+                host.model_copy(
+                    update={
+                        "agent_daily_budget_usd": LIMIT,
+                        "agent_paper_candidate_batch_id": portfolio.candidate_batch_id,
+                    }
+                ),
+                run_id=run,
+                instrument_id=source.instrument_id,
+                calendar_authority_id=CALENDAR_ID,
+            )
+        async with factory() as db:
+            assert (
+                await db.scalar(text("select source_run_id from single_sol_budget_scopes")) == run
+            )
+            credits = (
+                await db.execute(text("select task,run_id from single_sol_budget_credits"))
+            ).all()
+            assert len(credits) == 4 and ("synthesis", portfolio.id) in credits
+            assert run not in {item.run_id for item in credits}
+            assert (
+                await db.scalar(
+                    text("""SELECT count(*) FROM pg_constraint
+                WHERE conrelid='single_sol_budget_scopes'::regclass AND contype='c'
+                AND pg_get_constraintdef(oid) LIKE '%maximum <= daily_limit%'""")
+                )
+                == 1
+            )
+
+    monkeypatch.setattr(candidates, "start_schwab_agent_paper_cycle", scheduled)
+    monkeypatch.setattr(persistence, "reserve_daily_budget", reserve)
+    monkeypatch.setattr(
+        native, "test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes", prepare
+    )
+    try:
+        await stages.test_normal_sol_formal_research_reconciles_monitor_plans_once(
+            migrated_database_url, monkeypatch, tmp_path, after_admission=after
+        )
+    finally:
+        event.remove(ExchangeCalendarAuthorityRecord, "before_insert", cover_next_session)

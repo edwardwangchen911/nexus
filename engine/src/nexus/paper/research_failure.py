@@ -145,7 +145,7 @@ async def record_research_failure(
     cleanup: bool = False,
 ) -> None:
     row = await session.get(ManualPaperRequest, request_id)
-    if row is None or row.contract_version not in {2, 3}:
+    if row is None or row.contract_version not in {2, 3, 4}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     code = (
         error.code
@@ -178,7 +178,7 @@ async def record_research_failure(
 
 async def require_unused_request_closed(session: AsyncSession, *, request_id: UUID) -> None:
     row = await session.get(ManualPaperRequest, request_id)
-    if row is None or row.contract_version not in {2, 3}:
+    if row is None or row.contract_version not in {2, 3, 4}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     await lock_portfolio_account(session, row.account_id)
     view = await read_manual_request(session, row)

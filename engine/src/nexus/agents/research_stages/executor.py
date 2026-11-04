@@ -245,7 +245,9 @@ async def execute_staged_claim(
             native_price = sol_price_record(platform_model.platform_profile["price_record"])
     from nexus.agents.research_dispatch import stop_current_dispatch
 
-    protocol = StagedProtocol(factory, clock=clock, on_failure=stop_current_dispatch)
+    protocol = StagedProtocol(
+        factory, clock=clock, on_failure=stop_current_dispatch, native_settings=native_settings
+    )
     await protocol.install(
         scope_id=scope,
         claims=(claim,),

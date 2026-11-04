@@ -69,6 +69,7 @@ from nexus.paper.scheduled_unknown_acceptance import (
     ScheduledAcceptanceReceipt,
     inspect_or_accept_scheduled_unknown,
 )
+from nexus.paper.single_sol_owner import SingleSolOffer
 from nexus.paper.single_sol_research import SingleSolSelection, inspect_single_sol
 from nexus.paper.synthesis_usage_acceptance import (
     SynthesisUsageDiagnosticError,
@@ -219,6 +220,15 @@ def parser() -> argparse.ArgumentParser:
         "inspect-single-sol",
         help="Read a selected Sol batch member and full-session budget estimate",
     ).add_argument("--instrument-id", type=UUID, required=True)
+    single = commands.add_parser(
+        "start-single-sol", help="Queue one selected research-only Sol member"
+    )
+    single.add_argument("--instrument-id", type=UUID, required=True)
+    single.add_argument("--idempotency-key", required=True)
+    single.add_argument("--expected-intent-hash", required=True)
+    commands.add_parser("inspect-single-sol-intent").add_argument(
+        "--instrument-id", type=UUID, required=True
+    )
     for action in ("register-formal-intent", "read-formal-intent", "cancel-formal-intent"):
         commands.add_parser(action).add_argument("--idempotency-key", required=True)
     start = commands.add_parser("start")
@@ -294,6 +304,7 @@ async def run(
     | IntentReceipt
     | FormalAdmissionCheck
     | SingleSolSelection
+    | SingleSolOffer
     | TerminalCycleCancelReceipt
     | HistorySealReceipt
     | PreparationCloseReceipt
@@ -354,6 +365,28 @@ async def run(
                     await session.execute(text("SET TRANSACTION READ ONLY"))
                 return await intent_command(
                     session, settings, action=args.action, key=args.idempotency_key
+                )
+        if args.action == "inspect-single-sol-intent":
+            from nexus.paper.single_sol_research import single_sol_authority
+
+            async with factory.begin() as session:
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+                )
+                binding = await single_sol_authority(
+                    session, settings, instrument_id=args.instrument_id
+                )
+                return SingleSolOffer(binding=binding, intent_hash=binding.intent_hash)
+        if args.action == "start-single-sol":
+            from nexus.paper.single_sol_research import start_single_sol
+
+            async with factory.begin() as session:
+                return await start_single_sol(
+                    session,
+                    settings,
+                    instrument_id=args.instrument_id,
+                    idempotency_key=args.idempotency_key,
+                    expected_intent_hash=args.expected_intent_hash,
                 )
         if args.action in {"check-formal-admission", "inspect-single-sol"}:
             async with factory.begin() as session:

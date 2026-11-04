@@ -120,7 +120,7 @@ async def _read_presented_manual_request(
         return ManualRequestView.model_validate(
             {**view.model_dump(), "independent_disposition": disposition}
         )
-    if row.contract_version in {2, 3}:
+    if row.contract_version in {2, 3, 4}:
         return view
     from nexus.paper.current_preparation_acceptance import current_unknown_accepted
 
@@ -171,6 +171,28 @@ async def lookup_configured_manual_request(
     return None if row is None else await _read_presented_manual_request(session, row)
 
 
+async def require_configured_manual_host(
+    session: AsyncSession, settings: EngineSettings, *, now: datetime
+) -> None:
+    from nexus.paper.manual_host_exit import valid_host_exit
+
+    heartbeats = (
+        await session.scalars(
+            select(WorkerHeartbeat).where(
+                WorkerHeartbeat.queue == "agent_paper",
+                WorkerHeartbeat.seen_at >= now - timedelta(seconds=30),
+                ~valid_host_exit(),
+            )
+        )
+    ).all()
+    require_manual_host(
+        heartbeats,
+        now=now,
+        release_revision=settings.release_revision,
+        scope_hash=manual_host_scope(settings),
+    )
+
+
 async def _configured_admission(
     session: AsyncSession, settings: EngineSettings, *, mode: ManualMode, account_id: UUID
 ) -> tuple[UUID, UUID, datetime]:
@@ -197,23 +219,7 @@ async def _configured_admission(
         else require_acknowledged_operation_scope
     )
     await scope_check(session, account_id=account_id, model_config_id=model_id, now=now)
-    from nexus.paper.manual_host_exit import valid_host_exit
-
-    heartbeats = (
-        await session.scalars(
-            select(WorkerHeartbeat).where(
-                WorkerHeartbeat.queue == "agent_paper",
-                WorkerHeartbeat.seen_at >= now - timedelta(seconds=30),
-                ~valid_host_exit(),
-            )
-        )
-    ).all()
-    require_manual_host(
-        heartbeats,
-        now=now,
-        release_revision=settings.release_revision,
-        scope_hash=manual_host_scope(settings),
-    )
+    await require_configured_manual_host(session, settings, now=now)
     if mode not in {"research_only", "research_and_monitor"}:
         try:
             calendar = await select_agent_paper_service_calendar_authority(session, now=now)
@@ -285,7 +291,7 @@ async def start_configured_manual_request(
     # A response lost in transport is a read of the original immutable intent,
     # including after disabling the entry or rotating its configured batch/model.
     if row is not None:
-        if row.mode != mode:
+        if row.mode != mode or row.contract_version == 4:
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         return await _read_presented_manual_request(session, row)
     batch_id, model_id, _ = await _configured_admission(

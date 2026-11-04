@@ -43,11 +43,9 @@ async def recover_formal_research_orphans(
         ):
             raise ValueError("AGENT_PAPER_RESEARCH_ORPHAN_BINDING_INVALID")
         owner_id, cutoff = research_request.id, manifest.research_as_of
-        actor, prefix = (
-            ("local-independent-monitor-research-v1", "independent-monitor")
-            if research_request.contract_version == 3
-            else ("local-research-only-v2", "research-only")
-        )
+        from nexus.paper.single_sol_owner import research_identity
+
+        actor, prefix = research_identity(research_request.contract_version)
     elif cycle is not None:
         owner_id, cutoff = cycle.id, cycle.decision_time
         actor, prefix = "local-agent-paper-cycle", "agent-paper"

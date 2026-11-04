@@ -1,9 +1,8 @@
 """Protect remaining natural obligations in the native UTC-day allocation transaction."""
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import RowMapping, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +12,8 @@ from nexus.agents.persistence import _lock_budget_day, _shared_daily_budget_used
 from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
-from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
 from nexus.paper.research_request import database_now
+from nexus.paper.single_sol_obligations import funded_obligations, original_slot
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -76,27 +75,25 @@ async def freeze_single_sol_budget(
     day = (await database_now(session)).date()
     await _lock_budget_day(session, day.isoformat())
     now = await database_now(session)
-    slot = datetime.combine(
-        day,
-        PORTFOLIO_ALLOCATION_V1.decision_local_time,
-        ZoneInfo(PORTFOLIO_ALLOCATION_V1.decision_timezone),
-    ).astimezone(UTC)
+    slot = original_slot(day)
     if (
         now.date() != day
-        or now >= slot
         or await session.scalar(text("SHOW transaction_isolation")) != "read committed"
     ):
         raise ValueError("SINGLE_SOL_BUDGET_WINDOW_CLOSED")
-    if await session.scalar(
-        select(IdempotencyRecord.id).where(
-            IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account}",
-            IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
-            IdempotencyRecord.idempotency_key == slot.isoformat(),
+    if now < slot and (
+        await session.scalar(
+            select(IdempotencyRecord.id).where(
+                IdempotencyRecord.actor_id == f"local-agent-paper-schwab:{account}",
+                IdempotencyRecord.route == "agent-paper-schwab-trigger-v2",
+                IdempotencyRecord.idempotency_key == slot.isoformat(),
+            )
         )
-    ) or await session.scalar(
-        select(AgentPaperCycleRecord.id).where(
-            AgentPaperCycleRecord.account_id == account,
-            AgentPaperCycleRecord.decision_slot_at == slot,
+        or await session.scalar(
+            select(AgentPaperCycleRecord.id).where(
+                AgentPaperCycleRecord.account_id == account,
+                AgentPaperCycleRecord.decision_slot_at == slot,
+            )
         )
     ):
         raise ValueError("SINGLE_SOL_NATURAL_SLOT_CLAIMED")
@@ -139,7 +136,7 @@ async def freeze_single_sol_budget(
         or reservation.state != "reserved"
         or reservation.settled_usd is not None
         or reservation.reserved_usd != model.worst_case_cost_usd
-        or not model.pricing_available_at <= now < slot < model.pricing_expires_at
+        or not model.pricing_available_at <= now < model.pricing_expires_at
     ):
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
     calendar = await load_agent_paper_service_calendar_authority(
@@ -153,27 +150,22 @@ async def freeze_single_sol_budget(
     ):
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
     maximum = model.worst_case_cost_usd
-    covered_increment = await session.scalar(
-        text("""SELECT i.run_id FROM research_monitor_increments i
-            WHERE i.account_id=:account AND i.session_date=:day AND i.research_as_of<=:now
-            AND single_sol_increment_valid(:day,:account,:batch,:model,:calendar,:maximum,i.run_id)
-            ORDER BY i.research_as_of,i.run_id LIMIT 1"""),
-        dict(
-            day=day,
-            account=account,
-            batch=batch.batch_id,
-            model=model.id,
-            calendar=calendar_authority_id,
-            maximum=maximum,
-            now=now,
-        ),
+    covered = await funded_obligations(
+        session,
+        now=now,
+        account=account,
+        batch=batch.batch_id,
+        model=model.id,
+        calendar=calendar_authority_id,
+        members=batch.instrument_ids,
+        maximum=maximum,
     )
     used = await _shared_daily_budget_used(session, business_date=day)
-    remaining = len(batch.instrument_ids) + 2 - int(covered_increment is not None)
+    remaining = len(batch.instrument_ids) + 2 - len(covered)
     if used + remaining * maximum > settings.agent_daily_budget_usd:
         raise BudgetExhausted("SINGLE_SOL_NATURAL_BUDGET_PROTECTED")
     checked = await database_now(session)
-    if checked.date() != day or checked >= slot:
+    if checked.date() != day or (now < slot <= checked) or checked >= calendar.market_close_at:
         raise ValueError("SINGLE_SOL_BUDGET_WINDOW_CLOSED")
     await session.execute(
         text("""INSERT INTO single_sol_budget_scopes
@@ -196,8 +188,8 @@ async def freeze_single_sol_budget(
         ),
     )
 
-    if covered_increment is not None:
-        await _convert(session, day, "increment", covered_increment)
+    for task, native_id in covered.items():
+        await _convert(session, day, task, native_id)
 
 
 async def require_single_sol_capacity(
@@ -231,21 +223,34 @@ async def require_single_sol_capacity(
     )
     if daily_limit_usd != guard["daily_limit"]:
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
-    credits = set(
-        await session.scalars(
-            text("SELECT task FROM single_sol_budget_credits WHERE budget_day=:day"), {"day": day}
+    # The credit identifies the original owner forever. It covers its obligation
+    # only while native funds are held or a known settlement has discharged it.
+    rows = (
+        await session.execute(
+            text("""
+        SELECT c.task, CASE WHEN c.task='synthesis' THEN s.state ELSE r.state END AS state
+        FROM single_sol_budget_credits c
+        LEFT JOIN agent_daily_budget_reservations r ON r.run_id=c.run_id
+              AND r.business_date=c.budget_day
+        LEFT JOIN agent_portfolio_synthesis_budget_reservations s ON s.run_id=c.run_id
+              AND s.business_date=c.budget_day
+        WHERE c.budget_day=:day"""),
+            {"day": day},
         )
-    )
+    ).all()
     tasks = {"research:" + str(i) for i in guard["members"]} | {"synthesis", "increment"}
-    if not credits <= tasks:
+    recorded = {row.task for row in rows}
+    if not recorded <= tasks or any(
+        row.state not in {"reserved", "settled", "released"} for row in rows
+    ):
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
-    remaining = tasks - credits
+    remaining = tasks - {row.task for row in rows if row.state in {"reserved", "settled"}}
     task = (
         await _original_obligation(session, guard, kind, run_id, now)
         if amount == guard["maximum"]
         else None
     )
-    credit = task is not None and task in remaining
+    credit = task is not None and task not in recorded
     used = await _shared_daily_budget_used(session, business_date=day)
     if used + amount + (len(remaining) - int(credit)) * guard["maximum"] > daily_limit_usd:
         raise BudgetExhausted("SINGLE_SOL_NATURAL_BUDGET_PROTECTED")
