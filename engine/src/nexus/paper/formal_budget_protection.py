@@ -194,6 +194,9 @@ async def apply_protection(
         ):
             raise ValueError("FORMAL_BUDGET_APPLY_CONFLICT")
         return existing
+    from nexus.paper.single_sol_budget import require_no_single_sol_guard
+
+    await require_no_single_sol_guard(session, now.date())
     from nexus.paper.preparation_unknown_ack import require_no_conflicting_formal_successor
     from nexus.persistence.models.manual_paper import FormalIntradayIntent
 
@@ -603,6 +606,17 @@ async def require_protected_admission(
     from nexus.agents.research_usage import require_research_accounting_clear
 
     await require_research_accounting_clear(session)
+    from nexus.paper.single_sol_budget import (
+        require_no_single_sol_guard,
+        require_single_sol_capacity,
+    )
+
+    if allocation is not None:
+        await require_no_single_sol_guard(session, now.date())
+    elif await require_single_sol_capacity(
+        session, kind=kind, run_id=run_id, now=now, daily_limit_usd=daily_limit_usd, amount=amount
+    ):
+        return True
     demand = await protected_demand(session, business_date=now.date(), now=now)
     if demand is None:
         return False
