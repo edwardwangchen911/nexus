@@ -12,7 +12,9 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from nexus.providers.http import HttpPolicyError
 
-PHASES = frozenset({"configuration", "prior_daily", "macro", "current_trends", "research_identity"})
+PHASES = frozenset(
+    {"configuration", "prior_daily", "macro", "current_trends", "research_identity", "sec_index"}
+)
 POINTS = frozenset(
     {
         "configuration",
