@@ -133,7 +133,15 @@ async def test_sol_normal_and_orphan_consume_identical_original_price(
         await factory.kw["bind"].dispose()
 
 
-def install_sol_http(monkeypatch, store, *, audit_veto=False, on_request=None, model_response=None):
+def install_sol_http(
+    monkeypatch,
+    store,
+    *,
+    audit_veto=False,
+    on_request=None,
+    model_response=None,
+    critique_instruction_bytes=0,
+):
     import httpx
     from nexus.agents import platform_native
     from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _staged_batch
@@ -189,6 +197,8 @@ def install_sol_http(monkeypatch, store, *, audit_veto=False, on_request=None, m
             ]
         value = terminal()
         value["response"].update(model="gpt-6.1-sol", service_tier="default", usage=usage())
+        if payload["stage"] == "critique" and critique_instruction_bytes:
+            value["response"]["instructions"] = "x" * critique_instruction_bytes
         value["response"]["output"][0]["content"][0]["text"] = json.dumps(response)
         return httpx.Response(
             200,

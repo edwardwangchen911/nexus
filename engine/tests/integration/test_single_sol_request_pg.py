@@ -25,7 +25,17 @@ from sqlalchemy import func, select, text
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "path", ["complete", "late_history", "host", "late_queue", "late_locked", "unknown", "queued"]
+    "path",
+    [
+        "complete",
+        "late_history",
+        "host",
+        "late_queue",
+        "late_locked",
+        "unknown",
+        "queued",
+        "oversized_critique",
+    ],
 )
 async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
     from integration import test_research_request_pg as pure
@@ -234,7 +244,14 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     occurred_at=await db.scalar(select(func.clock_timestamp())),
                 )
 
-    requests, clients = install_sol_http(monkeypatch, store, on_request=add_late_history)
+    requests, clients = install_sol_http(
+        monkeypatch,
+        store,
+        on_request=add_late_history,
+        critique_instruction_bytes={"complete": 150_000, "oversized_critique": 1_048_576}.get(
+            path, 0
+        ),
+    )
     if path in {"late_queue", "late_locked"}:
         from nexus.jobs import worker as job_worker
         from nexus.paper import research_request
@@ -304,8 +321,20 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     {"run": member.run_id},
                 )
             ).all()
-            if path == "unknown":
-                assert requests == ["research"]
+            if path in {"unknown", "oversized_critique"}:
+                if path == "unknown":
+                    assert requests == ["research"]
+                else:
+                    assert requests == ["research", "critique"] and all(
+                        c.is_closed for c in clients
+                    )
+                    assert (
+                        await db.scalar(text("SELECT count(*) FROM research_stage_authorization"))
+                        == 2
+                    )
+                    assert (
+                        await db.scalars(text("SELECT stage FROM research_stage_observation"))
+                    ).all() == [1]
                 done = await finish_research_request(db, row=row)
                 assert done.status == "unknown" and not done.research.members[0].usage_known
                 state, settled = (
@@ -329,6 +358,23 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
             assert requests == ["research", "critique", "synthesis"], facts[-2:]
             done = await finish_research_request(db, row=row, cancel_unused=False)
             assert done.status == "completed" and done.research.members[0].usage_known
+            if path == "complete":
+                assert (
+                    await db.scalar(
+                        text(
+                            "SELECT octet_length(platform_response) "
+                            "FROM research_stage_observation WHERE run_id=:run AND stage=2"
+                        ),
+                        {"run": member.run_id},
+                    )
+                    > 131072
+                )
+                assert await db.scalar(
+                    text(
+                        "SELECT settled_usd FROM agent_daily_budget_reservations WHERE run_id=:run"
+                    ),
+                    {"run": member.run_id},
+                ) == Decimal("0.0897")
             assert await db.scalar(text("select count(*) from agent_paper_cycles")) == 0
             from nexus.monitoring.reconciliation import reconcile_account_results
 
