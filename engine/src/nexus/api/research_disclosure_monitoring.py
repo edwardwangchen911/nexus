@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.api.research_monitoring import _REASONS
+from nexus.api.research_monitoring import _REASONS, state_without_source_plan
 from nexus.api.schemas.research_monitoring import (
     ResearchDisclosureMonitorCheck,
     ResearchDisclosureMonitoringView,
@@ -250,11 +250,7 @@ async def read_disclosure_monitoring_view(
     if original is None:
         return ResearchDisclosureMonitoringView(
             observed_at=now,
-            state="not_installed"
-            if receipt is None
-            else "unknown"
-            if receipt.status == "unknown"
-            else "withdrawn",
+            state=state_without_source_plan(receipt),
             coverage_reason=reason,
         )
     try:

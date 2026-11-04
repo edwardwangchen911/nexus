@@ -42,6 +42,12 @@ _REASONS: dict[str, CoverageReason] = {
 }
 
 
+def state_without_source_plan(receipt: MonitorCoverageReceipt | None) -> MonitoringState:
+    if receipt is None or (receipt.status == "gap" and receipt.prior_plan_id is None):
+        return "not_installed"
+    return "unknown" if receipt.status == "unknown" else "withdrawn"
+
+
 async def read_monitoring_view(
     session: AsyncSession,
     run: AgentResearchRunRecord,
@@ -84,11 +90,7 @@ async def read_monitoring_view(
     if original is None:
         return ResearchMonitoringView(
             observed_at=now,
-            state="unknown"
-            if own_receipt is not None and own_receipt.status == "unknown"
-            else "withdrawn"
-            if own_receipt is not None
-            else "not_installed",
+            state=state_without_source_plan(own_receipt),
             coverage_reason=reason,
         )
     latest = await session.scalar(
