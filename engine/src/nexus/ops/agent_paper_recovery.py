@@ -9,6 +9,7 @@ from sqlalchemy import func, select, text
 from nexus.agents.platform_native import native_runtime_matches
 from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.agents.research_usage import require_research_accounting_clear
+from nexus.market.current_identity import identity_parse_scope
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
 from nexus.paper.manual_entry import manual_host_scope
@@ -20,6 +21,7 @@ from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings
+from nexus.workbench.evidence_read_scope import evidence_read_scope
 
 _KNOWN_CODES = frozenset(
     {
@@ -121,13 +123,14 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
                 # Existing acceptance/seal and consumed-lease proofs remain authoritative.
                 # Never replace them with a blanket historical cost/lease predicate.
-                await require_manual_account_available(
-                    session,
-                    account_id=account.id,
-                    now=now,
-                    allow_scheduled_completion=True,
-                    read_only=True,
-                )
+                with identity_parse_scope(), evidence_read_scope(session):
+                    await require_manual_account_available(
+                        session,
+                        account_id=account.id,
+                        now=now,
+                        allow_scheduled_completion=True,
+                        read_only=True,
+                    )
                 # Experimental runs have no business request to enumerate above.
                 # Known-but-unsettled costs still prohibit resuming new work.
                 await require_research_accounting_clear(session)
