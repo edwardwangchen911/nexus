@@ -161,10 +161,11 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
             )
         elif isinstance(error, DBAPIError):
             # SQLSTATE does not identify who cancelled a query.
-            safe_code = {
-                "57014": "RECOVERY_QUERY_CANCELLED",
-                "55P03": "RECOVERY_DB_LOCK_UNAVAILABLE",
-            }.get(getattr(error.orig, "sqlstate", None), code)
+            match getattr(error.orig, "sqlstate", None):
+                case "57014":
+                    safe_code = "RECOVERY_QUERY_CANCELLED"
+                case "55P03":
+                    safe_code = "RECOVERY_DB_LOCK_UNAVAILABLE"
         diagnostic = {
             "failed_stage": stage,
             "safe_code": safe_code,
