@@ -98,7 +98,9 @@ async def preopen_fixture_clock(url, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["complete", "late_history", "host"])
+@pytest.mark.parametrize(
+    "path", ["complete", "late_history", "host", "late_queue", "late_locked", "unknown", "queued"]
+)
 async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
     await preopen_fixture_clock(migrated_database_url, monkeypatch)
     original = base.current_record
@@ -221,6 +223,11 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
         assert await db.scalar(text("SELECT count(*) FROM manual_paper_requests")) == 1
         assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_scopes")) == 0
     from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+
+    if path == "queued":
+        assert receipt.status == "queued" and receipt.research is None
+        await factory.kw["bind"].dispose()
+        return
     from nexus.paper import single_sol_research as authority
     from nexus.paper.single_sol_obligations import original_slot
 
@@ -274,6 +281,10 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
         assert member.instrument_id == ids[0]
 
     async def add_late_history(payload):
+        if path == "unknown":
+            import httpx
+
+            raise httpx.ReadTimeout("synthetic peer lost after sending")
         if path == "late_history" and payload["stage"] == "research":
             from nexus.audit.service import append_audit_event
             from nexus.paper import preparation_unknown_ack as legacy
@@ -289,6 +300,60 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                 )
 
     requests, clients = install_sol_http(monkeypatch, store, on_request=add_late_history)
+    if path in {"late_queue", "late_locked"}:
+        from nexus.jobs import worker as job_worker
+        from nexus.paper import research_request
+        from nexus.persistence.models.runtime import Job
+
+        late = offer.binding.deadline - timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS)
+        assert late > view.research.research_as_of
+
+        async def late_now(db):
+            return late
+
+        claim = job_worker.claim_next_job
+        crossed = []
+
+        async def claim_at_boundary(db, **options):
+            guard = options["locked_job_guard"]
+
+            async def after_lock(session, job):
+                crossed.append(job.id)
+                if path == "late_locked":
+                    monkeypatch.setattr(authority, "database_now", late_now)
+                    monkeypatch.setattr(research_request, "database_now", late_now)
+                return await guard(session, job)
+
+            return await claim(db, **(options | {"locked_job_guard": after_lock}))
+
+        monkeypatch.setattr(job_worker, "claim_next_job", claim_at_boundary)
+        if path == "late_queue":
+            monkeypatch.setattr(authority, "database_now", late_now)
+            monkeypatch.setattr(research_request, "database_now", late_now)
+            async with factory.begin() as db:
+                await db.execute(
+                    text("UPDATE worker_heartbeats SET seen_at=:at WHERE queue='agent_paper'"),
+                    {"at": late},
+                )
+        try:
+            with pytest.raises(
+                ValueError,
+                match="SINGLE_SOL_NATURAL_WINDOW_PROTECTED|SINGLE_SOL_BUDGET_SCOPE_INVALID",
+            ):
+                await worker.run_agent_worker_once(
+                    settings, job_ids=(member.job_id,), formal_stage_capacity=True
+                )
+            async with factory() as db:
+                job = await db.get(Job, member.job_id)
+                assert job.status == "queued" and job.attempt_count == 0
+                for table in ("job_attempts", "job_leases", "research_stage_authorization"):
+                    assert await db.scalar(text(f"SELECT count(*) FROM {table}")) == 0
+                assert requests == [] and crossed == (
+                    [member.job_id] if path == "late_locked" else []
+                )
+            return
+        finally:
+            await factory.kw["bind"].dispose()
     try:
         assert await worker.run_agent_worker_once(
             settings, job_ids=(member.job_id,), formal_stage_capacity=True
@@ -304,6 +369,21 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     {"run": member.run_id},
                 )
             ).all()
+            if path == "unknown":
+                assert requests == ["research"]
+                done = await finish_research_request(db, row=row)
+                assert done.status == "unknown" and not done.research.members[0].usage_known
+                state, settled = (
+                    await db.execute(
+                        text(
+                            "SELECT state,settled_usd FROM agent_daily_budget_reservations "
+                            "WHERE run_id=:id"
+                        ),
+                        {"id": member.run_id},
+                    )
+                ).one()
+                assert state == "reserved" and settled is None
+                return
             if path == "late_history":
                 assert requests == ["research"], facts[-2:]
                 assert (
@@ -326,5 +406,23 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
             assert await db.scalar(text("select count(*) from research_monitor_plans")) == 0
             assert await db.scalar(text("select count(*) from research_monitor_coverage")) == 0
             assert await db.scalar(text("select count(*) from research_stage_authorization")) == 3
+        # A known settled native owner cannot claim a new lease or dispatch again.
+        assert not await worker.run_agent_worker_once(
+            settings, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
+        from nexus.agents.budget import BudgetExhausted
+        from nexus.agents.persistence import require_reserved_daily_budget
+
+        async with factory.begin() as db:
+            with pytest.raises(BudgetExhausted, match="no open budget reservation"):
+                await require_reserved_daily_budget(db, run_id=member.run_id, accounting=True)
+            assert (
+                await db.scalar(
+                    text("SELECT count(*) FROM job_attempts WHERE job_id=:j"), {"j": member.job_id}
+                )
+                == 1
+            )
+            assert await db.scalar(text("select count(*) from research_stage_authorization")) == 3
+        assert requests == ["research", "critique", "synthesis"]
     finally:
         await factory.kw["bind"].dispose()

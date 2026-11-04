@@ -454,8 +454,9 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["release", "allocate"])
 async def test_real_increment_converts_one_obligation_from_an_existing_plan(
-    migrated_database_url, monkeypatch
+    migrated_database_url, monkeypatch, first
 ):
     from nexus.agents import persistence
     from nexus.paper import single_sol_budget
@@ -501,6 +502,100 @@ async def test_real_increment_converts_one_obligation_from_an_existing_plan(
             ).all()
             assert credits == [("increment", member.run_id)]
             assert member.trigger_id == trigger.id and member.run_id != parent.id
+
+        # The new writer has a distinct native identity. Both transactions use the
+        # public budget writers; wait for the PostgreSQL blocking edge, not a timer.
+        async with factory.begin() as db:
+            old = await db.get(AgentResearchRunRecord, member.run_id)
+            now = member.research_as_of
+            maximum, price = old.reserved_cost_usd, old.pricing_version
+            initial = await _shared_daily_budget_used(db, business_date=now.date())
+            remaining = LIMIT - initial - 4 * maximum
+            assert remaining > 0
+            new_id = uuid4()
+            values = {c.name: getattr(old, c.name) for c in old.__table__.columns}
+            db.add(
+                AgentResearchRunRecord(
+                    **(
+                        values
+                        | dict(
+                            id=new_id,
+                            actor_id="other-research-fixture",
+                            data_snapshot_id=parent.data_snapshot_id,
+                            idempotency_key=str(new_id),
+                            input_hash=new_id.hex * 2,
+                        )
+                    )
+                )
+            )
+
+        async def write(db, action, amount):
+            if action == "release":
+                await persistence.release_daily_budget(db, run_id=member.run_id)
+            else:
+                await original(
+                    db,
+                    run_id=new_id,
+                    now=now,
+                    daily_limit_usd=LIMIT,
+                    worst_case_usd=amount,
+                    pricing_version=price,
+                    pricing_fresh=True,
+                )
+
+        extra = Decimal("0.000001")
+        async with factory() as a, factory() as b, factory() as observer:
+            async with a.begin():
+                await write(a, first, remaining)
+                holder = await a.scalar(text("SELECT pg_backend_pid()"))
+                pid = asyncio.get_running_loop().create_future()
+
+                async def other():
+                    async with b.begin():
+                        pid.set_result(await b.scalar(text("SELECT pg_backend_pid()")))
+                        await write(
+                            b, "allocate" if first == "release" else "release", remaining + extra
+                        )
+
+                pending = asyncio.create_task(other())
+                try:
+                    waiting = await pid
+                    async with asyncio.timeout(20):
+                        while holder not in await observer.scalar(
+                            text("SELECT pg_blocking_pids(:pid)"), {"pid": waiting}
+                        ):
+                            if pending.done():
+                                await pending
+                                pytest.fail("writers did not serialize")
+                            await asyncio.sleep(0.02)
+                except BaseException:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                    raise
+            if first == "release":
+                with pytest.raises(BudgetExhausted, match="SINGLE_SOL_NATURAL_BUDGET_PROTECTED"):
+                    await asyncio.wait_for(pending, 20)
+                async with b.begin():
+                    await write(b, "allocate", remaining)
+            else:
+                await asyncio.wait_for(pending, 20)
+        async with factory() as db:
+            assert (
+                await db.scalar(
+                    text("SELECT state FROM agent_daily_budget_reservations WHERE run_id=:id"),
+                    {"id": member.run_id},
+                )
+                == "released"
+            )
+            assert (
+                await db.scalar(
+                    text("SELECT run_id FROM single_sol_budget_credits WHERE task='increment'")
+                )
+                == member.run_id
+            )
+            used = await _shared_daily_budget_used(db, business_date=now.date())
+            assert used == initial - maximum + remaining
+            assert used + 5 * maximum == LIMIT
 
     monkeypatch.setattr(persistence, "reserve_daily_budget", fund_before_increment)
     await native.test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
@@ -761,6 +856,23 @@ async def test_install_single_protection_after_exact_natural_close(
                 pricing_version=source.pricing_version,
                 pricing_fresh=True,
             )
+            assert not await has_guard(db, now.date())
+            used = await _shared_daily_budget_used(db, business_date=now.date())
+            insufficient = used + source.reserved_cost_usd - Decimal("0.000001")
+            with pytest.raises(BudgetExhausted, match="SINGLE_SOL_NATURAL_BUDGET_PROTECTED"):
+                async with db.begin_nested():
+                    await freeze_single_sol_budget(
+                        db,
+                        host.model_copy(
+                            update={
+                                "agent_daily_budget_usd": insufficient,
+                                "agent_paper_candidate_batch_id": portfolio.candidate_batch_id,
+                            }
+                        ),
+                        run_id=run,
+                        instrument_id=source.instrument_id,
+                        calendar_authority_id=CALENDAR_ID,
+                    )
             assert not await has_guard(db, now.date())
             await freeze_single_sol_budget(
                 db,

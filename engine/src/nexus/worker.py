@@ -401,6 +401,22 @@ async def run_agent_worker_once(
                     text("SELECT set_config('nexus.stage_protocol',:value,true)"),
                     {"value": VERSION},
                 )
+                if (
+                    stage_route["kind"] == "independent"
+                    and stage_route.get("platform_binding") is not None
+                ):
+                    from nexus.paper.single_sol_research import (
+                        require_single_sol_first_claim_window,
+                    )
+                    from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+                    owner = await session.get(ManualPaperRequest, stage_route["scope_id"])
+                    if owner is None:
+                        raise ValueError("STAGED_ROUTE_BINDING_INVALID")
+                    if owner.contract_version == 4:
+                        # Preclaim retained the funding locks. Time can advance while the
+                        # heartbeat or Job is acquired: check again before the first attempt.
+                        await require_single_sol_first_claim_window(session, owner)
                 return True
 
             locked_guard = stage_locked_guard

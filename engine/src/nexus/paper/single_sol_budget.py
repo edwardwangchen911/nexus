@@ -13,7 +13,7 @@ from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
 from nexus.paper.research_request import database_now
-from nexus.paper.single_sol_obligations import funded_obligations, original_slot
+from nexus.paper.single_sol_obligations import closed_settlements, funded_obligations, original_slot
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -228,7 +228,7 @@ async def require_single_sol_capacity(
     rows = (
         await session.execute(
             text("""
-        SELECT c.task, CASE WHEN c.task='synthesis' THEN s.state ELSE r.state END AS state
+        SELECT c.task, c.run_id, CASE WHEN c.task='synthesis' THEN s.state ELSE r.state END AS state
         FROM single_sol_budget_credits c
         LEFT JOIN agent_daily_budget_reservations r ON r.run_id=c.run_id
               AND r.business_date=c.budget_day
@@ -244,7 +244,12 @@ async def require_single_sol_capacity(
         row.state not in {"reserved", "settled", "released"} for row in rows
     ):
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
-    remaining = tasks - {row.task for row in rows if row.state in {"reserved", "settled"}}
+    closed = await closed_settlements(
+        session, {row.run_id for row in rows if row.state == "settled"}, now=now
+    )
+    remaining = tasks - {
+        row.task for row in rows if row.state == "reserved" or row.run_id in closed
+    }
     task = (
         await _original_obligation(session, guard, kind, run_id, now)
         if amount == guard["maximum"]

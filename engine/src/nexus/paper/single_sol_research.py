@@ -244,6 +244,20 @@ async def single_sol_authority(
     )
 
 
+async def require_single_sol_first_claim_window(
+    session: AsyncSession, row: ManualPaperRequest
+) -> None:
+    from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+
+    frozen = binding_for(row)
+    now = await database_now(session)
+    if (
+        now.date() != frozen.budget_day
+        or now + timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS) >= frozen.deadline
+    ):
+        raise ValueError("SINGLE_SOL_NATURAL_WINDOW_PROTECTED")
+
+
 async def recheck_single_sol(
     session: AsyncSession,
     settings: EngineSettings,
