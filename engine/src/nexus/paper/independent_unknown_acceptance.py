@@ -243,6 +243,12 @@ async def inspect_or_accept_independent_unknown(
         return IndependentAcceptanceCheck(
             request_id=request_id, checked_at=now, proof_hash=digest, status="already_acknowledged"
         )
+    if row.contract_version == 4 and accept:
+        # The compatibility image may read an existing disposition but cannot
+        # create a new one, even when the source proof and consent match.
+        from nexus.agents.research_maintenance import require_research_open
+
+        require_research_open()
     require_preparation_producers_stopped(repo_root, env_file)
     try:
         await session.execute(

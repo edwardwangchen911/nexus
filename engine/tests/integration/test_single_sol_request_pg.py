@@ -35,11 +35,15 @@ from sqlalchemy import func, select, text
         "unknown",
         "queued",
         "oversized_critique",
+        "grant_first",
+        "receipt_first",
     ],
 )
 async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
     from integration import test_research_request_pg as pure
 
+    race = path in {"grant_first", "receipt_first"}
+    oversized = path == "oversized_critique" or race
     account = await pure.seed_paper_batch(migrated_database_url)
 
     async def seeded_account(_url):
@@ -60,7 +64,7 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
     monkeypatch.setattr(base, "current_record", price)
     factory, settings, store, ids = await base.scope(migrated_database_url, tmp_path)
     settings = settings.model_copy(
-        update={"agent_daily_budget_usd": Decimal(13), "release_revision": "a" * 40}
+        update={"agent_daily_budget_usd": Decimal(25 if race else 13), "release_revision": "a" * 40}
     )
     cal = uuid4()
     async with factory.begin() as db:
@@ -248,11 +252,11 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
         monkeypatch,
         store,
         on_request=add_late_history,
-        critique_instruction_bytes={"complete": 150_000, "oversized_critique": 1_048_576}.get(
-            path, 0
-        ),
+        critique_instruction_bytes=1_048_576
+        if oversized
+        else (150_000 if path == "complete" else 0),
     )
-    if path == "oversized_critique":
+    if oversized:
         from helpers.single_sol_disposition import capture_second_ticket
 
         tickets = capture_second_ticket(monkeypatch)
@@ -325,7 +329,7 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     {"run": member.run_id},
                 )
             ).all()
-            if path in {"unknown", "oversized_critique"}:
+            if path == "unknown" or oversized:
                 if path == "unknown":
                     assert requests == ["research"]
                 else:
@@ -351,13 +355,21 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                     )
                 ).one()
                 assert state == "reserved" and settled is None
-                if path == "oversized_critique":
+                if oversized:
                     from helpers.single_sol_disposition import verify_disposition
 
                     await db.commit()
                     (ticket,) = tickets
                     await verify_disposition(
-                        factory, settings, receipt.request_id, member, tmp_path, monkeypatch, ticket
+                        factory,
+                        settings,
+                        receipt.request_id,
+                        member,
+                        tmp_path,
+                        monkeypatch,
+                        ticket,
+                        race=path if race else None,
+                        store=store,
                     )
                 return
             if path == "late_history":

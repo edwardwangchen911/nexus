@@ -43,7 +43,9 @@ def capture_second_ticket(monkeypatch):
     return captured
 
 
-async def verify_disposition(factory, settings, request_id, member, root, monkeypatch, ticket):
+async def verify_disposition(
+    factory, settings, request_id, member, root, monkeypatch, ticket, *, race=None, store=None
+):
     monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_: None)
     monkeypatch.setattr(manual_paper, "preparation_service_control_lock", lambda *_: nullcontext())
     monkeypatch.setattr(
@@ -120,6 +122,12 @@ async def verify_disposition(factory, settings, request_id, member, root, monkey
             await require_single_sol_successor_history(
                 db, account_id=settings.agent_paper_account_id, now=now
             )
+    from nexus.agents import research_maintenance
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(research_maintenance, "IMAGE_MAINTENANCE", True)
+        with pytest.raises(ValueError, match="RESEARCH_MAINTENANCE"):
+            await command(accept, *consent, digest)
     await verify_workspace(None)
     accepted = await command(accept, *consent, digest)
     replay = await command(accept, *consent, digest)
@@ -212,6 +220,20 @@ async def verify_disposition(factory, settings, request_id, member, root, monkey
     response["id"] = "resp_synthetic_late_second"
     payload = json.dumps(response, separators=(",", ":")).encode()
     protocol = StagedProtocol(factory)
+    if race:
+        from helpers.single_sol_disposition_race import verify_order
+
+        await verify_order(
+            factory,
+            settings,
+            store,
+            race,
+            ticket,
+            accepted.accepted_at,
+            payload,
+            (first.input_tokens, first.output_tokens),
+            monkeypatch,
+        )
     for _ in range(2):
         await protocol.observe(
             ticket,
