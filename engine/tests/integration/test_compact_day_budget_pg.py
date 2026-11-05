@@ -129,6 +129,10 @@ async def test_compact_natural_cycle_consumes_existing_legacy_day_protection(
                 "0119_compact_budget_obligations"
             )
             assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_credits")) == 4
+        if not downgrade_race:
+            from helpers.compact_budget_maintenance_image import verify_images
+
+            await verify_images(factory, migrated_database_url)
     finally:
         await factory.kw["bind"].dispose()
 
