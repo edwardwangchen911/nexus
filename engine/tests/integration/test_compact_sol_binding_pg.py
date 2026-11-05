@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import threading
 
 import pytest
 from alembic import command
@@ -18,7 +19,8 @@ from nexus.paper.research_request import prepare_research_request
 from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
 
 
@@ -113,6 +115,92 @@ async def frozen_facts(factory):
                 "agent_daily_budget_reservations",
             )
         }
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_compact_registration_blocks_downgrade(
+    migrated_database_url, monkeypatch
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+    config = Config("engine/alembic.ini")
+    try:
+        record = await current_record(factory)
+        async with factory.begin() as db:
+            model = await platform_profile.register_sol_business_profile(
+                db,
+                price_record=record,
+                source_evidence=SOURCE,
+                units_version=COMPACT_PLATFORM_UNITS_VERSION,
+            )
+            with pytest.raises(DBAPIError, match="could not obtain lock"):
+                await asyncio.to_thread(command.downgrade, config, "0117_budgeted_single_sol")
+        async with factory() as db:
+            assert await db.get(AgentModelConfigRecord, model.id) is not None
+            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0118_compact_sol_profile"
+            )
+            assert "output_units_version" in await db.scalar(
+                text(
+                    "SELECT pg_get_functiondef('nexus_sol_model_profile_valid(agent_model_configs)'"
+                    "::regprocedure)"
+                )
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_downgrade_fences_normal_registration_before_check_until_commit(
+    migrated_database_url, monkeypatch
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+    config = Config("engine/alembic.ini")
+    at_check, release = threading.Event(), threading.Event()
+
+    def pause_check(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("DO $$ BEGIN") and "COMPACT_SOL_DOWNGRADE_FORBIDDEN" in statement:
+            at_check.set()
+            assert release.wait(15), "test did not release downgrade barrier"
+
+    event.listen(Engine, "before_cursor_execute", pause_check)
+    task = None
+    try:
+        record = await current_record(factory)
+        task = asyncio.create_task(
+            asyncio.to_thread(command.downgrade, config, "0117_budgeted_single_sol")
+        )
+        assert await asyncio.to_thread(at_check.wait, 15)
+        with pytest.raises(DBAPIError, match="lock timeout"):
+            async with factory.begin() as db:
+                await platform_profile.register_sol_business_profile(
+                    db,
+                    price_record=record,
+                    source_evidence=SOURCE,
+                    units_version=COMPACT_PLATFORM_UNITS_VERSION,
+                )
+        release.set()
+        await task
+        with pytest.raises(DBAPIError, match="PLATFORM_SOL_PROFILE_INVALID"):
+            async with factory.begin() as db:
+                await platform_profile.register_sol_business_profile(
+                    db,
+                    price_record=record,
+                    source_evidence=SOURCE,
+                    units_version=COMPACT_PLATFORM_UNITS_VERSION,
+                )
+        async with factory() as db:
+            assert await db.scalar(text("SELECT count(*) FROM agent_model_configs")) == 0
+            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0117_budgeted_single_sol"
+            )
+    finally:
+        release.set()
+        if task is not None:
+            await task
+        event.remove(Engine, "before_cursor_execute", pause_check)
+        await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio

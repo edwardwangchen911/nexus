@@ -43,6 +43,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Fence normal profile INSERTs before the READ COMMITTED existence check.
+    # Keep this transaction lock through function replacement and schema commit;
+    # an in-flight writer makes maintenance fail safely rather than wait.
+    op.execute("LOCK TABLE agent_model_configs IN SHARE ROW EXCLUSIVE MODE NOWAIT")
     op.execute(f"""DO $$ BEGIN
       IF EXISTS(SELECT 1 FROM agent_model_configs
                 WHERE platform_profile->>'output_units_version'='{_V3}') THEN
