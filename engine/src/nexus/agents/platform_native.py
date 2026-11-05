@@ -345,6 +345,7 @@ async def prepare_native_pool(
                 inputs=inputs,
                 profile=allocation.profile,
                 price_record=price,
+                units_version=allocation.units_version,
             )
             if (
                 fresh != allocation
