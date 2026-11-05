@@ -17,6 +17,18 @@ AdmissionFailurePhase = Literal[
     "reservation_commit",
 ]
 
+# Persisted v1 phases remain unchanged; the read contract uses public terminology.
+AdmissionFailurePresentationPhase = Literal[
+    "pool_capacity",
+    "profile_validation",
+    "definition_selection",
+    "snapshot_preparation",
+    "research_admission",
+    "definition_binding",
+    "stage_registration",
+    "reservation_commit",
+]
+
 ADMISSION_FAILURE_CODES = PRECLAIM_CODES | frozenset(
     {
         "UNKNOWN",
@@ -76,4 +88,8 @@ def read_admission_failure(facts: dict[str, object]) -> dict[str, object] | None
             instrument = UUID(instrument)
         except ValueError:
             return None
-    return {"phase": phase, "code": code, "instrument_id": instrument}
+    public_phase = {
+        "prompt_selection": "definition_selection",
+        "prompt_binding": "definition_binding",
+    }.get(phase, phase)
+    return {"phase": public_phase, "code": code, "instrument_id": instrument}

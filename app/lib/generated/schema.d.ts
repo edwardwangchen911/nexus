@@ -6261,7 +6261,7 @@ export interface components {
              * Phase
              * @enum {string}
              */
-            phase: "pool_capacity" | "profile_validation" | "prompt_selection" | "snapshot_preparation" | "research_admission" | "prompt_binding" | "stage_registration" | "reservation_commit";
+            phase: "pool_capacity" | "profile_validation" | "definition_selection" | "snapshot_preparation" | "research_admission" | "definition_binding" | "stage_registration" | "reservation_commit";
         };
         /** ResearchAdmissionResponse */
         ResearchAdmissionResponse: {

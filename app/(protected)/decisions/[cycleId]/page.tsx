@@ -72,8 +72,8 @@ function AdmissionFailureNotice({ cycle }: { cycle: Detail["cycle"] }): React.Re
   const failure = cycle.admission_failure;
   if (!failure) return null;
   const phases = {
-    pool_capacity: "整池容量检查", profile_validation: "模型档案复核", prompt_selection: "研究提示选择",
-    snapshot_preparation: "研究快照准备", research_admission: "研究与预算准入", prompt_binding: "研究提示绑定",
+    pool_capacity: "整池容量检查", profile_validation: "模型档案复核", definition_selection: "研究配置选择",
+    snapshot_preparation: "研究快照准备", research_admission: "研究与预算准入", definition_binding: "研究配置绑定",
     stage_registration: "模型阶段登记", reservation_commit: "研究预留提交",
   };
   const reasons: Record<string, string> = {

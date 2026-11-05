@@ -10,7 +10,7 @@ from nexus.agents.http_failure import HttpFailureKind, HttpFailurePhase
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.paper.models import InternalOrderStatus
-from nexus.paper.research_admission_diagnostics import AdmissionFailurePhase
+from nexus.paper.research_admission_diagnostics import AdmissionFailurePresentationPhase
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
@@ -410,7 +410,7 @@ AgentPaperExecutionMarketResponse = Annotated[
 
 
 class ResearchAdmissionFailureResponse(_StrictSchema):
-    phase: AdmissionFailurePhase
+    phase: AdmissionFailurePresentationPhase
     code: str = Field(min_length=1, max_length=100)
     instrument_id: UUID | None
 

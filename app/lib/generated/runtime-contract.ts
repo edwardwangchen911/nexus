@@ -11909,10 +11909,10 @@ export const runtimeContractSchemas = {
         "enum": [
           "pool_capacity",
           "profile_validation",
-          "prompt_selection",
+          "definition_selection",
           "snapshot_preparation",
           "research_admission",
-          "prompt_binding",
+          "definition_binding",
           "stage_registration",
           "reservation_commit"
         ],

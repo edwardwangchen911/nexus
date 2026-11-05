@@ -162,3 +162,28 @@ def test_missing_and_invalid_diagnostics_do_not_invent_legacy_facts(change):
         ValueError("UNKNOWN"), phase="pool_capacity", instrument_id=None
     )
     assert read_admission_failure(facts | change if change else {}) is None
+
+
+@pytest.mark.parametrize(
+    "stored_phase,public_phase",
+    [("prompt_selection", "definition_selection"), ("prompt_binding", "definition_binding")],
+)
+def test_internal_stage_names_have_public_aliases_without_rewriting_frozen_facts(
+    stored_phase, public_phase
+):
+    from nexus.api.schemas.paper import ResearchAdmissionFailureResponse
+    from nexus.paper.research_admission_diagnostics import (
+        admission_failure_facts,
+        read_admission_failure,
+    )
+
+    facts = admission_failure_facts(
+        ValueError("UNKNOWN"), phase=stored_phase, instrument_id=UUID(int=2)
+    )
+    original = dict(facts)
+    failure = read_admission_failure(facts)
+    assert failure is not None and failure["phase"] == public_phase
+    response = ResearchAdmissionFailureResponse.model_validate(failure)
+    assert response.phase == public_phase and response.instrument_id == UUID(int=2)
+    assert response.code == "UNKNOWN"
+    assert facts == original and facts["failure_phase"] == stored_phase
