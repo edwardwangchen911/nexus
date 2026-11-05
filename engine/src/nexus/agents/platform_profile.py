@@ -15,6 +15,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.platform_pricing import sol_price_record
+from nexus.agents.platform_schema import (
+    COMPACT_PLATFORM_UNITS_VERSION,
+    CURRENT_PLATFORM_UNITS_VERSION,
+)
 from nexus.agents.platform_usage import (
     CURRENT_PLATFORM_PRICE_VERSION,
     MEDIUM_PLATFORM_PRICE_VERSION,
@@ -26,12 +30,19 @@ from nexus.persistence.models.agents import AgentModelConfigRecord
 SOL_BUSINESS_CONTRACT = "platform-sol-business-v1"
 
 
-def sol_business_model_fields(price_record: object) -> dict[str, object]:
+def sol_business_model_fields(
+    price_record: object, *, units_version: str = CURRENT_PLATFORM_UNITS_VERSION
+) -> dict[str, object]:
     """One supported capability, with renewable immutable price data.
 
     This is deliberately not a comparison profile or a default selector.
     Normal owners must freeze the exact returned identity in their own prepare.
     """
+    if type(units_version) is not str or units_version not in {
+        CURRENT_PLATFORM_UNITS_VERSION,
+        COMPACT_PLATFORM_UNITS_VERSION,
+    }:
+        raise ValueError("PLATFORM_PROFILE_EXISTING_INVALID")
     pricing = sol_price_record(price_record)
     payload = {
         "contract": SOL_BUSINESS_CONTRACT,
@@ -42,6 +53,10 @@ def sol_business_model_fields(price_record: object) -> dict[str, object]:
         "max_tool_calls": 0,
         "business_consumption_allowed": True,
     }
+    if units_version == COMPACT_PLATFORM_UNITS_VERSION:
+        # Missing means the original v2 bytes, including queued root identities.
+        # The existing immutable model hash binds this choice before any Run exists.
+        payload["output_units_version"] = units_version
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -65,14 +80,28 @@ def sol_business_model_matches(model: AgentModelConfigRecord) -> bool:
     if not isinstance(payload, dict):
         return False
     try:
-        fields = sol_business_model_fields(payload.get("price_record"))
+        fields = sol_business_model_fields(
+            payload.get("price_record"),
+            units_version=payload.get("output_units_version", CURRENT_PLATFORM_UNITS_VERSION),
+        )
     except ValueError:
         return False
     return all(getattr(model, key, None) == value for key, value in fields.items())
 
 
+def sol_business_units_version(model: AgentModelConfigRecord) -> str:
+    if not sol_business_model_matches(model):
+        raise ValueError("PLATFORM_NATIVE_MODEL_BINDING_INVALID")
+    assert model.platform_profile is not None
+    return str(model.platform_profile.get("output_units_version", CURRENT_PLATFORM_UNITS_VERSION))
+
+
 async def register_sol_business_profile(
-    session: AsyncSession, *, price_record: object, source_evidence: bytes
+    session: AsyncSession,
+    *,
+    price_record: object,
+    source_evidence: bytes,
+    units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
 ) -> AgentModelConfigRecord:
     """Operator-verified source registration; no remote price/balance assertion.
 
@@ -93,7 +122,7 @@ async def register_sol_business_profile(
     now = await session.scalar(text("SELECT clock_timestamp()"))
     if not isinstance(now, datetime) or not pricing.verified_at <= now < pricing.expires_at:
         raise ValueError("PLATFORM_PRICE_WINDOW_INVALID")
-    fields = sol_business_model_fields(pricing)
+    fields = sol_business_model_fields(pricing, units_version=units_version)
     inserted_id = await session.scalar(
         insert(AgentModelConfigRecord)
         .values(**fields)

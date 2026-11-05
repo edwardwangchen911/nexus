@@ -14,7 +14,8 @@ from nexus.agents.codex_sdk import codex_output_schema
 
 LEGACY_PLATFORM_UNITS_VERSION = "platform-full-http-utf8-plus8192-v1"
 CURRENT_PLATFORM_UNITS_VERSION = "platform-structured-http-utf8-plus8192-v2"
-# Explicit opt-in until every native producer freezes this in its root identity.
+# Selected explicitly by the native owner's immutable model profile, never by
+# changing a default that could reinterpret an existing queued identity.
 # It changes task guidance, not the schema or the UTF-8-plus-framing algorithm.
 COMPACT_PLATFORM_UNITS_VERSION = "platform-compact-json-http-utf8-plus8192-v3"
 PLATFORM_UNITS_VERSIONS = frozenset(

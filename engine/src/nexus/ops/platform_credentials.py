@@ -621,6 +621,12 @@ def main() -> int:
     )
     register.add_argument("--price-record", type=Path, required=True)
     register.add_argument("--source-evidence", type=Path, required=True)
+    register.add_argument(
+        "--output-format",
+        choices=("structured-v2", "compact-v3"),
+        default="structured-v2",
+        help="Freeze output guidance in a new profile; does not select it for an existing host",
+    )
     inspect = sub.add_parser("inspect-sol-profile", help="Read one existing profile; no renewal")
     inspect.add_argument("--model-config-id", type=UUID, required=True)
     check = sub.add_parser(

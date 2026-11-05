@@ -172,6 +172,14 @@ def _wire(
 ) -> bytes:
     if units_version == COMPACT_PLATFORM_UNITS_VERSION:
         instructions = payload.get("instructions")
+        if "$iv2" in payload:
+            from nexus.agents.independent_input_view import restore_independent_input
+
+            # Expand only the instruction field. Leave encoded evidence, tables
+            # and prior prose byte-for-byte unchanged; count the resulting wire.
+            instructions = restore_independent_input(
+                {"$iv2": payload["$iv2"], "instructions": instructions}
+            )["instructions"]
         if not isinstance(instructions, str) or not instructions:
             raise ValueError("PLATFORM_COMPACT_INSTRUCTIONS_REQUIRED")
         # Do not mutate frozen evidence or BASE/developer instructions. The

@@ -31,6 +31,46 @@ GUIDANCE = (
 )
 
 
+@pytest.mark.parametrize("alias", [False, True])
+def test_compact_guidance_preserves_lossless_independent_input_view(alias):
+    from nexus.agents.independent_input_view import (
+        project_independent_payload,
+        restore_independent_input,
+    )
+
+    shared = "Preserve all evidence and all original audit requirements. " * 12
+    payload = {
+        "instructions": shared + ("Only this field receives output guidance." if not alias else ""),
+        "prompts": [{"content": shared}],
+        "frozen_inputs": {"facts": {"value": "1.23", "unit": "USD/shares"}},
+        "previous_claims": [{"text": "literal ~ and whitespace\n"}],
+    }
+    projected = project_independent_payload(payload)
+    assert isinstance(projected["instructions"], dict) or str(projected["instructions"]).startswith(
+        "$v:"
+    )
+    before = copy.deepcopy(projected)
+    _, _, _, _, old, _ = allocations()
+    body = json.loads(
+        _wire(
+            projected,
+            Answer,
+            output_remaining=8192,
+            profile=old.profile,
+            forbidden=(),
+            units_version=COMPACT,
+        )
+    )
+    sent = json.loads(body["input"][1]["content"])
+    restored = restore_independent_input(sent)
+    assert restored.pop("instructions") == payload["instructions"] + " " + GUIDANCE
+    assert restored == {k: v for k, v in payload.items() if k != "instructions"}
+    assert {k: v for k, v in sent.items() if k != "instructions"} == {
+        k: v for k, v in before.items() if k != "instructions"
+    }
+    assert projected == before
+
+
 def allocations():
     source, _, compiler, inputs, price, old = native_case()
     new = freeze_native_platform_allocation(

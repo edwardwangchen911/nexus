@@ -23,7 +23,7 @@ from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.models import ResearchRequest
 from nexus.agents.platform_pricing import sol_price_record
-from nexus.agents.platform_profile import sol_business_model_matches
+from nexus.agents.platform_profile import sol_business_model_matches, sol_business_units_version
 from nexus.agents.platform_wire import (
     PlatformAllocation,
     freeze_native_platform_allocation,
@@ -160,6 +160,7 @@ async def native_run_allocation(
         inputs=inputs,
         profile=platform_wire_profile(price.version, price_record=price),
         price_record=price,
+        units_version=sol_business_units_version(model),
     )
 
 
