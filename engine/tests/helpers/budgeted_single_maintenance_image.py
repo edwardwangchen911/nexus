@@ -11,6 +11,7 @@ from pathlib import Path
 import nexus
 from helpers.single_sol_maintenance_image import frozen_facts, refused
 from nexus.agents import research_maintenance
+from nexus.agents.platform_profile import read_sol_business_profile, sol_business_units_version
 from nexus.ops import manual_paper
 from nexus.ops.manual_paper_host import dispatch_pure_research_request
 from nexus.paper.manual_entry import read_configured_manual_request
@@ -49,6 +50,17 @@ async def run(args):
             assert {row.contract_version for row in rows} == {4, 5}
             assert {str(row.id) for row in rows} == set(args["receipts"])
         before = await frozen_facts(factory)
+        async with factory() as db:
+            model_facts = list(
+                await db.scalars(
+                    text("SELECT to_jsonb(m)::text FROM agent_model_configs m ORDER BY id")
+                )
+            )
+            assert model_facts == args["model_facts"]
+            for row in rows:
+                model = await read_sol_business_profile(db, model_config_id=row.model_config_id)
+                assert model is not None
+                assert sol_business_units_version(model) == args["model_versions"][str(model.id)]
         results = {}
         for row in rows:
             binding = binding_for(row)
@@ -125,6 +137,15 @@ async def run(args):
                 receipt=hashlib.sha256(receipt.model_dump_json().encode()).hexdigest(),
             )
         assert await frozen_facts(factory) == before == args["facts"]
+        async with factory() as db:
+            assert (
+                list(
+                    await db.scalars(
+                        text("SELECT to_jsonb(m)::text FROM agent_model_configs m ORDER BY id")
+                    )
+                )
+                == model_facts
+            )
         print(json.dumps(dict(schema=head, facts=before, requests=results)))
     finally:
         await factory.kw["bind"].dispose()
@@ -142,8 +163,17 @@ async def verify_images(factory, settings, *, label):
     assert re.fullmatch(r"nexus_test_[0-9a-f]{32}", url.database or "")
     receipts = {}
     raw_receipts = {}
+    model_versions = {}
     async with factory() as db:
+        model_facts = list(
+            await db.scalars(
+                text("SELECT to_jsonb(m)::text FROM agent_model_configs m ORDER BY id")
+            )
+        )
         for row in await db.scalars(select(ManualPaperRequest)):
+            model = await read_sol_business_profile(db, model_config_id=row.model_config_id)
+            assert model is not None
+            model_versions[str(model.id)] = sol_business_units_version(model)
             raw = await read_manual_request(db, row)
             raw_receipts[str(row.id)] = raw.model_dump(mode="json")
             view = await read_configured_manual_request(db, settings, request_id=row.id)
@@ -154,6 +184,8 @@ async def verify_images(factory, settings, *, label):
         receipts=receipts,
         raw_receipts=raw_receipts,
         facts=before,
+        model_facts=model_facts,
+        model_versions=model_versions,
     )
     results = []
     for mode, image in ((False, formal), (True, maintenance), (False, formal)):
