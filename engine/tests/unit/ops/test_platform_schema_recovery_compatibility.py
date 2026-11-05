@@ -27,6 +27,48 @@ TARGET = "0106_platform_qualification"
     [
         (
             3,
+            "0116_single_sol_request",
+            "0116_single_sol_request",
+            "pending_consumer_exit_0116_v1",
+            True,
+        ),
+        (
+            3,
+            "0117_budgeted_single_sol",
+            "0117_budgeted_single_sol",
+            "pending_consumer_exit_0117_v1",
+            True,
+        ),
+        (
+            3,
+            "0117_budgeted_single_sol",
+            "0117_budgeted_single_sol",
+            "pending_consumer_exit_0116_v1",
+            False,
+        ),
+        (
+            3,
+            "0116_single_sol_request",
+            "0117_budgeted_single_sol",
+            "pending_consumer_exit_0117_v1",
+            False,
+        ),
+        (
+            3,
+            "0117_budgeted_single_sol",
+            "0116_single_sol_request",
+            "pending_consumer_exit_0116_v1",
+            False,
+        ),
+        (
+            3,
+            "0118_unregistered_schema",
+            "0118_unregistered_schema",
+            "pending_consumer_exit_0118_v1",
+            False,
+        ),
+        (
+            3,
             "0115_single_sol_budget",
             "0115_single_sol_budget",
             "pending_consumer_exit_0115_v1",

@@ -36,6 +36,7 @@ _PENDING_POLICIES = {
     "0114_formal_intraday_intent": "pending_consumer_exit_0114_v1",
     "0116_single_sol_request": "pending_consumer_exit_0116_v1",
     "0115_single_sol_budget": "pending_consumer_exit_0115_v1",
+    "0117_budgeted_single_sol": "pending_consumer_exit_0117_v1",
 }
 SAFE_CODES = frozenset(
     _PREFIX + suffix
