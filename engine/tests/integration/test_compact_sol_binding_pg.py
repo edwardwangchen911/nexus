@@ -133,13 +133,13 @@ async def test_uncommitted_compact_registration_blocks_downgrade(
                 source_evidence=SOURCE,
                 units_version=COMPACT_PLATFORM_UNITS_VERSION,
             )
+            schema_before = await db.scalar(text("SELECT version_num FROM alembic_version"))
             with pytest.raises(DBAPIError, match="could not obtain lock"):
                 await asyncio.to_thread(command.downgrade, config, "0117_budgeted_single_sol")
         async with factory() as db:
             assert await db.get(AgentModelConfigRecord, model.id) is not None
-            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0118_compact_sol_profile"
-            )
+            # The entire failed migration chain must preserve its starting schema.
+            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == schema_before
             assert "output_units_version" in await db.scalar(
                 text(
                     "SELECT pg_get_functiondef('nexus_sol_model_profile_valid(agent_model_configs)'"
@@ -224,13 +224,12 @@ async def test_nonempty_old_roots_survive_migration_and_new_profile_fences_destr
         assert await frozen_facts(factory) == before
         await compact_model(factory, settings)
         protected = await frozen_facts(factory)
+        async with factory() as db:
+            schema_before = await db.scalar(text("SELECT version_num FROM alembic_version"))
         with pytest.raises(DBAPIError, match="COMPACT_SOL_DOWNGRADE_FORBIDDEN"):
             await asyncio.to_thread(command.downgrade, config, "0117_budgeted_single_sol")
         assert await frozen_facts(factory) == protected
         async with factory() as db:
-            assert (
-                await db.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0118_compact_sol_profile"
-            )
+            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == schema_before
     finally:
         await factory.kw["bind"].dispose()

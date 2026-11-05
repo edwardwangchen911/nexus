@@ -126,7 +126,8 @@ async def funded_obligations(
         JOIN data_snapshots s ON s.id=r.data_snapshot_id
         JOIN agent_model_configs m ON r.model_config_id=m.id
         WHERE rt.kind='formal' AND rt.scope_id=:cycle AND rt.platform_binding IS NOT NULL
-        AND m.id=:model AND r.model_hash=m.config_hash AND r.pricing_version=m.version
+        AND single_sol_budget_model_compatible(:model,m.id,:maximum)
+        AND r.model_hash=m.config_hash AND r.pricing_version=m.version
         AND r.actor_id='local-agent-paper-cycle'
         AND r.idempotency_key='agent-paper:'||rt.scope_id::text||':'||r.instrument_id::text
         AND s.payload#>>'{agent_paper_context,cycle_id}'=rt.scope_id::text
@@ -144,7 +145,8 @@ async def funded_obligations(
         WHERE s.cycle_id=:cycle AND s.candidate_batch_id=:batch
         AND s.idempotency_key='portfolio-synthesis:'||s.cycle_id::text
         AND s.frozen_input->>'calendar_authority_id'=CAST(:calendar AS text)
-        AND m.id=:model AND s.model_hash=m.config_hash AND s.pricing_version=m.version
+        AND single_sol_budget_model_compatible(:model,m.id,:maximum)
+        AND s.model_hash=m.config_hash AND s.pricing_version=m.version
         AND b.business_date=:day AND b.pricing_version=m.version AND b.reserved_usd=:maximum
         AND b.state='settled' AND b.settled_usd=s.settled_cost_usd AND s.status='completed'"""),
         args | {"cycle": cycle, "calendar": str(calendar)},

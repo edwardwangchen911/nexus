@@ -194,10 +194,18 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
         async def __aexit__(self, *args):
             return False
 
-        async def execute(self, statement):
+        async def execute(self, statement, parameters=None):
             statements.append(str(statement))
+            if "FROM single_sol_budget_scopes" in str(statement):
+                assert parameters == {"day": at.date()}
+                events.append("canonical_budget_scope")
+                return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: None))
 
-        async def scalar(self, statement):
+        async def scalar(self, statement, parameters=None):
+            if "formal_intraday_intents" in str(statement):
+                assert parameters["account"] == config.agent_paper_account_id
+                assert parameters["model"] == config.agent_paper_formal_model_config_id
+                return None  # No live frozen intent; do not consume the accounting result.
             return next(values)
 
         async def scalars(self, statement):
@@ -255,6 +263,7 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
         config, repo_root=tmp_path, env_file=tmp_path / "env", project="nexus", check_only=True
     )
     assert "SET TRANSACTION READ ONLY" in statements
+    assert events.index("canonical_budget_scope") < events.index("canonical_account_admission")
     assert "canonical_account_admission" in events
     assert result["status"] == ("blocked" if commit_fails else "eligible_at_check")
     assert ("publish" in events) is not commit_fails

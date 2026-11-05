@@ -27,6 +27,20 @@ TARGET = "0106_platform_qualification"
     [
         (
             3,
+            "0119_compact_budget_obligations",
+            "0119_compact_budget_obligations",
+            "pending_consumer_exit_0119_v1",
+            True,
+        ),
+        (
+            3,
+            "0118_compact_sol_profile",
+            "0119_compact_budget_obligations",
+            "pending_consumer_exit_0119_v1",
+            False,
+        ),
+        (
+            3,
             "0118_compact_sol_profile",
             "0118_compact_sol_profile",
             "pending_consumer_exit_0118_v1",

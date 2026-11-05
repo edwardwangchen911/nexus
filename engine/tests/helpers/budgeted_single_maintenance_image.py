@@ -45,7 +45,7 @@ async def run(args):
     try:
         async with factory() as db:
             head = await db.scalar(text("SELECT version_num FROM alembic_version"))
-            assert head == CURRENT_MIGRATION_HEAD == "0118_compact_sol_profile"
+            assert head == CURRENT_MIGRATION_HEAD == "0119_compact_budget_obligations"
             rows = list(await db.scalars(select(ManualPaperRequest)))
             assert {row.contract_version for row in rows} == {4, 5}
             assert {str(row.id) for row in rows} == set(args["receipts"])

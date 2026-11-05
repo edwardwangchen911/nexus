@@ -37,6 +37,9 @@ _KNOWN_CODES = frozenset(
         "RESEARCH_ACCOUNTING_UNSETTLED",
         "INITIAL_PROJECTION_OCCUPIED_OR_UNKNOWN",
         "INITIAL_PROJECTION_OCCUPANCY_AUTHORITY_CONFLICT",
+        "SINGLE_SOL_SERVICE_SCOPE_MISMATCH",
+        "SINGLE_SOL_FROZEN_MODEL_CONFLICT",
+        "SINGLE_SOL_BUDGET_SCOPE_INVALID",
     }
 )
 
@@ -71,6 +74,7 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
     factory = None
     code = None
     diagnostic: dict[str, object] = {}
+    budget_scope: dict[str, object] | None = None
     deadline = None
     stage, started = "configuration", monotonic_ns()
     try:
@@ -132,6 +136,10 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     or not _recovery_model_matches(model, now, sol=sol)
                 ):
                     raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
+                stage, started = "daily_budget_scope", monotonic_ns()
+                from nexus.paper.single_sol_compat import inspect_service_budget_scope
+
+                budget_scope = await inspect_service_budget_scope(session, settings, now=now)
                 # Existing acceptance/seal and consumed-lease proofs remain authoritative.
                 # Never replace them with a blanket historical cost/lease predicate.
                 stage, started = "account_occupancy", monotonic_ns()
@@ -183,4 +191,5 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
         "external_requests": 0,
         "migration_head": CURRENT_MIGRATION_HEAD if code is None else None,
         "scope_hash": manual_host_scope(settings) if code is None else None,
+        "budget_scope": budget_scope,
     }
