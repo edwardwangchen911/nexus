@@ -121,6 +121,14 @@ describe("issuer cash-distribution inputs", () => {
 });
 
 describe("research evidence docket", () => {
+  it("shows the verified output limit while keeping failed research unusable and non-replayable", () => {
+    render(<ResearchPanel state="partial" research={researchData({
+      status: "failed", intent: null, quality_status: null, abstention_reason: "model_output_limit_reached",
+    })} admission={null} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByText(/模型达到输出上限，未返回完整研究结果/)).toBeVisible();
+    expect(screen.getAllByText(/不能支持策略目标/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /运行冻结研究|重新运行冻结研究/ })).not.toBeInTheDocument();
+  });
   it("explains rejected stage content while retaining the failed research boundary", () => {
     render(<ResearchPanel state="partial" research={researchData({
       status: "failed", intent: null, quality_status: null, abstention_reason: "model_stage_output_invalid",

@@ -13,6 +13,22 @@ import {
   sessionDate,
 } from "../unit/research/fixtures";
 
+test("verified output limit remains a read-only failed result on the research page", async ({ page }) => {
+  await installShellFixture(page);
+  const methods: string[] = [];
+  const data = researchData({ status: "failed", intent: null, quality_status: null, abstention_reason: "model_output_limit_reached" });
+  await page.route(`**/api/v1/research-runs/${runId}`, (route) => {
+    methods.push(route.request().method());
+    return route.fulfill({ json: researchEnvelope(data) });
+  });
+  await page.goto(`/research/${instrumentId}?run_id=${runId}`);
+  await expect(page.getByText(/模型达到输出上限，未返回完整研究结果/)).toBeVisible();
+  await expect(page.getByRole("button", { name: /运行冻结研究|重新运行冻结研究|下单/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
+  await expect.poll(() => methods.length).toBe(2);
+  expect(methods).toEqual(["GET", "GET"]);
+});
+
 test("saved boolean research conditions remain unverified through page and evidence drawer", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.emulateMedia({ reducedMotion: "reduce" });
