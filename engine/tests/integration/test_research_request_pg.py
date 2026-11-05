@@ -864,14 +864,21 @@ async def test_pure_expired_native_attempt_preserves_unknown_budget_and_blocks_n
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["unclassified", "budget", "budget_private_suffix"])
 async def test_preparation_failure_is_not_replaced_by_cleanup_failure(
-    migrated_database_url, tmp_path, monkeypatch
+    migrated_database_url, tmp_path, monkeypatch, failure_kind
 ):
     import nexus.ops.manual_paper_host as host
     import nexus.paper.research_request as request_module
 
     factory, settings, store, ids = await prepare_scope(migrated_database_url, tmp_path)
-    primary = RuntimeError("preparation-test-canary")
+    primary = (
+        ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
+        if failure_kind == "budget"
+        else ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID private-canary")
+        if failure_kind == "budget_private_suffix"
+        else RuntimeError("preparation-test-canary")
+    )
     original = host.record_manual_request_event
 
     async def prepare(*a, **kw):
@@ -895,7 +902,7 @@ async def test_preparation_failure_is_not_replaced_by_cleanup_failure(
                 idempotency_key="preparation-primary",
                 contract_version=2,
             )
-        with pytest.raises(RuntimeError) as captured:
+        with pytest.raises(type(primary)) as captured:
             await host.dispatch_pure_research_request(settings, request_id=view.request_id)
         assert captured.value is primary
         assert captured.value.__cause__.args == ("cleanup-test-canary",)
@@ -906,7 +913,10 @@ async def test_preparation_failure_is_not_replaced_by_cleanup_failure(
                 select(AuditEvent).where(AuditEvent.action == "research.request_failure")
             )
             assert failure.payload["failure_phase"] == "research_preparation"
-            assert failure.payload["failure_code"] == "RESEARCH_FAILURE_UNCLASSIFIED"
+            if failure_kind == "budget":
+                assert failure.payload["failure_code"] == "SINGLE_SOL_BUDGET_SCOPE_INVALID"
+            else:
+                assert failure.payload["failure_code"] == "RESEARCH_FAILURE_UNCLASSIFIED"
             assert "canary" not in str(failure.payload)
     finally:
         await factory.kw["bind"].dispose()

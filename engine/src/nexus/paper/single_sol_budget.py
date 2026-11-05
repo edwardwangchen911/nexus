@@ -140,7 +140,7 @@ async def freeze_single_sol_budget(
     ):
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
     calendar = await load_agent_paper_service_calendar_authority(
-        session, now=now, expected_calendar_authority_id=calendar_authority_id
+        session, now=now, expected_calendar_authority_id=calendar_authority_id, expected_session=day
     )
     if (
         calendar.session != day

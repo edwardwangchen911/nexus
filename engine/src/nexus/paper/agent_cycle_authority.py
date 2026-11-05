@@ -240,11 +240,13 @@ async def load_agent_paper_service_calendar_authority(
     *,
     now: datetime,
     expected_calendar_authority_id: UUID,
+    expected_session: date | None = None,
 ) -> ServiceCalendarAuthority:
     """Reload one already-bound service calendar without selecting a replacement."""
     require_utc(now)
     ny = ZoneInfo("America/New_York")
     local_date = now.astimezone(ny).date()
+    bound_date = expected_session if expected_session is not None else local_date
     authority = await session.scalar(
         select(ExchangeCalendarAuthorityRecord).where(
             ExchangeCalendarAuthorityRecord.id == expected_calendar_authority_id,
@@ -264,7 +266,7 @@ async def load_agent_paper_service_calendar_authority(
                 select(ExchangeCalendarSessionRecord)
                 .where(
                     ExchangeCalendarSessionRecord.calendar_authority_id == authority.id,
-                    ExchangeCalendarSessionRecord.session >= local_date,
+                    ExchangeCalendarSessionRecord.session >= bound_date,
                     ExchangeCalendarSessionRecord.created_at <= now,
                 )
                 .order_by(ExchangeCalendarSessionRecord.session.asc())
@@ -274,6 +276,8 @@ async def load_agent_paper_service_calendar_authority(
     )
     if (
         len(rows) < 2
+        or expected_session is not None
+        and rows[0].session != expected_session
         or rows[1].session <= rows[0].session
         or any(
             row.session < authority.range_start or row.session > authority.range_end for row in rows
