@@ -1483,6 +1483,7 @@ export interface components {
         };
         /** AgentPaperCycleResponse */
         AgentPaperCycleResponse: {
+            admission_failure?: components["schemas"]["ResearchAdmissionFailureResponse"] | null;
             /** Candidate Count */
             candidate_count: number;
             /** Candidates */
@@ -6249,6 +6250,18 @@ export interface components {
         ResearchAdmissionEnvelope: {
             data: components["schemas"]["ResearchAdmissionResponse"];
             meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** ResearchAdmissionFailureResponse */
+        ResearchAdmissionFailureResponse: {
+            /** Code */
+            code: string;
+            /** Instrument Id */
+            instrument_id: string | null;
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "pool_capacity" | "profile_validation" | "definition_selection" | "snapshot_preparation" | "research_admission" | "definition_binding" | "stage_registration" | "reservation_commit";
         };
         /** ResearchAdmissionResponse */
         ResearchAdmissionResponse: {

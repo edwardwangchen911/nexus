@@ -1877,13 +1877,21 @@ async def _admit_cycle_research(
     if not omit_monitor_events_for <= instruments:
         raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
     capacity_scope = DailyEventCapacityScope(deadline=daily_event_preview_deadline)
+    from nexus.paper.research_admission_diagnostics import (
+        AdmissionFailurePhase,
+        admission_failure_facts,
+    )
+
     run_ids: list[UUID] = []
+    failure_phase: AdmissionFailurePhase = "pool_capacity"
+    failure_instrument_id: UUID | None = None
     try:
         async with session.begin_nested():
             async with capacity_scope:
                 if daily_event_preview_deadline is not None:
                     # Revalidate under the inherited timer before any rebuilt
                     # snapshot, Run, Job or hold may be prepared.
+                    failure_phase = "profile_validation"
                     profile_model_id = await _require_cycle_candidate_profile(
                         session,
                         cycle=cycle,
@@ -1892,6 +1900,8 @@ async def _admit_cycle_research(
                         formal_stage_capacity=formal_stage_capacity,
                     )
                 for candidate in manifest:
+                    failure_instrument_id = candidate.instrument_id
+                    failure_phase = "prompt_selection"
                     snapshot_actor = (
                         "local-agent-paper-cycle"
                         if version_evaluation_id is None
@@ -1938,6 +1948,7 @@ async def _admit_cycle_research(
                         selected_prompts is not None
                         and selected_prompts["portfolio"].version == DISCLOSURE_SCOPE_PROMPT_VERSION
                     )
+                    failure_phase = "snapshot_preparation"
                     research_snapshot_id = candidate.research_snapshot_id
                     if authority.execution_session == authority.decision_session:
                         if not isinstance(candidate, CandidateManifestEntry):
@@ -1954,6 +1965,7 @@ async def _admit_cycle_research(
                                 in omit_monitor_events_for,
                             )
                         ).id
+                    failure_phase = "research_admission"
                     if version_evaluation_id is None:
                         admission = await admit_agent_paper_research(
                             session,
@@ -1990,6 +2002,7 @@ async def _admit_cycle_research(
                             prompt_version_id=version_prompt_id,
                             model_config_id=version_model_id,
                         )
+                    failure_phase = "prompt_binding"
                     admitted = await session.get(AgentResearchRunRecord, admission.run_id)
                     admitted_portfolio = (
                         (admitted.prompt_manifest or {}).get("portfolio", {})
@@ -2005,6 +2018,9 @@ async def _admit_cycle_research(
                         # or reservation from this nested transaction may be committed.
                         raise ValueError("AGENT_PAPER_RESEARCH_CONTEXT_INVALID")
                     run_ids.append(admission.run_id)
+                failure_phase = "pool_capacity"
+                failure_instrument_id = None
+            failure_phase = "reservation_commit"
             await _append_event(
                 session,
                 cycle,
@@ -2014,6 +2030,7 @@ async def _admit_cycle_research(
                 {"research_run_ids": [str(value) for value in run_ids]},
             )
             if formal_stage_capacity:
+                failure_phase = "stage_registration"
                 from nexus.agents.research_stages.routes import register_new_prepared_runs
 
                 if platform_credential is None:
@@ -2022,6 +2039,7 @@ async def _admit_cycle_research(
                     await register_new_prepared_runs(
                         session, tuple(run_ids), platform_credential=platform_credential
                     )
+            failure_phase = "reservation_commit"
     except ValueError as error:
         # Rollback of the complete pool has finished before handling the error.
         # Never reuse a Run, pending Job, hold, or ORM state from that savepoint.
@@ -2060,7 +2078,9 @@ async def _admit_cycle_research(
             "prepared",
             "unavailable",
             "RESEARCH_ADMISSION_UNAVAILABLE",
-            {},
+            admission_failure_facts(
+                error, phase=failure_phase, instrument_id=failure_instrument_id
+            ),
         )
         return _result(cycle.id, await _events(session, cycle.id), replayed=False)
     return _result(cycle.id, await _events(session, cycle.id), replayed=False)

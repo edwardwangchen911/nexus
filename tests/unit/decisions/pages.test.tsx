@@ -59,6 +59,39 @@ const summary: CyclePage["summary"] = {
 };
 
 describe("decision records", () => {
+  it.each([
+    ["definition_selection", "研究配置选择"], ["definition_binding", "研究配置绑定"],
+  ] as const)("renders the public %s phase without an action", (phase, label) => {
+    render(<DecisionDetailPanel state="ready" detail={detail(cycle("20", {
+      status: "unavailable", result_code: "RESEARCH_ADMISSION_UNAVAILABLE", decision: null,
+      admission_failure: { phase, code: "UNKNOWN", instrument_id: null },
+    }), [])} onRefresh={vi.fn()} />);
+    const diagnostic = screen.getByRole("note", { name: "研究准入诊断" });
+    expect(diagnostic).toHaveTextContent(label);
+    expect(diagnostic).toHaveTextContent("原准入错误未能安全归类");
+    expect(within(diagnostic).queryByRole("button")).not.toBeInTheDocument();
+  });
+  it("shows persisted admission phase and safe cause without granting a retry", () => {
+    const failed = detail(cycle("20", {
+      status: "unavailable", result_code: "RESEARCH_ADMISSION_UNAVAILABLE", decision: null,
+      order_ids: [], admission_failure: { phase: "research_admission", code: "SINGLE_SOL_NATURAL_BUDGET_PROTECTED", instrument_id: agentPaperCycle.candidates[0].instrument_id },
+    }), []);
+    render(<DecisionDetailPanel state="ready" detail={failed} onRefresh={vi.fn()} />);
+    const diagnostic = screen.getByRole("note", { name: "研究准入诊断" });
+    expect(diagnostic).toHaveTextContent("研究与预算准入");
+    expect(diagnostic).toHaveTextContent("原自然研究额度仍受保护");
+    expect(diagnostic).toHaveTextContent("SINGLE_SOL_NATURAL_BUDGET_PROTECTED");
+    expect(diagnostic).toHaveTextContent("此记录不授权重试或解除预算占用");
+    expect(within(diagnostic).queryByRole("button")).not.toBeInTheDocument();
+    render(<DecisionsPanel state="ready" page={{ items: [failed.cycle], summary, version_observation: null, version_history: [], version_evaluation: null }} onRefresh={vi.fn()} />);
+    const row = screen.getByRole("list", { name: "决策记录" }).querySelector(".decision-row__result");
+    expect(row).toHaveTextContent("研究准入未通过");
+    expect(row).not.toHaveTextContent("数据不足");
+  });
+  it("does not infer a diagnostic for old unavailable cycles", () => {
+    render(<DecisionDetailPanel state="ready" detail={detail(cycle("20", { status: "unavailable", result_code: "RESEARCH_ADMISSION_UNAVAILABLE", decision: null }), [])} onRefresh={vi.fn()} />);
+    expect(screen.queryByRole("note", { name: "研究准入诊断" })).not.toBeInTheDocument();
+  });
   it("labels failed research execution separately from missing data in the result column", () => {
     const failed = cycle("27", {
       status: "unavailable", result_code: "RESEARCH_OUTPUT_NOT_ACTIONABLE",

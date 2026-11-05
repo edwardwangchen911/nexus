@@ -65,6 +65,71 @@ async def normal_slot(factory, settings, captured, pointer):
 
 
 @pytest.mark.asyncio
+async def test_normal_admission_public_phase_keeps_original_audit_and_budget(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.agents import persistence
+    from nexus.paper.read_service import PaperReadService
+
+    factory, settings, _, captured, pointer, _, _ = await prepared_materials(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    try:
+        now, arguments = await normal_slot(factory, settings, captured, pointer)
+
+        async def inventory(session):
+            return {
+                "runs": set(await session.scalars(select(AgentResearchRunRecord.id))),
+                "jobs": set(await session.scalars(select(Job.id))),
+                "budget": set(
+                    (
+                        row.id,
+                        row.run_id,
+                        row.state,
+                        row.reserved_usd,
+                        row.settled_usd,
+                    )
+                    for row in await session.scalars(select(AgentDailyBudgetReservationRecord))
+                ),
+            }
+
+        async with factory() as session:
+            before = await inventory(session)
+
+        async def refuse(*args, **kwargs):
+            raise ValueError("private-definition-canary")
+
+        async def no_sdk(*args, **kwargs):
+            raise AssertionError("diagnostic admission must not invoke a model")
+
+        monkeypatch.setattr(persistence, "resolve_research_prompt_authority", refuse)
+        monkeypatch.setattr(codex_staged, "invoke_codex", no_sdk)
+        async with factory() as session, session.begin():
+            result = await agent_cycle.start_schwab_agent_paper_cycle(session, **arguments)
+        assert result.result_code == "RESEARCH_ADMISSION_UNAVAILABLE"
+        async with factory() as session:
+            event = (await agent_cycle._events(session, result.cycle_id))[-1]
+            original = dict(event.fact_ids)
+            assert original["failure_phase"] == "prompt_selection"
+            assert original["failure_code"] == "UNKNOWN"
+            for _ in range(2):
+                detail = await PaperReadService(
+                    session, now + timedelta(seconds=30)
+                ).agent_cycle_detail(result.cycle_id)
+                assert detail is not None and detail.cycle.admission_failure is not None
+                assert detail.cycle.admission_failure.phase == "definition_selection"
+                assert detail.cycle.admission_failure.code == "UNKNOWN"
+                assert "private-definition-canary" not in detail.model_dump_json()
+                assert detail.cycle.status == "unavailable" and detail.orders == ()
+                assert (await agent_cycle._events(session, result.cycle_id))[
+                    -1
+                ].fact_ids == original
+                assert await inventory(session) == before
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode",
     [
@@ -350,6 +415,26 @@ async def test_unpublished_daily_capacity_rollback_is_exact(
         if mode == "late_member":
             assert staged_counts == [(2, 2)]
         async with factory() as session:
+            if not success:
+                from nexus.paper.read_service import PaperReadService
+
+                event = (await agent_cycle._events(session, result.cycle_id))[-1]
+                assert event.fact_ids["admission_failure_version"] == 1
+                assert event.fact_ids["failure_code"] == (
+                    "UNKNOWN"
+                    if mode == "noncapacity"
+                    else "CODEX_CAPACITY_PRECLAIM_TIMEOUT"
+                    if mode
+                    in {"deadline", "deadline_exit", "rebuild_expired", "rebuild_profile_timeout"}
+                    else "CODEX_CAPACITY_POOL_WIRE_EXCEEDED"
+                )
+                detail = await PaperReadService(
+                    session, now + timedelta(seconds=30)
+                ).agent_cycle_detail(result.cycle_id)
+                assert detail is not None and detail.cycle.admission_failure is not None
+                assert detail.cycle.admission_failure.code == event.fact_ids["failure_code"]
+                assert detail.cycle.admission_failure.phase == event.fact_ids["failure_phase"]
+                assert detail.cycle.status == "unavailable" and detail.orders == ()
             after = {model: set(await session.scalars(select(model.id))) for model in before}
             runs = tuple(
                 await session.scalars(

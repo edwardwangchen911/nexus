@@ -167,6 +167,9 @@ function decisionSummary(cycle: Cycle): ProductPresentation<DecisionSummaryKey> 
   if (cycle.status === "unavailable" && cycle.result_code === "RESEARCH_OUTPUT_NOT_ACTIONABLE") {
     return presentation("research_not_actionable", "研究未通过交易准入", "研究未形成符合交易准入条件的结论；不等同于有充分证据的不调整。", "warning", cycle.result_code);
   }
+  if (cycle.status === "unavailable" && cycle.result_code === "RESEARCH_ADMISSION_UNAVAILABLE" && cycle.admission_failure) {
+    return presentation("unknown", "研究准入未通过", "已保存准入失败阶段与安全原因；不代表模型已经完成研究。", "warning", cycle.result_code);
+  }
   if (cycle.status === "unavailable" && !DATA_REASON_CODES.has(cycle.result_code)) {
     return presentation("unknown", "阻断原因待核对", "现有记录不足以区分资料、绑定或运行故障，请核对原始结果。", "warning", cycle.result_code);
   }

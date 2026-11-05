@@ -63,8 +63,35 @@ export function DecisionDetailPanel({ state, detail, onRefresh }: { state: DataS
       <div className="page-actions"><span className="mode-badge">内部模拟</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新记录</button></div>
       {detail ? <dl><div><dt>决策时间</dt><dd className="numeric-data">{formatDisplayTime(detail.cycle.decision_time)}</dd></div><div><dt>周期 ID</dt><dd className="numeric-data">{detail.cycle.cycle_id}</dd></div><div><dt>执行结论</dt><dd>{resultUnknown ? "结果未知" : execution?.label}</dd></div></dl> : null}
     </header>
+    {hasFacts && detail?.cycle.status === "unavailable" && detail.cycle.result_code === "RESEARCH_ADMISSION_UNAVAILABLE" && detail.cycle.admission_failure ? <AdmissionFailureNotice cycle={detail.cycle} /> : null}
     {hasFacts ? management ? <PortfolioDecisionDetail detail={detail} /> : <DecisionTimeline detail={detail} /> : <DataState state={state} title={title} detail="详情只读取该周期及其精确关联订单，不从其他周期补填。" announce={false} />}
   </section>;
+}
+
+function AdmissionFailureNotice({ cycle }: { cycle: Detail["cycle"] }): React.ReactElement | null {
+  const failure = cycle.admission_failure;
+  if (!failure) return null;
+  const phases = {
+    pool_capacity: "整池容量检查", profile_validation: "模型档案复核", definition_selection: "研究配置选择",
+    snapshot_preparation: "研究快照准备", research_admission: "研究与预算准入", definition_binding: "研究配置绑定",
+    stage_registration: "模型阶段登记", reservation_commit: "研究预留提交",
+  };
+  const reasons: Record<string, string> = {
+    SINGLE_SOL_NATURAL_BUDGET_PROTECTED: "原自然研究额度仍受保护",
+    DAILY_RESEARCH_BUDGET_EXHAUSTED: "当日共享研究额度不足",
+    RESEARCH_PRICING_STALE: "研究价档已过期",
+    CODEX_CAPACITY_PRECLAIM_TIMEOUT: "准备检查达到原截止时间",
+    CODEX_CAPACITY_POOL_WIRE_EXCEEDED: "研究输入超过容量限制",
+    CODEX_CAPACITY_POOL_INPUT_EXCEEDED: "研究输入超过容量限制",
+    PLATFORM_NATIVE_INPUT_CHANGED: "阶段输入与冻结证据不一致",
+    UNKNOWN: "原准入错误未能安全归类",
+  };
+  const symbol = cycle.candidates.find(candidate => candidate.instrument_id === failure.instrument_id)?.symbol;
+  return <aside className="inline-notice" role="note" aria-label="研究准入诊断">
+    <strong>{symbol ? `${symbol} · ` : ""}{phases[failure.phase]}</strong>
+    <p>{reasons[failure.code] ?? "准入校验未通过，具体安全原因见记录代码。"} · <code>{failure.code}</code></p>
+    <p>此记录不授权重试或解除预算占用。</p>
+  </aside>;
 }
 
 function isDetailEnvelope(value: unknown): value is components["schemas"]["AgentPaperManagementCycleEnvelope"] {

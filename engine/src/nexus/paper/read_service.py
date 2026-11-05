@@ -2424,10 +2424,29 @@ class PaperReadService:
                     delayed=False,
                     quote_at=quote.observed_at,
                 )
+        from nexus.api.schemas.paper import ResearchAdmissionFailureResponse
+        from nexus.paper.research_admission_diagnostics import read_admission_failure
+
+        failure = (
+            read_admission_failure(event.fact_ids)
+            if event.to_status == "unavailable"
+            and event.result_code == "RESEARCH_ADMISSION_UNAVAILABLE"
+            else None
+        )
+        if failure is not None and failure["instrument_id"] not in {
+            None,
+            *(candidate.instrument_id for candidate in manifest),
+        }:
+            failure = None
         return AgentPaperCycleResponse(
             cycle_id=cycle.id,
             status=cast(Any, projected_status),
             result_code=projected_result_code,
+            admission_failure=(
+                ResearchAdmissionFailureResponse.model_validate(failure)
+                if failure is not None
+                else None
+            ),
             decision_session=cycle.decision_session,
             decision_time=cycle.decision_time,
             decision_slot_at=cycle.decision_slot_at,
