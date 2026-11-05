@@ -131,6 +131,7 @@ MERGE_SELECTORS = (
     # (pg-c 958s, pg-f 1005s); existing selectors and boundaries stay in place.
     "engine/tests/integration/test_platform_producer_pg.py",
     "engine/tests/integration/test_compact_sol_binding_pg.py",
+    "engine/tests/integration/test_compact_day_budget_pg.py",
     "engine/tests/integration/test_compact_sol_preparation_pg.py",
     "engine/tests/integration/test_compact_sol_lifecycle_pg.py",
     "engine/tests/integration/test_sol_profile_cli_pg.py",

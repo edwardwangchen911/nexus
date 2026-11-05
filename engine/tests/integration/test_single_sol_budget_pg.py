@@ -494,7 +494,7 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
     "source_actor", ["local-single-sol-research-v1", "local-budgeted-single-sol-v1"]
 )
 async def test_real_increment_converts_one_obligation_from_an_existing_plan(
-    migrated_database_url, monkeypatch, first, source_actor
+    migrated_database_url, monkeypatch, first, source_actor, after_admission=None
 ):
     from nexus.agents import persistence
     from nexus.paper import single_sol_budget
@@ -648,7 +648,10 @@ async def test_real_increment_converts_one_obligation_from_an_existing_plan(
 
     monkeypatch.setattr(persistence, "reserve_daily_budget", fund_before_increment)
     await native.test_normal_increment_selects_sol_and_retains_exact_sdk_predecessor(
-        migrated_database_url, monkeypatch, after_admitted=verify, daily_limit=LIMIT
+        migrated_database_url,
+        monkeypatch,
+        after_admitted=verify if after_admission is None else after_admission,
+        daily_limit=LIMIT,
     )
 
 

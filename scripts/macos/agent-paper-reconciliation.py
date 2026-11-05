@@ -38,6 +38,7 @@ _PENDING_POLICIES = {
     "0115_single_sol_budget": "pending_consumer_exit_0115_v1",
     "0117_budgeted_single_sol": "pending_consumer_exit_0117_v1",
     "0118_compact_sol_profile": "pending_consumer_exit_0118_v1",
+    "0119_compact_budget_obligations": "pending_consumer_exit_0119_v1",
 }
 SAFE_CODES = frozenset(
     _PREFIX + suffix

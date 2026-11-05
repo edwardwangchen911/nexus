@@ -13,6 +13,7 @@ from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
 from nexus.paper.research_request import database_now
+from nexus.paper.single_sol_compat import budget_model_compatible
 from nexus.paper.single_sol_obligations import closed_settlements, funded_obligations, original_slot
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -227,31 +228,9 @@ async def require_single_sol_capacity(
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
     # The credit identifies the original owner forever. It covers its obligation
     # only while native funds are held or a known settlement has discharged it.
-    rows = (
-        await session.execute(
-            text("""
-        SELECT c.task, c.run_id, CASE WHEN c.task='synthesis' THEN s.state ELSE r.state END AS state
-        FROM single_sol_budget_credits c
-        LEFT JOIN agent_daily_budget_reservations r ON r.run_id=c.run_id
-              AND r.business_date=c.budget_day
-        LEFT JOIN agent_portfolio_synthesis_budget_reservations s ON s.run_id=c.run_id
-              AND s.business_date=c.budget_day
-        WHERE c.budget_day=:day"""),
-            {"day": day},
-        )
-    ).all()
-    tasks = {"research:" + str(i) for i in guard["members"]} | {"synthesis", "increment"}
-    recorded = {row.task for row in rows}
-    if not recorded <= tasks or any(
-        row.state not in {"reserved", "settled", "released"} for row in rows
-    ):
-        raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
-    closed = await closed_settlements(
-        session, {row.run_id for row in rows if row.state == "settled"}, now=now
+    remaining, recorded = await remaining_obligations(
+        session, day=day, members=guard["members"], now=now
     )
-    remaining = tasks - {
-        row.task for row in rows if row.state == "reserved" or row.run_id in closed
-    }
     task = (
         await _original_obligation(session, guard, kind, run_id, now)
         if amount == guard["maximum"]
@@ -286,7 +265,12 @@ async def _original_obligation(
         run = await session.get(AgentResearchRunRecord, run_id)
         if (
             run is None
-            or run.model_config_id != guard["model_id"]
+            or not await budget_model_compatible(
+                session,
+                expected=guard["model_id"],
+                candidate=run.model_config_id,
+                maximum=guard["maximum"],
+            )
             or run.instrument_id not in guard["members"]
         ):
             return None
@@ -340,7 +324,12 @@ async def _original_obligation(
         if (
             synth is not None
             and synth.cycle_id == cycle
-            and synth.model_config_id == guard["model_id"]
+            and await budget_model_compatible(
+                session,
+                expected=guard["model_id"],
+                candidate=synth.model_config_id,
+                maximum=guard["maximum"],
+            )
             and synth.candidate_batch_id == guard["batch_id"]
             and synth.frozen_input.get("calendar_authority_id") == str(guard["calendar_id"])
         ):
@@ -352,3 +341,35 @@ async def _original_obligation(
     ):
         return "research:" + str(run.instrument_id)
     return None
+
+
+async def remaining_obligations(
+    session: AsyncSession, *, day: date, members: list[UUID], now: datetime
+) -> tuple[set[str], set[str]]:
+    """Read the same remaining protection for allocation and startup diagnostics."""
+    rows = (
+        await session.execute(
+            text("""
+        SELECT c.task, c.run_id, CASE WHEN c.task='synthesis' THEN s.state ELSE r.state END AS state
+        FROM single_sol_budget_credits c
+        LEFT JOIN agent_daily_budget_reservations r ON r.run_id=c.run_id
+              AND r.business_date=c.budget_day
+        LEFT JOIN agent_portfolio_synthesis_budget_reservations s ON s.run_id=c.run_id
+              AND s.business_date=c.budget_day
+        WHERE c.budget_day=:day"""),
+            {"day": day},
+        )
+    ).all()
+    tasks = {"research:" + str(i) for i in members} | {"synthesis", "increment"}
+    recorded = {row.task for row in rows}
+    if not recorded <= tasks or any(
+        row.state not in {"reserved", "settled", "released"} for row in rows
+    ):
+        raise ValueError("SINGLE_SOL_BUDGET_SCOPE_INVALID")
+    closed = await closed_settlements(
+        session, {row.run_id for row in rows if row.state == "settled"}, now=now
+    )
+    remaining = tasks - {
+        row.task for row in rows if row.state == "reserved" or row.run_id in closed
+    }
+    return remaining, recorded
