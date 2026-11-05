@@ -69,7 +69,7 @@ async def inspect_service_budget_scope(
         session, day=now.date(), members=guard["members"], now=now
     )
     if not remaining:
-        return {"status": "fulfilled", "remaining_obligations": 0}
+        return {"status": "covered", "remaining_obligations": 0}
     model = await session.get(AgentModelConfigRecord, selected) if selected is not None else None
     if (
         model is None

@@ -402,6 +402,122 @@ async def test_read_only_activation_checks_existing_day_guard(
             assert readiness["failed_stage"] == "daily_budget_scope"
         else:
             assert readiness["budget_scope"] == result
+            assert readiness["status"] == "blocked"
+            assert readiness["blocking_codes"] == ["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"]
+            assert readiness["failed_stage"] == "account_occupancy"
         assert readiness["external_requests"] == 0 and readiness["execution_locked"] is True
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_idle_completed_source_allows_full_compact_recovery(
+    migrated_database_url, tmp_path, monkeypatch, capsys
+):
+    from integration.test_budgeted_single_sol_pg import completed_predecessor
+    from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
+    from nexus.paper.manual_host_exit import record_host_exit
+    from nexus.persistence.models.runtime import WorkerHeartbeat
+    from sqlalchemy import select
+
+    settings, _, _ = await completed_predecessor(
+        migrated_database_url, tmp_path, monkeypatch, capsys
+    )
+    factory = session_factory(settings)
+    try:
+        async with factory.begin() as db:
+            # The synchronous fixture worker has returned and drained; record its
+            # exact host retirement through the existing product writer.
+            hosts = (
+                await db.scalars(
+                    select(WorkerHeartbeat).where(WorkerHeartbeat.queue == "agent_paper")
+                )
+            ).all()
+            for host in hosts:
+                await record_host_exit(
+                    db,
+                    worker_id=host.worker_id,
+                    started_at=host.started_at,
+                    process_version=host.process_version,
+                )
+            old = await db.get(AgentModelConfigRecord, settings.agent_paper_formal_model_config_id)
+            model = await register_sol_business_profile(
+                db,
+                price_record=old.platform_profile["price_record"],
+                source_evidence=SOURCE,
+                units_version=COMPACT_PLATFORM_UNITS_VERSION,
+            )
+            assert old.id != model.id
+            facts = text("""SELECT jsonb_build_object(
+              'guard',(SELECT jsonb_agg(to_jsonb(g)) FROM single_sol_budget_scopes g),
+              'requests',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM manual_paper_requests r),
+              'reserves',(SELECT jsonb_agg(to_jsonb(b) ORDER BY run_id)
+                          FROM agent_daily_budget_reservations b),
+              'credits',(SELECT jsonb_agg(to_jsonb(c)) FROM single_sol_budget_credits c))""")
+            before = await db.scalar(facts)
+        ready = await inspect_recovery_readiness(
+            settings.model_copy(
+                update={
+                    "agent_paper_formal_model_config_id": model.id,
+                    "agent_paper_cycle_enabled": True,
+                    "release_revision": "a" * 40,
+                }
+            )
+        )
+        assert ready["status"] == "ready", ready
+        assert ready["blocking_codes"] == []
+        assert ready["budget_scope"] == {"status": "compact", "remaining_obligations": 5}
+        assert ready["external_requests"] == 0 and ready["execution_locked"] is True
+        async with factory() as db:
+            # Full recovery is a database read-only transaction, not a new owner.
+            assert await db.scalar(facts) == before
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_four_known_settlements_and_one_reserve_are_covered_not_fulfilled(monkeypatch):
+    """Controlled read results exercise the real remaining-obligation classifier."""
+    from types import SimpleNamespace
+
+    from nexus.paper import single_sol_budget, single_sol_compat
+
+    members = [uuid4() for _ in range(3)]
+    account, batch, model = uuid4(), uuid4(), uuid4()
+    rows = [
+        SimpleNamespace(task=task, run_id=uuid4(), state="settled")
+        for task in [*("research:" + str(i) for i in members), "synthesis"]
+    ]
+    rows.append(SimpleNamespace(task="increment", run_id=uuid4(), state="reserved"))
+    closed_ids = {row.run_id for row in rows if row.state == "settled"}
+
+    async def closed(session, ids, *, now):
+        assert ids == closed_ids
+        return closed_ids
+
+    monkeypatch.setattr(single_sol_budget, "closed_settlements", closed)
+
+    class ReadSession:
+        async def scalar(self, statement, params):
+            assert "formal_intraday_intents" in str(statement)
+            return None
+
+        async def execute(self, statement, params):
+            if "FROM single_sol_budget_scopes" in str(statement):
+                guard = dict(
+                    account_id=account, batch_id=batch, daily_limit=Decimal("13"), members=members
+                )
+                return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: guard))
+            assert "FROM single_sol_budget_credits" in str(statement)
+            return SimpleNamespace(all=lambda: rows)
+
+    settings = EngineSettings(
+        agent_paper_account_id=account,
+        agent_paper_candidate_batch_id=batch,
+        agent_paper_formal_model_config_id=model,
+        agent_daily_budget_usd=Decimal("13"),
+    )
+    assert await single_sol_compat.inspect_service_budget_scope(
+        ReadSession(), settings, now=datetime.fromisoformat("2026-11-05T14:00:00+00:00")
+    ) == {"status": "covered", "remaining_obligations": 0}
+    assert rows[-1].state == "reserved"
