@@ -23,6 +23,11 @@ from sqlalchemy import select, text
 from unit.agents.test_codex_sdk import _assessment_payload, _restore_view, _staged_batch
 from unit.agents.test_http_stage_lifecycle import Body, terminal
 
+OPEN_CLIENT_TRANSACTIONS = (
+    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+    "AND pid<>pg_backend_pid() AND xact_start IS NOT NULL AND backend_type='client backend'"
+)
+
 
 def stage_response(wire, route, seen):
     payload = _restore_view(wire)
@@ -72,15 +77,7 @@ async def test_normal_sdk_and_http_chain_use_own_predecessors_and_common_persist
 
     async def no_held_transaction():
         async with factory() as session:
-            assert (
-                await session.scalar(
-                    text(
-                        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
-                        "AND pid<>pg_backend_pid() AND xact_start IS NOT NULL"
-                    )
-                )
-                == 0
-            )
+            assert await session.scalar(text(OPEN_CLIENT_TRANSACTIONS)) == 0
 
     async def invoke(payload, **kwargs):
         await no_held_transaction()

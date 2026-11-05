@@ -1403,3 +1403,14 @@ completed仅表示原生研究已终结。逐事件双审/采纳、按kind消费
 ```
 
 宿主使用原账户、批次、日历及 Sol 价档。开盘准备至原槽完成期间拒绝新增。原槽后仅在盘中原三股与组合已按原身份完成结算、原周期终结且其他准入条件满足时开放。相同键及意图只读回执，批次、模型、证券或期限变更按冲突处理。超时或未知时保留原键，以请求 ID 只读核对。每笔只生成一股研究，不生成组合、监控计划或订单。保留有效预留、已发生的费用及未知占用。若需回滚，使用能读 0116 的维护镜像；已有 v4 记录时禁止降级数据库。
+
+0117 新增显式的 `shared-budget` 政策，合同见 `docs/design/nexus-budgeted-independent-research-v1.md`。只有获得新的独立研究授权后，才使用下列新意图和新键；默认不传政策仍走上述 v4 单日入口。新入口不会重放已终结请求，也不会因同日已有保护记录就借用旧 Run 或旧预留。
+
+```sh
+.venv/bin/nexus-engine-manual-paper inspect-single-sol-intent --admission-policy shared-budget --instrument-id <证券UUID>
+.venv/bin/nexus-engine-manual-paper start-single-sol --admission-policy shared-budget --instrument-id <同一证券UUID> --idempotency-key <本次获准的新唯一键> --expected-intent-hash <本政策的原摘要>
+```
+
+每笔 v5 请求须重新通过当日身份、账户、自然义务、预算和期限检查，拥有独立 Run/Job 与预留。同键切换政策或更改意图仍拒绝；已经排队的同键只读原回执。已知结案不自动启动后继，未知费用与预留保留，旧接受不覆盖新 v5 未知。自然槽优先、输出上限和共享额度均不变。
+
+回滚需使用理解 0117 与 v5 事实的维护镜像。维护模式拒绝新注册、派发和 Worker 调用，仅允许原事实读回及符合条件的原身份收尾；存在 v5 记录时禁止降级到 0116。镜像切换验收必须保留非空 v4/v5 及未知共存记录，核对正式→维护→正式的完整事实一致性，不能用空库或源码开关测试代替。
