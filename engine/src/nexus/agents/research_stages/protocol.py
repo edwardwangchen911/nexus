@@ -303,7 +303,7 @@ class StagedProtocol:
                 from nexus.persistence.models.manual_paper import ManualPaperRequest
 
                 request = required(await session.get(ManualPaperRequest, route["scope_id"]))
-                if request.contract_version == 4:
+                if request.contract_version in {4, 5}:
                     from nexus.paper.single_sol_research import recheck_single_sol
 
                     if self.native_settings is None:

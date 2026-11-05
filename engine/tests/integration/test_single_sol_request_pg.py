@@ -23,28 +23,10 @@ from nexus.persistence.models.runtime import WorkerHeartbeat
 from sqlalchemy import func, select, text
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "path",
-    [
-        "complete",
-        "overnight",
-        "late_history",
-        "host",
-        "late_queue",
-        "late_locked",
-        "unknown",
-        "queued",
-        "oversized_critique",
-        "grant_first",
-        "receipt_first",
-    ],
-)
-async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, capsys, path):
+async def single_scope(migrated_database_url, tmp_path, monkeypatch, path="complete"):
     from integration import test_research_request_pg as pure
 
     race = path in {"grant_first", "receipt_first"}
-    oversized = path == "oversized_critique" or race
     account = await pure.seed_paper_batch(migrated_database_url)
 
     async def seeded_account(_url):
@@ -125,6 +107,33 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, capsys
                 seen_at=now,
             )
         )
+
+    return factory, settings, store, ids, cal, now
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "complete",
+        "overnight",
+        "late_history",
+        "host",
+        "late_queue",
+        "late_locked",
+        "unknown",
+        "queued",
+        "oversized_critique",
+        "grant_first",
+        "receipt_first",
+    ],
+)
+async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, capsys, path):
+    race = path in {"grant_first", "receipt_first"}
+    oversized = path == "oversized_critique" or race
+    factory, settings, store, ids, cal, now = await single_scope(
+        migrated_database_url, tmp_path, monkeypatch, path
+    )
 
     async def call(*args):
         return await manual_paper.run(settings, manual_paper.parser().parse_args(list(args)))

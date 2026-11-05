@@ -219,7 +219,15 @@ async def test_shared_allocator_serializes_single_scope(
         await factory.kw["bind"].dispose()
 
 
-async def seed_source(session, ordinary_reserve, kwargs, old, source_snapshot=None):
+async def seed_source(
+    session,
+    ordinary_reserve,
+    kwargs,
+    old,
+    source_snapshot=None,
+    *,
+    source_actor="local-single-sol-research-v1",
+):
     base = {c.name: getattr(old, c.name) for c in old.__table__.columns}
     if source_snapshot is not None:
         base["data_snapshot_id"] = source_snapshot
@@ -230,7 +238,7 @@ async def seed_source(session, ordinary_reserve, kwargs, old, source_snapshot=No
                 base
                 | dict(
                     id=identity,
-                    actor_id="local-single-sol-research-v1",
+                    actor_id=source_actor,
                     idempotency_key=str(identity),
                     input_hash=identity.hex * 2,
                 )
@@ -243,9 +251,20 @@ async def seed_source(session, ordinary_reserve, kwargs, old, source_snapshot=No
 
 
 async def seed_funded_scope(
-    session, ordinary_reserve, kwargs, old, account, batch, slot, *, source_snapshot=None
+    session,
+    ordinary_reserve,
+    kwargs,
+    old,
+    account,
+    batch,
+    slot,
+    *,
+    source_snapshot=None,
+    source_actor="local-single-sol-research-v1",
 ):
-    identity = await seed_source(session, ordinary_reserve, kwargs, old, source_snapshot)
+    identity = await seed_source(
+        session, ordinary_reserve, kwargs, old, source_snapshot, source_actor=source_actor
+    )
     # The bilateral tests exercise the real installer separately. Inject its
     # immutable source fixture before the first natural reservation here.
     await session.execute(
@@ -269,8 +288,11 @@ async def seed_funded_scope(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_actor", ["local-single-sol-research-v1", "local-budgeted-single-sol-v1"]
+)
 async def test_natural_research_and_synthesis_convert_their_own_native_reservations(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, source_actor
 ):
     from integration import test_candidate_multistock_path as candidates
     from nexus.agents import persistence
@@ -316,7 +338,16 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
                     )
                 )
             ).one()
-            await seed_funded_scope(session, ordinary_reserve, kwargs, old, account, batch, slot)
+            await seed_funded_scope(
+                session,
+                ordinary_reserve,
+                kwargs,
+                old,
+                account,
+                batch,
+                slot,
+                source_actor=source_actor,
+            )
         return await ordinary_reserve(session, **kwargs)
 
     monkeypatch.setattr(candidates, "start_schwab_agent_paper_cycle", scheduled)
@@ -338,6 +369,10 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
             scope = (
                 (await db.execute(text("select * from single_sol_budget_scopes"))).mappings().one()
             )
+            assert (
+                await db.get(AgentResearchRunRecord, scope["source_run_id"])
+            ).actor_id == source_actor
+            assert scope["source_run_id"] not in {item.run_id for item in credits}
             assert (
                 await _shared_daily_budget_used(db, business_date=scope["budget_day"])
                 == 4 * scope["maximum"]
@@ -455,8 +490,11 @@ async def test_natural_research_and_synthesis_convert_their_own_native_reservati
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("first", ["release", "allocate"])
+@pytest.mark.parametrize(
+    "source_actor", ["local-single-sol-research-v1", "local-budgeted-single-sol-v1"]
+)
 async def test_real_increment_converts_one_obligation_from_an_existing_plan(
-    migrated_database_url, monkeypatch, first
+    migrated_database_url, monkeypatch, first, source_actor
 ):
     from nexus.agents import persistence
     from nexus.paper import single_sol_budget
@@ -491,7 +529,15 @@ async def test_real_increment_converts_one_obligation_from_an_existing_plan(
             )
             assert parent_snapshot is not None and parent_snapshot != row.data_snapshot_id
             await seed_funded_scope(
-                db, original, kwargs, row, account, batch, slot, source_snapshot=parent_snapshot
+                db,
+                original,
+                kwargs,
+                row,
+                account,
+                batch,
+                slot,
+                source_snapshot=parent_snapshot,
+                source_actor=source_actor,
             )
         return await original(db, **kwargs)
 
@@ -502,6 +548,9 @@ async def test_real_increment_converts_one_obligation_from_an_existing_plan(
             ).all()
             assert credits == [("increment", member.run_id)]
             assert member.trigger_id == trigger.id and member.run_id != parent.id
+            source = await db.scalar(text("SELECT source_run_id FROM single_sol_budget_scopes"))
+            assert (await db.get(AgentResearchRunRecord, source)).actor_id == source_actor
+            assert source != member.run_id
 
         # The new writer has a distinct native identity. Both transactions use the
         # public budget writers; wait for the PostgreSQL blocking edge, not a timer.

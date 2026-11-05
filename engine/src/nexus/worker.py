@@ -413,7 +413,7 @@ async def run_agent_worker_once(
                     owner = await session.get(ManualPaperRequest, stage_route["scope_id"])
                     if owner is None:
                         raise ValueError("STAGED_ROUTE_BINDING_INVALID")
-                    if owner.contract_version == 4:
+                    if owner.contract_version in {4, 5}:
                         # Preclaim retained the funding locks. Time can advance while the
                         # heartbeat or Job is acquired: check again before the first attempt.
                         await require_single_sol_first_claim_window(session, owner)

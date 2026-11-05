@@ -23,6 +23,20 @@ const candidate = () => ({ instrument_id: instrumentId, symbol: "AAPL", run_id: 
   ], has_more: false,
 });
 
+it.each([
+  ["model_usage_uncertain", "部分模型调用未返回用量"],
+  ["model_output_limit_reached", "模型达到输出上限，未返回完整研究结果"],
+  ["model_research_stopped", "模型研究已停止，具体停止原因未分类"],
+])("shows verified model failure %s without an unverified-code fallback", (reason, expected) => {
+  render(<ActivitySummary activity={activity(activityScope({ mode: "research_only", candidates: [
+    { ...candidate(), run_status: "failed", job_status: "failed", quality: null, reason_code: reason, limitations: [] },
+  ] }))} />);
+  const card = screen.getByRole("article", { name: "AAPL 本轮研究" });
+  expect(card).toHaveTextContent(expected);
+  expect(card).not.toHaveTextContent("原因不可核验");
+  expect(card).not.toHaveTextContent("研究已完成");
+});
+
 describe("frozen round and research limits", () => {
   it("keeps unknown money and admission separate from accepted historical occupancy", () => {
     render(<ActivitySummary activity={activity(activityScope({ mode: "research_and_monitor", selection: "historical", occupancy: "released" }))} />);

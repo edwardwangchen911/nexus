@@ -132,10 +132,10 @@ async def dispatch_manual_request(
             # Route under the same safe failure and cleanup boundary as the claim.
             async with factory.begin() as session:
                 row = await session.get(ManualPaperRequest, request_id)
-                is_pure = row is not None and row.contract_version in {2, 3, 4}
+                is_pure = row is not None and row.contract_version in {2, 3, 4, 5}
             if is_pure:
                 pure = True
-                if row is not None and row.contract_version == 4:
+                if row is not None and row.contract_version in {4, 5}:
                     await dispatch_pure_research_request(
                         settings, request_id=request_id, calendar_authority_id=calendar_authority_id
                     )
@@ -411,13 +411,13 @@ async def claim_configured_manual_request(
         and not settings.formal_budget_protection_enabled
         and row.candidate_batch_id == settings.agent_paper_candidate_batch_id
         and row.model_config_id == settings.agent_paper_formal_model_config_id
-        and (row.contract_version in {2, 3, 4} or row.requested_at.date() == now.date())
+        and (row.contract_version in {2, 3, 4, 5} or row.requested_at.date() == now.date())
     )
-    if available and row.contract_version in {2, 3, 4}:
+    if available and row.contract_version in {2, 3, 4, 5}:
         from nexus.paper.research_request import require_research_profile
 
         try:
-            if row.contract_version == 4:
+            if row.contract_version in {4, 5}:
                 from nexus.paper.single_sol_owner import binding_for
                 from nexus.paper.single_sol_research import recheck_single_sol
 
@@ -427,7 +427,7 @@ async def claim_configured_manual_request(
             await require_research_profile(session, row=row, settings=settings)
         except ValueError:
             available = False
-    if available and row.contract_version not in {2, 3, 4}:
+    if available and row.contract_version not in {2, 3, 4, 5}:
         try:
             calendar = await select_agent_paper_service_calendar_authority(session, now=now)
         except ValueError:
@@ -465,7 +465,7 @@ async def finish_configured_manual_request(
     row = await session.get(ManualPaperRequest, request_id)
     if row is None or row.account_id != account_id:
         raise ValueError("MANUAL_NOT_FOUND")
-    if row.contract_version in {2, 3, 4}:
+    if row.contract_version in {2, 3, 4, 5}:
         from nexus.paper.research_request import finish_research_request
 
         return await finish_research_request(session, row=row, cancel_unused=cancel_unused)
@@ -526,9 +526,9 @@ async def _dispatch_pure_research_request(
     try:
         async with factory.begin() as session:
             row = await session.get(ManualPaperRequest, request_id)
-            if row is None or row.contract_version not in {2, 3, 4}:
+            if row is None or row.contract_version not in {2, 3, 4, 5}:
                 return False
-            if row.contract_version == 4:
+            if row.contract_version in {4, 5}:
                 view, claimed = await claim_configured_manual_request(
                     session,
                     settings,
