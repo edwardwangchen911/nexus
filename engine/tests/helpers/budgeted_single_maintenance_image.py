@@ -13,6 +13,7 @@ from helpers.single_sol_maintenance_image import frozen_facts, refused
 from nexus.agents import research_maintenance
 from nexus.ops import manual_paper
 from nexus.ops.manual_paper_host import dispatch_pure_research_request
+from nexus.paper.manual_entry import read_configured_manual_request
 from nexus.paper.manual_request import read_manual_request
 from nexus.paper.single_sol_owner import binding_for
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
@@ -64,7 +65,11 @@ async def run(args):
                 return await manual_paper.run(scoped, manual_paper.parser().parse_args(values))
 
             receipt = await cli("read", "--request-id", str(row.id))
-            assert receipt.model_dump(mode="json") == args["receipts"][str(row.id)]
+            assert receipt.model_dump(mode="json") == args["receipts"][str(row.id)], {
+                k: (v, args["receipts"][str(row.id)].get(k))
+                for k, v in receipt.model_dump(mode="json").items()
+                if v != args["receipts"][str(row.id)].get(k)
+            }
             assert receipt.execution_locked and receipt.cycle_id is None
             assert receipt.research_contract == "single_sol_research_v1"
             (member,) = receipt.research.members
@@ -111,7 +116,8 @@ async def run(args):
                         formal_stage_capacity=True,
                     )
                 )
-                assert await cli("finish-research", "--request-id", str(row.id)) == receipt
+                closed = await cli("finish-research", "--request-id", str(row.id))
+                assert closed.model_dump(mode="json") == args["raw_receipts"][str(row.id)]
             assert await cli("read", "--request-id", str(row.id)) == receipt
             results[str(row.id)] = dict(
                 version=row.contract_version,
@@ -135,14 +141,18 @@ async def verify_images(factory, settings, *, label):
     assert url.host == "127.0.0.1" and url.port == 56019
     assert re.fullmatch(r"nexus_test_[0-9a-f]{32}", url.database or "")
     receipts = {}
+    raw_receipts = {}
     async with factory() as db:
         for row in await db.scalars(select(ManualPaperRequest)):
-            view = await read_manual_request(db, row)
+            raw = await read_manual_request(db, row)
+            raw_receipts[str(row.id)] = raw.model_dump(mode="json")
+            view = await read_configured_manual_request(db, settings, request_id=row.id)
             receipts[str(row.id)] = view.model_dump(mode="json")
     before = await frozen_facts(factory)
     args = dict(
         url=url.set(port=5432).render_as_string(hide_password=False),
         receipts=receipts,
+        raw_receipts=raw_receipts,
         facts=before,
     )
     results = []
@@ -155,6 +165,8 @@ async def verify_images(factory, settings, *, label):
             "--read-only",
             "--tmpfs",
             "/tmp",
+            "--tmpfs",
+            "/app/Library:rw,mode=1777",
             "-i",
             "--network",
             "container:nexus-v4-disposition-offline-20261105",
