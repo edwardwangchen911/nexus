@@ -40,7 +40,7 @@ from sqlalchemy import func, select, text
         "receipt_first",
     ],
 )
-async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
+async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, capsys, path):
     from integration import test_research_request_pg as pure
 
     race = path in {"grant_first", "receipt_first"}
@@ -452,5 +452,59 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
             )
             assert await db.scalar(text("select count(*) from research_stage_authorization")) == 3
         assert requests == ["research", "critique", "synthesis"]
+        if path == "complete":
+            import json
+            from types import SimpleNamespace
+
+            async def protected_rows():
+                async with factory() as db:
+                    return {
+                        table: (
+                            await db.scalars(text(f"SELECT row_to_json(t)::text FROM {table} t"))
+                        ).all()
+                        for table in (
+                            "manual_paper_requests",
+                            "single_sol_budget_scopes",
+                            "agent_daily_budget_reservations",
+                            "research_stage_authorization",
+                        )
+                    }
+
+            before = await protected_rows()
+            monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, env: env)
+            monkeypatch.setattr(
+                manual_paper, "load_agent_paper_service_environment", lambda *a, **k: {}
+            )
+            monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+            monkeypatch.setattr(
+                manual_paper,
+                "_FileEngineSettings",
+                SimpleNamespace(model_validate=lambda env: settings),
+            )
+            capsys.readouterr()
+            for _ in range(2):
+                assert (
+                    await asyncio.to_thread(
+                        manual_paper.main,
+                        [
+                            "--repo-root",
+                            str(tmp_path),
+                            "inspect-single-sol-intent",
+                            "--instrument-id",
+                            str(ids[0]),
+                        ],
+                    )
+                    == 1
+                )
+                assert json.loads(capsys.readouterr().out) == {
+                    "status": "blocked",
+                    "error_code": "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS",
+                    "execution_locked": True,
+                    "operation_stage": "maintenance_guard",
+                    "operation_code": "VALIDATION_REJECTED",
+                    "transaction_outcome": "not_started",
+                }
+            assert await protected_rows() == before
+            assert requests == ["research", "critique", "synthesis"]
     finally:
         await factory.kw["bind"].dispose()

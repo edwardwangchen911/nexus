@@ -7,6 +7,16 @@ const receipt = { request_id: id, mode: "research_only", requested_at: "2026-10-
 const fetchMock = vi.fn();
 beforeEach(() => { sessionStorage.clear(); fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+it("explains an existing daily single-study scope without retrying or claiming unknown usage", async () => {
+  fetchMock.mockResolvedValue(Response.json({ error: { message: "private", details: { reason_code: "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS" } } }, { status: 409 }));
+  render(<ManualPaperStart />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "仅研究" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "仅研究" }));
+  await screen.findByText("当日单股研究额度已登记，不能再次申请；原请求费用与预算按原记录保留。");
+  expect(screen.queryByText(/提交结果尚未确认/)).not.toBeInTheDocument();
+  expect(screen.queryByText("private")).not.toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
 it("mounts without writes, starts only the explicit mode, and prevents duplicate clicks", async () => {
   fetchMock.mockResolvedValue(Response.json({ data: receipt }));
   render(<ManualPaperStart />);

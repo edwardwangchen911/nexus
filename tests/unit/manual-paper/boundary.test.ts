@@ -5,6 +5,13 @@ const id = "0198f7a0-1111-7777-8111-111111111111";
 const meta = { request_id: id, schema_version: "1", as_of: "2026-10-09T14:00:00Z" };
 const data = { request_id: id, mode: "research_only", requested_at: meta.as_of, status: "queued", code: "MANUAL_REQUEST_QUEUED", cycle_id: null, execution_locked: true };
 const path = "http://engine.local/internal/v1/paper/manual-requests";
+it("preserves the known daily single-study refusal without leaking raw details", async () => {
+  for (const reason of ["SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS", "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS private", "SINGLE_SOL_BUDGET_SCOPE_INVALID"]) {
+    const upstream = { error: { code: "PROPOSAL_NOT_EXECUTABLE", request_id: id, message: "private", details: { reason_code: reason, private: "hidden" } } };
+    const response = rebuildAllowedEngineResponse(409, upstream, undefined, path)!;
+    expect((await response.json()).error.details).toEqual(reason === "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS" ? { reason_code: reason } : {});
+  }
+});
 it("permits only exact receipts and readonly null lookup", () => {
   expect(rebuildAllowedEngineResponse(200, { data, meta }, undefined, path, undefined, "POST")).not.toBeNull();
   expect(rebuildAllowedEngineResponse(200, { data: null, meta }, undefined, path, undefined, "GET")).not.toBeNull();

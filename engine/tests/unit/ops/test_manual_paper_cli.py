@@ -38,6 +38,50 @@ class _SessionFactory:
         return Session()
 
 
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        ("SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS", "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS"),
+        ("SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS private", "MANUAL_RESULT_UNKNOWN"),
+        ("SINGLE_SOL_BUDGET_SCOPE_INVALID", "MANUAL_RESULT_UNKNOWN"),
+    ],
+)
+def test_single_sol_inspection_preserves_only_exact_public_refusal(
+    tmp_path, monkeypatch, capsys, raised, expected
+):
+    from nexus.api.routes.manual_paper import _entry_error
+
+    monkeypatch.setattr(manual_paper, "_validate_local_env", lambda root, path: path)
+    monkeypatch.setattr(manual_paper, "load_agent_paper_service_environment", lambda *a, **k: {})
+    monkeypatch.setattr(manual_paper, "_checkout_revision", lambda root: "a" * 40)
+
+    async def inspect(settings, args):
+        assert args.action == "inspect-single-sol-intent"
+        raise ValueError(raised)
+
+    monkeypatch.setattr(manual_paper, "run", inspect)
+    assert (
+        manual_paper.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "inspect-single-sol-intent",
+                "--instrument-id",
+                "00000000-0000-0000-0000-000000000001",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "error_code": expected,
+        "execution_locked": True,
+    }
+    response = _entry_error(ValueError(raised))
+    assert response.status_code == 409
+    assert response.details == {"reason_code": expected}
+
+
 @pytest.mark.parametrize("file_revision", [None, "1" * 40])
 def test_normal_cli_binds_host_version_to_requested_repo_head(
     tmp_path, monkeypatch, capsys, file_revision
