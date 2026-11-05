@@ -1,4 +1,5 @@
 import { formatDisplayTime } from "../../lib/display-format";
+import { reasonLabel } from "../../lib/display-labels";
 
 export type ActivityLimitation = {
   source: "system" | "model"; kind: string; text: string; truncated: boolean; impact: string | null;
@@ -46,6 +47,9 @@ const reasonCopy: Record<string, string> = {
   MANUAL_PREPARATION_RESULT_UNKNOWN: "原准备操作结果未知", AGENT_PAPER_LOOP_RESULT_UNKNOWN: "原周期结果未知",
   RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN: "原研究执行结果仍未知",
   manual_unused_research_cancelled: "未使用的研究已按原取消记录收尾",
+  model_usage_uncertain: reasonLabel("model_usage_uncertain"),
+  model_output_limit_reached: reasonLabel("model_output_limit_reached"),
+  model_research_stopped: reasonLabel("model_research_stopped"),
   RESEARCH_OUTPUT_UNAVAILABLE: "原研究输出暂不可核验", NO_ORDER_REQUIRED: "按已保存决定，本轮无需下单",
 };
 

@@ -154,7 +154,12 @@ async def inspect_single_sol(
 
 
 async def single_sol_authority(
-    session: AsyncSession, settings: EngineSettings, *, instrument_id: UUID, funded: bool = False
+    session: AsyncSession,
+    settings: EngineSettings,
+    *,
+    instrument_id: UUID,
+    funded: bool = False,
+    shared_budget: bool = False,
 ) -> SingleSolBinding:
     """The same non-trading identity must still be admissible before each new effect."""
     from nexus.agents.persistence import try_lock_budget_day
@@ -181,7 +186,7 @@ async def single_sol_authority(
     from nexus.paper.single_sol_budget import has_guard
     from nexus.paper.single_sol_obligations import funded_obligations, original_slot
 
-    if not funded and await has_guard(session, selection.budget_day):
+    if not shared_budget and not funded and await has_guard(session, selection.budget_day):
         raise ValueError("SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS")
     slot = original_slot(selection.budget_day)
     post_slot = selection.checked_at >= slot
@@ -233,7 +238,7 @@ async def single_sol_authority(
         or checked + timedelta(seconds=required_seconds) >= deadline
     ):
         raise ValueError("SINGLE_SOL_NATURAL_WINDOW_PROTECTED")
-    return SingleSolBinding(
+    binding = SingleSolBinding(
         preparation_proof=selection.history_proofs.get(preparation_unknown_ack.ACTION),
         scheduled_proof=selection.history_proofs.get(scheduled_unknown_acceptance.ACTION),
         instrument_id=instrument_id,
@@ -242,6 +247,20 @@ async def single_sol_authority(
         calendar_id=calendar.calendar_authority_id,
         deadline=deadline,
     )
+    if shared_budget:
+        from nexus.paper.budgeted_single_sol import protection_context_hash
+        from nexus.paper.single_sol_owner import BudgetedSingleSolBinding
+
+        return BudgetedSingleSolBinding(
+            **binding.model_dump(),
+            protection_context_hash=await protection_context_hash(
+                session,
+                settings,
+                day=selection.budget_day,
+                calendar_id=calendar.calendar_authority_id,
+            ),
+        )
+    return binding
 
 
 async def require_single_sol_first_claim_window(
@@ -271,7 +290,11 @@ async def recheck_single_sol(
 
     frozen = binding_for(row)
     current = await single_sol_authority(
-        session, settings, instrument_id=frozen.instrument_id, funded=run_id is not None
+        session,
+        settings,
+        instrument_id=frozen.instrument_id,
+        funded=run_id is not None,
+        shared_budget=row.contract_version == 5,
     )
     if current != frozen:
         raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
@@ -309,6 +332,25 @@ async def recheck_single_sol(
                 cal=frozen.calendar_id,
             ),
         )
+        if row.contract_version == 5:
+            source = await session.scalar(
+                text("""SELECT r.id FROM agent_research_runs r
+                JOIN agent_daily_budget_reservations b ON b.run_id=r.id
+                WHERE r.id=:run AND r.actor_id='local-budgeted-single-sol-v1'
+                AND r.idempotency_key='budgeted-single-sol:'||
+                CAST(CAST(:request AS uuid) AS text)||':'||
+                CAST(CAST(:instrument AS uuid) AS text)
+                AND r.instrument_id=:instrument AND r.model_config_id=:model
+                AND b.business_date=:day AND b.state='reserved'
+                AND b.reserved_usd=r.reserved_cost_usd AND b.pricing_version=r.pricing_version"""),
+                dict(
+                    run=run_id,
+                    request=row.id,
+                    instrument=frozen.instrument_id,
+                    model=row.model_config_id,
+                    day=frozen.budget_day,
+                ),
+            )
         now = await database_now(session)
         if (
             source != run_id
@@ -335,6 +377,7 @@ async def start_single_sol(
     instrument_id: UUID,
     idempotency_key: str,
     expected_intent_hash: str,
+    shared_budget: bool = False,
 ) -> ManualRequestView:
     from nexus.paper.manual_request import admit_manual_request
     from nexus.paper.target_service import try_lock_portfolio_account
@@ -354,7 +397,7 @@ async def start_single_sol(
         batch_id=batch,
         model_config_id=model,
         mode="research_only",
-        contract_version=4,
+        contract_version=5 if shared_budget else 4,
         idempotency_key=idempotency_key,
         runtime_mode="responses",
         daily_limit_usd=settings.agent_daily_budget_usd,

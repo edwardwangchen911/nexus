@@ -30,18 +30,34 @@ class SingleSolBinding(BaseModel):
         )
 
 
+class BudgetedSingleSolBinding(SingleSolBinding):
+    admission_policy: Literal["shared_budget_v1"] = "shared_budget_v1"
+    protection_context_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @property
+    def intent_hash(self) -> str:
+        return job_input_hash(
+            {"contract": "budgeted_single_sol_intent_v1", **self.model_dump(mode="json")}
+        )
+
+
 class SingleSolOffer(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    binding: SingleSolBinding
+    binding: BudgetedSingleSolBinding | SingleSolBinding
 
     intent_hash: str
 
 
 def binding_for(row: ManualPaperRequest) -> SingleSolBinding:
-    if row.contract_version != 4 or row.mode != "research_only" or row.research_profile is None:
+    if (
+        row.contract_version not in {4, 5}
+        or row.mode != "research_only"
+        or row.research_profile is None
+    ):
         raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
     try:
-        binding = SingleSolBinding.model_validate(row.research_profile["single_sol"])
+        model = BudgetedSingleSolBinding if row.contract_version == 5 else SingleSolBinding
+        binding = model.model_validate(row.research_profile["single_sol"])
         if binding.deadline.utcoffset() is None or binding.deadline.date() != binding.budget_day:
             raise ValueError
         return binding
@@ -50,6 +66,8 @@ def binding_for(row: ManualPaperRequest) -> SingleSolBinding:
 
 
 def research_identity(version: int) -> tuple[str, str]:
+    if version == 5:
+        return "local-budgeted-single-sol-v1", "budgeted-single-sol"
     if version == 4:
         return "local-single-sol-research-v1", "single-sol"
     if version == 3:

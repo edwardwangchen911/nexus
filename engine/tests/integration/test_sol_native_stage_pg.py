@@ -482,6 +482,7 @@ async def test_verified_sol_overrun_fences_scope_and_preserves_original_hold(
         "timeout",
         "cache_unknown",
         "incomplete_known",
+        "output_limit",
         "verification_ack_lost",
         "authorization_ack_lost",
     ],
@@ -506,8 +507,12 @@ async def test_native_worker_failure_never_retries_or_falls_back_and_preserves_a
         calls.append(request)
         if fault == "timeout":
             raise httpx.ReadTimeout("controlled offline timeout")
-        value = terminal("incomplete" if fault == "incomplete_known" else "completed")
+        value = terminal(
+            "incomplete" if fault in {"incomplete_known", "output_limit"} else "completed"
+        )
         value["response"].update(model="gpt-6.1-sol", service_tier="default", usage=usage())
+        if fault == "output_limit":
+            value["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
         if fault == "cache_unknown":
             del value["response"]["usage"]["input_tokens_details"]["cache_write_tokens"]
         return httpx.Response(
@@ -565,7 +570,7 @@ async def test_native_worker_failure_never_retries_or_falls_back_and_preserves_a
         async with factory() as session:
             holds = (await session.scalars(select(AgentDailyBudgetReservationRecord))).all()
             hold = next(h for h in holds if h.run_id == member.run_id)
-            known = fault in {"incomplete_known", "verification_ack_lost"}
+            known = fault in {"incomplete_known", "output_limit", "verification_ack_lost"}
             assert hold.state == ("settled" if known else "reserved")
             assert hold.settled_usd == (Decimal("0.0299") if known else None)
             assert all(
@@ -596,6 +601,27 @@ async def test_native_worker_failure_never_retries_or_falls_back_and_preserves_a
                     now=await session.scalar(text("SELECT clock_timestamp()")),
                 )
                 assert proof is not None and proof.known is known
+                if fault in {"incomplete_known", "output_limit"}:
+                    from nexus.api.routes.research import _hydrate_response
+                    from nexus.persistence.models.agents import AgentResearchOutputRecord
+
+                    run = await session.get(AgentResearchRunRecord, member.run_id)
+                    output = await session.scalar(
+                        select(AgentResearchOutputRecord)
+                        .where(AgentResearchOutputRecord.run_id == member.run_id)
+                        .order_by(AgentResearchOutputRecord.sequence.desc())
+                        .limit(1)
+                    )
+                    original_payload = dict(output.payload)
+                    view = await _hydrate_response(session, run, output)
+                    assert view.status == "failed" and view.intent is None
+                    assert view.abstention_reason == (
+                        "model_output_limit_reached"
+                        if fault == "output_limit"
+                        else "model_research_stopped"
+                    )
+                    assert view.settled_cost_usd == str(hold.settled_usd)
+                    assert output.payload == original_payload
         if fault in {"cache_unknown", "timeout"}:
             from nexus.paper.independent_unknown_proof import independent_unknown_proof
             from nexus.paper.manual_request import require_manual_account_available

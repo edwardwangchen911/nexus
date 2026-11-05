@@ -90,6 +90,8 @@ const reasons: Record<string, string> = {
   staged_action_semantics_unverified: "角色表态尚不能确定投资方向或证据缺口是否解决",
   model_stage_allowance_exhausted: "研究阶段达到既定用量、调用次数或时间上限，未继续调用模型",
   model_usage_uncertain: "部分模型调用未返回用量",
+  model_output_limit_reached: "模型达到输出上限，未返回完整研究结果",
+  model_research_stopped: "模型研究已停止，具体停止原因未分类",
   model_execution_failed: "模型执行未完成，具体原因尚未确认",
   model_stage_output_invalid: "研究阶段输出未通过内容校验",
   SHADOW_PRICE_AUTHORITY_UNAVAILABLE: "当前价格证据尚不能用于新的前向观察",

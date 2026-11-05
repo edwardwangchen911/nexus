@@ -303,6 +303,9 @@ async def _project(
         safe_reasons = {
             "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN": "原研究执行结果仍未知。",
             "manual_unused_research_cancelled": "未使用的研究已按原取消记录收尾。",
+            "model_usage_uncertain": "部分模型调用未返回用量；未知费用和预算占用继续保留。",
+            "model_research_stopped": "模型研究已停止，具体停止原因未分类。",
+            "model_output_limit_reached": "模型达到输出上限，未返回完整研究结果。",
         }
         reason = None
         if len(outputs) == 1:
@@ -320,10 +323,24 @@ async def _project(
                 and output.content_hash == canonical_hash(content)
             ):
                 raw = output.payload.get("reason")
-                if isinstance(raw, str) and raw in safe_reasons:
+                if (
+                    isinstance(raw, str)
+                    and raw in safe_reasons
+                    and raw != "model_output_limit_reached"
+                ):
                     reason = raw
         if reason is None:
             return base.model_copy(update={"reason_code": "RESEARCH_FAILURE_DETAIL_UNVERIFIED"})
+        if reason == "model_research_stopped":
+            from nexus.agents.research_stages.proof import read_terminal_proof
+            from nexus.api.research_failure import read_output_limit_reason
+
+            try:
+                proof = await read_terminal_proof(session, run_id=run.id, now=read_at)
+            except ValueError:
+                proof = None
+            if proof is not None:
+                reason = await read_output_limit_reason(session, proof) or reason
         return base.model_copy(
             update={
                 "read_status": "verified",
@@ -504,7 +521,12 @@ async def research_candidates(
     if (
         request.id != view.request_id
         or (request.mode, request.contract_version)
-        not in {("research_only", 2), ("research_and_monitor", 3)}
+        not in {
+            ("research_only", 2),
+            ("research_and_monitor", 3),
+            ("research_only", 4),
+            ("research_only", 5),
+        }
         or request.requested_at > read_at
     ):
         raise ValueError("WORKBENCH_CANDIDATE_BINDING_INVALID")

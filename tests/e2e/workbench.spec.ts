@@ -122,6 +122,25 @@ async function installFixtures(page: Page, payload: WorkbenchPayload, methods: s
   });
 }
 
+test("daily single-study refusal is specific and never automatically resubmits", async ({ page }) => {
+  await installFixtures(page, readyWorkbench(), []);
+  const methods: string[] = [];
+  await page.route("**/api/v1/paper/manual-requests", async (route) => {
+    methods.push(route.request().method());
+    await route.fulfill({ status: 409, json: { error: { code: "PROPOSAL_NOT_EXECUTABLE",
+      message: "private material", details: { reason_code: "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS" } } } });
+  });
+  await page.goto("/workspace");
+  await page.getByRole("button", { name: "仅研究", exact: true }).click();
+  const panel = page.getByRole("region", { name: "开始研究与内部模拟", exact: true });
+  await expect(panel.getByText("当日单股研究额度已登记，不能再次申请；原请求费用与预算按原记录保留。", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/提交结果尚未确认|private material/)).toHaveCount(0);
+  expect(methods).toEqual(["POST"]);
+  await expect(panel.getByRole("button", { name: "仅研究", exact: true })).toBeDisabled();
+  await expect(panel.getByRole("button", { name: "开始新的请求", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("manual start survives refresh as a readonly original-request lookup", async ({ page }) => {
   await installFixtures(page, readyWorkbench(), []);
   const calls: { method: string; key: string | undefined }[] = [];

@@ -11,6 +11,10 @@ describe("plain-language display labels", () => {
   it("describes a model execution failure without inventing its cause", () => {
     expect(reasonLabel("model_execution_failed")).toBe("模型执行未完成，具体原因尚未确认");
   });
+  it("distinguishes an evidenced output limit from an unspecified stopped model", () => {
+    expect(reasonLabel("model_output_limit_reached")).toBe("模型达到输出上限，未返回完整研究结果");
+    expect(reasonLabel("model_research_stopped")).toBe("模型研究已停止，具体停止原因未分类");
+  });
   it("describes rejected stage content without inventing a schema or citation failure", () => {
     expect(reasonLabel("model_stage_output_invalid")).toBe("研究阶段输出未通过内容校验");
   });

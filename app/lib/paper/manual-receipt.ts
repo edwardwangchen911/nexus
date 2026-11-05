@@ -9,6 +9,7 @@ export const manualEntryErrors: Record<string, string> = {
   MANUAL_HOST_NOT_READY: "同版本宿主尚未就绪。",
   MANUAL_SESSION_UNAVAILABLE: "当前不在支持的美股交易时段。",
   MANUAL_BUDGET_PROTECTED: "当前预算保护阻止新请求。",
+  SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS: "当日单股研究额度已登记，不能再次申请；原请求费用与预算按原记录保留。",
   MANUAL_NOT_FOUND: "未找到该请求。",
   MANUAL_IDEMPOTENCY_CONFLICT: "原请求内容不一致，请保留原请求核对。",
   MANUAL_REQUEST_INVALID: "开始请求无效。",

@@ -387,7 +387,7 @@ async def prepare_native_pool(
                 previous=[],
             )
         )
-        if request_record is not None and request_record.contract_version == 4:
+        if request_record is not None and request_record.contract_version in {4, 5}:
             from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
             from nexus.paper.research_request import database_now
             from nexus.paper.single_sol_research import recheck_single_sol

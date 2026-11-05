@@ -38,6 +38,7 @@ SAFE_ENTRY_CODES = frozenset(
         "MANUAL_BUDGET_PROTECTED",
         "MANUAL_NOT_FOUND",
         "SINGLE_SOL_NOT_BATCH_MEMBER",
+        "SINGLE_SOL_BUDGET_SCOPE_ALREADY_EXISTS",
         "MANUAL_IDEMPOTENCY_CONFLICT",
         "MANUAL_REQUEST_INVALID",
         "FORMAL_INTENT_ALREADY_REGISTERED",
@@ -120,7 +121,7 @@ async def _read_presented_manual_request(
         return ManualRequestView.model_validate(
             {**view.model_dump(), "independent_disposition": disposition}
         )
-    if row.contract_version in {2, 3, 4}:
+    if row.contract_version in {2, 3, 4, 5}:
         return view
     from nexus.paper.current_preparation_acceptance import current_unknown_accepted
 
@@ -291,7 +292,7 @@ async def start_configured_manual_request(
     # A response lost in transport is a read of the original immutable intent,
     # including after disabling the entry or rotating its configured batch/model.
     if row is not None:
-        if row.mode != mode or row.contract_version == 4:
+        if row.mode != mode or row.contract_version in {4, 5}:
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         return await _read_presented_manual_request(session, row)
     batch_id, model_id, _ = await _configured_admission(

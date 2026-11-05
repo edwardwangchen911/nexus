@@ -25,6 +25,19 @@ def test_merge_groups_cover_inventory_once_without_manual_suite() -> None:
     assert "engine/tests" not in selected
 
 
+def test_budgeted_single_owner_safety_suites_are_merge_required() -> None:
+    for module in (
+        "test_budgeted_single_sol_pg.py",
+        "test_budgeted_single_sol_lifecycle_pg.py",
+        "test_budgeted_single_sol_admission_pg.py",
+        "test_budgeted_single_sol_constraints_pg.py",
+        "test_budgeted_single_sol_migration_pg.py",
+        "test_budgeted_single_sol_maintenance_pg.py",
+        "test_agent_transaction_classifier_pg.py",
+    ):
+        assert MERGE_SELECTORS.count(f"engine/tests/integration/{module}") == 1
+
+
 def test_workflow_runs_every_merge_group_and_keeps_modules_together() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     matrix = next(line for line in workflow.splitlines() if "group: ${{ fromJSON(" in line)

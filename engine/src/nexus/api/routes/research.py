@@ -412,6 +412,15 @@ async def _hydrate_response(
                     status_code=409,
                 ) from error
             response = response.model_copy(update={"billing_mode": "platform_responses"})
+            if (
+                response.status == "failed"
+                and response.abstention_reason == "model_research_stopped"
+            ):
+                from nexus.api.research_failure import read_output_limit_reason
+
+                reason = await read_output_limit_reason(session, proof)
+                if reason is not None:
+                    response = response.model_copy(update={"abstention_reason": reason})
         monitoring = (
             await read_monitoring_view(session, run, now=reader.read_at)
             if _declares_monitoring(run)

@@ -59,6 +59,7 @@ async def freeze_single_sol_budget(
     run_id: UUID,
     instrument_id: UUID,
     calendar_authority_id: UUID,
+    source_actor: str = "local-single-sol-research-v1",
 ) -> None:
     """Install in the same transaction as the source run and its one native reserve."""
     from nexus.agents.research_usage import require_research_accounting_clear
@@ -121,7 +122,8 @@ async def freeze_single_sol_budget(
         or model is None
         or reservation is None
         or not sol_business_model_matches(model)
-        or source.actor_id != "local-single-sol-research-v1"
+        or source_actor not in {"local-single-sol-research-v1", "local-budgeted-single-sol-v1"}
+        or source.actor_id != source_actor
         or source.decision_time.date() != day
         or source.decision_time > now
         or source.reserved_cost_usd != model.worst_case_cost_usd

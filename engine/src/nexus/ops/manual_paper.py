@@ -226,9 +226,14 @@ def parser() -> argparse.ArgumentParser:
     single.add_argument("--instrument-id", type=UUID, required=True)
     single.add_argument("--idempotency-key", required=True)
     single.add_argument("--expected-intent-hash", required=True)
-    commands.add_parser("inspect-single-sol-intent").add_argument(
-        "--instrument-id", type=UUID, required=True
+    single.add_argument(
+        "--admission-policy", choices=("daily-single", "shared-budget"), default="daily-single"
     )
+    single_intent = commands.add_parser("inspect-single-sol-intent")
+    single_intent.add_argument(
+        "--admission-policy", choices=("daily-single", "shared-budget"), default="daily-single"
+    )
+    single_intent.add_argument("--instrument-id", type=UUID, required=True)
     for action in ("register-formal-intent", "read-formal-intent", "cancel-formal-intent"):
         commands.add_parser(action).add_argument("--idempotency-key", required=True)
     start = commands.add_parser("start")
@@ -374,7 +379,10 @@ async def run(
                     text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
                 )
                 binding = await single_sol_authority(
-                    session, settings, instrument_id=args.instrument_id
+                    session,
+                    settings,
+                    instrument_id=args.instrument_id,
+                    shared_budget=args.admission_policy == "shared-budget",
                 )
                 return SingleSolOffer(binding=binding, intent_hash=binding.intent_hash)
         if args.action == "start-single-sol":
@@ -387,6 +395,7 @@ async def run(
                     instrument_id=args.instrument_id,
                     idempotency_key=args.idempotency_key,
                     expected_intent_hash=args.expected_intent_hash,
+                    shared_budget=args.admission_policy == "shared-budget",
                 )
         if args.action in {"check-formal-admission", "inspect-single-sol"}:
             async with factory.begin() as session:

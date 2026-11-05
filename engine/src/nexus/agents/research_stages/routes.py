@@ -50,7 +50,7 @@ async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) ->
 
         await require_increment_binding(session, run)
         return increment.id, "increment"
-    if run.actor_id == "local-single-sol-research-v1":
+    if run.actor_id in {"local-single-sol-research-v1", "local-budgeted-single-sol-v1"}:
         from nexus.persistence.models.manual_paper import (
             ResearchRequestManifest,
             ResearchRequestMember,
@@ -68,7 +68,8 @@ async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) ->
                     ResearchRequestMember.manifest_id == ResearchRequestManifest.id,
                 )
                 .where(
-                    ManualPaperRequest.contract_version == 4,
+                    ManualPaperRequest.contract_version
+                    == (5 if run.actor_id == "local-budgeted-single-sol-v1" else 4),
                     ResearchRequestMember.run_id == run.id,
                     ResearchRequestMember.job_id == job.id,
                 )
