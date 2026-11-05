@@ -12,6 +12,7 @@ from nexus.ops import manual_paper
 from nexus.ops.manual_paper_host import dispatch_pure_research_request
 from nexus.paper.manual_request import read_manual_request
 from nexus.paper.single_sol_owner import binding_for
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.session import session_factory
 from nexus.workbench.research_summary import research_candidates
@@ -84,7 +85,7 @@ async def test_nonempty_v4_roundtrip_and_v5_downgrade_fence(
         async with factory() as db:
             assert (
                 await db.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0117_budgeted_single_sol"
+                == CURRENT_MIGRATION_HEAD
             )
             assert await facts(db) == preserved
             assert (

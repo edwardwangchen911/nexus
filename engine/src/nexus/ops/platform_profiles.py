@@ -17,6 +17,11 @@ from nexus.agents.platform_pricing import sol_price_record
 from nexus.agents.platform_profile import (
     read_sol_business_profile,
     register_sol_business_profile,
+    sol_business_units_version,
+)
+from nexus.agents.platform_schema import (
+    COMPACT_PLATFORM_UNITS_VERSION,
+    CURRENT_PLATFORM_UNITS_VERSION,
 )
 from nexus.ops.openai_local import local_settings
 from nexus.ops.platform_credentials import _private_bytes
@@ -76,7 +81,14 @@ async def profile_command(root: Path, args: argparse.Namespace) -> dict[str, obj
                 receipt["database_writes"] = 0
             else:
                 model = await register_sol_business_profile(
-                    session, price_record=record, source_evidence=source
+                    session,
+                    price_record=record,
+                    source_evidence=source,
+                    units_version=(
+                        COMPACT_PLATFORM_UNITS_VERSION
+                        if args.output_format == "compact-v3"
+                        else CURRENT_PLATFORM_UNITS_VERSION
+                    ),
                 )
                 receipt["registration_requested"] = True
             receipt["status"] = "profile_not_registered" if model is None else "profile_registered"
@@ -86,6 +98,11 @@ async def profile_command(root: Path, args: argparse.Namespace) -> dict[str, obj
                     config_hash=model.config_hash,
                     version=model.version,
                     model=model.model_id,
+                    output_format=(
+                        "compact-v3"
+                        if sol_business_units_version(model) == COMPACT_PLATFORM_UNITS_VERSION
+                        else "structured-v2"
+                    ),
                 )
             try:
                 await transaction.commit()

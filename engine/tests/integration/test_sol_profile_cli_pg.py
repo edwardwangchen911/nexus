@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSessionTransaction
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("output_format", ["structured-v2", "compact-v3"])
 @pytest.mark.parametrize(
     "lost_commit_ack,failed_disposal", [(False, False), (True, False), (True, True)]
 )
@@ -26,6 +27,7 @@ async def test_normal_sol_profile_cli_readback_without_keys_dispatch_or_duplicat
     capsys,
     lost_commit_ack,
     failed_disposal,
+    output_format,
 ):
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     record = await current_record(factory)
@@ -74,6 +76,8 @@ async def test_normal_sol_profile_cli_readback_without_keys_dispatch_or_duplicat
             str(price_path),
             "--source-evidence",
             str(source_path),
+            "--output-format",
+            output_format,
         ],
     )
     code = await asyncio.to_thread(cli.main)
@@ -91,6 +95,7 @@ async def test_normal_sol_profile_cli_readback_without_keys_dispatch_or_duplicat
     readback = json.loads(capsys.readouterr().out)
     assert readback["model_config_id"] == str(model_id)
     assert readback["config_hash"] == result["config_hash"]
+    assert readback["output_format"] == result["output_format"] == output_format
     assert readback["database_writes"] == 0 and readback["inspection_only"] is True
     async with factory() as session:
         assert (

@@ -130,6 +130,10 @@ MERGE_SELECTORS = (
     # New Platform suites use the two shorter lanes from main run 41178091403
     # (pg-c 958s, pg-f 1005s); existing selectors and boundaries stay in place.
     "engine/tests/integration/test_platform_producer_pg.py",
+    "engine/tests/integration/test_compact_sol_binding_pg.py",
+    "engine/tests/integration/test_compact_sol_preparation_pg.py",
+    "engine/tests/integration/test_compact_sol_lifecycle_pg.py",
+    "engine/tests/integration/test_sol_profile_cli_pg.py",
     "engine/tests/integration/test_platform_funding_pg.py",
     "engine/tests/integration/test_formal_intraday_intent_pg.py",
     "engine/tests/integration/test_platform_stage_accounting_pg.py",

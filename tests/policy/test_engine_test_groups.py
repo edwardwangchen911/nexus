@@ -50,6 +50,18 @@ def test_workflow_runs_every_merge_group_and_keeps_modules_together() -> None:
             assert module_groups.setdefault(module, group) == group
 
 
+def test_compact_profile_normal_paths_and_migration_are_merge_required() -> None:
+    for module in (
+        "test_compact_sol_binding_pg.py",
+        "test_compact_sol_preparation_pg.py",
+        "test_compact_sol_lifecycle_pg.py",
+        "test_sol_profile_cli_pg.py",
+    ):
+        path = f"engine/tests/integration/{module}"
+        assert MERGE_SELECTORS.count(path) == 1
+        assert path in selectors_for("pg-c")
+
+
 @pytest.mark.parametrize("group", MERGE_GROUPS[1:])
 def test_postgres_runner_selects_group_and_propagates_failure(tmp_path: Path, group: str) -> None:
     (tmp_path / "pytest.py").write_text(
