@@ -71,6 +71,7 @@ function decisionKeys(cycle: DecisionCycle): DecisionKey[] {
 }
 
 function finalPresentation(cycle: DecisionCycle, riskLabel: string): { label: string; tone: string } {
+  if (cycle.status === "unavailable" && cycle.result_code === "RESEARCH_ADMISSION_UNAVAILABLE" && cycle.admission_failure) return { label: "研究准入未通过", tone: "warning" };
   if (cycle.result_code === "TARGET_ACTIVATION_BLOCKED") return { label: "提案未生效", tone: "warning" };
   if (cycle.result_code === "POLICY_UNCONFIRMED") return { label: "政策未确认", tone: "warning" };
   if (cycle.status === "unavailable" && cycle.result_code === "RESEARCH_OUTPUT_NOT_ACTIONABLE") {

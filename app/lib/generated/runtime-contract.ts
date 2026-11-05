@@ -553,6 +553,16 @@ export const runtimeContractSchemas = {
   "AgentPaperCycleResponse": {
     "additionalProperties": false,
     "properties": {
+      "admission_failure": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchAdmissionFailureResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "candidate_count": {
         "maximum": 5,
         "minimum": 0,
@@ -11872,6 +11882,50 @@ export const runtimeContractSchemas = {
       "event_hash"
     ],
     "title": "RegistryEventResponse",
+    "type": "object"
+  },
+  "ResearchAdmissionFailureResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Code",
+        "type": "string"
+      },
+      "instrument_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Instrument Id"
+      },
+      "phase": {
+        "enum": [
+          "pool_capacity",
+          "profile_validation",
+          "prompt_selection",
+          "snapshot_preparation",
+          "research_admission",
+          "prompt_binding",
+          "stage_registration",
+          "reservation_commit"
+        ],
+        "title": "Phase",
+        "type": "string"
+      }
+    },
+    "required": [
+      "phase",
+      "code",
+      "instrument_id"
+    ],
+    "title": "ResearchAdmissionFailureResponse",
     "type": "object"
   },
   "ResearchAdmissionResponse": {
