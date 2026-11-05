@@ -14,7 +14,12 @@ from nexus.agents.codex_sdk import codex_output_schema
 
 LEGACY_PLATFORM_UNITS_VERSION = "platform-full-http-utf8-plus8192-v1"
 CURRENT_PLATFORM_UNITS_VERSION = "platform-structured-http-utf8-plus8192-v2"
-PLATFORM_UNITS_VERSIONS = frozenset({LEGACY_PLATFORM_UNITS_VERSION, CURRENT_PLATFORM_UNITS_VERSION})
+# Explicit opt-in until every native producer freezes this in its root identity.
+# It changes task guidance, not the schema or the UTF-8-plus-framing algorithm.
+COMPACT_PLATFORM_UNITS_VERSION = "platform-compact-json-http-utf8-plus8192-v3"
+PLATFORM_UNITS_VERSIONS = frozenset(
+    {LEGACY_PLATFORM_UNITS_VERSION, CURRENT_PLATFORM_UNITS_VERSION, COMPACT_PLATFORM_UNITS_VERSION}
+)
 _KEYWORDS = frozenset(
     {
         "$defs",
@@ -52,7 +57,7 @@ def platform_output_schema(
     schema = codex_output_schema(model)
     if units_version == LEGACY_PLATFORM_UNITS_VERSION:
         return schema
-    if units_version != CURRENT_PLATFORM_UNITS_VERSION:
+    if units_version not in {CURRENT_PLATFORM_UNITS_VERSION, COMPACT_PLATFORM_UNITS_VERSION}:
         raise ValueError("PLATFORM_ALLOCATION_CHANGED")
     error = "PLATFORM_OUTPUT_SCHEMA_UNSUPPORTED"
     if schema.get("type") != "object" or "anyOf" in schema:

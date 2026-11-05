@@ -28,6 +28,7 @@ from nexus.agents.comparison_inputs import PreparedComparisonInput, assert_outbo
 from nexus.agents.models import ResearchRequest
 from nexus.agents.platform_pricing import sol_price_record
 from nexus.agents.platform_schema import (
+    COMPACT_PLATFORM_UNITS_VERSION,
     CURRENT_PLATFORM_UNITS_VERSION,
     LEGACY_PLATFORM_UNITS_VERSION,
     PLATFORM_UNITS_VERSIONS,
@@ -45,6 +46,12 @@ _STAGE_ORDER = ("research", "critique", "synthesis")
 _OUTPUT_LIMIT = 8192
 _FRAMING_UNITS = 8192
 _MAX_STAGE_UNITS = 272000
+_COMPACT_OUTPUT_GUIDANCE = (
+    "Emit one compact JSON object. Do not pretty-print or indent. "
+    "Do not add whitespace between JSON tokens or pad the output. "
+    "Preserve whitespace inside natural-language string values. "
+    "Stop after the complete JSON object."
+)
 
 
 def _hash(value: object) -> str:
@@ -163,6 +170,13 @@ def _wire(
     units_version: str = CURRENT_PLATFORM_UNITS_VERSION,
     schema_name: str = "research_stage",
 ) -> bytes:
+    if units_version == COMPACT_PLATFORM_UNITS_VERSION:
+        instructions = payload.get("instructions")
+        if not isinstance(instructions, str) or not instructions:
+            raise ValueError("PLATFORM_COMPACT_INSTRUCTIONS_REQUIRED")
+        # Do not mutate frozen evidence or BASE/developer instructions. The
+        # allocation version and complete body hash bind this generated suffix.
+        payload = {**payload, "instructions": instructions + " " + _COMPACT_OUTPUT_GUIDANCE}
     body = {
         "model": profile.model,
         "instructions": BASE_INSTRUCTIONS,
@@ -206,7 +220,10 @@ def freeze_platform_allocation(
     the old experiment's outputs. No old common-wire 100479 admission is used.
     """
     _require_profile(profile, price_record=price_record)
-    if units_version not in PLATFORM_UNITS_VERSIONS:
+    if (
+        units_version not in PLATFORM_UNITS_VERSIONS
+        or units_version == COMPACT_PLATFORM_UNITS_VERSION
+    ):
         raise ValueError("PLATFORM_ALLOCATION_CHANGED")
     if prepared.input_hash != prepared.proof.get("input_hash"):
         raise ValueError("COMPARISON_INPUT_CHANGED")
@@ -445,6 +462,10 @@ def compile_platform_stage(
     creates a Grant/JWT, verifies funds, grants a ticket, or settles a ledger.
     """
     _require_profile(allocation.profile, price_record=price_record)
+    if allocation.units_version == COMPACT_PLATFORM_UNITS_VERSION and not isinstance(
+        prepared, _NativeInputIdentity
+    ):
+        raise ValueError("PLATFORM_ALLOCATION_CHANGED")
     if (
         allocation.allocation_hash != expected_allocation_hash
         or allocation.input_hash != prepared.input_hash
