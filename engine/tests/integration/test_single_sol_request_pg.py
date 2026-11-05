@@ -28,6 +28,7 @@ from sqlalchemy import func, select, text
     "path",
     [
         "complete",
+        "overnight",
         "late_history",
         "host",
         "late_queue",
@@ -51,6 +52,18 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
 
     monkeypatch.setattr(pure, "seed_paper_batch", seeded_account)
 
+    if path == "overnight":
+        from helpers import single_sol_clock
+
+        morning = single_sol_clock.preopen_target
+
+        def after_previous_close(wall):
+            target = morning(wall)
+            if target.weekday() == 0:
+                target -= timedelta(days=3)
+            return target - timedelta(hours=10)
+
+        monkeypatch.setattr(single_sol_clock, "preopen_target", after_previous_close)
     await preopen_fixture_clock(migrated_database_url, monkeypatch)
     original = base.current_record
 
@@ -76,7 +89,7 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
                 exchange="XNYS",
                 version="single-v4-fixture",
                 source="fixture",
-                range_start=day,
+                range_start=day - timedelta(days=1) if path == "overnight" else day,
                 range_end=day + timedelta(days=8),
                 query_parameters={},
                 completeness_status="complete",
@@ -85,7 +98,7 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
             )
         )
         await db.flush()
-        for off in range(7):
+        for off in range(-1 if path == "overnight" else 0, 7):
             dt = day + timedelta(days=off)
             if dt.weekday() > 4:
                 continue
@@ -117,6 +130,9 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
         return await manual_paper.run(settings, manual_paper.parser().parse_args(list(args)))
 
     offer = await call("inspect-single-sol-intent", "--instrument-id", str(ids[0]))
+    if path == "overnight":
+        assert now.astimezone(ZoneInfo("America/New_York")).date() < offer.binding.budget_day
+        assert offer.binding.budget_day == now.date()
     args = [
         "start-single-sol",
         "--instrument-id",
@@ -228,6 +244,13 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, path):
         assert view.research_contract == "single_sol_research_v1"
         (member,) = view.research.members
         assert member.instrument_id == ids[0]
+        if path == "overnight":
+            scope_day, scope_calendar = (
+                await db.execute(
+                    text("SELECT budget_day,calendar_id FROM single_sol_budget_scopes")
+                )
+            ).one()
+            assert scope_day == offer.binding.budget_day and scope_calendar == cal
 
     async def add_late_history(payload):
         if path == "unknown":

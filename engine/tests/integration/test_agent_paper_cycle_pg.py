@@ -4413,6 +4413,24 @@ async def test_service_calendar_bound_loader_keeps_expected_authority_after_half
                     expected_calendar_authority_id=bound_id,
                 )
 
+        async with sessions() as session:
+            pinned_next = await load_agent_paper_service_calendar_authority(
+                session,
+                now=after_close,
+                expected_calendar_authority_id=bound_id,
+                expected_session=date(2026, 11, 30),
+            )
+            assert pinned_next.calendar_authority_id == bound_id
+            assert pinned_next.session == date(2026, 11, 30)
+            assert pinned_next.market_open_at == datetime(2026, 11, 30, 14, 30, tzinfo=UTC)
+            with pytest.raises(ValueError, match="AGENT_PAPER_CALENDAR_UNAVAILABLE"):
+                await load_agent_paper_service_calendar_authority(
+                    session,
+                    now=after_close,
+                    expected_calendar_authority_id=bound_id,
+                    expected_session=date(2026, 11, 28),
+                )
+
         assert loaded.calendar_authority_id == bound_id
         assert loaded.market_close_at == datetime(2026, 11, 27, 18, tzinfo=UTC)
         assert loaded.next_session == date(2026, 11, 30)

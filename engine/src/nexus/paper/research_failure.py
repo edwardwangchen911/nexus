@@ -155,6 +155,14 @@ async def record_research_failure(
         and error.code in PRECLAIM_CODES
         else None
     )
+    # Exact fixed diagnostic only; it grants no retry, cleanup or recovery authority.
+    if (
+        preparation
+        and not cleanup
+        and type(error) is ValueError
+        and error.args == ("SINGLE_SOL_BUDGET_SCOPE_INVALID",)
+    ):
+        code = "SINGLE_SOL_BUDGET_SCOPE_INVALID"
     await append_audit_event(
         session,
         actor_id="manual-research-host",
