@@ -54,7 +54,8 @@ def _routes(*, forward: bool) -> None:
 
 def upgrade() -> None:
     op.execute("""
-      CREATE FUNCTION single_sol_budget_model_compatible(expected uuid, candidate uuid, maximum numeric)
+      CREATE FUNCTION public.single_sol_budget_model_compatible(
+        expected uuid, candidate uuid, maximum numeric)
       RETURNS boolean LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $$
       DECLARE old_model agent_model_configs; new_model agent_model_configs;
       BEGIN
@@ -91,4 +92,4 @@ def downgrade() -> None:
       ) THEN RAISE EXCEPTION 'COMPACT_BUDGET_DOWNGRADE_FORBIDDEN'; END IF;
     END $$""")
     _routes(forward=False)
-    op.execute("DROP FUNCTION single_sol_budget_model_compatible(uuid,uuid,numeric)")
+    op.execute("DROP FUNCTION public.single_sol_budget_model_compatible(uuid,uuid,numeric)")

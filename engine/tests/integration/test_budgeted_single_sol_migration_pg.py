@@ -54,6 +54,17 @@ async def test_nonempty_v4_roundtrip_and_v5_downgrade_fence(
             )
         await asyncio.to_thread(command.upgrade, config, "head")
         async with factory() as db:
+            # Keep the non-default clock schema: the product migration must place
+            # its function in public rather than inheriting the caller's path.
+            assert "fixture_clock" in await db.scalar(text("SHOW search_path"))
+            assert await db.scalar(
+                text("""SELECT to_regprocedure(
+                'public.single_sol_budget_model_compatible(uuid,uuid,numeric)') IS NOT NULL""")
+            )
+            assert await db.scalar(
+                text("""SELECT to_regprocedure(
+                'fixture_clock.single_sol_budget_model_compatible(uuid,uuid,numeric)') IS NULL""")
+            )
             assert await facts(db) == before
 
         async def call(*args):
