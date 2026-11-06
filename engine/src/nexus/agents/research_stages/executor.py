@@ -494,6 +494,9 @@ async def execute_staged_claim(
 
     committee.stage_invoker = invocation
     for role in ROLE_ORDER:
+        expected_stage = next(
+            index for index, (_, roles) in enumerate(codex_staged.STAGES, start=1) if role in roles
+        )
         failure_phase = "input_preparation"
         try:
             outputs[role] = await committee.analyze(role, request, refs, committee._prompts[role])
@@ -509,7 +512,7 @@ async def execute_staged_claim(
                 "attempt_no": claim.attempt_no,
                 "fence_token": claim.fence_token,
                 "scope_id": str(scope),
-                "stage": ROLE_ORDER.index(role) + 1,
+                "stage": expected_stage,
                 "failure_phase": failure_phase,
                 "failure_code": str(error)
                 if type(error) in {ValueError, ProtocolRejected}

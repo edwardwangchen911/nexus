@@ -218,3 +218,78 @@ async def test_zero_stage_unknown_closes_without_acceptance(
     await exercise(
         migrated_database_url, monkeypatch, tmp_path, None, request, zero_stage_check=check
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,phase", [(2, "input_preparation"), (3, "compile")])
+async def test_later_pre_authorization_failure_uses_stage_not_role(
+    migrated_database_url, monkeypatch, tmp_path, request, stage, phase
+):
+    async def check(factory, live, prepared, receipt, calls, clients, old):
+        from dataclasses import asdict
+
+        from nexus.agents import codex_staged, platform_wire
+
+        target = ("research", "critique", "synthesis")[stage - 1]
+        build = codex_staged.StructuredStagedCodexCommittee.build_stage_request
+        compile_stage = platform_wire.compile_native_platform_stage
+
+        def build_failure(self, **kwargs):
+            if kwargs["stage"] == target and phase == "input_preparation":
+                raise ValueError("SECRET-MARKER-later-input")
+            return build(self, **kwargs)
+
+        def compile_failure(**kwargs):
+            if kwargs["stage"] == target and phase == "compile":
+                raise ValueError("SECRET-MARKER-later-compile")
+            return compile_stage(**kwargs)
+
+        install = StagedProtocol.install
+
+        async def after_claim(*args, **kwargs):
+            result = await install(*args, **kwargs)
+            monkeypatch.setattr(
+                codex_staged.StructuredStagedCodexCommittee, "build_stage_request", build_failure
+            )
+            monkeypatch.setattr(platform_wire, "compile_native_platform_stage", compile_failure)
+            return result
+
+        monkeypatch.setattr(StagedProtocol, "install", after_claim)
+        member = prepared.research.members[0]
+        assert await worker.run_agent_worker_once(
+            live, job_ids=(member.job_id,), formal_stage_capacity=True
+        )
+        assert calls == ["research", "critique"][: stage - 1]
+        async with factory() as db:
+            audit = (
+                await db.scalars(
+                    select(AuditEvent).where(AuditEvent.action == "research.stage_failure")
+                )
+            ).one()
+            assert audit.payload["stage"] == stage
+            assert audit.payload["failure_phase"] == phase
+            assert "SECRET-MARKER" not in json.dumps(audit.payload)
+            now = await db.scalar(text("SELECT clock_timestamp()"))
+            proof = await read_terminal_proof(db, run_id=member.run_id, now=now)
+            assert proof.known and proof.cleanup_confirmed and proof.budget_settled
+            assert not proof.empty_authorizations
+            assert set(asdict(proof)) == {
+                "run_id",
+                "known",
+                "budget_settled",
+                "cleanup_confirmed",
+                "orphan",
+                "evidence_hash",
+                "cleanup_hash",
+            }
+            assert (
+                await db.scalar(
+                    text("SELECT count(*) FROM research_stage_authorization WHERE run_id=:run"),
+                    {"run": member.run_id},
+                )
+                == stage - 1
+            )
+
+    await exercise(
+        migrated_database_url, monkeypatch, tmp_path, None, request, zero_stage_check=check
+    )

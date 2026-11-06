@@ -41,7 +41,12 @@ class TerminalProof:
     orphan: bool
     evidence_hash: str
     cleanup_hash: str
-    empty_authorizations: bool = False
+
+    @property
+    def empty_authorizations(self) -> bool:
+        # Classification of a fully validated close-only result, never authority.
+        # Keep the original dataclass/public/audit projection exactly unchanged.
+        return not self.known and self.evidence_hash == evidence_digest([])
 
 
 async def read_terminal_proof(
@@ -434,5 +439,4 @@ async def read_terminal_proof(
         orphan,
         terminal["chain_hash"],
         evidence_digest(cleanup_facts),
-        not auths,
     )
