@@ -94,7 +94,8 @@ async def test_returning_condition_consumes_frozen_quote_but_not_postfreeze_chec
     source_late = await synthetic_source(factory, plan_a, minute=1.5, threshold="150")
     sources = {source.output.id: source for source in (source_b, source_a, source_late)}
 
-    async def approved(_session, *, account_id, output_id, now):
+    async def approved(_session, *, account_id, output_id, now, _single_kind=False):
+        assert _single_kind is True
         assert account_id == plan_a.account_id
         return sources[output_id]
 

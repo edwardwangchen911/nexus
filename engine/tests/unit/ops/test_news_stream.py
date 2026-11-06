@@ -179,8 +179,19 @@ async def test_news_frame_roundtrip_and_tampering(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_stream_archive_loader_retains_validated_originals_for_import(tmp_path):
+async def test_stream_archive_loader_retains_validated_originals_for_import(tmp_path, monkeypatch):
     socket = Socket([AUTH, SUB])
+    clock = [0.0]
+    monkeypatch.setattr(news_stream, "monotonic", lambda: clock[0])
+    receive = socket.recv
+
+    async def bounded_receive():
+        if not socket.frames:
+            clock[0] = 0.03
+            raise TimeoutError
+        return await receive()
+
+    monkeypatch.setattr(socket, "recv", bounded_receive)
     directory = tmp_path / "run"
     await collect_stream(
         symbol="EXAMPLE",

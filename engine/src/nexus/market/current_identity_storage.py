@@ -40,6 +40,7 @@ from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.providers.broker.fosun_contracts import AccountItem, PositionItem
 from nexus.providers.broker.gateway_contracts import GatewayResponsePage
+from nexus.research.artifact_read_scope import ArtifactRegistration, read_artifact
 
 
 class IdentityStore(Protocol):
@@ -171,7 +172,7 @@ async def _archive_taxonomy(
     return tuple(result)
 
 
-def _binding(artifact: DataArtifact) -> ArtifactBinding:
+def _binding(artifact: DataArtifact | ArtifactRegistration) -> ArtifactBinding:
     return ArtifactBinding(
         uri=artifact.uri,
         sha256=artifact.sha256,
@@ -501,9 +502,7 @@ async def read_current_held_common_stock(
             raise ValueError
         contents = []
         for binding in proof.artifacts:
-            artifact = await session.scalar(
-                select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
-            )
+            artifact = await read_artifact(session, binding.sha256)
             if artifact is None or _binding(artifact) != binding:
                 raise ValueError
             contents.append(await _read_artifact(store, binding))
@@ -762,9 +761,7 @@ async def read_current_identity(
             proof.taxonomy_artifacts if isinstance(proof, CustomMemberIdentityProof) else ()
         )
         for number, binding in enumerate(bindings):
-            artifact = await session.scalar(
-                select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
-            )
+            artifact = await read_artifact(session, binding.sha256)
             if artifact is None or _binding(artifact) != binding:
                 raise ValueError
             if number >= 4 and (
