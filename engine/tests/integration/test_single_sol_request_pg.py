@@ -323,6 +323,14 @@ async def test_single_owner(migrated_database_url, tmp_path, monkeypatch, capsys
             monkeypatch.setattr(authority, "database_now", late_now)
             monkeypatch.setattr(research_request, "database_now", late_now)
             async with factory.begin() as db:
+                # Advance the database clock with the business-clock doubles.
+                # Otherwise a fresh late heartbeat appears to come from the future.
+                await db.execute(
+                    text(f"""CREATE OR REPLACE FUNCTION fixture_clock.clock_timestamp()
+                    RETURNS timestamptz LANGUAGE sql VOLATILE AS $$
+                    SELECT '{late.isoformat()}'::timestamptz $$""")
+                )
+                assert await db.scalar(select(func.clock_timestamp())) == late
                 await db.execute(
                     text("UPDATE worker_heartbeats SET seen_at=:at WHERE queue='agent_paper'"),
                     {"at": late},

@@ -188,9 +188,18 @@ async def require_configured_manual_host(
             )
         )
     ).all()
+    # History checks may span a heartbeat commit. Judge the rows at their read
+    # time, not the earlier admission time; retain the same 30-second bound.
+    observed_at = await session.scalar(select(func.clock_timestamp()))
+    if (
+        not isinstance(observed_at, datetime)
+        or observed_at.utcoffset() is None
+        or observed_at < now
+    ):
+        raise ValueError("MANUAL_HOST_NOT_READY")
     require_manual_host(
         heartbeats,
-        now=now,
+        now=observed_at.astimezone(UTC),
         release_revision=settings.release_revision,
         scope_hash=manual_host_scope(settings),
     )
