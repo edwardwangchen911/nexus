@@ -483,3 +483,65 @@ async def test_scoped_registration_does_not_survive_savepoint_rollback(migrated_
                 assert await read_artifact(session, digest) is None
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+async def test_scoped_registration_rejects_partial_rollback_before_explicit_close(
+    migrated_database_url, nested
+):
+    from datetime import UTC, datetime
+
+    from nexus.persistence.models.data import DataArtifact
+    from nexus.research.artifact_read_scope import artifact_read_scope, read_artifact
+    from sqlalchemy.exc import PendingRollbackError
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    digest = "d" * 64
+
+    def row():
+        now = datetime.now(UTC)
+        return DataArtifact(
+            uri="s3://synthetic/raw/two?versionId=one",
+            sha256=digest,
+            byte_size=1,
+            mime_type="application/json",
+            schema_version="test_v1",
+            source="test",
+            observed_at=now,
+            available_at=now,
+            received_at=now,
+        )
+
+    try:
+        async with factory() as session:
+            await session.begin()
+            savepoint = await session.begin_nested() if nested else None
+            with artifact_read_scope(session):
+                session.add(row())
+                await session.flush()
+                session.expunge_all()
+                assert await read_artifact(session, digest) is not None
+                assert await read_artifact(session, digest) is not None
+                before = (
+                    session.sync_session.get_transaction(),
+                    session.sync_session.get_nested_transaction(),
+                )
+                session.add(row())
+                with pytest.raises(IntegrityError):
+                    await session.flush()
+                assert not session.is_active
+                assert before == (
+                    session.sync_session.get_transaction(),
+                    session.sync_session.get_nested_transaction(),
+                )
+                assert not (session.new or session.dirty or session.deleted or session.identity_map)
+                with pytest.raises(PendingRollbackError):
+                    await read_artifact(session, digest)
+                if savepoint is not None:
+                    await savepoint.rollback()
+                else:
+                    await session.rollback()
+                assert await read_artifact(session, digest) is None
+    finally:
+        await factory.kw["bind"].dispose()

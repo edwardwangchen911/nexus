@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import SessionTransaction
 
 from nexus.persistence.models.data import DataArtifact
 
@@ -38,11 +39,17 @@ class _Scope:
         self.limit = limit
         self.active = True
         self.rows: dict[str, ArtifactRegistration] = {}
-        self.transaction: tuple[object, object] | None = None
+        self.transaction: tuple[SessionTransaction | None, SessionTransaction | None] | None = None
 
 
-def _transaction(session: AsyncSession) -> tuple[object, object]:
+def _transaction(
+    session: AsyncSession,
+) -> tuple[SessionTransaction | None, SessionTransaction | None]:
     return (session.sync_session.get_transaction(), session.sync_session.get_nested_transaction())
+
+
+def _usable(session: AsyncSession) -> bool:
+    return session.is_active and all(tx is None or tx.is_active for tx in _transaction(session))
 
 
 _KEY = "nexus_immutable_artifact_read_scope"
@@ -72,13 +79,14 @@ async def read_artifact(
     scope = session.info.get(_KEY)
     if isinstance(scope, _Scope) and scope.owner is session:
         current = _transaction(session)
-        if current != scope.transaction:
+        if current != scope.transaction or not _usable(session):
             scope.rows.clear()
             scope.transaction = current
     reusable = (
         isinstance(scope, _Scope)
         and scope.active
         and scope.owner is session
+        and _usable(session)
         and not (session.new or session.dirty or session.deleted)
     )
     if reusable and isinstance(scope, _Scope) and (row := scope.rows.get(digest)) is not None:
@@ -89,6 +97,7 @@ async def read_artifact(
         reusable
         and isinstance(scope, _Scope)
         and scope.active
+        and _usable(session)
         and record is not None
         and record.sha256 == digest
         and len(scope.rows) < scope.limit

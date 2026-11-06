@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -13,7 +14,8 @@ class Session:
     def __init__(self):
         self.info = {}
         self.sync_session = self
-        self.transaction = object()
+        self.is_active = True
+        self.transaction = SimpleNamespace(is_active=True)
         self.nested = None
         self.new, self.dirty, self.deleted = set(), set(), set()
         self.identity_map = {}
@@ -109,13 +111,34 @@ async def test_transaction_and_savepoint_changes_discard_registrations():
         await read_artifact(session, "a" * 64)
         await read_artifact(session, "a" * 64)
         assert session.calls == 1
-        session.nested = object()
+        session.nested = SimpleNamespace(is_active=True)
         await read_artifact(session, "a" * 64)
         assert session.calls == 2
         session.nested = None
         session.row = None
         assert await read_artifact(session, "a" * 64) is None
         assert session.calls == 3
-        session.transaction = object()
+        session.transaction = SimpleNamespace(is_active=True)
         assert await read_artifact(session, "a" * 64) is None
         assert session.calls == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inactive", ["session", "outer", "nested"])
+async def test_inactive_state_discards_cached_rows_and_never_fills(inactive):
+    session = Session()
+    session.nested = SimpleNamespace(is_active=True)
+    with artifact_read_scope(session):
+        await read_artifact(session, "a" * 64)
+        await read_artifact(session, "a" * 64)
+        assert session.calls == 1
+        target = {"session": session, "outer": session.transaction, "nested": session.nested}[
+            inactive
+        ]
+        target.is_active = False
+        assert await read_artifact(session, "a" * 64) is session.row
+        scope = session.info["nexus_immutable_artifact_read_scope"]
+        assert not scope.rows and session.calls == 2
+        target.is_active = True
+        await read_artifact(session, "a" * 64)
+        assert session.calls == 3

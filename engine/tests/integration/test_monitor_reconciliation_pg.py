@@ -779,8 +779,9 @@ async def test_new_ordinary_daily_sec_refusal_preserves_native_facts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "statement-timeout", "cancel"])
 async def test_three_terminal_stocks_without_proposals_record_both_reasons_once(
-    migrated_database_url, monkeypatch
+    migrated_database_url, monkeypatch, failure
 ):
     from collections import Counter
 
@@ -827,6 +828,54 @@ async def test_three_terminal_stocks_without_proposals_record_both_reasons_once(
                 agent_paper_candidate_batch_id=cycle.candidate_batch_id,
             )
         args = parser().parse_args(["scan", "--calendar-authority-id", str(CALENDAR_ID)])
+        if failure is not None:
+            from nexus.monitoring import reconciliation
+            from sqlalchemy import text
+            from sqlalchemy.exc import DBAPIError
+
+            original_record = reconciliation._record_validated_kind
+            captured = []
+            records = []
+
+            async def interrupted(session, **kwargs):
+                if records:
+                    from nexus.persistence.models.data import DataArtifact
+                    from nexus.research.artifact_read_scope import read_artifact
+
+                    # The synthetic research fixture shortcuts some identity
+                    # readers. Populate the real registration cache explicitly
+                    # after the first coverage write, inside the same savepoint.
+                    await session.flush()
+                    digest = await session.scalar(select(DataArtifact.sha256).limit(1))
+                    assert digest is not None
+                    assert await read_artifact(session, digest) is not None
+                    assert await read_artifact(session, digest) is not None
+                    scope = session.info["nexus_immutable_artifact_read_scope"]
+                    assert scope.rows
+                    captured.append((session, scope))
+                    if failure == "cancel":
+                        raise asyncio.CancelledError
+                    await session.execute(text("SET LOCAL statement_timeout = '10ms'"))
+                    await session.execute(text("SELECT pg_sleep(1)"))
+                    pytest.fail("database statement timeout was not enforced")
+                receipt = await original_record(session, **kwargs)
+                assert receipt is not None
+                records.append(receipt.id)
+                return receipt
+
+            monkeypatch.setattr(reconciliation, "_record_validated_kind", interrupted)
+            error = asyncio.CancelledError if failure == "cancel" else DBAPIError
+            with pytest.raises(error):
+                await run(settings, args)
+            assert len(records) == len(captured) == 1
+            failed_session, scope = captured[0]
+            assert not scope.active and not scope.rows
+            assert "nexus_immutable_artifact_read_scope" not in failed_session.info
+            async with factory() as session:
+                assert not await session.scalar(select(MonitorCoverageReceipt.id))
+                assert not await session.scalar(select(MonitorPlan.id))
+            monkeypatch.setattr(reconciliation, "_record_validated_kind", original_record)
+            calls.clear()
         result = await run(settings, args)
         assert result["reconciled_results"] == 6 and result["checks"] == 0
         assert result["provider_requests"] == result["model_requests"] == 0
