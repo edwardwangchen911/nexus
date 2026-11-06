@@ -14,7 +14,14 @@ from sqlalchemy import select
 
 
 async def prepared_materials(
-    database_url, monkeypatch, root, *, sec_only=False, independent=False, exhibit_text=""
+    database_url,
+    monkeypatch,
+    root,
+    *,
+    sec_only=False,
+    independent=False,
+    exhibit_text="",
+    forward=False,
 ):
     factory, settings, store, captured, pointer = await installed(
         database_url,
@@ -22,6 +29,7 @@ async def prepared_materials(
         root,
         kinds=("disclosure",) if sec_only else ("price", "disclosure"),
         independent=independent,
+        listed_history=forward,
     )
     monkeypatch.setattr(
         "nexus.monitoring.filing_archive.configured_exhibit_store", lambda session: store
@@ -33,6 +41,31 @@ async def prepared_materials(
 
     if not independent:
         monkeypatch.setattr(store, "read_evidence", read_evidence, raising=False)
+    if forward:
+        from integration.test_sec_forward_origin_pg import listed
+        from nexus.monitoring.disclosure_forward import establish_origin
+        from nexus.persistence.models.monitoring import MonitorPlan
+
+        factory.kw["info"] = {"sec_exhibit_store": store}
+        monkeypatch.setattr(
+            "nexus.monitoring.disclosure_forward.configured_exhibit_store", lambda s: store
+        )
+        captured["clock"][0] += timedelta(seconds=1)
+        first_id = await listed(
+            settings, store, factory, captured, root, "forward-first", recent_added=2
+        )
+        async with factory() as session, session.begin():
+            prior = await session.scalar(
+                select(MonitorPlan).where(MonitorPlan.kind == "disclosure")
+            )
+            origin = await establish_origin(
+                session, plan_id=prior.id, capture_id=first_id, now=captured["clock"][0]
+            )
+            captured["forward_origin_id"] = origin.id
+            captured["forward_origin_hash"] = origin.revision
+            captured["forward_comparison_from"] = origin.available_at
+            captured["forward_first_id"] = first_id
+            captured["forward_prior_id"] = prior.id
     async with factory() as session, session.begin():
         observed = await scan_stock_batch(
             session,
@@ -45,7 +78,10 @@ async def prepared_materials(
     async with factory() as session:
         current = await session.scalar(
             select(DataSnapshot)
-            .where(DataSnapshot.source == "sec_disclosure_index")
+            .where(
+                DataSnapshot.source
+                == ("sec_disclosure_listed_index" if forward else "sec_disclosure_index")
+            )
             .order_by(DataSnapshot.created_at.desc())
         )
     entries = [
@@ -71,7 +107,7 @@ async def prepared_materials(
     prepared = await run(
         settings, argparse.Namespace(action="prepare-batch", batch_id=UUID(observed["batch_id"]))
     )
-    assert prepared["status"] == "prepared"
+    assert prepared["status"] == "prepared", prepared
     return (
         factory,
         settings,

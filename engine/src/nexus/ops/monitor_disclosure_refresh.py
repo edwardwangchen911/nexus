@@ -143,11 +143,24 @@ async def _claim(
         proposal.issuer_cik,
     ):
         raise ValueError("SEC_BASELINE_INVALID")
+    from nexus.monitoring.disclosure_forward import ForwardObservation
+
     observation = await read_disclosure_observation(session, plan=plan, now=now)
+    if observation.reason == "SEC_INDEX_FORWARD_EVIDENCE_INVALID":
+        return {"status": "unknown", "reason": observation.reason}
+    # Successor custody keeps the original comparison route even when the new
+    # research baseline is a complete legacy capture. It is not a new origin.
+    listed_history = isinstance(observation, ForwardObservation) or not baseline.history_complete
     if (
-        observation.current_snapshot_id is not None
+        (not listed_history or isinstance(observation, ForwardObservation))
+        and observation.current_snapshot_id is not None
         and observation.reason
-        in {None, "SEC_INDEX_COVERAGE_UNAVAILABLE", "SEC_INDEX_EVENT_CONFLICT"}
+        in {
+            None,
+            "SEC_INDEX_COVERAGE_UNAVAILABLE",
+            "SEC_INDEX_EVENT_CONFLICT",
+            "SEC_INDEX_FORWARD_BASELINE_ESTABLISHED",
+        }
         and observation.received_at is not None
         and timedelta(0) <= now - observation.received_at <= timedelta(seconds=300)
     ):
@@ -185,6 +198,7 @@ async def _claim(
         "identity_snapshot_id": str(baseline.identity_snapshot_id),
         "issuer_cik": baseline.issuer_cik,
         "feed": FEED,
+        "listed_history": listed_history,
         "scheduled_at": scheduled.isoformat(),
         "archive_dir": str(archive),
     }
@@ -199,7 +213,7 @@ async def _claim(
     return claim
 
 
-def _request_count(archive: Path) -> int | None:
+def _request_count(archive: Path, *, listed_history: bool = False) -> int | None:
     path = archive / "result.json"
     try:
         if path.is_symlink() or path.stat().st_size > 65536:
@@ -208,7 +222,19 @@ def _request_count(archive: Path) -> int | None:
         if not isinstance(result, dict):
             return None
         count = result.get("requests")
-        return count if type(count) is int and 0 <= count <= 2 else None
+        if type(count) is not int or not 0 <= count <= 2:
+            return None
+        if not listed_history:
+            return count
+        for name in ("history-result.json", "history-failure.json"):
+            history = archive / name
+            if history.exists():
+                if history.is_symlink() or history.stat().st_size > 65536:
+                    return None
+                extra = json.loads(history.read_bytes()).get("requests")
+                return count + extra if type(extra) is int and 0 <= extra <= 2 else None
+        # No registered history attempt count is not proof of zero extra calls.
+        return None
     except (OSError, ValueError, TypeError):
         return None
 
@@ -292,12 +318,16 @@ async def refresh_disclosure_observations(
                             archive_dir=archive,
                             contact=contact or "",
                             client=client,
+                            listed_history=claim.get("listed_history") is True,
                         )
                     async with factory() as session, session.begin():
                         now = await session.scalar(select(func.clock_timestamp()))
                         if not isinstance(now, datetime):
                             raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
-                        row, index = await _capture(
+                        from nexus.research.sec_listed_storage import read_listed_capture
+
+                        reader = read_listed_capture if claim.get("listed_history") else _capture
+                        row, index = await reader(
                             session,
                             configured_exhibit_store(session),
                             snapshot_id=UUID(str(collected["snapshot_id"])),
@@ -309,6 +339,16 @@ async def refresh_disclosure_observations(
                             UUID(str(claim["identity_snapshot_id"])),
                         ) or not timedelta(0) <= now - index.received_at <= timedelta(seconds=300):
                             raise ValueError("SEC_INDEX_IDENTITY_INVALID")
+                        if claim.get("listed_history"):
+                            from nexus.monitoring.disclosure_forward import establish_origin
+
+                            session.info["sec_exhibit_store"] = configured_exhibit_store(session)
+                            await establish_origin(
+                                session,
+                                plan_id=UUID(str(claim["plan_id"])),
+                                capture_id=row.id,
+                                now=now,
+                            )
                         item = {
                             "status": "refreshed",
                             "snapshot_id": str(row.id),
@@ -327,7 +367,9 @@ async def refresh_disclosure_observations(
                     # A database commit outcome is unknown; never fabricate a terminal result.
                     raise
                 except Exception:
-                    count = _request_count(archive)
+                    count = _request_count(
+                        archive, listed_history=claim.get("listed_history") is True
+                    )
                     item = {
                         "status": "failed",
                         "reason": "SEC_INDEX_REFRESH_FAILED",

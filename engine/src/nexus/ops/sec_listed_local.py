@@ -85,6 +85,10 @@ async def collect_listed_sources(
                 dict(schema="sec_listed_history_archive_v2", files=[x.name for x in files])
             ).encode(),
         )
+        write_private(
+            archive_dir / "history-result.json",
+            json.dumps(dict(requests=requests, authority_registered=False, retried=False)).encode(),
+        )
         return requests
     except BaseException:
         write_private(

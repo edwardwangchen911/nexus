@@ -40,6 +40,7 @@ async def import_baseline_capture(
     exchange="NYSE",
     received=None,
     sibling_symbols=(),
+    listed_history=False,
 ):
     """No collector/HTTP: import complete synthetic archives and preserve local custody times."""
     received = received or datetime.now(UTC) - timedelta(hours=1)
@@ -58,7 +59,16 @@ async def import_baseline_capture(
         "tickers": [symbol, *sibling_symbols],
         "exchanges": [source_exchange] * (1 + len(sibling_symbols)),
         "filings": {
-            "files": [],
+            "files": [
+                dict(
+                    name=f"CIK{CIK}-submissions-001.json",
+                    filingCount=1,
+                    filingFrom="2020-01-05",
+                    filingTo="2020-01-05",
+                )
+            ]
+            if listed_history
+            else [],
             "recent": {
                 "accessionNumber": [f"{CIK}-26-000001"],
                 "form": ["8-K"],

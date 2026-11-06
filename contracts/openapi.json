@@ -13456,6 +13456,42 @@
             "title": "Checked At",
             "type": "string"
           },
+          "comparison_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comparison From"
+          },
+          "prior_history_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior History From"
+          },
+          "prior_history_unknown": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior History Unknown"
+          },
           "reason": {
             "anyOf": [
               {
@@ -13487,7 +13523,10 @@
           "result",
           "scheduled_at",
           "checked_at",
-          "reason"
+          "reason",
+          "comparison_from",
+          "prior_history_from",
+          "prior_history_unknown"
         ],
         "title": "ResearchDisclosureMonitorCheck",
         "type": "object"

@@ -26,9 +26,9 @@ def settings_for_import(factory):
     )
 
 
-async def setup(database_url, monkeypatch, root):
+async def setup(database_url, monkeypatch, root, *, listed_history=False):
     factory, settings, store, captured, pointer = await installed(
-        database_url, monkeypatch, root, kinds=("disclosure",)
+        database_url, monkeypatch, root, kinds=("disclosure",), listed_history=listed_history
     )
     async with factory() as session:
         run = await session.get(AgentResearchRunRecord, pointer.source_run_id)
@@ -49,10 +49,25 @@ async def setup(database_url, monkeypatch, root):
                 created_at=AT - timedelta(hours=1),
             )
         )
+    if listed_history:
+        monkeypatch.setattr(
+            "nexus.monitoring.disclosure_forward.configured_exhibit_store", lambda session: store
+        )
     calls = []
 
     async def request(request):
         calls.append(str(request.url))
+        if request.url.path.endswith("-submissions-001.json"):
+            return httpx.Response(
+                200,
+                json=dict(
+                    accessionNumber=["0000123456-20-000001"],
+                    form=["8-K/A"],
+                    acceptanceDateTime=["2020-01-05T19:00:00Z"],
+                    filingDate=["2020-01-05"],
+                    primaryDocument=["old.txt"],
+                ),
+            )
         name = "directory" if request.url.host == "www.sec.gov" else "AAPL-submissions"
         return httpx.Response(200, content=(root / "baseline" / f"{name}.json").read_bytes())
 
@@ -78,6 +93,7 @@ async def setup(database_url, monkeypatch, root):
             return captured["clock"][0].astimezone(tz)
 
     monkeypatch.setattr("nexus.ops.research_identity_local.datetime", Clock)
+    monkeypatch.setattr("nexus.ops.sec_listed_local.datetime", Clock)
 
     async def invoke(environment=None, scheduled_at=None):
         return await refresh.refresh_disclosure_observations(
@@ -143,6 +159,86 @@ async def test_fresh_then_concurrent_stale_refresh_is_exact_once(
         closed = await invoke()
         assert closed["status"] == "market_closed" and closed["provider_requests"] == 0
         assert len(calls) == 2
+    finally:
+        await client.aclose()
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_committed", [False, True])
+async def test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recollects(
+    migrated_database_url, monkeypatch, tmp_path, server_committed
+):
+    from nexus.monitoring import disclosure_forward
+    from nexus.persistence.models.data import DataSnapshot
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import SessionTransaction
+
+    factory, store, captured, pointer, calls, client, invoke = await setup(
+        migrated_database_url, monkeypatch, tmp_path, listed_history=True
+    )
+    real_establish = disclosure_forward.establish_origin
+    real_commit = SessionTransaction.commit
+    injected = []
+
+    async def tagged(*args, **kwargs):
+        row = await real_establish(*args, **kwargs)
+        args[0].info["test_forward_commit"] = row.id
+        return row
+
+    def commit(transaction, *args, **kwargs):
+        if transaction.parent is None and transaction.session.info.pop("test_forward_commit", None):
+            injected.append(server_committed)
+            if server_committed:
+                real_commit(transaction, *args, **kwargs)
+            raise OperationalError("synthetic lost commit acknowledgement", None, RuntimeError())
+        return real_commit(transaction, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(disclosure_forward, "establish_origin", tagged)
+            fault.setattr(SessionTransaction, "commit", commit)
+            uncertain = await invoke()
+            assert uncertain["status"] == "unknown", uncertain
+            assert uncertain["reason"] == "SEC_INDEX_REFRESH_UNAVAILABLE"
+            assert uncertain["provider_requests"] is None
+        assert injected == [server_committed] and len(calls) == 4
+        async with factory() as session:
+            origins = tuple(
+                await session.scalars(
+                    select(DataSnapshot).where(DataSnapshot.source == disclosure_forward.SOURCE)
+                )
+            )
+            assert len(origins) == int(server_committed)
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(AuditEvent.action == refresh.CLAIM)
+                )
+                == 1
+            )
+            assert await session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.action == refresh.RESULT)
+            ) == int(server_committed)
+            original_ids = [row.id for row in origins]
+        # Same normal bucket reads the committed original or occupied claim;
+        # neither lost confirmation grants another HTTP collection.
+        result = await invoke()
+        assert result["provider_requests"] == 0 and len(calls) == 4
+        async with factory() as session:
+            assert (
+                list(
+                    await session.scalars(
+                        select(DataSnapshot.id).where(
+                            DataSnapshot.source == disclosure_forward.SOURCE
+                        )
+                    )
+                )
+                == original_ids
+            )
     finally:
         await client.aclose()
         await factory.kw["bind"].dispose()
@@ -375,6 +471,100 @@ async def test_slow_original_readback_cannot_claim_a_missed_bucket(
                 )
                 == 0
             )
+    finally:
+        await client.aclose()
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_normal_refresh_publishes_forward_origin_once_without_old_events(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.monitoring.disclosure_forward import SOURCE, ForwardObservation
+    from nexus.monitoring.disclosure_observations import read_disclosure_observation
+    from nexus.persistence.models.data import DataSnapshot
+    from nexus.persistence.models.monitoring import MonitorPlan, MonitorTrigger
+
+    factory, store, captured, pointer, calls, client, invoke = await setup(
+        migrated_database_url, monkeypatch, tmp_path, listed_history=True
+    )
+    try:
+        results = await asyncio.gather(invoke(), invoke())
+        assert len(calls) == 4, results
+        assert any(r["status"] == "refreshed" for r in results), results
+        async with factory() as session:
+            plan = await session.scalar(select(MonitorPlan).where(MonitorPlan.kind == "disclosure"))
+            observation = await read_disclosure_observation(
+                session, plan=plan, now=captured["clock"][0]
+            )
+            assert isinstance(observation, ForwardObservation)
+            assert observation.reason == "SEC_INDEX_FORWARD_BASELINE_ESTABLISHED"
+            assert not observation.added
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(DataSnapshot)
+                    .where(DataSnapshot.source == SOURCE)
+                )
+                == 1
+            )
+            assert await session.scalar(select(func.count()).select_from(MonitorTrigger)) == 0
+        assert (await invoke())["provider_requests"] == 0
+        assert len(calls) == 4
+        captured["clock"][0] = AT + timedelta(minutes=10)
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        assert (await invoke())["status"] == "refreshed"
+        assert len(calls) == 8
+        async with factory() as session:
+            observation = await read_disclosure_observation(
+                session, plan=plan, now=captured["clock"][0]
+            )
+            assert observation.result == "false" and observation.old_history_gap == "unknown"
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(DataSnapshot)
+                    .where(DataSnapshot.source == SOURCE)
+                )
+                == 1
+            )
+    finally:
+        await client.aclose()
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_forward_route_survives_complete_legacy_baseline_projection(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    factory, store, captured, pointer, calls, client, invoke = await setup(
+        migrated_database_url, monkeypatch, tmp_path, listed_history=True
+    )
+    try:
+        assert (await invoke())["status"] == "refreshed"
+        original = refresh._capture
+
+        async def complete_baseline(*args, **kwargs):
+            # Trusted-reader projection isolates routing from archive parsing.
+            # A successor's v1 baseline completeness cannot reset its inherited v2 route.
+            row, index = await original(*args, **kwargs)
+            return row, index.model_copy(update={"history_complete": True})
+
+        monkeypatch.setattr(refresh, "_capture", complete_baseline)
+        captured["clock"][0] = AT + timedelta(minutes=10)
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        result = await invoke()
+        assert result["status"] == "refreshed", result
+        assert len(calls) == 8
+        async with factory() as session:
+            from nexus.monitoring.disclosure_forward import ForwardObservation
+            from nexus.persistence.models.monitoring import MonitorPlan
+
+            plan = await session.scalar(select(MonitorPlan).where(MonitorPlan.kind == "disclosure"))
+            observed = await refresh.read_disclosure_observation(
+                session, plan=plan, now=captured["clock"][0]
+            )
+            assert isinstance(observed, ForwardObservation) and observed.result == "false"
     finally:
         await client.aclose()
         await factory.kw["bind"].dispose()

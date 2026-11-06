@@ -158,6 +158,17 @@ async def read_disclosure_observation(
             {**values, "result": "unknown", "reason": reason}
         )
 
+    from nexus.monitoring.disclosure_forward import read_forward_observation
+
+    try:
+        forward = await read_forward_observation(session, plan=plan, now=now)
+        if forward is not None:
+            return forward
+    except SQLAlchemyError:
+        raise
+    except Exception:
+        return unknown("SEC_INDEX_FORWARD_EVIDENCE_INVALID")
+
     try:
         store = configured_exhibit_store(session)
         baseline_row, baseline = await _capture(

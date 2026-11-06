@@ -82,6 +82,7 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     unknown,
     independent=False,
     accepted_unknown_root=None,
+    forward=False,
 ):
     frozen_without_price = unknown == "superseded_unfrozen_price"
     if frozen_without_price:
@@ -92,6 +93,7 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         tmp_path,
         sec_only=unknown in ("capacity", "sec_only"),
         independent=independent,
+        forward=forward,
         # A real imported original large enough for byte fallback to exceed the
         # unchanged 64k allowance even after v2 lossless input compression.
         exhibit_text=(
@@ -628,6 +630,26 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         monkeypatch.setattr(
             disclosure_installation, "_install_mixed_or_legacy_disclosure", fail_second
         )
+    if forward:
+        from integration.test_sec_forward_origin_pg import listed
+
+        # A previously unseen OLD-date accession arrives after the child's input
+        # freeze but before successor installation. It must not be bootstrapped away.
+        captured["clock"][0] += timedelta(seconds=1)
+        await listed(
+            settings,
+            store,
+            factory,
+            captured,
+            tmp_path,
+            "between-freeze-and-replacement",
+            recent_added=2,
+            late=True,
+        )
+        from integration.test_sec_forward_successor_pg import assert_installation_atomic
+
+        await assert_installation_atomic(factory, captured, member.run_id)
+
     reconciled = await run(settings, argparse.Namespace(action="reconcile"))
     from nexus.ops.monitor_dispatch import confirm_monitor_shutdown
     from nexus.persistence.models.monitoring import MonitorCoverageReceipt, MonitorMixedEventReceipt
@@ -722,5 +744,11 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             member.run_id,
             batch_id,
             captured["clock"][0],
+        )
+    if forward:
+        from integration.test_sec_forward_successor_pg import verify_successor
+
+        await verify_successor(
+            factory, settings, store, captured, tmp_path, member.run_id, monkeypatch
         )
     await factory.kw["bind"].dispose()

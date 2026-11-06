@@ -85,6 +85,9 @@ async def _install_mixed_or_legacy_disclosure(
     if existing is not None:
         if existing.predecessor_id != expected_predecessor_id:
             raise ValueError("MONITOR_PLAN_CONFLICT")
+        from nexus.monitoring.disclosure_forward import read_origin
+
+        await read_origin(session, existing, await plan_recorded_at(session, requested_at=now))
         return existing
     prior = await session.scalar(
         select(MonitorPlan)
@@ -127,6 +130,9 @@ async def _install_mixed_or_legacy_disclosure(
     )
     session.add(plan)
     await session.flush()
+    from nexus.monitoring.disclosure_inheritance import inherit_origin
+
+    await inherit_origin(session, plan=plan, prior=prior, now=now)
     await append_audit_event(
         session,
         actor_id="research-monitor",

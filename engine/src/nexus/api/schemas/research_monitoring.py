@@ -92,6 +92,9 @@ class ResearchDisclosureMonitorCheck(MonitoringViewModel):
     scheduled_at: datetime
     checked_at: datetime
     reason: Literal["observation_unverified"] | None
+    comparison_from: datetime | None = None
+    prior_history_from: datetime | None = None
+    prior_history_unknown: Literal[True] | None = None
 
 
 class ResearchDisclosureMonitorTrigger(MonitoringViewModel):

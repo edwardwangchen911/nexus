@@ -320,7 +320,7 @@ async def scan_stock_batch(
             for entry in disclosure.added:
                 event_key = f"sec:{disclosure.issuer_cik}:{entry.accession_number}"
                 seen = await session.scalar(
-                    select(MonitorTrigger.id).where(
+                    select(MonitorTrigger).where(
                         MonitorTrigger.account_id == account_id,
                         MonitorTrigger.instrument_id == instrument_id,
                         MonitorTrigger.kind == "disclosure",
@@ -328,6 +328,13 @@ async def scan_stock_batch(
                     )
                 )
                 if seen is not None:
+                    original = await session.get(MonitorCheck, seen.check_id)
+                    if (
+                        original is None
+                        or not isinstance(original.observation, dict)
+                        or original.observation.get("entry") != entry.model_dump(mode="json")
+                    ):
+                        raise ValueError("MONITOR_DISCLOSURE_IDENTITY_CONFLICT")
                     continue
                 observed = {
                     **{key: value for key, value in document.items() if key != "added"},
