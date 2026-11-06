@@ -23,7 +23,11 @@ async def seed(database_url, tmp_path):
         database_url=database_url, object_store_endpoint="http://127.0.0.1:9000"
     )
     store = MemoryStore()
-    fmp, sec = archives(tmp_path / "identity")
+    # This fixture represents already-held source material, not a sub-millisecond
+    # race between the Mac clock and the isolated PostgreSQL server clock.
+    fmp, sec = archives(
+        tmp_path / "identity", received=(datetime.now(UTC) - timedelta(days=1)).isoformat()
+    )
     identity = await import_identity(
         settings, symbol="AAPL", fmp_archive=fmp, sec_archive=sec, store=store
     )

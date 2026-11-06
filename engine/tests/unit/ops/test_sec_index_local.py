@@ -9,7 +9,10 @@ from nexus.ops import sec_index_local as module
 
 
 @pytest.mark.parametrize("action", ["collect", "import", "inspect"])
-def test_normal_cli_routes_exact_arguments_without_starting_other_work(monkeypatch, capsys, action):
+@pytest.mark.parametrize("listed_history", [False, True])
+def test_normal_cli_routes_exact_arguments_without_starting_other_work(
+    monkeypatch, capsys, action, listed_history
+):
     calls = []
 
     async def operation(settings, **kwargs):
@@ -29,6 +32,8 @@ def test_normal_cli_routes_exact_arguments_without_starting_other_work(monkeypat
     )
     identifier = str(UUID(int=1))
     args = ["sec-index", action]
+    if listed_history:
+        args.append("--listed-history")
     if action == "inspect":
         args += ["--snapshot-id", identifier]
     else:
@@ -36,6 +41,7 @@ def test_normal_cli_routes_exact_arguments_without_starting_other_work(monkeypat
     monkeypatch.setattr(sys, "argv", args)
     module.main()
     assert len(calls) == 1 and calls[0][0].database_url.endswith("/synthetic")
+    assert calls[0][1]["listed_history"] is listed_history
     assert calls[0][1]["snapshot_id" if action == "inspect" else "identity_snapshot_id"] == UUID(
         int=1
     )
