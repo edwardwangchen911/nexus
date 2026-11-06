@@ -187,6 +187,9 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
     from nexus.paper.independent_history_scope import binding as history_binding
 
     history_binding(row)
+    from nexus.paper.independent_priority import binding as priority_binding
+
+    priority_binding(row)
     if row.mode not in {"research_only", "research_and_paper", "research_and_monitor"}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     if row.request_hash != manual_request_hash(
@@ -622,6 +625,7 @@ async def admit_manual_request(
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     now = now.astimezone(UTC)
     history = None
+    priority = None
     if contract_version == 3:
         from nexus.paper.independent_history_scope import capture, require_capacity
 
@@ -629,13 +633,14 @@ async def admit_manual_request(
             session, account_id=account_id, model_config_id=model_config_id, now=now
         )
         if history is not None:
-            await require_capacity(
+            priority = await require_capacity(
                 session,
                 account_id=account_id,
                 batch_id=batch_id,
                 model_id=model_config_id,
                 daily_limit=daily_limit_usd,
                 now=now,
+                key_hash=key_hash,
             )
     await require_manual_account_available(session, account_id=account_id, now=now)
     batch, _ = await validate_agent_paper_candidate_batch(
@@ -678,6 +683,8 @@ async def admit_manual_request(
         }
         if history is not None:
             profile["historical_exception"] = history.model_dump(mode="json")
+        if priority is not None:
+            profile["budget_priority"] = priority
         if single_sol is not None:
             profile["single_sol"] = single_sol.model_dump(mode="json")
         if two_flight:
@@ -708,6 +715,9 @@ async def admit_manual_request(
         row.id = intent_id
     session.add(row)
     await session.flush()
+    from nexus.paper.independent_priority import consume
+
+    await consume(session, row, now=now)
     return await _append(session, row, status="queued", code="MANUAL_REQUEST_QUEUED", at=now)
 
 

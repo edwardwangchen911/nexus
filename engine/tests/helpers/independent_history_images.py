@@ -49,6 +49,29 @@ async def run(args):
                     agent_paper_formal_model_config_id=row.model_config_id,
                 )
             )
+        if (row.research_profile or {}).get("budget_priority") is not None:
+            from nexus.paper.independent_priority import read_priority
+
+            async with factory.begin() as db:
+                from sqlalchemy import text
+
+                await db.execute(text("SET TRANSACTION READ ONLY"))
+                grant = await read_priority(db, settings, idempotency_key="full-new-root")
+                assert grant.consumed_request_id == row.id and not grant.grant_unconsumed
+            if args["maintenance"]:
+                await refused(
+                    manual_paper.run(
+                        settings,
+                        manual_paper.parser().parse_args(
+                            [
+                                "authorize-independent-priority",
+                                "--idempotency-key",
+                                "never-send",
+                                "--accept-priority",
+                            ]
+                        ),
+                    )
+                )
         results = []
         for identity, expected in [(args["new"], "completed"), (args["old"], "unknown")]:
             receipt = await manual_paper.run(

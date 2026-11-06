@@ -38,6 +38,7 @@ from nexus.paper.history_seal import (
     ResearchProcessDiagnosticError,
     seal_failed_research,
 )
+from nexus.paper.independent_priority import PriorityReceipt
 from nexus.paper.independent_unknown_acceptance import (
     IndependentAcceptanceCheck,
     IndependentAcceptanceReceipt,
@@ -221,7 +222,13 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "check-independent-admission",
         help="Read independent three-stock eligibility without submitting or reserving",
+    ).add_argument("--idempotency-key")
+    commands.add_parser("read-independent-priority").add_argument(
+        "--idempotency-key", required=True
     )
+    priority = commands.add_parser("authorize-independent-priority")
+    priority.add_argument("--idempotency-key", required=True)
+    priority.add_argument("--accept-priority", action="store_true", required=True)
     commands.add_parser(
         "inspect-single-sol",
         help="Read a selected Sol batch member and full-session budget estimate",
@@ -315,6 +322,7 @@ async def run(
     | IntentReceipt
     | FormalAdmissionCheck
     | IndependentAdmissionCheck
+    | PriorityReceipt
     | SingleSolSelection
     | SingleSolOffer
     | TerminalCycleCancelReceipt
@@ -335,6 +343,24 @@ async def run(
     lifecycle_guards = ExitStack()
     diagnostic = _OperationDiagnostic()
     try:
+        if args.action == "read-independent-priority":
+            from nexus.paper.independent_priority import read_priority
+
+            async with diagnostic.transaction(factory) as session:
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                )
+                return await read_priority(session, settings, idempotency_key=args.idempotency_key)
+        if args.action == "authorize-independent-priority":
+            from nexus.paper.independent_priority import authorize
+
+            async with diagnostic.transaction(factory) as session:
+                return await authorize(
+                    session,
+                    settings,
+                    idempotency_key=args.idempotency_key,
+                    accept_priority=args.accept_priority,
+                )
         if args.action in {"check-independent-acceptance", "accept-independent-unknown"}:
             _require_maintenance_code(args.repo_root, settings.release_revision)
             lifecycle_guards.enter_context(
@@ -409,7 +435,7 @@ async def run(
             "check-independent-admission",
             "inspect-single-sol",
         }:
-            async with factory.begin() as session:
+            async with diagnostic.transaction(factory) as session:
                 await session.execute(
                     text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
                 )
@@ -418,7 +444,9 @@ async def run(
                         session, settings, instrument_id=args.instrument_id
                     )
                 if args.action == "check-independent-admission":
-                    return await check_configured_independent_admission(session, settings)
+                    return await check_configured_independent_admission(
+                        session, settings, idempotency_key=getattr(args, "idempotency_key", None)
+                    )
                 return await check_configured_formal_admission(session, settings)
         if args.action == "run-research":
             from nexus.ops.manual_paper_host import run_pure_research_once

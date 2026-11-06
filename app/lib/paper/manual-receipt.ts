@@ -16,6 +16,8 @@ export const manualEntryErrors: Record<string, string> = {
   MANUAL_ACCOUNT_BUSY_OR_UNKNOWN: "已有任务、订单占用或未确认结果，暂不能开始。",
   MANUAL_PREPARATION_RECOVERY_BLOCKED: "准备收尾证据无法确认，请保留原请求核对。",
   INDEPENDENT_RECHECK_UNAVAILABLE: "本次派发复验未通过，未获得新的发送许可。",
+  INDEPENDENT_PRIORITY_INVALID: "本次独立研究的单轮优先授权已失效或绑定不符，不能用于其他请求。",
+  INDEPENDENT_SHARED_BUDGET_EXHAUSTED: "原共享日额度不足，单轮优先授权不会增加预算。",
   INDEPENDENT_HISTORY_SCOPE_UNSUPPORTED: "本独立请求不适用已接受的历史例外，旧身份不会升级。",
   INDEPENDENT_HISTORY_PROOF_INVALID: "绑定的历史处置证明缺失或已变更，暂不能继续发送。",
   INDEPENDENT_NATURAL_BUDGET_PROTECTED: "扣除原预留及自然研究所需额度后，本次独立研究预算不足。",

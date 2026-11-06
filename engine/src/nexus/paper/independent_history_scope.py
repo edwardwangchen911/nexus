@@ -23,7 +23,18 @@ BUDGET = "INDEPENDENT_NATURAL_BUDGET_PROTECTED"
 WINDOW = "INDEPENDENT_NATURAL_WINDOW_PROTECTED"
 ECONOMIC = "INDEPENDENT_ECONOMIC_SCOPE_CONFLICT"
 UNAVAILABLE = "INDEPENDENT_RECHECK_UNAVAILABLE"
-SAFE_CODES = frozenset({SCOPE, PROOF, BUDGET, WINDOW, ECONOMIC, UNAVAILABLE})
+SAFE_CODES = frozenset(
+    {
+        SCOPE,
+        PROOF,
+        BUDGET,
+        WINDOW,
+        ECONOMIC,
+        UNAVAILABLE,
+        "INDEPENDENT_PRIORITY_INVALID",
+        "INDEPENDENT_SHARED_BUDGET_EXHAUSTED",
+    }
+)
 
 
 class AcceptedProof(BaseModel):
@@ -222,7 +233,8 @@ async def require_capacity(
     now: datetime,
     row: ManualPaperRequest | None = None,
     cleanup_deadline: datetime | None = None,
-) -> None:
+    key_hash: str | None = None,
+) -> dict[str, object] | None:
     """Independent reserves never pay a natural obligation, even without an older guard."""
     from nexus.agents.persistence import _shared_daily_budget_used
     from nexus.agents.research_usage import require_research_accounting_clear
@@ -249,7 +261,52 @@ async def require_capacity(
         session_date=calendar.session,
         pricing_expires_at=model.pricing_expires_at,
     )
+    from nexus.paper.independent_priority import EXHAUSTED, INVALID, resolve
+
+    priority = await resolve(
+        session,
+        account_id=account_id,
+        batch_id=batch_id,
+        batch_hash=batch.batch_hash,
+        model_id=model_id,
+        model_hash=model.config_hash,
+        daily_limit=daily_limit,
+        maximum=model.worst_case_cost_usd,
+        now=now,
+        key_hash=key_hash,
+        row=row,
+    )
+    if priority is not None:
+        deadline = min(deadline, priority[1].expires_at)
     manifest = None if row is None else await read_research_manifest(session, row)
+    if priority is not None and manifest is not None:
+        from nexus.persistence.models.agents import AgentDailyBudgetReservationRecord
+
+        holds = list(
+            await session.scalars(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id.in_(
+                        [m.run_id for m in manifest.members]
+                    )
+                )
+            )
+        )
+        if (
+            len(manifest.members) != 3
+            or len(holds) != 3
+            or any(
+                h.business_date != priority[1].budget_day
+                or h.reserved_usd != model.worst_case_cost_usd
+                or h.pricing_version != model.version
+                or h.state not in {"reserved", "settled"}
+                or h.state == "reserved"
+                and h.settled_usd is not None
+                or h.state == "settled"
+                and h.settled_usd is None
+                for h in holds
+            )
+        ):
+            raise ValueError(INVALID)
     headroom = BATCH_PREPARATION_HEADROOM_SECONDS + 3 * INCREMENT_ACTION_HEADROOM_SECONDS
     if (
         row is not None
@@ -310,10 +367,12 @@ async def require_capacity(
             session, day=now.date(), members=list(batch.instrument_ids), now=now
         )
         remaining = len(obligations)
+    if priority is not None:
+        remaining = 0
     additional = 3 if manifest is None else 0
     used = await _shared_daily_budget_used(session, business_date=now.date())
     if used + (remaining + additional) * model.worst_case_cost_usd > daily_limit:
-        raise ValueError(BUDGET)
+        raise ValueError(EXHAUSTED if priority is not None else BUDGET)
     from nexus.paper.research_request import database_now
 
     checked = await database_now(session)
@@ -324,6 +383,8 @@ async def require_capacity(
         and checked + timedelta(seconds=headroom) >= deadline
     ):
         raise ValueError(WINDOW)
+
+    return None if priority is None else priority[0].model_dump(mode="json")
 
 
 def execution_boundary(
