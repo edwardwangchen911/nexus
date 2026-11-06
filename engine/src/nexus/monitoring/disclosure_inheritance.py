@@ -48,6 +48,26 @@ class ForwardInheritance(BaseModel):
         ).encode()
 
 
+async def _require_no_ancestor_origin(
+    session: AsyncSession, plan: MonitorPlan, at: datetime
+) -> None:
+    current = plan
+    visited = {plan.id}
+    while current.predecessor_id is not None:
+        if current.predecessor_id in visited:
+            raise ValueError(INVALID)
+        visited.add(current.predecessor_id)
+        prior = await session.get(MonitorPlan, current.predecessor_id)
+        if prior is None or (
+            current.generation != prior.generation + 1
+            or (current.account_id, current.instrument_id, current.kind, current.condition_hash)
+            != (prior.account_id, prior.instrument_id, prior.kind, prior.condition_hash)
+            or await _origins(session, prior, at)
+        ):
+            raise ValueError(INVALID)
+        current = prior
+
+
 async def read_binding(
     session: AsyncSession, plan: MonitorPlan, now: datetime
 ) -> tuple[DataSnapshot, DataSnapshot, MonitorPlan, ForwardOrigin] | None:
@@ -55,16 +75,7 @@ async def read_binding(
     rows = await _origins(session, plan, now)
     if not rows:
         # A missing link is not permission to bootstrap or fall back to old false.
-        prior_id = plan.predecessor_id
-        visited = {plan.id}
-        while prior_id is not None:
-            if prior_id in visited:
-                raise ValueError(INVALID)
-            visited.add(prior_id)
-            prior = await session.get(MonitorPlan, prior_id)
-            if prior is None or await _origins(session, prior, now):
-                raise ValueError(INVALID)
-            prior_id = prior.predecessor_id
+        await _require_no_ancestor_origin(session, plan, now)
         return None
     own = rows[0]
     current = plan
@@ -114,6 +125,7 @@ async def read_binding(
         ):
             raise ValueError(INVALID)
         if isinstance(value, ForwardOrigin):
+            await _require_no_ancestor_origin(session, current, value.effective_at)
             if root_binding is not None and root_binding != (row.id, row.revision):
                 raise ValueError(INVALID)
             capture_row = await session.get(DataSnapshot, value.capture_id)

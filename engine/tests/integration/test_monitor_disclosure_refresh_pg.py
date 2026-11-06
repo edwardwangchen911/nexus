@@ -167,7 +167,7 @@ async def test_fresh_then_concurrent_stale_refresh_is_exact_once(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("server_committed", [False, True])
 async def test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recollects(
-    migrated_database_url, monkeypatch, tmp_path, server_committed
+    migrated_database_url, monkeypatch, tmp_path, server_committed, fault_level="application"
 ):
     from nexus.monitoring import disclosure_forward
     from nexus.persistence.models.data import DataSnapshot
@@ -180,15 +180,27 @@ async def test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recolle
     real_establish = disclosure_forward.establish_origin
     real_commit = SessionTransaction.commit
     injected = []
+    dbapi_faults, dbapi_contexts, acknowledgements = [], [], []
 
     async def tagged(*args, **kwargs):
         row = await real_establish(*args, **kwargs)
         args[0].info["test_forward_commit"] = row.id
+        if fault_level == "dbapi":
+            from helpers.commit_ack_fault import lose_commit_ack
+
+            assert args[0].bind is not factory.kw["bind"]
+            context = lose_commit_ack(args[0].bind, server_commits=server_committed)
+            dbapi_contexts.append(context)
+            dbapi_faults.append(context.__enter__())
         return row
 
     def commit(transaction, *args, **kwargs):
         if transaction.parent is None and transaction.session.info.pop("test_forward_commit", None):
             injected.append(server_committed)
+            if fault_level == "dbapi":
+                result = real_commit(transaction, *args, **kwargs)
+                acknowledgements.append(True)
+                return result
             if server_committed:
                 real_commit(transaction, *args, **kwargs)
             raise OperationalError("synthetic lost commit acknowledgement", None, RuntimeError())
@@ -203,6 +215,10 @@ async def test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recolle
             assert uncertain["reason"] == "SEC_INDEX_REFRESH_UNAVAILABLE"
             assert uncertain["provider_requests"] is None
         assert injected == [server_committed] and len(calls) == 4
+        if fault_level == "dbapi":
+            assert acknowledgements == [] and len(dbapi_faults) == 1
+            assert dbapi_faults[0].boundary_calls == 1
+            assert dbapi_faults[0].server_commit_completed is server_committed
         async with factory() as session:
             origins = tuple(
                 await session.scalars(
@@ -240,6 +256,8 @@ async def test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recolle
                 == original_ids
             )
     finally:
+        for context in dbapi_contexts:
+            context.__exit__(None, None, None)
         await client.aclose()
         await factory.kw["bind"].dispose()
 
@@ -568,3 +586,13 @@ async def test_forward_route_survives_complete_legacy_baseline_projection(
     finally:
         await client.aclose()
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_committed", [False, True])
+async def test_forward_refresh_dbapi_ack_loss(
+    migrated_database_url, monkeypatch, tmp_path, server_committed
+):
+    await test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recollects(
+        migrated_database_url, monkeypatch, tmp_path, server_committed, fault_level="dbapi"
+    )

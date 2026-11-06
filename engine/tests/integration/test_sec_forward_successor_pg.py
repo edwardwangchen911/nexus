@@ -129,6 +129,12 @@ async def verify_successor(factory, settings, store, captured, root, child_id, m
         for model, count in before.items():
             assert await s.scalar(select(func.count()).select_from(model)) == count + 1
 
+    import os
+
+    if os.environ.get("NEXUS_TEST_SEC_FORMAL_IMAGE"):
+        from helpers.sec_forward_images import verify_images
+
+        await verify_images(factory, store, captured, successor)
     await verify_successor_page(factory, captured, successor, monkeypatch)
     await assert_invalid_inheritance(factory, captured, successor, child_id, monkeypatch)
 
@@ -168,6 +174,68 @@ async def assert_invalid_inheritance(factory, captured, successor, child_id, mon
     from nexus.persistence.models.agents import AgentResearchRunRecord
 
     original = inheritance._origins
+
+    # A self-consistent new root must not bypass the prior comparison origin.
+    async def reset_root(session, plan, now):
+        from nexus.monitoring.disclosure_forward import POLICY, ForwardOrigin
+        from nexus.monitoring.disclosure_observations import _bound_proposal
+        from nexus.research.sec_listed_storage import SOURCE as LISTED
+        from nexus.research.sec_listed_storage import ListedCapture
+
+        rows = await original(session, plan, now)
+        if plan.id != successor.id:
+            return rows
+        proposal = await _bound_proposal(session, plan, now)
+        current = await session.scalar(
+            select(DataSnapshot)
+            .where(DataSnapshot.source == LISTED)
+            .order_by(DataSnapshot.available_at.desc())
+            .limit(1)
+        )
+        value = ForwardOrigin(
+            plan_id=plan.id,
+            account_id=plan.account_id,
+            instrument_id=plan.instrument_id,
+            source_hash=plan.source_hash,
+            condition_hash=plan.condition_hash,
+            baseline_snapshot_id=proposal.baseline_snapshot_id,
+            baseline_hash=proposal.baseline_hash,
+            baseline_as_of=proposal.baseline_as_of,
+            capture_id=current.id,
+            capture_hash=current.revision,
+            original_hashes=tuple(
+                x.sha256 for x in ListedCapture.model_validate(current.payload).originals
+            ),
+            effective_at=now,
+        )
+        row = DataSnapshot(
+            **{c.name: getattr(rows[0], c.name) for c in DataSnapshot.__table__.columns}
+        )
+        row.schema_version = POLICY
+        row.payload = value.model_dump(mode="json")
+        row.revision = sha256(value.canonical()).hexdigest()
+        row.created_at = row.available_at = row.observed_at = row.received_at = now
+        return (row,)
+
+    with monkeypatch.context() as reset:
+        reset.setattr(inheritance, "_origins", reset_root)
+        async with factory() as s:
+            with pytest.raises(ValueError, match="SEC_INDEX_FORWARD_ORIGIN_INVALID"):
+                await inheritance.read_binding(s, successor, captured["clock"][0])
+
+    # Having a predecessor alone must not prohibit a first comparison origin.
+    # This reader projection keeps the normal installed chain and valid capture,
+    # but represents ancestors that had no forward origin at publication time.
+    async def first_root(session, plan, now):
+        return await reset_root(session, plan, now) if plan.id == successor.id else ()
+
+    with monkeypatch.context() as first:
+        first.setattr(inheritance, "_origins", first_root)
+        async with factory() as s:
+            binding = await inheritance.read_binding(s, successor, captured["clock"][0])
+            assert binding is not None
+            assert binding[2].id == successor.id
+            assert binding[3].effective_at == captured["clock"][0]
     for field in (
         "predecessor_origin_hash",
         "root_origin_hash",

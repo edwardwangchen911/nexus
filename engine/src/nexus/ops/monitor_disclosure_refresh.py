@@ -310,6 +310,7 @@ async def refresh_disclosure_observations(
                     continue
                 archive = Path(str(claim["archive_dir"]))
                 in_flight = True
+                result_ready = False
                 try:
                     async with _client() as client:
                         collected = await collect_index(
@@ -363,10 +364,15 @@ async def refresh_disclosure_observations(
                             occurred_at=now,
                             payload={**claim, **item},
                         )
+                        result_ready = True
                 except SQLAlchemyError:
                     # A database commit outcome is unknown; never fabricate a terminal result.
                     raise
                 except Exception:
+                    # The body finished; any exit failure can be a lost commit
+                    # acknowledgement even when the driver does not wrap it.
+                    if result_ready:
+                        raise
                     count = _request_count(
                         archive, listed_history=claim.get("listed_history") is True
                     )
