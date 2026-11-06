@@ -358,7 +358,10 @@ async def run_agent_worker_once(
                 )
                 if job is None or job.status != "queued":
                     return
-                if not await formal_stage_job_qualified(session, job):
+                if (
+                    runtime_mode is not AgentRuntimeMode.RESPONSES
+                    and not await formal_stage_job_qualified(session, job)
+                ):
                     raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
                 run = await session.get(
                     AgentResearchRunRecord, UUID(cast(str, job.payload["run_id"]))
@@ -366,7 +369,11 @@ async def run_agent_worker_once(
                 if run is None:
                     raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
                 await _prepare_preclaim_capacity_pool(
-                    session, settings, run, formal_stage_capacity=True
+                    session,
+                    settings,
+                    run,
+                    formal_stage_capacity=True,
+                    preclaim_job=job if runtime_mode is AgentRuntimeMode.RESPONSES else None,
                 )
 
             preclaim_guard = guard_formal_pool
@@ -468,6 +475,7 @@ async def _prepare_preclaim_capacity_pool(
     run: AgentResearchRunRecord,
     *,
     formal_stage_capacity: bool = False,
+    preclaim_job: Job | None = None,
 ) -> None:
     """Bound native Sol/v11 input preparation before any Job claim or provider call."""
     from nexus.agents.capacity_cycle import prepare_cycle_capacity_pool
@@ -492,7 +500,9 @@ async def _prepare_preclaim_capacity_pool(
             if native:
                 from nexus.agents.platform_native import prepare_native_pool
 
-                await prepare_native_pool(session, settings, run, deadline=deadline)
+                await prepare_native_pool(
+                    session, settings, run, deadline=deadline, preclaim_job=preclaim_job
+                )
             else:
                 await prepare_cycle_capacity_pool(
                     session,

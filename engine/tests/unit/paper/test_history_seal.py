@@ -466,6 +466,9 @@ def test_process_inspection_preserves_safe_failure_boundary(monkeypatch, boundar
     expected = {"diagnostic_stage": "research_processes", "diagnostic_code": code}
     if boundary == "identity":
         expected["diagnostic_reason"] = "EXECUTABLE_MISMATCH"
+        expected.update(
+            diagnostic_chain="direct", diagnostic_hop="candidate", diagnostic_observed="other"
+        )
     assert failure.value.safe_diagnostics() == expected
 
 

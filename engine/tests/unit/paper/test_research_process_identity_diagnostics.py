@@ -89,6 +89,14 @@ def test_identity_cause_survives_guard_and_cli_without_host_details(
         "diagnostic_stage": "research_processes",
         "diagnostic_code": "HOST_IDENTITY_UNCONFIRMED",
         "diagnostic_reason": reason,
+        "diagnostic_chain": "nested",
+        "diagnostic_hop": "repl" if fault in {"missing", "cycle"} else "candidate",
+        "diagnostic_observed": {
+            "missing": "missing",
+            "cycle": "codex",
+            "owner": "codex",
+            "executable": "other",
+        }[fault],
     }
     assert "credential-marker" not in captured.out and _DESKTOP not in captured.out
 
@@ -118,3 +126,73 @@ def test_identity_reason_cannot_be_attached_to_another_boundary(wrapped):
             "HOST_MAPPING_UNCONFIRMED", reason="OWNER_MISMATCH"
         )
     assert "diagnostic_reason" not in error.safe_diagnostics()
+
+
+@pytest.mark.parametrize("hop", [0, 1, 2, 3, 4])
+def test_nested_identity_reports_exact_failed_hop(monkeypatch, hop):
+    paths = [
+        _DESKTOP,
+        history_seal._DESKTOP_REPL,
+        history_seal._DESKTOP_NODE,
+        _DESKTOP,
+        history_seal._DESKTOP_PARENT,
+    ]
+    roles = ["candidate", "repl", "node", "ancestor_codex", "desktop"]
+
+    def execute(command, **kwargs):
+        assert kwargs["timeout"] == 5
+        if command[0] == "/bin/ps":
+            # Only the first codex candidate is mismatched in place; the parent
+            # codex is omitted from candidate discovery when it is the bad hop.
+            lines = [
+                f"{200 + i} {201 + i} {os.getuid()} {_BIRTH} "
+                + (
+                    path
+                    if i != hop
+                    else "/private/secret/codex"
+                    if i == 0
+                    else "/private/secret/other"
+                )
+                for i, path in enumerate(paths)
+            ]
+            raw = "\n".join(lines) + "\n"
+        elif command[0] == "/usr/sbin/lsof":
+            pid = int(command[command.index("-p") + 1])
+            raw = f"p{pid}\nftxt\nn{paths[pid - 200]}\nfcwd\nn/\n"
+        else:
+            raise AssertionError("must reject before container check")
+        return subprocess.CompletedProcess(command, 0, raw)
+
+    monkeypatch.setattr(
+        history_seal,
+        "subprocess",
+        SimpleNamespace(
+            run=execute,
+            SubprocessError=subprocess.SubprocessError,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    with pytest.raises(history_seal.ResearchProcessDiagnosticError) as error:
+        history_seal.require_research_processes_quiescent()
+    d = error.value.safe_diagnostics()
+    assert d["diagnostic_reason"] == "EXECUTABLE_MISMATCH"
+    assert d["diagnostic_chain"] == "nested"
+    assert d["diagnostic_hop"] == roles[hop]
+    assert d["diagnostic_observed"] == "other"
+    assert "private" not in json.dumps(d) and "secret" not in json.dumps(d)
+
+
+@pytest.mark.parametrize("value", ["private-secret", ["nested"], None])
+def test_identity_context_rejects_untrusted_values(value):
+    error = history_seal.ResearchProcessDiagnosticError(
+        "HOST_IDENTITY_UNCONFIRMED",
+        reason="EXECUTABLE_MISMATCH",
+        chain=value,
+        hop=value,
+        observed=value,
+    )
+    assert set(error.safe_diagnostics()) == {
+        "diagnostic_stage",
+        "diagnostic_code",
+        "diagnostic_reason",
+    }

@@ -36,6 +36,7 @@ from nexus.ops.platform_credentials import (
     credential_fingerprint,
 )
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
+from nexus.persistence.models.runtime import Job
 from nexus.settings import AgentRuntimeMode, EngineSettings
 
 
@@ -239,7 +240,12 @@ async def read_native_allocation(
 
 
 async def prepare_native_pool(
-    session: AsyncSession, settings: EngineSettings, run: AgentResearchRunRecord, *, deadline: float
+    session: AsyncSession,
+    settings: EngineSettings,
+    run: AgentResearchRunRecord,
+    *,
+    deadline: float,
+    preclaim_job: Job | None = None,
 ) -> StructuredStagedCodexCommittee:
     """Revalidate the original owner pool before claim; never create replacement work."""
     import asyncio
@@ -248,11 +254,27 @@ async def prepare_native_pool(
     from nexus.agents.research_stages.routes import selected_route
 
     credential = credential_for_preparation(settings)
-    owner = (
-        await session.execute(
-            text("SELECT scope_id FROM research_stage_route WHERE run_id=:run"), {"run": run.id}
+    async with asyncio.timeout_at(deadline):
+        owner = (
+            await session.execute(
+                text("SELECT scope_id FROM research_stage_route WHERE run_id=:run"), {"run": run.id}
+            )
+        ).scalar_one()
+        # Join the same short-transaction order as authorization and cleanup.
+        # Waiting consumes the original allowance; no account lock is held yet.
+        locked = await session.scalar(
+            text("SELECT id FROM research_stage_scope WHERE id=:scope AND NOT stopped FOR UPDATE"),
+            {"scope": owner},
         )
-    ).scalar_one()
+        if locked != owner:
+            raise ValueError("PLATFORM_NATIVE_ROUTE_INVALID")
+        if preclaim_job is not None:
+            from nexus.agents.codex_formal_stage import formal_stage_job_qualified
+
+            if preclaim_job.payload.get("run_id") != str(
+                run.id
+            ) or not await formal_stage_job_qualified(session, preclaim_job):
+                raise ValueError("CODEX_FORMAL_AUTHORITY_INVALID")
     members = (
         await session.execute(
             text(

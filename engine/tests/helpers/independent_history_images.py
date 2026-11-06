@@ -81,6 +81,8 @@ async def run(args):
                 settings, manual_paper.parser().parse_args(["read", "--request-id", identity])
             )
             assert receipt.status == expected and receipt.execution_locked
+            if identity == args["new"] and args.get("zero_disposition"):
+                assert receipt.independent_disposition == "unknown_acknowledged"
             results.append(receipt.model_dump(mode="json"))
         if args.get("expected_new") == "unknown":
             from nexus.agents.research_stages.proof import read_terminal_proof
@@ -131,7 +133,9 @@ async def run(args):
         await factory.kw["bind"].dispose()
 
 
-async def verify_images(factory, database_url, new, old, *, expected_new="completed"):
+async def verify_images(
+    factory, database_url, new, old, *, expected_new="completed", zero_disposition=False
+):
     names = [
         os.environ[k]
         for k in ("NEXUS_TEST_HISTORY_FORMAL_IMAGE", "NEXUS_TEST_HISTORY_MAINTENANCE_IMAGE")
@@ -146,6 +150,7 @@ async def verify_images(factory, database_url, new, old, *, expected_new="comple
         new=str(new),
         old=str(old),
         expected_new=expected_new,
+        zero_disposition=zero_disposition,
     )
     receipts = []
     for maintenance, image in [(False, names[0]), (True, names[1]), (False, names[0])]:

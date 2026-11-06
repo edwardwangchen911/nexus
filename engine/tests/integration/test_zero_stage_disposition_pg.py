@@ -1,0 +1,449 @@
+"""Explicit disposition is distinct from cleanup and keeps every unknown reserve."""
+
+from contextlib import nullcontext
+from types import SimpleNamespace
+
+import pytest
+from integration.test_independent_history_scope_pg import (
+    test_accepted_history_three_stock_preparation_worker_and_close as exercise,
+)
+from nexus import worker
+from nexus.agents.research_stages import executor
+from nexus.ops import manual_paper
+from nexus.paper import manual_preparation_close
+from nexus.paper.research_request import finish_research_request
+from nexus.persistence.models.manual_paper import ManualPaperRequest
+from sqlalchemy import text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["normal", "commit_unknown", "rollback", "maintenance", "late_before", "late_stage"]
+)
+async def test_zero_stage_disposition_normal_entry(
+    migrated_database_url, monkeypatch, tmp_path, request, case
+):
+    async def check(factory, live, prepared, receipt, calls, clients, old):
+        async def fail(*args, **kwargs):
+            raise ValueError("frozen preauthorization failure")
+
+        monkeypatch.setattr(executor.ShortTools, "execute", fail)
+        first = prepared.research.members[0]
+        assert await worker.run_agent_worker_once(
+            live, job_ids=(first.job_id,), formal_stage_capacity=True
+        )
+        assert calls == [] and clients == []
+        async with factory.begin() as db:
+            row = await db.get(ManualPaperRequest, receipt.request_id)
+            result = await finish_research_request(db, row=row, cancel_unused=True)
+            assert result.status == "unknown"
+            # Retire the setup host through the normal exact heartbeat exit writer.
+            from nexus.paper.manual_host_exit import record_host_exit
+            from nexus.persistence.models.runtime import WorkerHeartbeat
+            from sqlalchemy import select
+
+            for host in await db.scalars(
+                select(WorkerHeartbeat).where(WorkerHeartbeat.queue == "agent_paper")
+            ):
+                await record_host_exit(
+                    db,
+                    worker_id=host.worker_id,
+                    started_at=host.started_at,
+                    process_version=host.process_version,
+                )
+
+        monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_: None)
+        monkeypatch.setattr(
+            manual_paper, "preparation_service_control_lock", lambda *_: nullcontext()
+        )
+        monkeypatch.setattr(
+            manual_preparation_close, "require_preparation_producers_stopped", lambda *_: None
+        )
+        args = SimpleNamespace(
+            action="check-independent-acceptance",
+            request_id=receipt.request_id,
+            repo_root=tmp_path,
+            env_file=tmp_path / "env",
+        )
+        checked = await manual_paper.run(live, args)
+        assert checked.status == "eligible_at_check"
+        async with factory() as db:
+            assert (
+                await db.scalar(
+                    text(
+                        "SELECT count(*) FROM audit_events "
+                        "WHERE action='paper.independent_unknown.accepted'"
+                    )
+                )
+                == 0
+            )
+            held = (
+                await db.execute(
+                    text(
+                        "SELECT state,settled_usd FROM agent_daily_budget_reservations "
+                        "WHERE run_id=:id"
+                    ),
+                    {"id": first.run_id},
+                )
+            ).one()
+            assert tuple(held) == ("reserved", None)
+
+        from nexus.agents.research_stages.proof import read_terminal_proof
+        from nexus.paper import independent_unknown_acceptance as acceptance
+        from nexus.paper.independent_unknown_proof import FACT_FILTERS, independent_unknown_proof
+        from nexus.paper.manual_request import require_manual_account_available
+        from sqlalchemy.exc import DBAPIError
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        async def facts():
+            async with factory() as db:
+                return {
+                    table: tuple(
+                        await db.scalars(
+                            text(
+                                f"SELECT to_jsonb(t)::text FROM {table} t "
+                                "ORDER BY to_jsonb(t)::text"
+                            )
+                        )
+                    )
+                    for table in FACT_FILTERS
+                }
+
+        before = await facts()
+        async with factory.begin() as db:
+            row = await db.get(ManualPaperRequest, receipt.request_id)
+            now = await db.scalar(text("SELECT clock_timestamp()"))
+            with pytest.raises(ValueError):
+                await independent_unknown_proof(db, row=row, now=now)
+            proof = await read_terminal_proof(
+                db, run_id=first.run_id, now=now, close_empty_unknown=True
+            )
+            assert not proof.cleanup_confirmed and not proof.known and not proof.budget_settled
+            with pytest.raises(ValueError):
+                await require_manual_account_available(
+                    db, account_id=row.account_id, now=now, read_only=True
+                )
+        args.action = "accept-independent-unknown"
+        args.accept_unknown_effects = False
+        args.expected_proof_hash = checked.proof_hash
+        with pytest.raises(ValueError):
+            await manual_paper.run(live, args)
+        args.accept_unknown_effects = True
+        args.expected_proof_hash = "0" * 64
+        with pytest.raises(ValueError):
+            await manual_paper.run(live, args)
+        args.expected_proof_hash = checked.proof_hash
+        if case == "maintenance":
+            from nexus.agents import research_maintenance
+
+            monkeypatch.setattr(research_maintenance, "IMAGE_MAINTENANCE", True)
+            with pytest.raises(ValueError, match="RESEARCH_MAINTENANCE"):
+                await manual_paper.run(live, args)
+            args.action = "check-independent-acceptance"
+            assert (await manual_paper.run(live, args)).status == "eligible_at_check"
+            assert before == await facts()
+            return
+        if case == "rollback":
+            async with factory() as owner:
+                await owner.begin()
+                accepted = await acceptance.inspect_or_accept_independent_unknown(
+                    owner,
+                    settings=live,
+                    request_id=receipt.request_id,
+                    repo_root=tmp_path,
+                    env_file=tmp_path / "env",
+                    accept=True,
+                    accept_unknown_effects=True,
+                    expected_proof_hash=checked.proof_hash,
+                )
+                assert not accepted.replayed
+                async with factory.begin() as writer:
+                    with pytest.raises(DBAPIError) as busy:
+                        await writer.execute(
+                            text(
+                                "SELECT id FROM research_stage_scope WHERE id=:id FOR UPDATE NOWAIT"
+                            ),
+                            {"id": receipt.request_id},
+                        )
+                    assert busy.value.orig.sqlstate == "55P03"
+                    await writer.rollback()
+                with pytest.raises(ValueError):
+                    await manual_paper.run(live, args)
+                await owner.rollback()
+            assert before == await facts()
+            args.action = "check-independent-acceptance"
+            assert (await manual_paper.run(live, args)).status == "eligible_at_check"
+            return
+        if case == "commit_unknown":
+            commit = AsyncSession.commit
+
+            async def lost_ack(db):
+                await commit(db)
+                raise ConnectionError("synthetic lost acknowledgement")
+
+            with monkeypatch.context() as m:
+                m.setattr(AsyncSession, "commit", lost_ack)
+                with pytest.raises(ConnectionError):
+                    await manual_paper.run(live, args)
+        else:
+            accepted = await manual_paper.run(live, args)
+            assert accepted.status == "independent_unknown_acknowledged" and not accepted.replayed
+        args.action = "check-independent-acceptance"
+        assert (await manual_paper.run(live, args)).status == "already_acknowledged"
+        assert before == await facts()
+        async with factory.begin() as db:
+            row = await db.get(ManualPaperRequest, receipt.request_id)
+            now = await db.scalar(text("SELECT clock_timestamp()"))
+            assert await acceptance.independent_unknown_accepted(db, row, now=now)
+            await require_manual_account_available(
+                db, account_id=row.account_id, now=now, read_only=True
+            )
+            with pytest.raises(ValueError):
+                await acceptance.require_independent_execution_open(db, request_id=row.id)
+            audit = (
+                await db.execute(
+                    text(
+                        "SELECT schema_version,payload FROM audit_events "
+                        "WHERE action='paper.independent_unknown.accepted'"
+                    )
+                )
+            ).one()
+            assert audit.schema_version == acceptance.ZERO_STAGE_SCHEMA
+            assert audit.payload["zero_stage_disposition"]["cleanup_confirmed"] is False
+            assert audit.payload["zero_stage_disposition"]["usage_unknown"] is True
+            point = await db.begin_nested()
+            try:
+                await db.execute(
+                    text("ALTER TABLE agent_daily_budget_reservations DISABLE TRIGGER USER")
+                )
+                await db.execute(
+                    text(
+                        "UPDATE agent_daily_budget_reservations SET state='released' "
+                        "WHERE run_id=:run"
+                    ),
+                    {"run": first.run_id},
+                )
+                with pytest.raises(ValueError):
+                    await acceptance.independent_unknown_accepted(db, row, now=now)
+                with pytest.raises(ValueError):
+                    await acceptance.require_independent_execution_open(db, request_id=row.id)
+            finally:
+                await point.rollback()
+        assert before == await facts()
+        assert calls == [] and clients == []
+
+        import os
+
+        if os.environ.get("NEXUS_TEST_HISTORY_FORMAL_IMAGE") and case == "commit_unknown":
+            from helpers.independent_history_images import verify_images
+
+            await verify_images(
+                factory,
+                migrated_database_url,
+                receipt.request_id,
+                old,
+                expected_new="unknown",
+                zero_disposition=True,
+            )
+
+        from datetime import timedelta
+
+        async with factory.begin() as db:
+            row = await db.get(ManualPaperRequest, receipt.request_id)
+            now = await db.scalar(text("SELECT clock_timestamp()"))
+            assert await acceptance.independent_unknown_accepted(
+                db, row, now=now + timedelta(days=1)
+            )
+        if case == "late_before":
+            from helpers.zero_stage_recovery_host import append_late_fact
+            from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
+
+            await append_late_fact(factory, first.run_id)
+            result = await inspect_recovery_readiness(live)
+            assert result["status"] == "blocked" and result["failed_stage"] == "account_occupancy"
+            async with factory.begin() as db:
+                row = await db.get(ManualPaperRequest, receipt.request_id)
+                now = await db.scalar(text("SELECT clock_timestamp()"))
+                assert (
+                    await acceptance.read_independent_disposition(db, row, now=now)
+                    == "recheck_required"
+                )
+                with pytest.raises(ValueError):
+                    await acceptance.require_independent_execution_open(db, request_id=row.id)
+            return
+        if case in {"normal", "late_stage"}:
+            from decimal import Decimal
+
+            from nexus.monitoring.disclosure_context import configured_exhibit_store
+            from nexus.ops.agent_paper_loop import (
+                acquire_agent_paper_lock,
+            )
+            from nexus.ops.agent_paper_recovery import inspect_recovery_readiness
+
+            ready = await inspect_recovery_readiness(live)
+            assert ready["status"] == "ready", ready
+            assert ready["external_requests"] == 0
+            import asyncio
+            import base64
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            from helpers.monitor_host_process import write_environment
+
+            store_client = configured_exhibit_store(None)._client
+            (tmp_path / "objects.json").write_text(
+                json.dumps(
+                    {
+                        "objects": {
+                            key: base64.b64encode(content).decode()
+                            for key, content in store_client.objects.items()
+                        },
+                        "versions": store_client.versions,
+                        "case": case,
+                        "old_run": str(first.run_id),
+                        "bucket": configured_exhibit_store(None)._bucket,
+                        "prefix": configured_exhibit_store(None)._prefix,
+                    }
+                )
+            )
+            write_environment(
+                live,
+                tmp_path / "host.env",
+                {"ALPACA_API_KEY_ID": "synthetic", "ALPACA_API_SECRET_KEY": "synthetic"},
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = (
+                str(Path("engine/src").resolve()) + os.pathsep + str(Path("engine/tests").resolve())
+            )
+            error_file = (tmp_path / "recovery-host-error.log").open("wb")
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "helpers.zero_stage_recovery_host",
+                str(tmp_path),
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=error_file,
+            )
+            try:
+                line = await asyncio.wait_for(process.stdout.readline(), 35)
+                assert line, (tmp_path / "recovery-host-error.log").read_text()
+                signal = json.loads(line)
+                assert (
+                    signal["phase"] == "ready"
+                    and signal["heartbeats"] == 2
+                    and process.returncode is None
+                )
+                with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_ALREADY_RUNNING"):
+                    with acquire_agent_paper_lock(runtime_root=tmp_path / "isolated-host"):
+                        pass
+                start = manual_paper.parser().parse_args(
+                    [
+                        "start",
+                        "--mode",
+                        "research_and_monitor",
+                        "--idempotency-key",
+                        "next-after-zero-disposition",
+                    ]
+                )
+                with pytest.raises(ValueError, match="INDEPENDENT_NATURAL_BUDGET_PROTECTED"):
+                    await manual_paper.run(
+                        live.model_copy(update={"agent_daily_budget_usd": Decimal("1")}), start
+                    )
+                successor = await manual_paper.run(live, start)
+                assert successor.status == "queued" and successor.request_id != receipt.request_id
+                assert (await manual_paper.run(live, start)).request_id == successor.request_id
+                process.stdin.write(b"run\n")
+                await process.stdin.drain()
+                dispatched_line = await asyncio.wait_for(process.stdout.readline(), 90)
+                assert dispatched_line, (tmp_path / "recovery-host-error.log").read_text()
+                dispatched = json.loads(dispatched_line)
+                assert dispatched["phase"] == "dispatched"
+                if case == "late_stage":
+                    assert dispatched["stages"] == ["research"]
+                else:
+                    assert dispatched["parallel_http"]
+                    assert len(dispatched["stage_calls"]) == 3
+                    assert all(
+                        stages == ["research", "critique", "synthesis"]
+                        for stages in dispatched["stage_calls"].values()
+                    )
+                    assert len(dispatched["stages"]) == 9
+                assert dispatched["clients_closed"]
+                stopped_line = await asyncio.wait_for(process.stdout.readline(), 35)
+                assert stopped_line, (tmp_path / "recovery-host-error.log").read_text()
+                stopped = json.loads(stopped_line)
+                assert stopped["pid"] == signal["pid"]
+                if case == "late_stage":
+                    assert stopped["phase"] == "blocked"
+                    assert stopped["code"] == "STAGED_TERMINAL_PROOF_INVALID"
+                    assert await asyncio.wait_for(process.wait(), 10) == 1
+                else:
+                    assert stopped["phase"] == "stopped"
+                    assert await asyncio.wait_for(process.wait(), 10) == 0
+                async with factory.begin() as db:
+                    row = await db.get(ManualPaperRequest, successor.request_id)
+                    complete = await finish_research_request(db, row=row)
+                    assert complete.status == ("unknown" if case == "late_stage" else "completed")
+                    assert await finish_research_request(db, row=row) == complete
+                    held = (
+                        await db.execute(
+                            text(
+                                "SELECT state,settled_usd FROM agent_daily_budget_reservations "
+                                "WHERE run_id=:id"
+                            ),
+                            {"id": first.run_id},
+                        )
+                    ).one()
+                    assert tuple(held) == ("reserved", None)
+                    if case == "late_stage":
+                        saved = (
+                            (
+                                await db.execute(
+                                    text("""
+                            SELECT a.run_id,a.stage,o.input_tokens,o.output_tokens,c.confirmed,
+                                   t.known,b.state,b.settled_usd
+                            FROM research_request_manifests f
+                            JOIN research_request_members m ON m.manifest_id=f.id
+                            JOIN research_stage_authorization a ON a.run_id=m.run_id
+                            JOIN research_stage_observation o
+                                ON o.run_id=a.run_id AND o.stage=a.stage
+                            JOIN research_stage_cleanup c ON c.run_id=a.run_id AND c.stage=a.stage
+                            JOIN research_stage_terminal t ON t.run_id=a.run_id
+                            JOIN agent_daily_budget_reservations b ON b.run_id=a.run_id
+                            WHERE f.request_id=:id
+                        """),
+                                    {"id": row.id},
+                                )
+                            )
+                            .mappings()
+                            .all()
+                        )
+                        assert len(saved) == 1 and saved[0]["stage"] == 1
+                        usage = saved[0]
+                        assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0
+                        assert usage["confirmed"] and usage["known"]
+                        assert usage["state"] == "settled" and usage["settled_usd"] > 0
+                        terminal = await read_terminal_proof(
+                            db,
+                            run_id=usage["run_id"],
+                            now=await db.scalar(text("SELECT clock_timestamp()")),
+                        )
+                        assert (
+                            terminal.known
+                            and terminal.budget_settled
+                            and terminal.cleanup_confirmed
+                        )
+                assert calls == [] and clients == []
+            finally:
+                if process.returncode is None:
+                    process.terminate()
+                    await asyncio.wait_for(process.wait(), 10)
+                error_file.close()
+
+    await exercise(
+        migrated_database_url, monkeypatch, tmp_path, None, request, zero_stage_check=check
+    )
