@@ -263,9 +263,12 @@ async def execute_staged_claim(
     committee._tools = tools
     outputs = {}
     stage_number = 0
+    failure_phase = "input_preparation"
+    stage_failure: dict[str, object] | None = None
 
     async def invocation(payload: Any, **options: Any) -> Any:
-        nonlocal stage_number
+        nonlocal stage_number, failure_phase
+        failure_phase = "compile"
         stage_number += 1
         stage_deadline = wall_anchor + timedelta(
             seconds=min(original_deadline, options.get("deadline_at", original_deadline))
@@ -329,6 +332,7 @@ async def execute_staged_claim(
                     separators=(",", ":"),
                 ).encode()
             )
+        failure_phase = "authorization"
         try:
             ticket = await protocol.authorize(
                 claim,
@@ -359,6 +363,7 @@ async def execute_staged_claim(
         except Exception as error:
             await stop_preserving_error(protocol, scope, error)
             raise StagedCommitUnconfirmed("AUTHORIZATION_COMMIT_UNCONFIRMED") from error
+        failure_phase = "transport"
         old_guard = options.get("dispatch_guard")
 
         def guard() -> Any:
@@ -489,12 +494,49 @@ async def execute_staged_claim(
 
     committee.stage_invoker = invocation
     for role in ROLE_ORDER:
+        failure_phase = "input_preparation"
         try:
             outputs[role] = await committee.analyze(role, request, refs, committee._prompts[role])
         except ResearchAccountingBusy as error:
             await stop_preserving_error(protocol, scope, error)
             raise
-        except Exception:
+        except Exception as error:
+            from nexus.paper.research_failure import PRECLAIM_CODES
+
+            stage_failure = {
+                "run_id": str(run_id),
+                "job_id": str(claim.job_id),
+                "attempt_no": claim.attempt_no,
+                "fence_token": claim.fence_token,
+                "scope_id": str(scope),
+                "stage": ROLE_ORDER.index(role) + 1,
+                "failure_phase": failure_phase,
+                "failure_code": str(error)
+                if type(error) in {ValueError, ProtocolRejected}
+                and str(error)
+                in PRECLAIM_CODES
+                | {
+                    "PLATFORM_PROFILE_INVALID",
+                    "PLATFORM_WIRE_CHANGED",
+                    "PLATFORM_COMPACT_INSTRUCTIONS_REQUIRED",
+                    "PLATFORM_ALLOCATION_CHANGED",
+                    "COMPARISON_INPUT_CHANGED",
+                    "PLATFORM_CAPACITY_ENVELOPE_CHANGED",
+                    "PLATFORM_INPUT_TOO_LARGE",
+                    "PLATFORM_PRIOR_USAGE_INVALID",
+                    "PLATFORM_OUTPUT_EXHAUSTED",
+                    "PLATFORM_STAGE_INVALID",
+                    "PLATFORM_NATIVE_REQUEST_REQUIRED",
+                }
+                else "RESEARCH_FAILURE_UNCLASSIFIED",
+                "exception_kind": "timeout"
+                if isinstance(error, TimeoutError)
+                else "protocol_rejected"
+                if type(error) is ProtocolRejected
+                else "invalid_input"
+                if type(error) is ValueError
+                else "unexpected_exception",
+            }
             break
     assert committee._deadline == original_deadline
     frozen = FrozenCommittee(committee, outputs, request, refs)
@@ -548,6 +590,17 @@ async def execute_staged_claim(
                         rows=rows,
                     )
                 closed_at = clock()
+                if stage_failure is not None:
+                    from nexus.audit.service import append_audit_event
+
+                    await append_audit_event(
+                        target,
+                        actor_id="research-stage-worker",
+                        action="research.stage_failure",
+                        schema_version="research_stage_failure_v1",
+                        occurred_at=closed_at,
+                        payload=stage_failure,
+                    )
                 await target.execute(
                     text(
                         "INSERT INTO "

@@ -41,13 +41,16 @@ class TerminalProof:
     orphan: bool
     evidence_hash: str
     cleanup_hash: str
+    empty_authorizations: bool = False
 
 
 async def read_terminal_proof(
-    session: AsyncSession, *, run_id: UUID, now: datetime
+    session: AsyncSession, *, run_id: UUID, now: datetime, close_empty_unknown: bool = False
 ) -> TerminalProof | None:
     """Same frozen membership for accounting, closeout, seal inspection and admission.
 
+    close_empty_unknown is exclusively for root-status aggregation under the
+    original scope lock. It never proves cleanup or grants acceptance.
     A result is neither host-exit evidence nor permission to accept unknown effects.
     Late diagnostic rows cannot retroactively enlarge the terminal's proof.
     """
@@ -193,8 +196,29 @@ async def read_terminal_proof(
         .mappings()
         .all()
     )
-    if not auths or [a["stage"] for a in auths] != list(range(1, len(auths) + 1)) or len(auths) > 3:
+    if not auths and not (
+        close_empty_unknown
+        and kind == "independent"
+        and not orphan
+        and member["stopped"]
+        and run.status == "failed"
+        and job.status == "failed"
+        and terminal["known"] is False
+        and terminal["evidence"] == []
+        and terminal["observed_stages"] == []
+    ):
         raise ProtocolRejected(invalid)
+    if [a["stage"] for a in auths] != list(range(1, len(auths) + 1)) or len(auths) > 3:
+        raise ProtocolRejected(invalid)
+    if not auths:
+        # Absence in the frozen terminal is not absence in current durable facts.
+        # The finish caller retains the original scope lock until root commit.
+        for table in ("authorization", "observation", "verification", "cleanup"):
+            if await session.scalar(
+                text(f"SELECT 1 FROM research_stage_{table} WHERE run_id=:run LIMIT 1"),
+                {"run": run.id},
+            ):
+                raise ProtocolRejected(invalid)
     for auth in auths:
         if (
             (
@@ -325,7 +349,7 @@ async def read_terminal_proof(
             # Unknown-history acceptance cannot waive a separately known cost
             # overrun, including after the original reservation's business day.
             raise ProtocolRejected(invalid)
-    if orphan:
+    if orphan or not auths:
         outputs = tuple(
             await session.scalars(
                 select(AgentResearchOutputRecord).where(AgentResearchOutputRecord.run_id == run.id)
@@ -333,7 +357,9 @@ async def read_terminal_proof(
         )
         events = tuple(
             await session.scalars(
-                select(AgentResearchEventRecord).where(AgentResearchEventRecord.run_id == run.id)
+                select(AgentResearchEventRecord)
+                .where(AgentResearchEventRecord.run_id == run.id)
+                .order_by(AgentResearchEventRecord.sequence)
             )
         )
         reason = {
@@ -341,6 +367,9 @@ async def read_terminal_proof(
             if known
             else "RESEARCH_LEASE_EXPIRED_RESULT_UNKNOWN"
         }
+        if not auths:
+            reason = {"reason": "model_usage_uncertain"}
+            events = events[-1:]
         if len(outputs) != 1 or len(events) != 1:
             raise ProtocolRejected(invalid)
         output, event = outputs[0], events[0]
@@ -350,15 +379,19 @@ async def read_terminal_proof(
             or output.role is not None
             or output.prompt_hash is not None
             or output.intent is not None
-            or output.payload != reason
+            or (
+                output.payload != reason
+                if orphan
+                else output.payload.get("reason") != reason["reason"]
+            )
             or output.content_hash
-            != _hash({"status": "failed", "role": None, "payload": reason, "intent": None})
-            or event.sequence != 1
+            != _hash({"status": "failed", "role": None, "payload": output.payload, "intent": None})
+            or (event.sequence != 1 if orphan else event.sequence != 3)
             or event.state != "failed"
             or event.details != reason
             or event.event_hash != _hash({"state": "failed", "details": reason})
-            or output.created_at > now
-            or event.created_at > now
+            or output.created_at > (now if orphan else terminal["closed_at"])
+            or event.created_at > (now if orphan else terminal["closed_at"])
         ):
             raise ProtocolRejected(invalid)
     # Financial membership stays frozen; lifecycle may gain a later, immutable
@@ -388,8 +421,10 @@ async def read_terminal_proof(
         }
         for c in cleanup_rows
     ]
-    confirmed = len(cleanup_rows) == len(auths) and all(
-        c["confirmed"] is True for c in cleanup_rows
+    confirmed = (
+        bool(auths)
+        and len(cleanup_rows) == len(auths)
+        and all(c["confirmed"] is True for c in cleanup_rows)
     )
     return TerminalProof(
         run.id,
@@ -399,4 +434,5 @@ async def read_terminal_proof(
         orphan,
         terminal["chain_hash"],
         evidence_digest(cleanup_facts),
+        not auths,
     )

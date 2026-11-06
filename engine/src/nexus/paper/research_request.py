@@ -460,7 +460,12 @@ async def finish_research_request(
     ):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     await require_research_jobs_settled(
-        session, row=row, view=view.research, now=now, allow_unknown_usage=True
+        session,
+        row=row,
+        view=view.research,
+        now=now,
+        allow_unknown_usage=True,
+        close_empty_unknown=True,
     )
     if any(not member.usage_known for member in view.research.members):
         return await record_manual_request_event(
@@ -649,6 +654,7 @@ async def require_research_jobs_settled(
     view: ResearchManifestView,
     now: datetime,
     allow_unknown_usage: bool = False,
+    close_empty_unknown: bool = False,
 ) -> None:
     from nexus.agents.research_stages.public import _research_settled
 
@@ -669,5 +675,10 @@ async def require_research_jobs_settled(
                 raise ValueError("INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED")
             return
     await _research_settled(
-        session, row=row, view=view, now=now, allow_unknown_usage=allow_unknown_usage
+        session,
+        row=row,
+        view=view,
+        now=now,
+        allow_unknown_usage=allow_unknown_usage,
+        close_empty_unknown=close_empty_unknown,
     )
