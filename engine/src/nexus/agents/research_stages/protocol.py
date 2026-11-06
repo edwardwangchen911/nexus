@@ -358,6 +358,28 @@ class StagedProtocol:
                 except ValueError as error:
                     # The history read is before any new ticket or commit attempt.
                     raise ProtocolRejected("FORMAL_SUCCESSOR_HISTORY_BLOCKED") from error
+            if (
+                route is not None
+                and route["kind"] == "independent"
+                and route.get("platform_binding") is not None
+            ):
+                from nexus.paper.independent_history_scope import SAFE_CODES, recheck
+                from nexus.persistence.models.manual_paper import ManualPaperRequest
+
+                request = required(await session.get(ManualPaperRequest, route["scope_id"]))
+                try:
+                    await recheck(
+                        session,
+                        request,
+                        now=self._now(now),
+                        run_id=route["run_id"],
+                        cleanup_deadline=member["cleanup_deadline"],
+                    )
+                except ValueError as error:
+                    code = str(error)
+                    if code in SAFE_CODES | {"MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"}:
+                        raise ProtocolRejected(code) from error
+                    raise
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
             budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)

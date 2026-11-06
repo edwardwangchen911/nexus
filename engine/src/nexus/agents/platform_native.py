@@ -403,6 +403,19 @@ async def prepare_native_pool(
                 cleanup_deadline=await database_now(session)
                 + timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS),
             )
+        if request_record is not None and request_record.contract_version == 3:
+            from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
+            from nexus.paper.independent_history_scope import recheck
+            from nexus.paper.research_request import database_now
+
+            checked = await database_now(session)
+            await recheck(
+                session,
+                request_record,
+                now=checked,
+                run_id=run.id,
+                cleanup_deadline=checked + timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS),
+            )
         return selected
 
 

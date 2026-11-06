@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.jobs.repository import job_lease_consumed
+from nexus.paper.independent_history_scope import SAFE_CODES as HISTORY_SCOPE_CODES
 from nexus.paper.manual_request import ResearchMemberView, read_manual_request
 from nexus.paper.research_request import database_now, require_research_jobs_settled
 from nexus.paper.target_service import lock_portfolio_account
@@ -20,7 +21,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.runtime import Job, JobAttempt, JobLease
 
-PLATFORM_PRECLAIM_CODES = frozenset(
+PLATFORM_PRECLAIM_CODES = HISTORY_SCOPE_CODES | frozenset(
     {
         "PLATFORM_HTTP_CREDENTIAL_CHANGED",
         "PLATFORM_PRICE_WINDOW_INVALID",
@@ -143,6 +144,7 @@ async def record_research_failure(
     error: BaseException,
     preparation: bool = False,
     cleanup: bool = False,
+    stage: int | None = None,
 ) -> None:
     row = await session.get(ManualPaperRequest, request_id)
     if row is None or row.contract_version not in {2, 3, 4, 5}:
@@ -160,9 +162,17 @@ async def record_research_failure(
         preparation
         and not cleanup
         and type(error) is ValueError
-        and error.args == ("SINGLE_SOL_BUDGET_SCOPE_INVALID",)
+        and len(error.args) == 1
+        and str(error) in HISTORY_SCOPE_CODES | {"SINGLE_SOL_BUDGET_SCOPE_INVALID"}
     ):
-        code = "SINGLE_SOL_BUDGET_SCOPE_INVALID"
+        code = str(error)
+    if not preparation and not cleanup:
+        from nexus.agents.research_stages.protocol import ProtocolRejected
+
+        if type(error) is ProtocolRejected and str(error) in HISTORY_SCOPE_CODES:
+            code = str(error)
+    if stage is not None and (stage not in {1, 2, 3} or code not in HISTORY_SCOPE_CODES):
+        raise ValueError("RESEARCH_FAILURE_UNCLASSIFIED")
     await append_audit_event(
         session,
         actor_id="manual-research-host",
@@ -172,7 +182,9 @@ async def record_research_failure(
         payload={
             "request_id": str(row.id),
             "request_hash": row.request_hash,
-            "failure_phase": "research_cleanup"
+            "failure_phase": f"research_stage_{stage}"
+            if stage is not None
+            else "research_cleanup"
             if cleanup
             else "research_preparation"
             if preparation

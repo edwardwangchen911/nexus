@@ -60,7 +60,14 @@ from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 )
 @pytest.mark.asyncio
 async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
-    migrated_database_url, monkeypatch, fault
+    migrated_database_url,
+    monkeypatch,
+    fault,
+    *,
+    after_successor_setup=None,
+    successor_at=None,
+    history_symbols=None,
+    include_scheduled_history=False,
 ):
     from nexus.paper import manual_preparation_close as close
     from nexus.paper import preparation_unknown_ack as ack
@@ -75,6 +82,7 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
         decision_time=AT,
         candidate_instruments=INSTRUMENTS,
         occupied=fault == "occupied",
+        candidate_symbols=history_symbols,
     )
     clock = [AT]
     original = AsyncSession.scalar
@@ -543,8 +551,46 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
             from integration.test_candidate_multistock_path import _set_test_insert_clock
             from integration.test_sol_profile_pg import current_record, register
 
-            monkeypatch.setattr(ack, "_FORMAL_SUCCESSOR_POLICY_AT", AT + timedelta(minutes=1))
-            clock[0] = (AT + timedelta(days=3)).replace(hour=13, minute=45)
+            if include_scheduled_history:
+                from nexus.paper import agent_cycle
+                from nexus.paper.scheduled_unknown_acceptance import (
+                    inspect_or_accept_scheduled_unknown,
+                )
+                from nexus.paper.single_sol_obligations import original_slot
+
+                historical_slot = original_slot(AT.date())
+                clock[0] = historical_slot + timedelta(minutes=10)
+                await _set_test_insert_clock(sessions, historical_slot)
+                async with sessions.begin() as db:
+                    reservation = await agent_cycle.reserve_schwab_agent_paper_trigger(
+                        db,
+                        account_id=authority.account_id,
+                        candidate_batch_id=settings.agent_paper_candidate_batch_id,
+                        now=historical_slot,
+                        client_idempotency_key=f"agent-paper-loop:{historical_slot.isoformat()}",
+                        formal_stage_capacity=True,
+                        formal_model_config_id=settings.agent_paper_formal_model_config_id,
+                    )
+                    await agent_cycle.finish_schwab_agent_paper_trigger(
+                        db, reservation=reservation, error_code="AGENT_PAPER_TRIGGER_FAILED"
+                    )
+                async with sessions.begin() as db:
+                    accepted = await inspect_or_accept_scheduled_unknown(
+                        db,
+                        settings=settings,
+                        claim_id=reservation.claim_id,
+                        repo_root=Path("/fixture"),
+                        env_file=Path("/fixture/env"),
+                        accept=True,
+                        accept_unknown_effects=True,
+                    )
+                    assert accepted.status == "scheduled_unknown_acknowledged"
+            monkeypatch.setattr(
+                ack,
+                "_FORMAL_SUCCESSOR_POLICY_AT",
+                AT + timedelta(hours=2) if include_scheduled_history else AT + timedelta(minutes=1),
+            )
+            clock[0] = successor_at or (AT + timedelta(days=3)).replace(hour=13, minute=45)
             following = clock[0] + timedelta(days=1)
             async with sessions.begin() as session:
                 session.add(
@@ -603,6 +649,9 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                         seen_at=clock[0],
                     )
                 )
+        if after_successor_setup is not None:
+            await after_successor_setup(sessions, settings, old, clock, original)
+            return
         if fault == "sol-successor":
             from decimal import Decimal
 
