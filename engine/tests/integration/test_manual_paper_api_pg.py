@@ -36,6 +36,64 @@ from unit.ops.test_formal_stage_registration import OPTIONS
 from unit.ops.test_full_input_capacity_registration import V9_OPTIONS
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["advanced", "future", "stale", "duplicate", "version"])
+async def test_configured_host_observes_heartbeat_after_admission_history(
+    migrated_database_url, monkeypatch, case
+):
+    from nexus.paper.manual_entry import (
+        MANUAL_HOST_PROTOCOL,
+        manual_host_scope,
+        require_configured_manual_host,
+    )
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+    from nexus.persistence.session import session_factory
+
+    settings = EngineSettings(database_url=migrated_database_url, release_revision="a" * 40)
+    factory = session_factory(settings)
+    # History validation spans a normal heartbeat commit. No wall-clock sleeps.
+    admitted_at = AT
+    observed_at = admitted_at + timedelta(seconds=6)
+    seen_at = admitted_at + timedelta(seconds=1)
+    if case == "future":
+        seen_at = observed_at + timedelta(seconds=1)
+    elif case == "stale":
+        seen_at = admitted_at - timedelta(seconds=25)
+    scalar = AsyncSession.scalar
+
+    async def clock(self, statement, *args, **kwargs):
+        if str(statement) == "SELECT clock_timestamp() AS clock_timestamp_1":
+            return observed_at
+        return await scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", clock)
+    try:
+        async with factory.begin() as writer:
+            for number in range(2 if case == "duplicate" else 1):
+                writer.add(
+                    WorkerHeartbeat(
+                        queue="agent_paper",
+                        worker_id=(
+                            f"agent-paper-loop-{UUID(int=number + 1)}:manual:"
+                            f"{manual_host_scope(settings)}"
+                        ),
+                        process_version=f"{MANUAL_HOST_PROTOCOL}+"
+                        + ("b" * 40 if case == "version" else "a" * 40),
+                        migration_head=CURRENT_MIGRATION_HEAD,
+                        started_at=admitted_at - timedelta(minutes=1),
+                        seen_at=seen_at,
+                    )
+                )
+        async with factory.begin() as reader:
+            if case == "advanced":
+                await require_configured_manual_host(reader, settings, now=admitted_at)
+            else:
+                with pytest.raises(ValueError, match="MANUAL_HOST_NOT_READY"):
+                    await require_configured_manual_host(reader, settings, now=admitted_at)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 @pytest.mark.parametrize("count", [3, 5])
 @pytest.mark.parametrize("mode", ["research_only", "research_and_paper"])
 @pytest.mark.parametrize(
