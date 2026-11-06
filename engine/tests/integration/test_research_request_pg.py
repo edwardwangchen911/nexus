@@ -74,8 +74,8 @@ def research_snapshot_uses_database_clock(monkeypatch):
     monkeypatch.setattr(snapshots, "prepare_research_snapshot", prepare)
 
 
-async def prepare_scope(url, tmp_path, *, bounded=False):
-    account = await seed_paper_batch(url)
+async def prepare_scope(url, tmp_path, *, bounded=False, account=None):
+    account = account or await seed_paper_batch(url)
     settings = EngineSettings(database_url=url, agent_runtime_mode="codex_sdk").model_copy(
         update={
             "object_store_endpoint": "http://127.0.0.1:9000",

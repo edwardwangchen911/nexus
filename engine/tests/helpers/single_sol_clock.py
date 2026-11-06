@@ -14,7 +14,7 @@ def preopen_target(wall):
     return target.astimezone(UTC)
 
 
-async def preopen_fixture_clock(url, monkeypatch):
+async def preopen_fixture_clock(url, monkeypatch, *, target=None):
     """One synthetic morning for archives, DB inserts, claims and model-local clocks."""
     from helpers import current_identity
     from integration import test_research_identity_context
@@ -33,7 +33,7 @@ async def preopen_fixture_clock(url, monkeypatch):
         name = await db.scalar(text("SELECT current_database()"))
         assert name.isidentifier() and name != "postgres"
         wall = await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
-        target = preopen_target(wall)
+        target = target or preopen_target(wall)
         delta = int((wall - target).total_seconds())
         await db.execute(text("CREATE SCHEMA fixture_clock"))
         await db.execute(

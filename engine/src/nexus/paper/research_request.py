@@ -224,6 +224,9 @@ async def _prepare_research_request(
     view = await read_manual_request(session, row)
     if view.status != "preparing":
         return view
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     if row.contract_version in {4, 5}:
         from nexus.monitoring.host import (
             BATCH_PREPARATION_HEADROOM_SECONDS,
@@ -239,6 +242,25 @@ async def _prepare_research_request(
             if await database_now(session) >= deadline:
                 raise ValueError("SINGLE_SOL_NATURAL_WINDOW_PROTECTED")
             return prepared
+    from nexus.paper.independent_history_scope import binding as history_binding
+    from nexus.paper.independent_history_scope import recheck
+
+    if history_binding(row) is not None:
+        from nexus.monitoring.host import (
+            BATCH_PREPARATION_HEADROOM_SECONDS,
+            INCREMENT_ACTION_HEADROOM_SECONDS,
+        )
+
+        async with asyncio.timeout(BATCH_PREPARATION_HEADROOM_SECONDS):
+            prepared = await _prepare_members(session, settings, row)
+            now = await database_now(session)
+            await recheck(
+                session,
+                row,
+                now=now,
+                cleanup_deadline=now + timedelta(seconds=3 * INCREMENT_ACTION_HEADROOM_SECONDS),
+            )
+            return prepared
     return await _prepare_members(session, settings, row)
 
 
@@ -251,6 +273,9 @@ async def _prepare_members(
 
     require_research_open()
     now = await database_now(session)
+    from nexus.paper.independent_history_scope import recheck
+
+    await recheck(session, row, now=now)
     await require_manual_account_available(
         session, account_id=row.account_id, now=now, excluding_request_id=row.id
     )
@@ -567,6 +592,11 @@ async def require_research_profile(
         != {"runtime_mode", "daily_limit_usd", "orchestrator_id", "prompt_hashes"}
         | ({"execution_policy"} if parallel else set())
         | ({"single_sol"} if row.contract_version in {4, 5} else set())
+        | (
+            {"historical_exception"}
+            if isinstance(profile, dict) and "historical_exception" in profile
+            else set()
+        )
         or settings.agent_runtime_mode is None
         or profile["runtime_mode"] != settings.agent_runtime_mode.value
         or profile["runtime_mode"] != ("responses" if platform else "codex_sdk")
@@ -577,6 +607,9 @@ async def require_research_profile(
         or profile["daily_limit_usd"] != format(settings.agent_daily_budget_usd.normalize(), "f")
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
+    from nexus.paper.independent_history_scope import binding as history_binding
+
+    history_binding(row)
     try:
         identifier = UUID(str(profile["orchestrator_id"]))
     except ValueError:

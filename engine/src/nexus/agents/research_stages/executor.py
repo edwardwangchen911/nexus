@@ -338,7 +338,23 @@ async def execute_staged_claim(
                 not_after=stage_deadline,
                 **({"platform_wire": platform_wire} if platform_wire is not None else {}),
             )
-        except (ProtocolRejected, LeaseLostError, ResearchAccountingBusy):
+        except ProtocolRejected as error:
+            from nexus.paper.independent_history_scope import SAFE_CODES
+            from nexus.paper.research_failure import record_research_failure
+
+            if route["kind"] == "independent" and str(error) in SAFE_CODES:
+                try:
+                    async with asyncio.timeout(1), factory.begin() as diagnostic:
+                        await record_research_failure(
+                            diagnostic,
+                            request_id=route["scope_id"],
+                            error=error,
+                            stage=stage_number,
+                        )
+                except BaseException:
+                    error.add_note("RESEARCH_FAILURE_AUDIT_UNCONFIRMED")
+            raise
+        except (LeaseLostError, ResearchAccountingBusy):
             raise
         except Exception as error:
             await stop_preserving_error(protocol, scope, error)

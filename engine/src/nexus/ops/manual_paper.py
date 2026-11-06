@@ -50,7 +50,9 @@ from nexus.paper.manual_cancel import (
 from nexus.paper.manual_entry import (
     SAFE_ENTRY_CODES,
     FormalAdmissionCheck,
+    IndependentAdmissionCheck,
     check_configured_formal_admission,
+    check_configured_independent_admission,
     manual_host_scope,
     read_configured_manual_request,
     require_manual_host,
@@ -217,6 +219,10 @@ def parser() -> argparse.ArgumentParser:
         help="Read formal queue eligibility without reserving a budget or submitting",
     )
     commands.add_parser(
+        "check-independent-admission",
+        help="Read independent three-stock eligibility without submitting or reserving",
+    )
+    commands.add_parser(
         "inspect-single-sol",
         help="Read a selected Sol batch member and full-session budget estimate",
     ).add_argument("--instrument-id", type=UUID, required=True)
@@ -308,6 +314,7 @@ async def run(
     ManualRequestView
     | IntentReceipt
     | FormalAdmissionCheck
+    | IndependentAdmissionCheck
     | SingleSolSelection
     | SingleSolOffer
     | TerminalCycleCancelReceipt
@@ -397,7 +404,11 @@ async def run(
                     expected_intent_hash=args.expected_intent_hash,
                     shared_budget=args.admission_policy == "shared-budget",
                 )
-        if args.action in {"check-formal-admission", "inspect-single-sol"}:
+        if args.action in {
+            "check-formal-admission",
+            "check-independent-admission",
+            "inspect-single-sol",
+        }:
             async with factory.begin() as session:
                 await session.execute(
                     text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
@@ -406,6 +417,8 @@ async def run(
                     return await inspect_single_sol(
                         session, settings, instrument_id=args.instrument_id
                     )
+                if args.action == "check-independent-admission":
+                    return await check_configured_independent_admission(session, settings)
                 return await check_configured_formal_admission(session, settings)
         if args.action == "run-research":
             from nexus.ops.manual_paper_host import run_pure_research_once

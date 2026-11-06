@@ -407,3 +407,30 @@ for (const width of [390, 1280]) {
     });
   }
 }
+
+for (const [reason, message] of [
+  ["INDEPENDENT_HISTORY_SCOPE_UNSUPPORTED", "本独立请求不适用已接受的历史例外，旧身份不会升级。"],
+  ["INDEPENDENT_HISTORY_PROOF_INVALID", "绑定的历史处置证明缺失或已变更，暂不能继续发送。"],
+  ["INDEPENDENT_NATURAL_BUDGET_PROTECTED", "扣除原预留及自然研究所需额度后，本次独立研究预算不足。"],
+  ["INDEPENDENT_NATURAL_WINDOW_PROTECTED", "剩余时间不足以完成独立研究及清理，须保留自然调度窗口。"],
+  ["INDEPENDENT_ECONOMIC_SCOPE_CONFLICT", "当前已有经济预算保护，本独立研究不能同时准入。"],
+  ["INDEPENDENT_RECHECK_UNAVAILABLE", "本次派发复验未通过，未获得新的发送许可。"],
+]) {
+  test(`independent history refusal ${reason} is precise and never resubmits`, async ({ page }) => {
+    await installFixtures(page, readyWorkbench(), []);
+    const methods: string[] = [];
+    await page.route("**/api/v1/paper/manual-requests", async (route) => {
+      methods.push(route.request().method());
+      expect(route.request().postDataJSON()).toEqual({ mode: "research_and_monitor" });
+      await route.fulfill({ status: 409, json: { error: { code: "PROPOSAL_NOT_EXECUTABLE",
+        message: "private material", details: { reason_code: reason } } } });
+    });
+    await page.goto("/workspace");
+    await page.getByRole("button", { name: "研究并持续监控", exact: true }).click();
+    const panel = page.getByRole("region", { name: "开始研究与内部模拟", exact: true });
+    await expect(panel.getByText(message, { exact: true })).toBeVisible();
+    await expect(panel.getByText(/提交结果尚未确认|private material/)).toHaveCount(0);
+    expect(methods).toEqual(["POST"]);
+    await expect(panel.getByRole("button", { name: "研究并持续监控", exact: true })).toBeDisabled();
+  });
+}

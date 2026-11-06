@@ -16,6 +16,7 @@ from nexus.paper.current_preparation_recovery import (
     begin_preparation_effects,
     start_preparation_execution,
 )
+from nexus.paper.independent_history_scope import SAFE_CODES as HISTORY_SCOPE_CODES
 from nexus.paper.manual_request import (
     ManualRequestView,
     claim_manual_request,
@@ -44,7 +45,8 @@ MANUAL_TRIGGER_PHASES = frozenset(
 MANUAL_TRIGGER_KINDS = frozenset(
     {"timeout", "database", "name_error", "attribute_error", "validation", "unexpected_exception"}
 )
-MANUAL_TRIGGER_CODES = frozenset(
+
+MANUAL_TRIGGER_CODES = HISTORY_SCOPE_CODES | frozenset(
     {
         "MANUAL_REQUEST_INVALID",
         "MANUAL_REQUEST_TERMINAL_OR_UNKNOWN",
@@ -445,7 +447,18 @@ async def claim_configured_manual_request(
         return await record_manual_request_event(
             session, row, status="unavailable", code="MANUAL_INPUTS_UNAVAILABLE"
         ), False
-    return await claim_manual_request(session, request_id=request_id)
+    try:
+        return await claim_manual_request(session, request_id=request_id)
+    except ValueError as error:
+        from nexus.paper.independent_history_scope import SAFE_CODES
+        from nexus.paper.research_failure import record_research_failure
+
+        if row.contract_version != 3 or str(error) not in SAFE_CODES:
+            raise
+        await record_research_failure(session, request_id=row.id, error=error, preparation=True)
+        return await record_manual_request_event(
+            session, row, status="unavailable", code="MANUAL_INPUTS_UNAVAILABLE"
+        ), False
 
 
 async def finish_configured_manual_request(

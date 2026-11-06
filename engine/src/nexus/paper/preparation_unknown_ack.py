@@ -639,7 +639,15 @@ async def require_no_conflicting_formal_successor(
         .join(ManualPaperRequest, ManualPaperRequest.model_config_id == AgentModelConfigRecord.id)
         .where(
             ManualPaperRequest.account_id == account_id,
-            ManualPaperRequest.mode == "research_and_paper",
+            (ManualPaperRequest.mode == "research_and_paper")
+            | (
+                (ManualPaperRequest.contract_version == 3)
+                & (ManualPaperRequest.mode == "research_and_monitor")
+                & (
+                    ManualPaperRequest.research_profile["historical_exception"]["version"].astext
+                    == "independent_accepted_history_v1"
+                )
+            ),
             ManualPaperRequest.requested_at >= start,
             ManualPaperRequest.requested_at < start + timedelta(days=1),
         )

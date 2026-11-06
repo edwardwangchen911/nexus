@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.jobs.models import job_input_hash
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
+from nexus.paper.independent_history_scope import SAFE_CODES as HISTORY_SCOPE_CODES
 from nexus.paper.manual_request import (
     ManualMode,
     ManualRequestView,
@@ -28,7 +29,8 @@ from nexus.settings import AgentRuntimeMode, EngineSettings
 # Advertised only by a host that implements timely queue inspection and dispatch.
 # Disabled or incompletely bound hosts keep the scheduled-only protocol.
 MANUAL_HOST_PROTOCOL = "nexus-manual-paper-v1"
-SAFE_ENTRY_CODES = frozenset(
+
+SAFE_ENTRY_CODES = HISTORY_SCOPE_CODES | frozenset(
     {
         "MANUAL_ENTRY_DISABLED",
         "MANUAL_CONFIGURATION_UNAVAILABLE",
@@ -219,7 +221,23 @@ async def _configured_admission(
         if mode == "research_and_paper"
         else require_acknowledged_operation_scope
     )
-    await scope_check(session, account_id=account_id, model_config_id=model_id, now=now)
+    if mode == "research_and_monitor":
+        from nexus.paper.independent_history_scope import capture, require_capacity
+
+        history = await capture(session, account_id=account_id, model_config_id=model_id, now=now)
+        if history is not None:
+            await require_capacity(
+                session,
+                account_id=account_id,
+                batch_id=batch_id,
+                model_id=model_id,
+                daily_limit=settings.agent_daily_budget_usd,
+                now=now,
+            )
+        else:
+            await scope_check(session, account_id=account_id, model_config_id=model_id, now=now)
+    else:
+        await scope_check(session, account_id=account_id, model_config_id=model_id, now=now)
     await require_configured_manual_host(session, settings, now=now)
     if mode not in {"research_only", "research_and_monitor"}:
         try:
@@ -244,9 +262,37 @@ class FormalAdmissionCheck(BaseModel):
     external_requests: Literal[0] = 0
 
 
+class IndependentAdmissionCheck(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    status: Literal["independent_request_queueable"] = "independent_request_queueable"
+    checked_at: datetime
+    budget_reserved: Literal[False] = False
+    execution_locked: Literal[True] = True
+    external_requests: Literal[0] = 0
+
+
 async def check_configured_formal_admission(
     session: AsyncSession, settings: EngineSettings
 ) -> FormalAdmissionCheck:
+    return FormalAdmissionCheck(
+        checked_at=await _check_configured_queue(session, settings, mode="research_and_paper")
+    )
+
+
+async def check_configured_independent_admission(
+    session: AsyncSession, settings: EngineSettings
+) -> IndependentAdmissionCheck:
+    return IndependentAdmissionCheck(
+        checked_at=await _check_configured_queue(session, settings, mode="research_and_monitor")
+    )
+
+
+async def _check_configured_queue(
+    session: AsyncSession,
+    settings: EngineSettings,
+    *,
+    mode: ManualMode,
+) -> datetime:
     from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
     from nexus.agents.platform_profile import sol_business_model_matches
     from nexus.agents.research_maintenance import require_research_open
@@ -259,7 +305,7 @@ async def check_configured_formal_admission(
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     await lock_portfolio_account(session, account_id)
     batch_id, model_id, now = await _configured_admission(
-        session, settings, mode="research_and_paper", account_id=account_id
+        session, settings, mode=mode, account_id=account_id
     )
     await require_manual_account_available(session, account_id=account_id, now=now, read_only=True)
     await validate_agent_paper_candidate_batch(
@@ -271,7 +317,7 @@ async def check_configured_formal_admission(
         and settings.research_admission_mode != AgentRuntimeMode.RESPONSES
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
-    return FormalAdmissionCheck(checked_at=now)
+    return now
 
 
 async def start_configured_manual_request(

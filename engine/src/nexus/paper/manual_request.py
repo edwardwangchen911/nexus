@@ -184,6 +184,9 @@ async def read_manual_request(session: AsyncSession, row: ManualPaperRequest) ->
     ).all()
     if row.contract_version in {4, 5}:
         binding_for(row)
+    from nexus.paper.independent_history_scope import binding as history_binding
+
+    history_binding(row)
     if row.mode not in {"research_only", "research_and_paper", "research_and_monitor"}:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     if row.request_hash != manual_request_hash(
@@ -571,6 +574,10 @@ async def admit_manual_request(
         )
     )
     if existing is not None:
+        if (existing.research_profile or {}).get(
+            "historical_exception"
+        ) is not None and existing.model_config_id != model_config_id:
+            raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         if contract_version in {4, 5} and (
             existing.contract_version != contract_version
             or existing.model_config_id != model_config_id
@@ -614,6 +621,22 @@ async def admit_manual_request(
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     now = now.astimezone(UTC)
+    history = None
+    if contract_version == 3:
+        from nexus.paper.independent_history_scope import capture, require_capacity
+
+        history = await capture(
+            session, account_id=account_id, model_config_id=model_config_id, now=now
+        )
+        if history is not None:
+            await require_capacity(
+                session,
+                account_id=account_id,
+                batch_id=batch_id,
+                model_id=model_config_id,
+                daily_limit=daily_limit_usd,
+                now=now,
+            )
     await require_manual_account_available(session, account_id=account_id, now=now)
     batch, _ = await validate_agent_paper_candidate_batch(
         session, batch_id=batch_id, account_id=account_id, as_of=now
@@ -653,6 +676,8 @@ async def admit_manual_request(
             "orchestrator_id": str(prompts["orchestrator"].id),
             "prompt_hashes": {role: prompt.content_hash for role, prompt in prompts.items()},
         }
+        if history is not None:
+            profile["historical_exception"] = history.model_dump(mode="json")
         if single_sol is not None:
             profile["single_sol"] = single_sol.model_dump(mode="json")
         if two_flight:
@@ -913,6 +938,9 @@ async def claim_manual_request(
 
     require_research_open()
     now = await _database_now(session)
+    from nexus.paper.independent_history_scope import recheck
+
+    await recheck(session, row, now=now)
     await require_manual_account_available(
         session, account_id=row.account_id, now=now, excluding_request_id=row.id
     )
