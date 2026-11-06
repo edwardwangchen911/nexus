@@ -255,9 +255,11 @@ async def test_recovery_reads_versioned_identity_once_and_rechecks_the_next_acti
     migrated_database_url, tmp_path, monkeypatch
 ):
     from collections import Counter
+    from contextvars import ContextVar
 
     from integration.test_sol_native_preparation_pg import scope
     from nexus.ops import agent_paper_recovery as recovery
+    from nexus.research import current_identity_storage
     from nexus.research.current_identity_storage import read_identity_bindings
 
     factory, settings, store, instruments = await scope(migrated_database_url, tmp_path)
@@ -269,6 +271,30 @@ async def test_recovery_reads_versioned_identity_once_and_rechecks_the_next_acti
     original_read = store.read_raw
     reads = Counter()
     corrupt = False
+    artifact_reads = Counter()
+    registration_read = ContextVar("test_registration_read", default=False)
+    original_artifact = current_identity_storage.read_artifact
+
+    async def artifact(session, digest):
+        from nexus.persistence.models.data import DataArtifact
+
+        # A retained ORM instance must keep its original query semantics.
+        retained = any(
+            isinstance(row, DataArtifact) and row.sha256 == digest
+            for row in session.identity_map.values()
+        )
+        token = registration_read.set(not retained)
+        try:
+            return await original_artifact(session, digest)
+        finally:
+            registration_read.reset(token)
+
+    def query(_conn, _cursor, statement, parameters, _context, _executemany):
+        # Mutable authority queries deliberately stay outside this optimization.
+        if registration_read.get() and "FROM data_artifacts" in statement:
+            artifact_reads[repr(parameters)] += 1
+
+    monkeypatch.setattr(current_identity_storage, "read_artifact", artifact)
 
     async def read_raw(key, *, uri):
         reads[uri] += 1
@@ -288,9 +314,14 @@ async def test_recovery_reads_versioned_identity_once_and_rechecks_the_next_acti
 
     monkeypatch.setattr(recovery, "require_manual_account_available", historical_identity)
     try:
-        ready = await recovery.inspect_recovery_readiness(host)
+        event.listen(Engine, "before_cursor_execute", query)
+        try:
+            ready = await recovery.inspect_recovery_readiness(host)
+        finally:
+            event.remove(Engine, "before_cursor_execute", query)
         assert ready["status"] == "ready"
         assert reads and all(count == 1 for count in reads.values())
+        assert artifact_reads and all(count == 1 for count in artifact_reads.values())
         corrupt = True
         reads.clear()
         refused = await recovery.inspect_recovery_readiness(host)

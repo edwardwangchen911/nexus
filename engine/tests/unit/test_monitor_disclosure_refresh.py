@@ -78,6 +78,7 @@ def test_listed_request_count_requires_exact_separate_attempt_receipt(
     tmp_path, receipt, extra, expected
 ):
     import json
+
     from nexus.ops.monitor_disclosure_refresh import _request_count
 
     (tmp_path / "result.json").write_text(json.dumps({"requests": 2}))
