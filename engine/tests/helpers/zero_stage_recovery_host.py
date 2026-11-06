@@ -71,11 +71,50 @@ async def main(root):
     client.objects = {key: base64.b64decode(content) for key, content in fixture["objects"].items()}
     client.versions = fixture["versions"]
 
+    fault_enabled = False
+    authorization_refusals = []
+    if fixture["case"] == "policy_refusal":
+        from contextvars import ContextVar
+
+        from nexus.agents.research_stages.protocol import StagedProtocol
+        from nexus.paper import independent_priority as priority
+        from nexus.paper import independent_unknown_acceptance as acceptance
+
+        inside_predecessor = ContextVar("inside_predecessor", default=False)
+        original_capture = priority.capture_predecessor
+        original_validate = acceptance._validate
+        original_authorize = StagedProtocol.authorize
+
+        async def capture(*args, **kwargs):
+            token = inside_predecessor.set(True)
+            try:
+                return await original_capture(*args, **kwargs)
+            finally:
+                inside_predecessor.reset(token)
+
+        async def validate(*args, **kwargs):
+            if fault_enabled and inside_predecessor.get():
+                raise ValueError(acceptance.BLOCKED)
+            return await original_validate(*args, **kwargs)
+
+        async def authorize(self, *args, **kwargs):
+            try:
+                return await original_authorize(self, *args, **kwargs)
+            except Exception as error:
+                authorization_refusals.append([type(error).__name__, str(error), kwargs["stage"]])
+                raise
+
+        patch.setattr(priority, "capture_predecessor", capture)
+        patch.setattr(acceptance, "_validate", validate)
+        patch.setattr(StagedProtocol, "authorize", authorize)
     stage_calls = {}
     first_transports = []
     overlap = asyncio.Event()
 
     async def on_request(payload):
+        nonlocal fault_enabled
+        if fixture["case"] == "policy_refusal":
+            fault_enabled = True
         stage_calls.setdefault(str(payload["request"]["instrument_id"]), []).append(
             payload["stage"]
         )
@@ -106,13 +145,15 @@ async def main(root):
     native_execute = loop.execute_agent_paper_loop_action
 
     async def execute(*args, **kwargs):
-        nonlocal dispatched
+        nonlocal dispatched, fault_enabled
         result = await native_execute(*args, **kwargs)
         if kwargs["action"] == loop.AgentPaperLoopAction.TRIGGER_MANUAL:
+            fault_enabled = False
             print(
                 json.dumps(
                     dict(
                         phase="dispatched",
+                        authorization_refusals=authorization_refusals,
                         stages=calls,
                         stage_calls=stage_calls,
                         parallel_http=overlap.is_set(),

@@ -229,6 +229,7 @@ def parser() -> argparse.ArgumentParser:
     priority = commands.add_parser("authorize-independent-priority")
     priority.add_argument("--idempotency-key", required=True)
     priority.add_argument("--accept-priority", action="store_true", required=True)
+    priority.add_argument("--predecessor-request-id", type=UUID)
     commands.add_parser(
         "inspect-single-sol",
         help="Read a selected Sol batch member and full-session budget estimate",
@@ -360,6 +361,7 @@ async def run(
                     settings,
                     idempotency_key=args.idempotency_key,
                     accept_priority=args.accept_priority,
+                    predecessor_request_id=getattr(args, "predecessor_request_id", None),
                 )
         if args.action in {"check-independent-acceptance", "accept-independent-unknown"}:
             _require_maintenance_code(args.repo_root, settings.release_revision)

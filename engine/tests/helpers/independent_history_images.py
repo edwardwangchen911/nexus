@@ -56,7 +56,9 @@ async def run(args):
                 from sqlalchemy import text
 
                 await db.execute(text("SET TRANSACTION READ ONLY"))
-                grant = await read_priority(db, settings, idempotency_key="full-new-root")
+                grant = await read_priority(
+                    db, settings, idempotency_key=args.get("priority_key", "full-new-root")
+                )
                 assert grant.consumed_request_id == row.id and not grant.grant_unconsumed
             if args["maintenance"]:
                 await refused(
@@ -134,7 +136,14 @@ async def run(args):
 
 
 async def verify_images(
-    factory, database_url, new, old, *, expected_new="completed", zero_disposition=False
+    factory,
+    database_url,
+    new,
+    old,
+    *,
+    expected_new="completed",
+    zero_disposition=False,
+    priority_key="full-new-root",
 ):
     names = [
         os.environ[k]
@@ -151,6 +160,7 @@ async def verify_images(
         old=str(old),
         expected_new=expected_new,
         zero_disposition=zero_disposition,
+        priority_key=priority_key,
     )
     receipts = []
     for maintenance, image in [(False, names[0]), (True, names[1]), (False, names[0])]:

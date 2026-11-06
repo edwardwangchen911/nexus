@@ -22,13 +22,15 @@ ACTION = "paper.independent_priority.authorized"
 CONSUMED = "paper.independent_priority.consumed"
 ACTOR = "local-independent-priority"
 SCHEMA = "independent_priority_v1"
+SUCCESSOR_SCHEMA = "independent_priority_v2"
+Policy = Literal["one_root_priority_v1", "one_root_priority_successor_v1"]
 LIMIT = Decimal("13")
 MAXIMUM = Decimal("6.36576")
 
 
 class Grant(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    policy: Literal["one_root_priority_v1"] = "one_root_priority_v1"
+    policy: Policy = "one_root_priority_v1"
     mode: Literal["research_and_monitor"] = "research_and_monitor"
     contract_version: Literal[3] = 3
     account_id: UUID
@@ -44,9 +46,121 @@ class Grant(BaseModel):
     root_maximum: Decimal
 
 
+class Predecessor(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    request_id: UUID
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    grant_id: UUID
+    grant_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acceptance_id: UUID
+    acceptance_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acceptance_schema: str
+
+
+class SuccessorGrant(Grant):
+    policy: Policy = "one_root_priority_successor_v1"
+    predecessor: Predecessor
+
+
+def parse_grant(event: AuditEvent) -> Grant:
+    try:
+        if event.schema_version == SCHEMA:
+            grant = Grant.model_validate(event.payload)
+            if grant.policy != "one_root_priority_v1":
+                raise ValueError(INVALID)
+        elif event.schema_version == SUCCESSOR_SCHEMA:
+            grant = SuccessorGrant.model_validate(event.payload)
+            if grant.policy != "one_root_priority_successor_v1":
+                raise ValueError(INVALID)
+        else:
+            raise ValueError(INVALID)
+        return grant
+    except ValidationError:
+        raise ValueError(INVALID) from None
+
+
+async def capture_predecessor(
+    session: AsyncSession, *, request_id: UUID, account: UUID, day: date, now: datetime
+) -> Predecessor:
+    from nexus.paper import independent_unknown_acceptance as acceptance
+
+    row = await session.get(ManualPaperRequest, request_id, populate_existing=True)
+    if (
+        row is None
+        or row.account_id != account
+        or row.requested_at.date() != day
+        or row.contract_version != 3
+        or row.mode != "research_and_monitor"
+    ):
+        raise ValueError(INVALID)
+    ref = binding(row)
+    if ref is None:
+        raise ValueError(INVALID)
+    events = await _events(session, account, row.key_hash)
+    if len(events) != 1:
+        raise ValueError(INVALID)
+    event = events[0]
+    await validate_audit(session, event, ACTION)
+    grant = parse_grant(event)
+    historical = await _historical_receipt(session, event, grant, now=now)
+    if (
+        event.id != ref.audit_id
+        or event.event_hash != ref.event_hash
+        or grant.budget_day != day
+        or historical.consumed_request_id != row.id
+    ):
+        raise ValueError(INVALID)
+    audits = await acceptance._audits(session, row.id)
+    if len(audits) != 1:
+        raise ValueError(INVALID)
+    # This explicit continuation supports accepted unknown predecessors only.
+    # The original versioned validator proves terminal state and retained money.
+    try:
+        await acceptance._validate(session, row=row, audit=audits[0], now=now)
+    except ValueError as error:
+        if str(error) == acceptance.BLOCKED:
+            raise ValueError(INVALID) from error
+        raise
+    return Predecessor(
+        request_id=row.id,
+        request_hash=row.request_hash,
+        grant_id=event.id,
+        grant_hash=event.event_hash,
+        acceptance_id=audits[0].id,
+        acceptance_hash=audits[0].event_hash,
+        acceptance_schema=audits[0].schema_version,
+    )
+
+
+async def recheck_predecessor(session: AsyncSession, grant: Grant, now: datetime) -> None:
+    if isinstance(grant, SuccessorGrant):
+        current = await capture_predecessor(
+            session,
+            request_id=grant.predecessor.request_id,
+            account=grant.account_id,
+            day=grant.budget_day,
+            now=now,
+        )
+        if current != grant.predecessor:
+            raise ValueError(INVALID)
+        children = list(
+            await session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action == ACTION,
+                    AuditEvent.payload["predecessor"]["grant_id"].astext == str(current.grant_id),
+                )
+            )
+        )
+        if len(children) != 1:
+            raise ValueError(INVALID)
+        await validate_audit(session, children[0], ACTION)
+        if parse_grant(children[0]) != grant:
+            raise ValueError(INVALID)
+
+
 class Reference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    policy: Literal["one_root_priority_v1"] = "one_root_priority_v1"
+    policy: Policy = "one_root_priority_v1"
     audit_id: UUID
     event_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -93,7 +207,8 @@ async def validate_audit(session: AsyncSession, event: AuditEvent, action: str) 
     if (
         event.actor_id != ACTOR
         or event.action != action
-        or event.schema_version != SCHEMA
+        or event.schema_version
+        not in ((SCHEMA, SUCCESSOR_SCHEMA) if action == ACTION else (SCHEMA,))
         or event.chain_version != "audit_jcs_sha256_v1"
         or event.canonical_event != canonical
         or event.previous_hash != ("0" * 64 if event.event_seq == 1 else previous)
@@ -142,10 +257,11 @@ async def resolve(
     event = events[0]
     await validate_audit(session, event, ACTION)
     try:
-        grant = Grant.model_validate(event.payload)
+        grant = parse_grant(event)
     except ValidationError:
         raise ValueError(INVALID) from None
-    reference = Reference(audit_id=event.id, event_hash=event.event_hash)
+    await recheck_predecessor(session, grant, now)
+    reference = Reference(policy=grant.policy, audit_id=event.id, event_hash=event.event_hash)
     if (
         grant.account_id != account_id
         or grant.batch_id != batch_id
@@ -236,7 +352,12 @@ async def require_no_active_priority(session: AsyncSession, *, account_id: UUID)
 
 
 async def authorize(
-    session: AsyncSession, settings: EngineSettings, *, idempotency_key: str, accept_priority: bool
+    session: AsyncSession,
+    settings: EngineSettings,
+    *,
+    idempotency_key: str,
+    accept_priority: bool,
+    predecessor_request_id: UUID | None = None,
 ) -> PriorityReceipt:
     from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
     from nexus.agents.research_maintenance import require_research_open
@@ -283,7 +404,7 @@ async def authorize(
         event = events[0]
         await validate_audit(session, event, ACTION)
         try:
-            grant = Grant.model_validate(event.payload)
+            grant = parse_grant(event)
         except ValidationError:
             raise ValueError(INVALID) from None
         if (
@@ -297,8 +418,41 @@ async def authorize(
             or grant.root_maximum > MAXIMUM
         ):
             raise ValueError(INVALID)
+        expected_predecessor = (
+            grant.predecessor.request_id if isinstance(grant, SuccessorGrant) else None
+        )
+        if predecessor_request_id != expected_predecessor:
+            raise ValueError(INVALID)
         return await _historical_receipt(session, event, grant, now=now)
-    if await session.scalar(
+    # Unknown versions in today's authorization set cannot disappear from the
+    # uniqueness decision merely because they use another payload layout.
+    daily_events = list(
+        await session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == ACTION,
+                AuditEvent.payload["account_id"].astext == str(account),
+                AuditEvent.payload["budget_day"].astext == now.date().isoformat(),
+            )
+        )
+    )
+    for daily_event in daily_events:
+        await validate_audit(session, daily_event, ACTION)
+        parse_grant(daily_event)
+    predecessor = None
+    if predecessor_request_id is not None:
+        predecessor = await capture_predecessor(
+            session, request_id=predecessor_request_id, account=account, day=now.date(), now=now
+        )
+        # Never recycle a predecessor, even after its successor expired or failed.
+        successors = await session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == ACTION,
+                AuditEvent.payload["predecessor"]["grant_id"].astext == str(predecessor.grant_id),
+            )
+        )
+        if list(successors):
+            raise ValueError(INVALID)
+    if predecessor is None and await session.scalar(
         select(AuditEvent.id).where(
             AuditEvent.action == ACTION,
             AuditEvent.payload["account_id"].astext == str(account),
@@ -336,11 +490,19 @@ async def authorize(
     )
     if grant.root_maximum > MAXIMUM:
         raise ValueError(INVALID)
+    if predecessor is not None:
+        grant = SuccessorGrant.model_validate(
+            grant.model_dump()
+            | {
+                "policy": "one_root_priority_successor_v1",
+                "predecessor": predecessor,
+            }
+        )
     event = await append_audit_event(
         session,
         actor_id=ACTOR,
         action=ACTION,
-        schema_version=SCHEMA,
+        schema_version=SUCCESSOR_SCHEMA if isinstance(grant, SuccessorGrant) else SCHEMA,
         payload=grant.model_dump(mode="json"),
         occurred_at=now,
     )
@@ -374,7 +536,7 @@ async def read_priority(
     event = events[0]
     await validate_audit(session, event, ACTION)
     try:
-        grant = Grant.model_validate(event.payload)
+        grant = parse_grant(event)
     except ValidationError:
         raise ValueError(INVALID) from None
     return await _historical_receipt(session, event, grant, now=await database_now(session))
@@ -403,7 +565,7 @@ async def _historical_receipt(
     if len(roots) != len(consumed) or len(roots) > 1:
         raise ValueError(INVALID)
     if roots:
-        reference = Reference(audit_id=event.id, event_hash=event.event_hash)
+        reference = Reference(policy=grant.policy, audit_id=event.id, event_hash=event.event_hash)
         await validate_audit(session, consumed[0], CONSUMED)
         if binding(roots[0]) != reference or consumed[0].payload != consumption(
             roots[0], reference
