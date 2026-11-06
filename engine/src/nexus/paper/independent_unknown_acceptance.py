@@ -20,6 +20,8 @@ from nexus.paper.independent_unknown_proof import (
     independent_unknown_proof,
     load_independent_request,
 )
+from nexus.paper.zero_stage_disposition import SCHEMA as ZERO_STAGE_SCHEMA
+from nexus.paper.zero_stage_disposition import selected as zero_stage_selected
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.runtime import AuditEvent, Job, JobLease
 from nexus.settings import EngineSettings
@@ -59,7 +61,7 @@ async def _audits(session: AsyncSession, request_id: UUID) -> list[AuditEvent]:
         .where(
             or_(
                 AuditEvent.action == ACTION,
-                AuditEvent.schema_version.in_((SCHEMA, SINGLE_SOL_SCHEMA)),
+                AuditEvent.schema_version.in_((SCHEMA, SINGLE_SOL_SCHEMA, ZERO_STAGE_SCHEMA)),
                 AuditEvent.actor_id == ACTOR,
             )
         )
@@ -105,9 +107,15 @@ async def _validate(
         if getattr(error.orig, "sqlstate", None) == "55P03":
             raise ValueError(BLOCKED) from None
         raise
-    proof = await independent_unknown_proof(session, row=row, now=now)
+    schema = audit.schema_version
+    if schema not in {SCHEMA, SINGLE_SOL_SCHEMA, ZERO_STAGE_SCHEMA} or (
+        (schema == SINGLE_SOL_SCHEMA) != (row.contract_version == 4)
+    ):
+        raise ValueError(BLOCKED)
+    proof = await independent_unknown_proof(
+        session, row=row, now=now, zero_stage=schema == ZERO_STAGE_SCHEMA
+    )
     digest = job_input_hash(proof)
-    schema = SINGLE_SOL_SCHEMA if row.contract_version == 4 else SCHEMA
     payload = {**proof, "proof_hash": digest}
     canonical = canonical_audit_event(
         AuditChainInput(
@@ -308,7 +316,12 @@ async def inspect_or_accept_independent_unknown(
     for job, lease in leased:
         if not await job_lease_consumed(session, job=job, lease=lease, now=now):
             raise ValueError(BLOCKED)
-    proof = await independent_unknown_proof(session, row=row, now=now)
+    zero_stage = await zero_stage_selected(session, row)
+    if zero_stage and accept:
+        from nexus.agents.research_maintenance import require_research_open
+
+        require_research_open()
+    proof = await independent_unknown_proof(session, row=row, now=now, zero_stage=zero_stage)
     await require_manual_account_available(
         session, account_id=account_id, now=now, excluding_request_id=request_id, read_only=True
     )
@@ -342,7 +355,9 @@ async def inspect_or_accept_independent_unknown(
         session,
         actor_id=ACTOR,
         action=ACTION,
-        schema_version=SINGLE_SOL_SCHEMA if row.contract_version == 4 else SCHEMA,
+        schema_version=ZERO_STAGE_SCHEMA
+        if zero_stage
+        else (SINGLE_SOL_SCHEMA if row.contract_version == 4 else SCHEMA),
         payload={**proof, "proof_hash": digest},
         occurred_at=now,
     )

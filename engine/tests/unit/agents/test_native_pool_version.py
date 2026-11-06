@@ -87,7 +87,13 @@ def saved_pool(monkeypatch, version):
                 return model
             pytest.fail("unexpected identity read")
 
-        async def scalar(self, query):
+        async def scalar(self, query, params=None):
+            if (
+                str(query)
+                == "SELECT id FROM research_stage_scope WHERE id=:scope AND NOT stopped FOR UPDATE"
+            ):
+                assert params == {"scope": scope}
+                return scope
             assert str(query) == "SELECT clock_timestamp()"
             return self.now
 
@@ -171,3 +177,17 @@ async def test_recovered_version_keeps_existing_authority_checks(
         await platform_native.prepare_native_pool(
             storage, settings, run, deadline=monotonic() + 120
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locked", [None, "wrong-owner"])
+async def test_native_pool_rejects_missing_or_different_locked_scope(monkeypatch, locked):
+    storage, settings, run, *_ = saved_pool(monkeypatch, VERSIONS[-1])
+
+    async def scalar(query, params=None):
+        assert "research_stage_scope" in str(query) and "FOR UPDATE" in str(query)
+        return locked
+
+    monkeypatch.setattr(storage, "scalar", scalar)
+    with pytest.raises(ValueError, match="PLATFORM_NATIVE_ROUTE_INVALID"):
+        await platform_native.prepare_native_pool(storage, settings, run, deadline=monotonic() + 30)

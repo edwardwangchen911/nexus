@@ -42,7 +42,7 @@ FACT_FILTERS = {
 
 
 async def independent_unknown_proof(
-    session: AsyncSession, *, row: ManualPaperRequest, now: datetime
+    session: AsyncSession, *, row: ManualPaperRequest, now: datetime, zero_stage: bool = False
 ) -> dict[str, object]:
     """Validate native financial closure and bind all current facts, including absence."""
     view = await read_manual_request(session, row)
@@ -73,9 +73,15 @@ async def independent_unknown_proof(
         if route is None or route["kind"] != "independent" or route["scope_id"] != row.id:
             raise ValueError(BLOCKED)
     # This is only a financial/cleanup proof, not an admission exemption.
-    await require_research_jobs_settled(
-        session, row=row, view=view.research, now=now, allow_unknown_usage=True
-    )
+    disposition: dict[str, object] = {}
+    if zero_stage:
+        from nexus.paper.zero_stage_disposition import proof
+
+        disposition["zero_stage_disposition"] = await proof(session, row=row, view=view, now=now)
+    else:
+        await require_research_jobs_settled(
+            session, row=row, view=view.research, now=now, allow_unknown_usage=True
+        )
     params = {
         "request": row.id,
         "runs": [m.run_id for m in view.research.members],
@@ -104,7 +110,7 @@ async def independent_unknown_proof(
             )
         )
         facts[table] = job_input_hash({"rows": rows})
-    extra = {}
+    extra = dict(disposition)
     if row.contract_version == 4:
         from nexus.paper.single_sol_disposition import single_sol_history
 

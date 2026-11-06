@@ -76,10 +76,19 @@ class ResearchProcessDiagnosticError(ValueError):
         {"ANCESTOR_MISSING", "ANCESTOR_CYCLE", "OWNER_MISMATCH", "EXECUTABLE_MISMATCH"}
     )
 
-    def __init__(self, code: str, *, reason: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        reason: str | None = None,
+        chain: str | None = None,
+        hop: str | None = None,
+        observed: str | None = None,
+    ) -> None:
         super().__init__(_BLOCKED)
         self.code = code
         self.reason = reason
+        self.chain, self.hop, self.observed = chain, hop, observed
 
     def safe_diagnostics(self) -> dict[str, str]:
         if isinstance(self.code, str) and self.code in self.SAFE_CODES:
@@ -90,6 +99,17 @@ class ResearchProcessDiagnosticError(ValueError):
                 and self.reason in self.IDENTITY_REASONS
             ):
                 result["diagnostic_reason"] = self.reason
+                for key, value, allowed in (
+                    ("chain", self.chain, {"direct", "nested"}),
+                    ("hop", self.hop, {"candidate", "repl", "node", "ancestor_codex", "desktop"}),
+                    (
+                        "observed",
+                        self.observed,
+                        {"codex", "chatgpt", "repl", "node", "other", "missing"},
+                    ),
+                ):
+                    if isinstance(value, str) and value in allowed:
+                        result["diagnostic_" + key] = value
             return result
         return {}
 
@@ -172,24 +192,41 @@ def require_research_processes_quiescent() -> None:
             else (_DESKTOP_CHILD, _DESKTOP_REPL, _DESKTOP_NODE, _DESKTOP_CHILD, _DESKTOP_PARENT)
         )
         ancestors: set[int] = set()
-        for executable in chain:
+        roles = (
+            ("candidate", "desktop")
+            if len(chain) == 2
+            else ("candidate", "repl", "node", "ancestor_codex", "desktop")
+        )
+        for role, executable in zip(roles, chain, strict=True):
             row = host.get(pid)
+            observed = (
+                "missing"
+                if row is None
+                else {
+                    _DESKTOP_CHILD: "codex",
+                    _DESKTOP_PARENT: "chatgpt",
+                    _DESKTOP_REPL: "repl",
+                    _DESKTOP_NODE: "node",
+                }.get(row[3], "other")
+            )
+
+            def identity_error(reason: str) -> ResearchProcessDiagnosticError:
+                return ResearchProcessDiagnosticError(
+                    "HOST_IDENTITY_UNCONFIRMED",
+                    reason=reason,
+                    chain="direct" if len(chain) == 2 else "nested",
+                    hop=role,
+                    observed=observed,
+                )
+
             if row is None:
-                raise ResearchProcessDiagnosticError(
-                    "HOST_IDENTITY_UNCONFIRMED", reason="ANCESTOR_MISSING"
-                )
+                raise identity_error("ANCESTOR_MISSING")
             if pid in ancestors:
-                raise ResearchProcessDiagnosticError(
-                    "HOST_IDENTITY_UNCONFIRMED", reason="ANCESTOR_CYCLE"
-                )
+                raise identity_error("ANCESTOR_CYCLE")
             if row[1] != os.getuid():
-                raise ResearchProcessDiagnosticError(
-                    "HOST_IDENTITY_UNCONFIRMED", reason="OWNER_MISMATCH"
-                )
+                raise identity_error("OWNER_MISMATCH")
             if row[3] != executable:
-                raise ResearchProcessDiagnosticError(
-                    "HOST_IDENTITY_UNCONFIRMED", reason="EXECUTABLE_MISMATCH"
-                )
+                raise identity_error("EXECUTABLE_MISMATCH")
             ancestors.add(pid)
             if pid not in verified:
                 files = mappings(pid)
