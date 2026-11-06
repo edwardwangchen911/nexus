@@ -49,6 +49,14 @@ async def preopen_fixture_clock(url, monkeypatch, *, target=None):
         await db.execute(
             text(f'ALTER DATABASE "{name}" SET search_path TO fixture_clock,public,pg_catalog')
         )
+        # The route trigger has its own search_path. Keep its original price
+        # deadline check on the same synthetic clock as registration and claims.
+        await db.execute(
+            text(
+                "ALTER FUNCTION public.nexus_sol_native_route_guard() "
+                "SET search_path TO fixture_clock,public,pg_catalog"
+            )
+        )
         await db.execute(
             text("""DO $$ DECLARE obj record; BEGIN
             FOR obj IN SELECT table_name FROM information_schema.columns

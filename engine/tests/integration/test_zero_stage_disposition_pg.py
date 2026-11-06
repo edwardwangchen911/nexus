@@ -18,11 +18,27 @@ from sqlalchemy import text
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", ["normal", "commit_unknown", "rollback", "maintenance", "late_before", "late_stage"]
+    "case",
+    [
+        "normal",
+        "commit_unknown",
+        "rollback",
+        "maintenance",
+        "late_before",
+        "late_stage",
+        "successor",
+        "successor_late",
+        "successor_ack_lost",
+        "successor_root_ack_lost",
+        "successor_rollback",
+    ],
 )
 async def test_zero_stage_disposition_normal_entry(
     migrated_database_url, monkeypatch, tmp_path, request, case
 ):
+    is_successor = case.startswith("successor")
+    late_case = case in {"late_stage", "successor_late"}
+
     async def check(factory, live, prepared, receipt, calls, clients, old):
         async def fail(*args, **kwargs):
             raise ValueError("frozen preauthorization failure")
@@ -123,6 +139,18 @@ async def test_zero_stage_disposition_normal_entry(
                 await require_manual_account_available(
                     db, account_id=row.account_id, now=now, read_only=True
                 )
+        if is_successor:
+            from nexus.paper.independent_priority import authorize
+
+            async with factory.begin() as db:
+                with pytest.raises(ValueError):
+                    await authorize(
+                        db,
+                        live,
+                        idempotency_key="not-accepted",
+                        accept_priority=True,
+                        predecessor_request_id=receipt.request_id,
+                    )
         args.action = "accept-independent-unknown"
         args.accept_unknown_effects = False
         args.expected_proof_hash = checked.proof_hash
@@ -232,6 +260,113 @@ async def test_zero_stage_disposition_normal_entry(
         assert before == await facts()
         assert calls == [] and clients == []
 
+        if is_successor:
+            from uuid import uuid4
+
+            from nexus.paper.independent_priority import authorize, read_priority
+
+            async with factory.begin() as db:
+                with pytest.raises(ValueError, match="^INDEPENDENT_PRIORITY_INVALID$"):
+                    await authorize(
+                        db,
+                        live,
+                        idempotency_key="next-after-zero-disposition",
+                        accept_priority=True,
+                    )
+            async with factory.begin() as db:
+                with pytest.raises(ValueError):
+                    await authorize(
+                        db,
+                        live,
+                        idempotency_key="wrong-parent",
+                        accept_priority=True,
+                        predecessor_request_id=uuid4(),
+                    )
+            grant_args = manual_paper.parser().parse_args(
+                [
+                    "authorize-independent-priority",
+                    "--idempotency-key",
+                    "next-after-zero-disposition",
+                    "--accept-priority",
+                    "--predecessor-request-id",
+                    str(receipt.request_id),
+                ]
+            )
+            if case == "successor_rollback":
+                async with factory() as holder:
+                    await holder.begin()
+                    await authorize(
+                        holder,
+                        live,
+                        idempotency_key="rolled-back",
+                        accept_priority=True,
+                        predecessor_request_id=receipt.request_id,
+                    )
+                    await holder.rollback()
+                async with factory() as db:
+                    with pytest.raises(ValueError):
+                        await read_priority(db, live, idempotency_key="rolled-back")
+                assert before == await facts()
+                return
+            if case == "successor_ack_lost":
+                original_commit = AsyncSession.commit
+
+                async def lost_grant_ack(db):
+                    await original_commit(db)
+                    raise ConnectionError("synthetic grant acknowledgement lost")
+
+                with monkeypatch.context() as m:
+                    m.setattr(AsyncSession, "commit", lost_grant_ack)
+                    with pytest.raises(ConnectionError):
+                        await manual_paper.run(live, grant_args)
+                renewed = await manual_paper.run(
+                    live,
+                    manual_paper.parser().parse_args(
+                        [
+                            "read-independent-priority",
+                            "--idempotency-key",
+                            "next-after-zero-disposition",
+                        ]
+                    ),
+                )
+            else:
+                # The contender uses a separate connection while the winner's
+                # account/day locks are still held; registration is the fence.
+                from nexus.agents.budget import ResearchAccountingBusy
+
+                async with factory.begin() as holder:
+                    renewed = await authorize(
+                        holder,
+                        live,
+                        idempotency_key="next-after-zero-disposition",
+                        accept_priority=True,
+                        predecessor_request_id=receipt.request_id,
+                    )
+                    async with factory.begin() as contender:
+                        with pytest.raises(ResearchAccountingBusy):
+                            await authorize(
+                                contender,
+                                live,
+                                idempotency_key="racing-successor",
+                                accept_priority=True,
+                                predecessor_request_id=receipt.request_id,
+                            )
+            repeated = await manual_paper.run(live, grant_args)
+            assert renewed == repeated and renewed.grant_unconsumed
+            async with factory.begin() as db:
+                with pytest.raises(ValueError):
+                    await authorize(
+                        db,
+                        live,
+                        idempotency_key="another-successor",
+                        accept_priority=True,
+                        predecessor_request_id=receipt.request_id,
+                    )
+            async with factory.begin() as db:
+                historical = await read_priority(db, live, idempotency_key="full-new-root")
+                assert historical.consumed_request_id == receipt.request_id
+            assert before == await facts()
+
         import os
 
         if os.environ.get("NEXUS_TEST_HISTORY_FORMAL_IMAGE") and case == "commit_unknown":
@@ -271,7 +406,7 @@ async def test_zero_stage_disposition_normal_entry(
                 with pytest.raises(ValueError):
                     await acceptance.require_independent_execution_open(db, request_id=row.id)
             return
-        if case in {"normal", "late_stage"}:
+        if case in {"normal", "late_stage"} or is_successor:
             from decimal import Decimal
 
             from nexus.monitoring.disclosure_context import configured_exhibit_store
@@ -301,7 +436,7 @@ async def test_zero_stage_disposition_normal_entry(
                             for key, content in store_client.objects.items()
                         },
                         "versions": store_client.versions,
-                        "case": case,
+                        "case": "late_stage" if late_case else "normal" if is_successor else case,
                         "old_run": str(first.run_id),
                         "bucket": configured_exhibit_store(None)._bucket,
                         "prefix": configured_exhibit_store(None)._prefix,
@@ -349,11 +484,48 @@ async def test_zero_stage_disposition_normal_entry(
                         "next-after-zero-disposition",
                     ]
                 )
-                with pytest.raises(ValueError, match="INDEPENDENT_NATURAL_BUDGET_PROTECTED"):
+                with pytest.raises(
+                    ValueError,
+                    match="INDEPENDENT_PRIORITY_INVALID"
+                    if is_successor
+                    else "INDEPENDENT_NATURAL_BUDGET_PROTECTED",
+                ):
                     await manual_paper.run(
                         live.model_copy(update={"agent_daily_budget_usd": Decimal("1")}), start
                     )
-                successor = await manual_paper.run(live, start)
+                if case == "successor_root_ack_lost":
+                    original_commit = AsyncSession.commit
+
+                    async def lost_root_ack(db):
+                        await original_commit(db)
+                        raise ConnectionError("synthetic root acknowledgement lost")
+
+                    with monkeypatch.context() as m:
+                        m.setattr(AsyncSession, "commit", lost_root_ack)
+                        with pytest.raises(ConnectionError):
+                            await manual_paper.run(live, start)
+                    known_grant = await manual_paper.run(
+                        live,
+                        manual_paper.parser().parse_args(
+                            [
+                                "read-independent-priority",
+                                "--idempotency-key",
+                                "next-after-zero-disposition",
+                            ]
+                        ),
+                    )
+                    successor = await manual_paper.run(
+                        live,
+                        manual_paper.parser().parse_args(
+                            [
+                                "read",
+                                "--request-id",
+                                str(known_grant.consumed_request_id),
+                            ]
+                        ),
+                    )
+                else:
+                    successor = await manual_paper.run(live, start)
                 assert successor.status == "queued" and successor.request_id != receipt.request_id
                 assert (await manual_paper.run(live, start)).request_id == successor.request_id
                 process.stdin.write(b"run\n")
@@ -362,7 +534,7 @@ async def test_zero_stage_disposition_normal_entry(
                 assert dispatched_line, (tmp_path / "recovery-host-error.log").read_text()
                 dispatched = json.loads(dispatched_line)
                 assert dispatched["phase"] == "dispatched"
-                if case == "late_stage":
+                if late_case:
                     assert dispatched["stages"] == ["research"]
                 else:
                     assert dispatched["parallel_http"]
@@ -377,7 +549,7 @@ async def test_zero_stage_disposition_normal_entry(
                 assert stopped_line, (tmp_path / "recovery-host-error.log").read_text()
                 stopped = json.loads(stopped_line)
                 assert stopped["pid"] == signal["pid"]
-                if case == "late_stage":
+                if late_case:
                     assert stopped["phase"] == "blocked"
                     assert stopped["code"] == "STAGED_TERMINAL_PROOF_INVALID"
                     assert await asyncio.wait_for(process.wait(), 10) == 1
@@ -387,7 +559,7 @@ async def test_zero_stage_disposition_normal_entry(
                 async with factory.begin() as db:
                     row = await db.get(ManualPaperRequest, successor.request_id)
                     complete = await finish_research_request(db, row=row)
-                    assert complete.status == ("unknown" if case == "late_stage" else "completed")
+                    assert complete.status == ("unknown" if late_case else "completed")
                     assert await finish_research_request(db, row=row) == complete
                     held = (
                         await db.execute(
@@ -399,7 +571,7 @@ async def test_zero_stage_disposition_normal_entry(
                         )
                     ).one()
                     assert tuple(held) == ("reserved", None)
-                    if case == "late_stage":
+                    if late_case:
                         saved = (
                             (
                                 await db.execute(
@@ -443,7 +615,22 @@ async def test_zero_stage_disposition_normal_entry(
                     process.terminate()
                     await asyncio.wait_for(process.wait(), 10)
                 error_file.close()
+            if is_successor and not late_case and os.environ.get("NEXUS_TEST_HISTORY_FORMAL_IMAGE"):
+                from helpers.independent_history_images import verify_images
+
+                await verify_images(
+                    factory,
+                    migrated_database_url,
+                    successor.request_id,
+                    receipt.request_id,
+                    priority_key="next-after-zero-disposition",
+                )
 
     await exercise(
-        migrated_database_url, monkeypatch, tmp_path, None, request, zero_stage_check=check
+        migrated_database_url,
+        monkeypatch,
+        tmp_path,
+        "priority" if is_successor else None,
+        request,
+        zero_stage_check=check,
     )
