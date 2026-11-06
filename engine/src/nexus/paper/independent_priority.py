@@ -297,21 +297,7 @@ async def authorize(
             or grant.root_maximum > MAXIMUM
         ):
             raise ValueError(INVALID)
-        roots = list(
-            await session.scalars(
-                select(ManualPaperRequest).where(
-                    ManualPaperRequest.account_id == account,
-                    ManualPaperRequest.key_hash == key_hash,
-                )
-            )
-        )
-        return PriorityReceipt(
-            audit_id=event.id,
-            expires_at=grant.expires_at,
-            consumed_request_id=roots[0].id if len(roots) == 1 else None,
-            grant_unconsumed=not roots,
-            expired=now >= grant.expires_at,
-        )
+        return await _historical_receipt(session, event, grant, now=now)
     if await session.scalar(
         select(AuditEvent.id).where(
             AuditEvent.action == ACTION,
@@ -391,10 +377,18 @@ async def read_priority(
         grant = Grant.model_validate(event.payload)
     except ValidationError:
         raise ValueError(INVALID) from None
+    return await _historical_receipt(session, event, grant, now=await database_now(session))
+
+
+async def _historical_receipt(
+    session: AsyncSession, event: AuditEvent, grant: Grant, *, now: datetime
+) -> PriorityReceipt:
+    """Shared exact consumption proof; never evaluates new dispatch eligibility."""
     roots = list(
         await session.scalars(
             select(ManualPaperRequest).where(
-                ManualPaperRequest.account_id == account, ManualPaperRequest.key_hash == key_hash
+                ManualPaperRequest.account_id == grant.account_id,
+                ManualPaperRequest.key_hash == grant.key_hash,
             )
         )
     )
@@ -415,7 +409,6 @@ async def read_priority(
             roots[0], reference
         ):
             raise ValueError(INVALID)
-    now = await database_now(session)
     return PriorityReceipt(
         audit_id=event.id,
         expires_at=grant.expires_at,

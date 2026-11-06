@@ -347,7 +347,9 @@ async def run(
             from nexus.paper.independent_priority import read_priority
 
             async with diagnostic.transaction(factory) as session:
-                await session.execute(text("SET TRANSACTION READ ONLY"))
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                )
                 return await read_priority(session, settings, idempotency_key=args.idempotency_key)
         if args.action == "authorize-independent-priority":
             from nexus.paper.independent_priority import authorize

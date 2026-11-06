@@ -343,3 +343,168 @@ async def test_concurrent_same_identity_has_one_root_and_one_consumption(
         after_successor_setup=check,
         successor_at=(AT + timedelta(days=3)).replace(hour=9, minute=0),
     )
+
+
+@pytest.mark.asyncio
+async def test_priority_read_snapshot_survives_concurrent_consumption(
+    migrated_database_url, monkeypatch
+):
+    from nexus.ops import manual_paper
+    from nexus.paper.independent_priority import authorize
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async def check(factory, settings, old, clock, original):
+        settings = (await independent_settings(settings, clock, monkeypatch)).model_copy(
+            update={"agent_daily_budget_usd": Decimal("13")}
+        )
+        async with factory.begin() as db:
+            await authorize(db, settings, idempotency_key="snapshot", accept_priority=True)
+        scalars = AsyncSession.scalars
+        crossed = False
+
+        async def interleave(db, statement, *args, **kwargs):
+            nonlocal crossed
+            result = await scalars(db, statement, *args, **kwargs)
+            if not crossed and str(statement).startswith("SELECT manual_paper_requests."):
+                crossed = True
+                async with factory.begin() as writer:
+                    await start_configured_manual_request(
+                        writer, settings, mode="research_and_monitor", idempotency_key="snapshot"
+                    )
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(AsyncSession, "scalars", interleave)
+            before = await manual_paper.run(
+                settings,
+                manual_paper.parser().parse_args(
+                    ["read-independent-priority", "--idempotency-key", "snapshot"]
+                ),
+            )
+        assert crossed and before.grant_unconsumed and before.consumed_request_id is None
+        after = await manual_paper.run(
+            settings,
+            manual_paper.parser().parse_args(
+                ["read-independent-priority", "--idempotency-key", "snapshot"]
+            ),
+        )
+        assert not after.grant_unconsumed and after.consumed_request_id is not None
+
+    await exercise_history(
+        migrated_database_url,
+        monkeypatch,
+        "sol-successor",
+        after_successor_setup=check,
+        successor_at=(AT + timedelta(days=3)).replace(hour=9, minute=0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeat_authorization_rejects_inconsistent_consumption(
+    migrated_database_url, monkeypatch
+):
+    from nexus.paper.independent_priority import authorize, read_priority
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    async def check(factory, settings, old, clock, original):
+        settings = (await independent_settings(settings, clock, monkeypatch)).model_copy(
+            update={"agent_daily_budget_usd": Decimal("13")}
+        )
+        async with factory.begin() as db:
+            await authorize(db, settings, idempotency_key="consistent", accept_priority=True)
+            root = await start_configured_manual_request(
+                db, settings, mode="research_and_monitor", idempotency_key="consistent"
+            )
+        async with factory.begin() as db:
+            row = await db.get(ManualPaperRequest, root.request_id)
+            before = await read_priority(db, settings, idempotency_key="consistent")
+            repeated = await authorize(
+                db, settings, idempotency_key="consistent", accept_priority=True
+            )
+            assert repeated == before and repeated.consumed_request_id == row.id
+            # Corrupt only the reader identity map; immutable persisted facts stay untouched.
+            set_committed_value(
+                row,
+                "research_profile",
+                {k: v for k, v in row.research_profile.items() if k != "budget_priority"},
+            )
+            for read in (read_priority, authorize):
+                with pytest.raises(ValueError, match="^INDEPENDENT_PRIORITY_INVALID$"):
+                    await read(
+                        db,
+                        settings,
+                        idempotency_key="consistent",
+                        **({"accept_priority": True} if read is authorize else {}),
+                    )
+
+    await exercise_history(
+        migrated_database_url,
+        monkeypatch,
+        "sol-successor",
+        after_successor_setup=check,
+        successor_at=(AT + timedelta(days=3)).replace(hour=9, minute=0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_priority_unknown_blocks_normal_single_owner_before_guard(
+    migrated_database_url, monkeypatch
+):
+    from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
+    from nexus.paper.independent_priority import authorize
+    from nexus.paper.manual_request import claim_manual_request, record_manual_request_event
+    from nexus.paper.single_sol_research import single_sol_authority, start_single_sol
+    from nexus.settings import AgentRuntimeMode
+    from pydantic import SecretStr
+
+    async def check(factory, settings, old, clock, original):
+        settings = (await independent_settings(settings, clock, monkeypatch)).model_copy(
+            update={
+                "agent_daily_budget_usd": Decimal("13"),
+                "agent_runtime_mode": AgentRuntimeMode.RESPONSES,
+                "openai_api_key": SecretStr("sk-proj-" + "synthetic-only" * 5),
+            }
+        )
+        async with factory.begin() as db:
+            await authorize(db, settings, idempotency_key="unknown-priority", accept_priority=True)
+            root = await start_configured_manual_request(
+                db, settings, mode="research_and_monitor", idempotency_key="unknown-priority"
+            )
+            await claim_manual_request(db, request_id=root.request_id)
+            await record_manual_request_event(
+                db,
+                await db.get(ManualPaperRequest, root.request_id),
+                status="unknown",
+                code="MANUAL_RESULT_UNKNOWN",
+            )
+        async with factory.begin() as db:
+            batch = await load_agent_paper_candidate_batch(
+                db, batch_id=settings.agent_paper_candidate_batch_id
+            )
+            offer = await single_sol_authority(db, settings, instrument_id=batch.instrument_ids[0])
+            with pytest.raises(ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"):
+                await start_single_sol(
+                    db,
+                    settings,
+                    instrument_id=batch.instrument_ids[0],
+                    idempotency_key="no-new-single",
+                    expected_intent_hash=offer.intent_hash,
+                )
+            assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_scopes")) == 0
+            assert (
+                await db.scalar(
+                    text(
+                        "SELECT count(*) FROM audit_events "
+                        "WHERE action='paper.independent_priority.consumed'"
+                    )
+                )
+                == 1
+            )
+
+    await exercise_history(
+        migrated_database_url,
+        monkeypatch,
+        "sol-successor",
+        after_successor_setup=check,
+        successor_at=(AT + timedelta(days=3)).replace(hour=9, minute=0),
+    )

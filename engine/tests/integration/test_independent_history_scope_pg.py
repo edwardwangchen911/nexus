@@ -675,6 +675,10 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
 
                 async with factory.begin() as db:
                     grant = await read_priority(db, live, idempotency_key="full-new-root")
+                    repeated = await authorize(
+                        db, live, idempotency_key="full-new-root", accept_priority=True
+                    )
+                    assert repeated == grant
                     assert (
                         grant.consumed_request_id == receipt.request_id
                         and not grant.grant_unconsumed
