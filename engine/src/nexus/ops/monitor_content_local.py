@@ -14,7 +14,12 @@ import httpx
 from sqlalchemy import func, select
 
 from nexus.monitoring.filing_archive import import_filing_content
-from nexus.monitoring.filing_content import MAX_DOCUMENTS, document_inventory, filing_root
+from nexus.monitoring.filing_content import (
+    MAX_DOCUMENTS,
+    document_inventory,
+    filing_root,
+    require_html_entry,
+)
 from nexus.ops.local_recovery import write_private
 from nexus.ops.sec_index_local import _store
 from nexus.persistence.session import session_factory
@@ -33,6 +38,7 @@ _SAFE_CODES = frozenset(
     {
         "SEC_MONITOR_INVENTORY_INVALID",
         "SEC_MONITOR_ATTACHMENT_UNSUPPORTED",
+        "SEC_MONITOR_DOCUMENT_FORMAT_UNSUPPORTED",
         "SEC_MONITOR_INVENTORY_IDENTITY_INVALID",
         "SEC_MONITOR_DOCUMENT_SIZE_INVALID",
         "SEC_MONITOR_DOCUMENT_TIME_INVALID",
@@ -156,6 +162,7 @@ async def _collect_documents(
 
         try:
             async with asyncio.timeout(60):
+                require_html_entry(entry)
                 inventory = await get(entry.accession_number + "-index.html")
                 rows = document_inventory(inventory, entry=entry, issuer_cik=issuer_cik)
                 stage = "documents"

@@ -21,6 +21,11 @@ MAX_DOCUMENTS = 17
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 
 
+def require_html_entry(entry: SecIndexEntry) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.html?", entry.primary_document):
+        raise ValueError("SEC_MONITOR_DOCUMENT_FORMAT_UNSUPPORTED")
+
+
 class FilingDocument(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     filename: str
@@ -84,6 +89,7 @@ class _Inventory(HTMLParser):
 def document_inventory(
     raw: bytes, *, entry: SecIndexEntry, issuer_cik: str
 ) -> tuple[tuple[str, str, int], ...]:
+    require_html_entry(entry)
     if not re.fullmatch(r"[0-9]{10}", issuer_cik) or not int(issuer_cik):
         raise ValueError("SEC_MONITOR_IDENTITY_INVALID")
     root = filing_root(issuer_cik, entry.accession_number)
@@ -151,6 +157,7 @@ def verify_filing_documents(
     documents: dict[str, tuple[bytes, bytes]],
     now: datetime,
 ) -> tuple[FilingDocument, ...]:
+    require_html_entry(entry)
     now = require_utc(now)
     try:
         root = filing_root(issuer_cik, entry.accession_number)

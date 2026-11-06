@@ -18,6 +18,7 @@ from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.research_identity_local import collect_identity_sources
 from nexus.persistence.session import session_factory
+from nexus.research.sec_disclosure_index import SecDisclosureIndex
 from nexus.research.sec_exhibit_storage import ExhibitStore, _read_identity
 from nexus.research.sec_index_storage import (
     compare_index_captures,
@@ -55,6 +56,7 @@ async def import_index(
     identity_snapshot_id: UUID,
     archive_dir: Path,
     store: ExhibitStore | None = None,
+    listed_history: bool = False,
 ) -> dict[str, object]:
     archive_store = _store(settings, store)
     factory = session_factory(settings)
@@ -79,14 +81,32 @@ async def import_index(
             # originals verified; older network receipt dates never backdate import.
             now = await session.scalar(select(func.clock_timestamp()))
             assert isinstance(now, datetime)
-            snapshot, created = await persist_index_archive(
-                session,
-                archive_store,
-                identity_snapshot_id=identity_snapshot_id,
-                directory=directory,
-                submissions=submissions,
-                now=now,
-            )
+            if listed_history:
+                from nexus.ops.sec_listed_local import read_listed_sources
+                from nexus.research.sec_listed_storage import persist_listed_archive
+
+                closing, history = read_listed_sources(archive_dir, symbol)
+                now = await session.scalar(select(func.clock_timestamp()))
+                assert isinstance(now, datetime)
+                snapshot, created = await persist_listed_archive(
+                    session,
+                    archive_store,
+                    identity_snapshot_id=identity_snapshot_id,
+                    directory=directory,
+                    submissions=submissions,
+                    closing=closing,
+                    history=history,
+                    now=now,
+                )
+            else:
+                snapshot, created = await persist_index_archive(
+                    session,
+                    archive_store,
+                    identity_snapshot_id=identity_snapshot_id,
+                    directory=directory,
+                    submissions=submissions,
+                    now=now,
+                )
             return {
                 "status": "created" if created else "existing",
                 "snapshot_id": str(snapshot.id),
@@ -107,6 +127,7 @@ async def collect_index(
     contact: str,
     store: ExhibitStore | None = None,
     client: httpx.AsyncClient | None = None,
+    listed_history: bool = False,
 ) -> dict[str, object]:
     archive_store = _store(settings, store)
     factory = session_factory(settings)
@@ -117,17 +138,33 @@ async def collect_index(
             identity = await _read_identity(
                 session, archive_store, snapshot_id=identity_snapshot_id, as_of=now
             )
-        collected = await collect_identity_sources(
-            symbols=(identity.identity.symbol,),
-            contact=contact,
-            output_dir=archive_dir,
-            client=client,
-        )
+        # One deadline for the public HTTP chain, as in the original collector.
+        # Import below retains its own transaction; this is not a command deadline.
+        async with asyncio.timeout(60):
+            collected = await collect_identity_sources(
+                symbols=(identity.identity.symbol,),
+                contact=contact,
+                output_dir=archive_dir,
+                client=client,
+            )
+            if listed_history:
+                from nexus.ops.sec_listed_local import collect_listed_sources
+
+                requests = await collect_listed_sources(
+                    archive_dir=archive_dir,
+                    symbol=identity.identity.symbol,
+                    contact=contact,
+                    client=client,
+                )
+                previous_requests = collected["requests"]
+                assert isinstance(previous_requests, int)
+                collected["requests"] = previous_requests + requests
         result = await import_index(
             settings,
             identity_snapshot_id=identity_snapshot_id,
             archive_dir=archive_dir,
             store=archive_store,
+            listed_history=listed_history,
         )
         return {**result, "provider_requests": collected["requests"]}
     finally:
@@ -141,6 +178,7 @@ async def inspect_index(
     baseline_id: UUID | None = None,
     baseline_as_of: datetime | None = None,
     store: ExhibitStore | None = None,
+    listed_history: bool = False,
 ) -> dict[str, object]:
     archive_store = _store(settings, store)
     factory = session_factory(settings)
@@ -150,6 +188,8 @@ async def inspect_index(
             now = await session.scalar(select(func.clock_timestamp()))
             assert isinstance(now, datetime)
             if baseline_id is not None:
+                if listed_history:
+                    raise ValueError("SEC_INDEX_VERSIONED_COMPARISON_REQUIRED")
                 if baseline_as_of is None:
                     raise ValueError("SEC_INDEX_BASELINE_REQUIRED")
                 return await compare_index_captures(
@@ -160,14 +200,27 @@ async def inspect_index(
                     baseline_as_of=baseline_as_of,
                     now=now,
                 )
-            row, index = await read_index_capture(
-                session, archive_store, snapshot_id=snapshot_id, as_of=now
-            )
+            index: SecDisclosureIndex
+            coverage_received_at: datetime
+            if listed_history:
+                from nexus.research.sec_listed_storage import read_listed_capture
+
+                row, listed_index = await read_listed_capture(
+                    session, archive_store, snapshot_id=snapshot_id, as_of=now
+                )
+                index = listed_index
+                coverage_received_at = listed_index.coverage_received_at
+            else:
+                row, index = await read_index_capture(
+                    session, archive_store, snapshot_id=snapshot_id, as_of=now
+                )
+                coverage_received_at = index.received_at
             return {
                 "status": "verified",
                 "snapshot_id": str(row.id),
                 "entries": len(index.entries),
-                "source_fresh": now - index.received_at <= timedelta(minutes=5),
+                **({"schema_version": row.schema_version} if listed_history else {}),
+                "source_fresh": now - coverage_received_at <= timedelta(minutes=5),
                 "source_received_at": index.received_at.isoformat(),
                 "available_at": row.available_at.isoformat(),
                 "history_complete": index.history_complete,
@@ -187,8 +240,10 @@ def main() -> None:
         command = commands.add_parser(action)
         command.add_argument("--identity-snapshot-id", type=UUID, required=True)
         command.add_argument("--archive-dir", type=Path, required=True)
+        command.add_argument("--listed-history", action="store_true")
     inspect = commands.add_parser("inspect")
     inspect.add_argument("--snapshot-id", type=UUID, required=True)
+    inspect.add_argument("--listed-history", action="store_true")
     inspect.add_argument("--baseline-id", type=UUID)
     inspect.add_argument("--baseline-as-of", type=datetime.fromisoformat)
     try:
@@ -201,11 +256,13 @@ def main() -> None:
                 snapshot_id=args.snapshot_id,
                 baseline_id=args.baseline_id,
                 baseline_as_of=args.baseline_as_of,
+                listed_history=args.listed_history,
             )
         else:
             inputs = {
                 "identity_snapshot_id": args.identity_snapshot_id,
                 "archive_dir": args.archive_dir,
+                "listed_history": args.listed_history,
             }
             operation = (
                 collect_index(settings, **inputs, contact=environment.get("SEC_CONTACT", ""))
