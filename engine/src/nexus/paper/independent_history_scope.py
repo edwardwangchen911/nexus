@@ -233,7 +233,7 @@ async def require_capacity(
     from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
     from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
     from nexus.paper.research_request import read_research_manifest
-    from nexus.paper.single_sol_obligations import funded_obligations
+    from nexus.paper.single_sol_obligations import funded_obligations, original_slot
 
     await _locks(session, account_id, now)
     batch, _ = await validate_agent_paper_candidate_batch(
@@ -262,22 +262,6 @@ async def require_capacity(
     ):
         raise ValueError(WINDOW)
     await require_research_accounting_clear(session)
-    try:
-        covered = await funded_obligations(
-            session,
-            now=now,
-            account=account_id,
-            batch=batch_id,
-            model=model_id,
-            calendar=calendar.calendar_authority_id,
-            members=batch.instrument_ids,
-            maximum=model.worst_case_cost_usd,
-        )
-    except ValueError as error:
-        if str(error) == "SINGLE_SOL_NATURAL_WINDOW_PROTECTED":
-            raise ValueError(WINDOW) from error
-        raise
-    remaining = len(batch.instrument_ids) + 2 - len(covered)
     from nexus.paper.single_sol_budget import remaining_obligations
     from nexus.paper.single_sol_compat import budget_model_compatible
 
@@ -297,11 +281,31 @@ async def require_capacity(
             or guard["batch_id"] != batch_id
             or guard["daily_limit"] != daily_limit
             or guard["maximum"] != model.worst_case_cost_usd
+            or guard["slot"] != original_slot(now.date())
             or not await budget_model_compatible(
                 session, expected=guard["model_id"], candidate=model.id, maximum=guard["maximum"]
             )
         ):
             raise ValueError(BUDGET)
+    try:
+        covered = await funded_obligations(
+            session,
+            now=now,
+            account=account_id,
+            batch=batch_id,
+            model=model_id if guard is None else guard["model_id"],
+            calendar=calendar.calendar_authority_id if guard is None else guard["calendar_id"],
+            members=batch.instrument_ids,
+            maximum=model.worst_case_cost_usd,
+        )
+    except ValueError as error:
+        if str(error) == "SINGLE_SOL_NATURAL_WINDOW_PROTECTED":
+            raise ValueError(WINDOW) from error
+        if str(error) == "SINGLE_SOL_ORIGINAL_SETTLEMENT_UNPROVEN":
+            raise ValueError(UNAVAILABLE) from error
+        raise
+    remaining = len(batch.instrument_ids) + 2 - len(covered)
+    if guard is not None:
         obligations, _ = await remaining_obligations(
             session, day=now.date(), members=list(batch.instrument_ids), now=now
         )

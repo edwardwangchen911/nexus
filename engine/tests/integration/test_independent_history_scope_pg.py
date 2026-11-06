@@ -329,7 +329,7 @@ async def test_normal_independent_queue_preserves_accepted_unknown_and_deduplica
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("late_stage", [None, 2, 3])
+@pytest.mark.parametrize("late_stage", [None, 2, 3, "cleanup"])
 async def test_accepted_history_three_stock_preparation_worker_and_close(
     migrated_database_url,
     monkeypatch,
@@ -362,8 +362,18 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
         target = preopen_target(
             await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
         ).replace(hour=9)
+    import os
+
+    images = bool(os.environ.get("NEXUS_TEST_HISTORY_FORMAL_IMAGE"))
+    if images:
+        async with clock_factory() as db:
+            target = await db.scalar(text("SELECT pg_catalog.clock_timestamp()")) - timedelta(
+                minutes=2
+            )
     await clock_factory.kw["bind"].dispose()
-    monkeypatch.setattr(history_fixture, "AT", (target - timedelta(days=3)).replace(hour=14))
+    monkeypatch.setattr(
+        history_fixture, "AT", (target - timedelta(days=7 if images else 3)).replace(hour=14)
+    )
 
     async def check(factory, settings, old, clock, original_scalar):
         monkeypatch.setattr(AsyncSession, "scalar", original_scalar)
@@ -442,6 +452,65 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                         )
 
             calls, clients = install_sol_http(monkeypatch, store, on_request=change_history)
+            if late_stage == "cleanup":
+                from nexus.agents import platform_native
+
+                original_client = platform_native.native_http_client
+
+                def unconfirmed_cleanup():
+                    client = original_client()
+                    close = client.aclose
+
+                    async def failed_close():
+                        await close()
+                        raise RuntimeError("synthetic cleanup confirmation missing")
+
+                    client.aclose = failed_close
+                    return client
+
+                monkeypatch.setattr(platform_native, "native_http_client", unconfirmed_cleanup)
+                first, second = prepared.research.members[:2]
+                assert await worker.run_agent_worker_once(
+                    live, job_ids=(first.job_id,), formal_stage_capacity=True
+                )
+                before = list(calls)
+                from nexus.paper.research_failure import CapacityPreclaimRejected
+
+                with pytest.raises(
+                    CapacityPreclaimRejected, match="^PLATFORM_NATIVE_POOL_NOT_READY$"
+                ):
+                    await worker.run_agent_worker_once(
+                        live, job_ids=(second.job_id,), formal_stage_capacity=True
+                    )
+                assert calls == before == ["research"]
+                async with factory() as db:
+                    hold = await db.scalar(
+                        select(AgentDailyBudgetReservationRecord).where(
+                            AgentDailyBudgetReservationRecord.run_id == first.run_id
+                        )
+                    )
+                    assert hold.state == "settled" and hold.settled_usd > 0
+                    assert (
+                        await db.scalar(
+                            text(
+                                "SELECT count(*) FROM research_stage_cleanup "
+                                "WHERE run_id=:run AND confirmed"
+                            ),
+                            {"run": first.run_id},
+                        )
+                        == 0
+                    )
+                    assert (
+                        await db.scalar(
+                            text(
+                                "SELECT count(*) FROM research_stage_authorization "
+                                "WHERE run_id=:run"
+                            ),
+                            {"run": second.run_id},
+                        )
+                        == 0
+                    )
+                return
             if late_stage is not None:
                 member = prepared.research.members[0]
                 assert await worker.run_agent_worker_once(
@@ -526,6 +595,12 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                 assert (
                     await read_manual_request(db, await db.get(ManualPaperRequest, old.request_id))
                 ).status == "unknown"
+            if images:
+                from helpers.independent_history_images import verify_images
+
+                await verify_images(
+                    factory, migrated_database_url, receipt.request_id, old.request_id
+                )
         finally:
             await prepared_factory.kw["bind"].dispose()
 
@@ -599,3 +674,57 @@ async def test_after_close_full_native_obligations_allow_independent_capacity(
             assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_scopes")) == 0
 
     await exercise_natural(migrated_database_url, monkeypatch, tmp_path, after_natural_close=check)
+
+
+@pytest.mark.asyncio
+async def test_compact_independent_reads_original_legacy_natural_obligations(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from integration.test_compact_sol_binding_pg import compact_model
+    from integration.test_single_sol_budget_pg import (
+        LIMIT,
+    )
+    from integration.test_single_sol_budget_pg import (
+        test_install_single_protection_after_exact_natural_close as exercise_natural,
+    )
+    from nexus.paper import research_request, single_sol_obligations
+    from nexus.paper.independent_history_scope import UNAVAILABLE, require_capacity
+
+    async def check(factory, host, portfolio, now):
+        selected = await compact_model(factory, host)
+
+        async def observed(_session):
+            return now
+
+        monkeypatch.setattr(research_request, "database_now", observed)
+        args = dict(
+            account_id=host.agent_paper_account_id,
+            batch_id=portfolio.candidate_batch_id,
+            model_id=selected,
+            daily_limit=LIMIT,
+            now=now,
+        )
+        async with factory.begin() as db:
+            before = await db.scalar(
+                text("SELECT jsonb_agg(to_jsonb(g)) FROM single_sol_budget_scopes g")
+            )
+            await require_capacity(db, **args)
+            assert (
+                await db.scalar(
+                    text("SELECT jsonb_agg(to_jsonb(g)) FROM single_sol_budget_scopes g")
+                )
+                == before
+            )
+        sentinel = ValueError("SINGLE_SOL_ORIGINAL_SETTLEMENT_UNPROVEN")
+
+        async def missing_proof(*_args, **_kwargs):
+            raise sentinel
+
+        with monkeypatch.context() as patch:
+            patch.setattr(single_sol_obligations, "funded_obligations", missing_proof)
+            with pytest.raises(ValueError, match=f"^{UNAVAILABLE}$") as caught:
+                async with factory.begin() as db:
+                    await require_capacity(db, **args)
+            assert caught.value.__cause__ is sentinel
+
+    await exercise_natural(migrated_database_url, monkeypatch, tmp_path, after_guard_closed=check)

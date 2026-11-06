@@ -803,7 +803,12 @@ async def test_old_reservation_cannot_authorize_a_new_scope(
 
 @pytest.mark.asyncio
 async def test_install_single_protection_after_exact_natural_close(
-    migrated_database_url, monkeypatch, tmp_path, *, after_natural_close=None
+    migrated_database_url,
+    monkeypatch,
+    tmp_path,
+    *,
+    after_natural_close=None,
+    after_guard_closed=None,
 ):
     from integration import test_candidate_multistock_path as candidates
     from integration import test_sol_native_stage_pg as stages
@@ -957,6 +962,9 @@ async def test_install_single_protection_after_exact_natural_close(
                 )
                 == 1
             )
+
+        if after_guard_closed is not None:
+            await after_guard_closed(factory, host, portfolio, now)
 
     monkeypatch.setattr(candidates, "start_schwab_agent_paper_cycle", scheduled)
     monkeypatch.setattr(persistence, "reserve_daily_budget", reserve)

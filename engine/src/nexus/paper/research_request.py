@@ -224,6 +224,9 @@ async def _prepare_research_request(
     view = await read_manual_request(session, row)
     if view.status != "preparing":
         return view
+    from nexus.agents.research_maintenance import require_research_open
+
+    require_research_open()
     if row.contract_version in {4, 5}:
         from nexus.monitoring.host import (
             BATCH_PREPARATION_HEADROOM_SECONDS,

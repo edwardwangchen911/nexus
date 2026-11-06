@@ -277,7 +277,7 @@ async def test_explicit_unknown_batch_is_atomic_and_does_not_replay(
                     state="reserved",
                 )
             )
-            next_at = AT + timedelta(days=3)
+            next_at = successor_at or AT + timedelta(days=3)
             s.add(
                 ExchangeCalendarSessionRecord(
                     calendar_authority_id=CALENDAR_ID,
