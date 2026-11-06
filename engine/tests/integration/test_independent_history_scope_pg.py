@@ -329,7 +329,7 @@ async def test_normal_independent_queue_preserves_accepted_unknown_and_deduplica
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("late_stage", [None, 2, 3, "cleanup"])
+@pytest.mark.parametrize("late_stage", [None, 2, 3, "cleanup", "priority"])
 async def test_accepted_history_three_stock_preparation_worker_and_close(
     migrated_database_url,
     monkeypatch,
@@ -357,6 +357,10 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
     from unit.ops.test_formal_stage_registration import OPTIONS
+
+    priority = late_stage == "priority"
+    if priority:
+        late_stage = None
 
     clock_factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with clock_factory() as db:
@@ -421,7 +425,7 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
             update={
                 "agent_paper_candidate_batch_id": prepared_settings.agent_paper_candidate_batch_id,
                 "agent_runtime_mode": AgentRuntimeMode.RESPONSES,
-                "agent_daily_budget_usd": Decimal("30"),
+                "agent_daily_budget_usd": Decimal("13" if priority else "30"),
                 "openai_api_key": SecretStr("sk-proj-" + "synthetic-only" * 5),
             }
         )
@@ -434,6 +438,10 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                         "FROM agent_daily_budget_reservations b"
                     )
                 )
+                if priority:
+                    from nexus.paper.independent_priority import authorize
+
+                    await authorize(db, live, idempotency_key="full-new-root", accept_priority=True)
                 receipt = await admit_manual_request(
                     db,
                     account_id=live.agent_paper_account_id,
@@ -451,6 +459,55 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                 prepared = await prepare_research_request(db, live, request_id=receipt.request_id)
                 assert len(prepared.research.members) == 3
                 assert {m.instrument_id for m in prepared.research.members} == set(ids)
+
+            if priority:
+                from integration.test_single_sol_budget_pg import seed_source
+                from nexus.agents.persistence import release_daily_budget, reserve_daily_budget
+                from nexus.paper.agent_cycle_authority import (
+                    select_agent_paper_service_calendar_authority,
+                )
+                from nexus.paper.independent_priority import read_priority
+                from nexus.paper.single_sol_budget import freeze_single_sol_budget
+                from nexus.persistence.models.agents import AgentResearchRunRecord
+
+                async with factory.begin() as db:
+                    point = await db.begin_nested()
+                    await release_daily_budget(db, run_id=prepared.research.members[0].run_id)
+                    row = await db.get(ManualPaperRequest, receipt.request_id)
+                    with pytest.raises(ValueError, match="^INDEPENDENT_PRIORITY_INVALID$"):
+                        await scope.recheck(
+                            db, row, now=await db.scalar(text("SELECT clock_timestamp()"))
+                        )
+                    await point.rollback()
+                async with factory.begin() as db:
+                    point = await db.begin_nested()
+                    old_run = await db.get(
+                        AgentResearchRunRecord, prepared.research.members[0].run_id
+                    )
+                    identity = await seed_source(
+                        db,
+                        reserve_daily_budget,
+                        dict(
+                            now=await db.scalar(text("SELECT clock_timestamp()")),
+                            daily_limit_usd=Decimal("13"),
+                            worst_case_usd=old_run.reserved_cost_usd,
+                            pricing_version=old_run.pricing_version,
+                            pricing_fresh=True,
+                        ),
+                        old_run,
+                    )
+                    calendar = await select_agent_paper_service_calendar_authority(
+                        db, now=await db.scalar(text("SELECT clock_timestamp()"))
+                    )
+                    with pytest.raises(ValueError, match="^INDEPENDENT_PRIORITY_INVALID$"):
+                        await freeze_single_sol_budget(
+                            db,
+                            live,
+                            run_id=identity,
+                            instrument_id=old_run.instrument_id,
+                            calendar_authority_id=calendar.calendar_authority_id,
+                        )
+                    await point.rollback()
 
             async def change_history(payload):
                 previous = {2: "research", 3: "critique"}.get(late_stage)
@@ -613,6 +670,30 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                 assert (
                     await read_manual_request(db, await db.get(ManualPaperRequest, old.request_id))
                 ).status == "unknown"
+            if priority:
+                from nexus.paper.independent_priority import authorize, read_priority
+
+                async with factory.begin() as db:
+                    grant = await read_priority(db, live, idempotency_key="full-new-root")
+                    assert (
+                        grant.consumed_request_id == receipt.request_id
+                        and not grant.grant_unconsumed
+                    )
+                    with pytest.raises(ValueError, match="^INDEPENDENT_PRIORITY_INVALID$"):
+                        await authorize(
+                            db, live, idempotency_key="second-root", accept_priority=True
+                        )
+                async with factory.begin() as db:
+                    with pytest.raises(ValueError, match="^INDEPENDENT_NATURAL_BUDGET_PROTECTED$"):
+                        await scope.require_capacity(
+                            db,
+                            account_id=live.agent_paper_account_id,
+                            batch_id=live.agent_paper_candidate_batch_id,
+                            model_id=live.agent_paper_formal_model_config_id,
+                            daily_limit=Decimal("13"),
+                            now=await db.scalar(text("SELECT clock_timestamp()")),
+                        )
+
             if images:
                 from helpers.independent_history_images import verify_images
 

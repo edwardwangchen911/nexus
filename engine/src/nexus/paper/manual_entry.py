@@ -197,7 +197,12 @@ async def require_configured_manual_host(
 
 
 async def _configured_admission(
-    session: AsyncSession, settings: EngineSettings, *, mode: ManualMode, account_id: UUID
+    session: AsyncSession,
+    settings: EngineSettings,
+    *,
+    mode: ManualMode,
+    account_id: UUID,
+    idempotency_key: str | None = None,
 ) -> tuple[UUID, UUID, datetime]:
     if not settings.agent_paper_manual_enabled or not settings.agent_paper_cycle_enabled:
         raise ValueError("MANUAL_ENTRY_DISABLED")
@@ -233,6 +238,9 @@ async def _configured_admission(
                 model_id=model_id,
                 daily_limit=settings.agent_daily_budget_usd,
                 now=now,
+                key_hash=None
+                if idempotency_key is None
+                else sha256(idempotency_key.encode()).hexdigest(),
             )
         else:
             await scope_check(session, account_id=account_id, model_config_id=model_id, now=now)
@@ -280,10 +288,12 @@ async def check_configured_formal_admission(
 
 
 async def check_configured_independent_admission(
-    session: AsyncSession, settings: EngineSettings
+    session: AsyncSession, settings: EngineSettings, *, idempotency_key: str | None = None
 ) -> IndependentAdmissionCheck:
     return IndependentAdmissionCheck(
-        checked_at=await _check_configured_queue(session, settings, mode="research_and_monitor")
+        checked_at=await _check_configured_queue(
+            session, settings, mode="research_and_monitor", idempotency_key=idempotency_key
+        )
     )
 
 
@@ -292,6 +302,7 @@ async def _check_configured_queue(
     settings: EngineSettings,
     *,
     mode: ManualMode,
+    idempotency_key: str | None = None,
 ) -> datetime:
     from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
     from nexus.agents.platform_profile import sol_business_model_matches
@@ -305,7 +316,7 @@ async def _check_configured_queue(
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
     await lock_portfolio_account(session, account_id)
     batch_id, model_id, now = await _configured_admission(
-        session, settings, mode=mode, account_id=account_id
+        session, settings, mode=mode, account_id=account_id, idempotency_key=idempotency_key
     )
     await require_manual_account_available(session, account_id=account_id, now=now, read_only=True)
     await validate_agent_paper_candidate_batch(
@@ -342,7 +353,7 @@ async def start_configured_manual_request(
             raise ValueError("MANUAL_IDEMPOTENCY_CONFLICT")
         return await _read_presented_manual_request(session, row)
     batch_id, model_id, _ = await _configured_admission(
-        session, settings, mode=mode, account_id=account_id
+        session, settings, mode=mode, account_id=account_id, idempotency_key=idempotency_key
     )
     from nexus.agents.codex_versions import BOUNDED_STAGE_BUDGET_CONFIG_VERSION
     from nexus.agents.platform_profile import sol_business_model_matches

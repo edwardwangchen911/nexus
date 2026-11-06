@@ -597,6 +597,11 @@ async def require_research_profile(
             if isinstance(profile, dict) and "historical_exception" in profile
             else set()
         )
+        | (
+            {"budget_priority"}
+            if isinstance(profile, dict) and "budget_priority" in profile
+            else set()
+        )
         or settings.agent_runtime_mode is None
         or profile["runtime_mode"] != settings.agent_runtime_mode.value
         or profile["runtime_mode"] != ("responses" if platform else "codex_sdk")
