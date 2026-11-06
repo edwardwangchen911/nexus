@@ -120,3 +120,12 @@ describe("SEC saved monitoring readback", () => {
     expect(screen.queryByRole("region", { name: "SEC 披露监控记录" })).not.toBeInTheDocument();
   });
 });
+
+it("shows the forward comparison boundary without clearing the earlier history gap", () => {
+  render(panel({ latest_check: { result: "false", checked_at: disclosureAt, scheduled_at: disclosureAt, reason: null,
+    comparison_from: "2026-10-24T11:00:00Z", prior_history_from: "2026-10-24T10:00:00Z", prior_history_unknown: true } }));
+  expect(screen.getByText("完整比较起点")).toBeVisible();
+  expect(screen.getByText("原历史缺口起点")).toBeVisible();
+  expect(screen.getByText(/未命中仅适用于该起点之后/)).toBeVisible();
+  expect(screen.getByText(/原冻结基线至该起点的历史覆盖仍未知/)).toBeVisible();
+});

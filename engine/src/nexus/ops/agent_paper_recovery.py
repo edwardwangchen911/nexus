@@ -22,6 +22,8 @@ from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.models.runtime import WorkerHeartbeat
 from nexus.persistence.session import session_factory
+from nexus.research.artifact_read_scope import artifact_read_scope
+from nexus.research.identity_sources import identity_source_parse_scope
 from nexus.settings import AgentRuntimeMode, EngineSettings
 from nexus.workbench.evidence_read_scope import evidence_read_scope
 
@@ -143,7 +145,12 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                 # Existing acceptance/seal and consumed-lease proofs remain authoritative.
                 # Never replace them with a blanket historical cost/lease predicate.
                 stage, started = "account_occupancy", monotonic_ns()
-                with identity_parse_scope(), evidence_read_scope(session):
+                with (
+                    identity_parse_scope(),
+                    identity_source_parse_scope(),
+                    artifact_read_scope(session),
+                    evidence_read_scope(session),
+                ):
                     await require_manual_account_available(
                         session,
                         account_id=account.id,

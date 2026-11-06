@@ -20,6 +20,7 @@ from nexus.monitoring.filing_content import (
     filing_root,
     require_html_entry,
 )
+from nexus.monitoring.sec_index_reader import read_monitor_index
 from nexus.ops.local_recovery import write_private
 from nexus.ops.sec_index_local import _store
 from nexus.persistence.session import session_factory
@@ -31,7 +32,6 @@ from nexus.providers.http import (
 )
 from nexus.research.sec_disclosure_index import SecIndexEntry
 from nexus.research.sec_exhibit_storage import ExhibitStore
-from nexus.research.sec_index_storage import read_index_capture
 from nexus.settings import EngineSettings
 
 _SAFE_CODES = frozenset(
@@ -203,7 +203,7 @@ async def collect_filing_content(
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("SEC_MONITOR_CLOCK_UNAVAILABLE")
-            _, index = await read_index_capture(
+            _, index = await read_monitor_index(
                 session, archive_store, snapshot_id=index_snapshot_id, as_of=now
             )
             matches = [entry for entry in index.entries if entry.accession_number == accession]

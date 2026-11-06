@@ -1,5 +1,6 @@
 """Saved SEC coverage and per-event review, without collecting or admitting work."""
 
+import json
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -201,6 +202,51 @@ async def _mixed_review(
         return "addressed"
     except (ValueError, KeyError, TypeError):
         return "unverified"
+
+
+async def _comparison_boundary(
+    session: AsyncSession, check: MonitorCheck, plan: MonitorPlan
+) -> tuple[datetime, datetime] | None:
+    """Read saved custody bindings only; page loads never fetch or rebuild source archives."""
+    from nexus.monitoring.disclosure_forward import ForwardObservation
+    from nexus.monitoring.disclosure_inheritance import read_binding
+
+    if not isinstance(check.observation, dict) or "policy" not in check.observation:
+        return None
+    document = dict(check.observation)
+    if "entry" in document:
+        document["added"] = [document.pop("entry")]
+    observation = ForwardObservation.model_validate_json(json.dumps(document))
+    binding = await read_binding(session, plan, check.checked_at)
+    if binding is None:
+        raise ValueError("SEC_INDEX_FORWARD_ORIGIN_INVALID")
+    row, _, _, origin = binding
+    if (
+        row.id != observation.origin_id
+        or (origin.capture_id, origin.capture_hash, origin.effective_at)
+        != (
+            observation.comparison_snapshot_id,
+            observation.comparison_hash,
+            observation.comparison_from,
+        )
+        or (
+            observation.plan_id,
+            observation.instrument_id,
+            observation.baseline_snapshot_id,
+            observation.baseline_as_of,
+            observation.baseline_hash,
+        )
+        != (
+            plan.id,
+            plan.instrument_id,
+            origin.baseline_snapshot_id,
+            origin.baseline_as_of,
+            origin.baseline_hash,
+        )
+        or observation.result != check.result
+    ):
+        raise ValueError("SEC_INDEX_FORWARD_ORIGIN_INVALID")
+    return origin.effective_at, origin.baseline_as_of
 
 
 async def read_disclosure_monitoring_view(
@@ -464,6 +510,16 @@ async def read_disclosure_monitoring_view(
                 }
             )
         )
+    comparison_from = None
+    prior_history_from = None
+    comparison_invalid = False
+    if check is not None:
+        try:
+            boundary = await _comparison_boundary(session, check, original)
+            if boundary is not None:
+                comparison_from, prior_history_from = boundary
+        except (ValueError, TypeError, KeyError):
+            comparison_invalid = True
     return ResearchDisclosureMonitoringView.model_validate(
         {
             "observed_at": now,
@@ -481,10 +537,15 @@ async def read_disclosure_monitoring_view(
             if check is None
             else ResearchDisclosureMonitorCheck.model_validate(
                 {
-                    "result": check.result,
+                    "result": "unknown" if comparison_invalid else check.result,
                     "scheduled_at": check.scheduled_at,
                     "checked_at": check.checked_at,
-                    "reason": "observation_unverified" if check.reason is not None else None,
+                    "reason": "observation_unverified"
+                    if check.reason is not None or comparison_invalid
+                    else None,
+                    "comparison_from": comparison_from,
+                    "prior_history_from": prior_history_from,
+                    "prior_history_unknown": True if comparison_from is not None else None,
                 }
             ),
         }

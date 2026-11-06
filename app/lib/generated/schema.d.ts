@@ -6350,6 +6350,12 @@ export interface components {
              * Format: date-time
              */
             checked_at: string;
+            /** Comparison From */
+            comparison_from: string | null;
+            /** Prior History From */
+            prior_history_from: string | null;
+            /** Prior History Unknown */
+            prior_history_unknown: true | null;
             /** Reason */
             reason: "observation_unverified" | null;
             /**

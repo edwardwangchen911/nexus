@@ -1,0 +1,41 @@
+import fs from "node:fs";
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+const directory = process.env.NEXUS_TEST_MONITOR_BROWSER_DIR;
+test.skip(!directory, "requires an isolated persisted forward-origin fixture");
+
+test("normal BFF and page retain the original gap and exact forward boundary", async ({ page }) => {
+  const ready = JSON.parse(fs.readFileSync(path.join(directory!, "ready.json"), "utf8"));
+  const writes: string[] = [], errors: string[] = [];
+  page.on("request", request => { if (request.url().includes("/api/") && request.method() !== "GET") writes.push(request.method()); });
+  page.on("pageerror", error => errors.push(String(error)));
+  await page.route("**/*", route => ["127.0.0.1", "localhost"].includes(new URL(route.request().url()).hostname) ? route.continue() : route.abort());
+  const responsePromise = page.waitForResponse(response => response.url().includes(`/api/v1/research-runs/${ready.run_id}`));
+  await page.goto(`/research/${ready.instrument_id}?run_id=${ready.run_id}`);
+  const response = await responsePromise;
+  expect(response.status()).toBe(200);
+  const actual = (await response.json()).data.disclosure_monitoring;
+  const saved = ready.response.data.disclosure_monitoring;
+  // Read timestamps advance; every saved business field and the origin remain exact.
+  expect(Date.parse(actual.observed_at)).toBeGreaterThanOrEqual(Date.parse(saved.observed_at));
+  expect(Date.parse(actual.observed_at) - Date.parse(saved.observed_at)).toBeLessThan(300_000);
+  expect(actual).toEqual({ ...saved, observed_at: actual.observed_at });
+  await page.waitForLoadState("networkidle");
+  const sec = page.getByRole("region", { name: "SEC 披露监控记录" });
+  await expect(sec).toBeVisible();
+  await expect(sec).toContainText("完整比较起点");
+  await expect(sec).toContainText("原历史缺口起点");
+  expect(saved.latest_check.result).toBe(ready.expected_result ?? "false");
+  await expect(sec).toContainText(ready.expected_result === "true" ? "该次检查收录了指定类型的新披露" : "该次检查未收录指定类型的新披露");
+  await expect(sec).toContainText("未命中仅适用于该起点之后");
+  await expect(sec).toContainText("原冻结基线至该起点的历史覆盖仍未知");
+  await expect(sec).toContainText("交易保持锁定");
+  await expect(sec).toContainText(`共记录 ${ready.expected_event_count ?? 0} 项披露事件`);
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await sec.screenshot({ path: path.join(directory!, "sec-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await sec.screenshot({ path: path.join(directory!, "sec-mobile.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  expect(writes).toEqual([]); expect(errors).toEqual([]);
+  fs.writeFileSync(path.join(directory!, "browser-proof.json"), JSON.stringify({ passed: true, writes, errors, status: response.status() }));
+});

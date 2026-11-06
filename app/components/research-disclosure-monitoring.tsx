@@ -52,6 +52,11 @@ export function ResearchDisclosureMonitoring({ monitoring, instrumentId }: { mon
             <div><dt>计划检查时间</dt><dd>{formatDisplayTime(check.scheduled_at)}</dd></div>
             <div><dt>实际检查时间</dt><dd>{formatDisplayTime(check.checked_at)}</dd></div>
           </dl>
+          {check.comparison_from ? <>
+            <dl className="decision-card__versions"><div><dt>完整比较起点</dt><dd>{formatDisplayTime(check.comparison_from)}</dd></div></dl>
+            {check.prior_history_from ? <dl className="decision-card__versions"><div><dt>原历史缺口起点</dt><dd>{formatDisplayTime(check.prior_history_from)}</dd></div></dl> : null}
+            <p>未命中仅适用于该起点之后；原冻结基线至该起点的历史覆盖仍未知。</p>
+          </> : null}
           {check.result === "unknown" ? <p>披露原件或时间依据尚未核验，无法确认该次收录变化。</p> : null}
         </> : <p>尚无已保存的披露检查；不能据此认定没有新增披露。</p>}
       </section>

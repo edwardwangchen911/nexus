@@ -22,7 +22,13 @@ from sqlalchemy import select
 
 
 async def reader_source(
-    database_url, monkeypatch, root, *, monitoring_lifetime_days=None, independent=False
+    database_url,
+    monkeypatch,
+    root,
+    *,
+    monitoring_lifetime_days=None,
+    independent=False,
+    listed_history=False,
 ):
     class VersionedMemoryStore(MemoryStore):
         async def put_if_absent(self, *, key, content):
@@ -59,6 +65,7 @@ async def reader_source(
             root / "baseline",
             identity=identity,
             sibling_symbols=("AVGO", "NVDA") if independent else (),
+            listed_history=listed_history,
             exchange="NASDAQ",
             received=historical - timedelta(seconds=1),
         )

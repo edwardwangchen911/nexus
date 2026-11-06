@@ -63,3 +63,26 @@ async def test_invalid_scope_rejected_before_io(tmp_path, fault):
         }[fault]
     )
     assert not tuple(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "receipt,extra,expected",
+    [
+        (None, None, None),
+        ("history-result.json", 2, 4),
+        ("history-failure.json", 1, 3),
+        ("history-failure.json", 3, None),
+    ],
+)
+def test_listed_request_count_requires_exact_separate_attempt_receipt(
+    tmp_path, receipt, extra, expected
+):
+    import json
+
+    from nexus.ops.monitor_disclosure_refresh import _request_count
+
+    (tmp_path / "result.json").write_text(json.dumps({"requests": 2}))
+    if receipt:
+        (tmp_path / receipt).write_text(json.dumps({"requests": extra}))
+    assert _request_count(tmp_path, listed_history=True) == expected
+    assert _request_count(tmp_path) == 2

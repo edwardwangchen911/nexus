@@ -19,8 +19,10 @@ from nexus.monitoring.filing_content import (
     FilingDocument,
     document_inventory,
     filing_root,
+    require_html_entry,
     verify_filing_documents,
 )
+from nexus.monitoring.sec_index_reader import read_monitor_index
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.research.sec_disclosure_index import SecIndexEntry
@@ -29,7 +31,6 @@ from nexus.research.sec_index_storage import (
     IndexArchiveBinding,
     _original,
     _receipt,
-    read_index_capture,
 )
 
 SOURCE = "nexus_sec_monitor_filing"
@@ -121,13 +122,14 @@ async def import_filing_content(
     if not isinstance(clock, datetime) or clock < now:
         raise ValueError("SEC_MONITOR_CLOCK_UNAVAILABLE")
     now = clock
-    source, index = await read_index_capture(
+    source, index = await read_monitor_index(
         session, store, snapshot_id=index_snapshot_id, as_of=now
     )
     matches = [row for row in index.entries if row.accession_number == accession]
     if len(matches) != 1:
         raise ValueError("SEC_MONITOR_ENTRY_UNAVAILABLE")
-    entry = matches[0]
+    require_html_entry(matches[0])
+    entry = SecIndexEntry.model_validate(matches[0].model_dump())
     root = filing_root(index.issuer_cik, entry.accession_number)
     inventory_name = entry.accession_number + "-index.html"
 
@@ -265,14 +267,14 @@ async def read_filing_content(
         ):
             return None
         store = configured_exhibit_store(session)
-        source, index = await read_index_capture(
+        source, index = await read_monitor_index(
             session, store, snapshot_id=document.index_snapshot_id, as_of=as_of
         )
         if (
             source.revision != document.index_hash
             or index.instrument_id != document.instrument_id
             or index.issuer_cik != document.issuer_cik
-            or document.entry not in index.entries
+            or document.entry.model_dump() not in [entry.model_dump() for entry in index.entries]
         ):
             return None
         originals = {}

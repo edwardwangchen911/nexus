@@ -40,6 +40,7 @@ async def installed(
     kinds=("price", "disclosure"),
     monitoring_lifetime_days=None,
     independent=False,
+    listed_history=False,
 ):
     factory, settings, store, captured, pointer = await reader_source(
         database_url,
@@ -47,6 +48,7 @@ async def installed(
         root,
         monitoring_lifetime_days=monitoring_lifetime_days,
         independent=independent,
+        listed_history=listed_history,
     )
     monkeypatch.setattr(
         "nexus.monitoring.disclosure_observations.configured_exhibit_store", lambda session: store

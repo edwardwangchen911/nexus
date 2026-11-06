@@ -67,9 +67,11 @@ async def _inputs(
     from nexus.agents.paper_context import AgentPaperResearchContext
     from nexus.monitoring.batches import disclosure_source_current
     from nexus.monitoring.disclosure_observations import read_disclosure_observation
+    from nexus.monitoring.filing_content import require_html_entry
     from nexus.monitoring.reconciliation import plan_covered
     from nexus.monitoring.source_qualification import QualifiedSource, load_qualified_source
     from nexus.research.sec_disclosure_index import SecIndexEntry
+    from nexus.research.sec_listed_history import SecMetadataEntry
 
     readonly = await session.scalar(text("SELECT current_setting('transaction_read_only')"))
     validator = (
@@ -212,11 +214,16 @@ async def _inputs(
             continue
         if not isinstance(check.observation, dict):
             raise MaterialGap("MONITOR_CONTEXT_INVALID")
-        entry = SecIndexEntry.model_validate(check.observation["entry"])
+        metadata = SecMetadataEntry.model_validate(check.observation["entry"])
+        try:
+            require_html_entry(metadata)
+        except ValueError:
+            raise MaterialGap("SEC_MONITOR_DOCUMENT_FORMAT_UNSUPPORTED") from None
+        entry = SecIndexEntry.model_validate(metadata.model_dump())
         observation = await read_disclosure_observation(session, plan=plan, now=check.checked_at)
         if (
             observation.result != "true"
-            or entry not in observation.added
+            or entry.model_dump() not in [item.model_dump() for item in observation.added]
             or trigger.event_key != f"sec:{observation.issuer_cik}:{entry.accession_number}"
             or {
                 **{k: v for k, v in observation.model_dump(mode="json").items() if k != "added"},
