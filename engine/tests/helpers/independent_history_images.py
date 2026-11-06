@@ -60,18 +60,24 @@ async def run(args):
             await refused(run_agent_worker_once(settings, formal_stage_capacity=True))
             await refused(
                 manual_paper.run(
-                    settings,
-                    manual_paper.parser().parse_args(
-                        [
-                            "start",
-                            "--mode",
-                            "research_and_monitor",
-                            "--idempotency-key",
-                            "never-send",
-                        ]
-                    ),
+                    settings, manual_paper.parser().parse_args(["check-independent-admission"])
                 )
             )
+            from nexus.paper.manual_request import admit_manual_request
+
+            async with factory.begin() as db:
+                await refused(
+                    admit_manual_request(
+                        db,
+                        account_id=row.account_id,
+                        batch_id=row.candidate_batch_id,
+                        model_config_id=row.model_config_id,
+                        mode="research_and_monitor",
+                        contract_version=3,
+                        runtime_mode="responses",
+                        idempotency_key="never-send",
+                    )
+                )
         assert await facts(factory) == args["facts"]
         print(json.dumps(results))
     finally:

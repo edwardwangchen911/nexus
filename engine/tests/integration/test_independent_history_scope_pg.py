@@ -335,6 +335,7 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
     monkeypatch,
     tmp_path,
     late_stage,
+    request,
 ):
     from datetime import timedelta
     from decimal import Decimal
@@ -371,8 +372,25 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                 minutes=2
             )
     await clock_factory.kw["bind"].dispose()
+    if images:
+        from nexus.persistence.models.backtest import ExchangeCalendarAuthorityRecord
+        from sqlalchemy import event
+
+        def complete_fixture_calendar(_mapper, _connection, row):
+            row.range_end = max(row.range_end, target.date() + timedelta(days=3))
+
+        event.listen(ExchangeCalendarAuthorityRecord, "before_insert", complete_fixture_calendar)
+        request.addfinalizer(
+            lambda: event.remove(
+                ExchangeCalendarAuthorityRecord, "before_insert", complete_fixture_calendar
+            )
+        )
     monkeypatch.setattr(
-        history_fixture, "AT", (target - timedelta(days=7 if images else 3)).replace(hour=14)
+        history_fixture,
+        "AT",
+        (target - timedelta(days=7 if images else 3)).replace(
+            hour=14, minute=0, second=0, microsecond=0
+        ),
     )
 
     async def check(factory, settings, old, clock, original_scalar):
