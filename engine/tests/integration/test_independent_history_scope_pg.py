@@ -336,6 +336,7 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
     tmp_path,
     late_stage,
     request,
+    zero_stage_check=None,
 ):
     from datetime import timedelta
     from decimal import Decimal
@@ -527,6 +528,11 @@ async def test_accepted_history_three_stock_preparation_worker_and_close(
                         )
 
             calls, clients = install_sol_http(monkeypatch, store, on_request=change_history)
+            if zero_stage_check is not None:
+                await zero_stage_check(
+                    factory, live, prepared, receipt, calls, clients, old.request_id
+                )
+                return
             if late_stage == "cleanup":
                 from nexus.agents import platform_native
 

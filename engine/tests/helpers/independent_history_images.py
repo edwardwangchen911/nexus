@@ -73,12 +73,36 @@ async def run(args):
                     )
                 )
         results = []
-        for identity, expected in [(args["new"], "completed"), (args["old"], "unknown")]:
+        for identity, expected in [
+            (args["new"], args.get("expected_new", "completed")),
+            (args["old"], "unknown"),
+        ]:
             receipt = await manual_paper.run(
                 settings, manual_paper.parser().parse_args(["read", "--request-id", identity])
             )
             assert receipt.status == expected and receipt.execution_locked
             results.append(receipt.model_dump(mode="json"))
+        if args.get("expected_new") == "unknown":
+            from nexus.agents.research_stages.proof import read_terminal_proof
+            from nexus.agents.research_stages.protocol import ProtocolRejected
+            from sqlalchemy import text
+
+            async with factory() as db:
+                run_id = await db.scalar(
+                    text("SELECT run_id FROM research_stage_terminal WHERE known=false")
+                )
+                now = await db.scalar(text("SELECT clock_timestamp()"))
+                proof = await read_terminal_proof(
+                    db, run_id=run_id, now=now, close_empty_unknown=True
+                )
+                assert proof.empty_authorizations and not proof.cleanup_confirmed
+                assert not proof.known and not proof.budget_settled
+                try:
+                    await read_terminal_proof(db, run_id=run_id, now=now)
+                except ProtocolRejected:
+                    pass
+                else:
+                    raise AssertionError("strict reader admitted zero-stage unknown")
         if args["maintenance"]:
             await refused(run_agent_worker_once(settings, formal_stage_capacity=True))
             await refused(
@@ -107,7 +131,7 @@ async def run(args):
         await factory.kw["bind"].dispose()
 
 
-async def verify_images(factory, database_url, new, old):
+async def verify_images(factory, database_url, new, old, *, expected_new="completed"):
     names = [
         os.environ[k]
         for k in ("NEXUS_TEST_HISTORY_FORMAL_IMAGE", "NEXUS_TEST_HISTORY_MAINTENANCE_IMAGE")
@@ -121,6 +145,7 @@ async def verify_images(factory, database_url, new, old):
         facts=before,
         new=str(new),
         old=str(old),
+        expected_new=expected_new,
     )
     receipts = []
     for maintenance, image in [(False, names[0]), (True, names[1]), (False, names[0])]:

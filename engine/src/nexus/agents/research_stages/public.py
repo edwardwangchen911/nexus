@@ -222,8 +222,16 @@ async def _history_proof(session: Any, **kwargs: Any) -> Any:
 
 
 async def _research_settled(
-    session: Any, *, row: Any, view: Any, now: Any, allow_unknown_usage: Any = False
+    session: Any,
+    *,
+    row: Any,
+    view: Any,
+    now: Any,
+    allow_unknown_usage: Any = False,
+    close_empty_unknown: bool = False,
 ) -> Any:
+    # finish_research_request already holds the scope fence via orphan recovery.
+    # The independent opt-in is never forwarded by acceptance or admission.
     historical = []
     for member in view.members:
         if await selected_route(session, member.job_id) is None:
@@ -239,6 +247,7 @@ async def _research_settled(
             member=member,
             now=now,
             allow_unknown_usage=allow_unknown_usage,
+            close_empty_unknown=close_empty_unknown,
         )
     if historical:
         await research_request._legacy_require_research_jobs_settled(
@@ -251,7 +260,14 @@ async def _research_settled(
 
 
 async def _selected_member_settled(
-    session: Any, *, owner_id: Any, kind: Any, member: Any, now: Any, allow_unknown_usage: Any
+    session: Any,
+    *,
+    owner_id: Any,
+    kind: Any,
+    member: Any,
+    now: Any,
+    allow_unknown_usage: Any,
+    close_empty_unknown: bool = False,
 ) -> Any:
     from nexus.paper.research_failure import require_unused_research_member_closed
 
@@ -282,12 +298,26 @@ async def _selected_member_settled(
         )
         return
     try:
-        proof = await read_terminal_proof(session, run_id=member.run_id, now=now)
+        proof = await read_terminal_proof(
+            session,
+            run_id=member.run_id,
+            now=now,
+            close_empty_unknown=close_empty_unknown and allow_unknown_usage,
+        )
     except ProtocolRejected:
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN") from None
     if (
         proof is None
-        or not proof.cleanup_confirmed
+        or (
+            not proof.cleanup_confirmed
+            and not (
+                close_empty_unknown
+                and allow_unknown_usage
+                and proof.empty_authorizations
+                and not proof.known
+                and not proof.budget_settled
+            )
+        )
         or (proof.known and not proof.budget_settled)
         or (not allow_unknown_usage and (not proof.known))
     ):
