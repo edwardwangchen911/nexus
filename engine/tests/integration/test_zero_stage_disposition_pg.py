@@ -31,6 +31,7 @@ from sqlalchemy import text
         "successor_ack_lost",
         "successor_root_ack_lost",
         "successor_rollback",
+        "successor_policy_refusal",
     ],
 )
 async def test_zero_stage_disposition_normal_entry(
@@ -282,6 +283,25 @@ async def test_zero_stage_disposition_normal_entry(
                         accept_priority=True,
                         predecessor_request_id=uuid4(),
                     )
+            from nexus.paper.independent_priority import capture_predecessor
+
+            unexpected = ValueError("synthetic non-policy read failure")
+
+            async def unrelated_error(*_args, **_kwargs):
+                raise unexpected
+
+            with monkeypatch.context() as m:
+                m.setattr(acceptance, "_validate", unrelated_error)
+                async with factory.begin() as db:
+                    with pytest.raises(ValueError) as failure:
+                        await capture_predecessor(
+                            db,
+                            request_id=receipt.request_id,
+                            account=live.agent_paper_account_id,
+                            day=(await db.scalar(text("SELECT clock_timestamp()"))).date(),
+                            now=await db.scalar(text("SELECT clock_timestamp()")),
+                        )
+                    assert failure.value is unexpected
             grant_args = manual_paper.parser().parse_args(
                 [
                     "authorize-independent-priority",
@@ -436,7 +456,13 @@ async def test_zero_stage_disposition_normal_entry(
                             for key, content in store_client.objects.items()
                         },
                         "versions": store_client.versions,
-                        "case": "late_stage" if late_case else "normal" if is_successor else case,
+                        "case": "policy_refusal"
+                        if case == "successor_policy_refusal"
+                        else "late_stage"
+                        if late_case
+                        else "normal"
+                        if is_successor
+                        else case,
                         "old_run": str(first.run_id),
                         "bucket": configured_exhibit_store(None)._bucket,
                         "prefix": configured_exhibit_store(None)._prefix,
@@ -475,6 +501,21 @@ async def test_zero_stage_disposition_normal_entry(
                 with pytest.raises(RuntimeError, match="AGENT_PAPER_LOOP_ALREADY_RUNNING"):
                     with acquire_agent_paper_lock(runtime_root=tmp_path / "isolated-host"):
                         pass
+                if is_successor:
+                    ready = await manual_paper.run(
+                        live,
+                        manual_paper.parser().parse_args(
+                            [
+                                "check-independent-admission",
+                                "--idempotency-key",
+                                "next-after-zero-disposition",
+                            ]
+                        ),
+                    )
+                    assert (
+                        ready.status == "independent_request_queueable"
+                        and not ready.budget_reserved
+                    )
                 start = manual_paper.parser().parse_args(
                     [
                         "start",
@@ -536,6 +577,14 @@ async def test_zero_stage_disposition_normal_entry(
                 assert dispatched["phase"] == "dispatched"
                 if late_case:
                     assert dispatched["stages"] == ["research"]
+                elif case == "successor_policy_refusal":
+                    assert dispatched["stages"] == ["research"]
+                    # The next stock's first stage and the first stock's critique
+                    # both recheck the predecessor before any transport can open.
+                    assert sorted(dispatched["authorization_refusals"]) == [
+                        ["ProtocolRejected", "INDEPENDENT_PRIORITY_INVALID", 1],
+                        ["ProtocolRejected", "INDEPENDENT_PRIORITY_INVALID", 2],
+                    ]
                 else:
                     assert dispatched["parallel_http"]
                     assert len(dispatched["stage_calls"]) == 3
@@ -559,7 +608,48 @@ async def test_zero_stage_disposition_normal_entry(
                 async with factory.begin() as db:
                     row = await db.get(ManualPaperRequest, successor.request_id)
                     complete = await finish_research_request(db, row=row)
-                    assert complete.status == ("unknown" if late_case else "completed")
+                    if case == "successor_policy_refusal":
+                        # The parallel stock failed before its first authorization.
+                        # Existing zero-stage policy retains unknown usage and money;
+                        # a fixed refusal code does not certify a zero-cost terminal.
+                        assert complete.status == "unknown"
+                        assert complete.research is not None
+                        uncertain = [m for m in complete.research.members if not m.usage_known]
+                        assert len(uncertain) == 1 and uncertain[0].status == "failed"
+                        unknown_run = uncertain[0].run_id
+                        from nexus.agents.research_stages.protocol import ProtocolRejected
+
+                        with pytest.raises(ProtocolRejected, match="STAGED_TERMINAL_PROOF_INVALID"):
+                            await read_terminal_proof(
+                                db,
+                                run_id=unknown_run,
+                                now=await db.scalar(text("SELECT clock_timestamp()")),
+                            )
+                        proof = await read_terminal_proof(
+                            db,
+                            run_id=unknown_run,
+                            now=await db.scalar(text("SELECT clock_timestamp()")),
+                            close_empty_unknown=True,
+                        )
+                        assert proof.empty_authorizations and not proof.known
+                        assert not proof.budget_settled and not proof.cleanup_confirmed
+                        unknown_hold = (
+                            await db.execute(
+                                text(
+                                    "SELECT state,reserved_usd,settled_usd "
+                                    "FROM agent_daily_budget_reservations WHERE run_id=:id"
+                                ),
+                                {"id": unknown_run},
+                            )
+                        ).one()
+                        from decimal import Decimal
+
+                        assert tuple(unknown_hold) == ("reserved", Decimal("2.12192"), None)
+                        assert sorted(
+                            (m.status, m.usage_known) for m in complete.research.members
+                        ) == [("abstained", True), ("failed", False), ("failed", True)]
+                    else:
+                        assert complete.status == ("unknown" if late_case else "completed")
                     assert await finish_research_request(db, row=row) == complete
                     held = (
                         await db.execute(
@@ -571,7 +661,7 @@ async def test_zero_stage_disposition_normal_entry(
                         )
                     ).one()
                     assert tuple(held) == ("reserved", None)
-                    if late_case:
+                    if late_case or case == "successor_policy_refusal":
                         saved = (
                             (
                                 await db.execute(

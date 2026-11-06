@@ -115,7 +115,12 @@ async def capture_predecessor(
         raise ValueError(INVALID)
     # This explicit continuation supports accepted unknown predecessors only.
     # The original versioned validator proves terminal state and retained money.
-    await acceptance._validate(session, row=row, audit=audits[0], now=now)
+    try:
+        await acceptance._validate(session, row=row, audit=audits[0], now=now)
+    except ValueError as error:
+        if str(error) == acceptance.BLOCKED:
+            raise ValueError(INVALID) from error
+        raise
     return Predecessor(
         request_id=row.id,
         request_hash=row.request_hash,
