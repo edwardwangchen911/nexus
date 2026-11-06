@@ -149,6 +149,18 @@ async def _read_artifact(
     canonical: bool = False,
 ) -> bytes:
     record = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == binding.sha256))
+    return await _read_registered_artifact(store, record, binding, as_of, canonical=canonical)
+
+
+async def _read_registered_artifact(
+    store: ExhibitStore,
+    record: DataArtifact | None,
+    binding: ArtifactBinding,
+    as_of: datetime,
+    *,
+    canonical: bool = False,
+) -> bytes:
+    """Validate a row selected by this read, including its exact stored original."""
     if (
         record is None
         or _binding(record) != binding

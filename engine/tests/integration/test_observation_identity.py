@@ -230,3 +230,117 @@ async def test_register_observation_exact_readback_and_fail_closed(
                         await session.flush()
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_known_receipts_batch_registration_reads_without_skipping_originals(
+    migrated_database_url, tmp_path
+):
+    from nexus.research.observation_identity_storage import (
+        ResearchIdentityBinding,
+        _check_known_sources,
+    )
+    from sqlalchemy import event
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    client = FakeS3Client()
+    store = S3ProviderEvidenceStore(settings, client=client)
+    engine = factory.kw["bind"]
+    reads = []
+
+    def record(_conn, _cursor, statement, _params, _context, _many):
+        if "FROM data_artifacts" in statement:
+            reads.append(statement)
+
+    try:
+        await fixture(factory, settings, store, tmp_path)
+        async with factory() as session:
+            snapshot = await session.scalar(
+                select(DataSnapshot).where(DataSnapshot.source == "research_current_identity")
+            )
+            document = ResearchIdentityBinding.model_validate(snapshot.payload)
+            cutoff = await session.scalar(select(func.clock_timestamp()))
+            client.get_calls.clear()
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            await _check_known_sources(session, store, document, cutoff)
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+            # Receipts plus their exact originals, not one registration query per object.
+            assert len(reads) == 2
+            assert len(client.get_calls) == 4
+            # Already-read bytes are never treated as authority on the next invocation.
+            raw_key = urlsplit(document.source_artifacts[0].uri).path.lstrip("/")
+            client.objects[raw_key] = b"corrupt"
+            with pytest.raises(ValueError):
+                await _check_known_sources(session, store, document, cutoff)
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", record):
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["delete", "metadata"])
+async def test_batched_original_registration_is_immutable_during_read(
+    migrated_database_url, tmp_path, change
+):
+    from nexus.research.observation_identity_storage import (
+        ResearchIdentityBinding,
+        _check_known_sources,
+    )
+    from sqlalchemy import text
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    changed = False
+    try:
+        await fixture(factory, settings, store, tmp_path)
+        async with factory() as session:
+            snapshot = await session.scalar(
+                select(DataSnapshot).where(DataSnapshot.source == "research_current_identity")
+            )
+            document = ResearchIdentityBinding.model_validate(snapshot.payload)
+            cutoff = await session.scalar(select(func.clock_timestamp()))
+
+            class ConcurrentStore:
+                async def read_raw(self, key, *, uri):
+                    nonlocal changed
+                    value = await store.read_raw(key, uri=uri)
+                    if not changed and uri in {
+                        document.source_artifacts[0].uri,
+                        document.source_artifacts[2].uri,
+                    }:
+                        other = document.source_artifacts[
+                            2 if uri == document.source_artifacts[0].uri else 0
+                        ]
+                        with pytest.raises(
+                            IntegrityError, match="diagnostic authority record is immutable"
+                        ):
+                            async with factory.begin() as writer:
+                                sql = (
+                                    "DELETE FROM data_artifacts WHERE sha256=:hash"
+                                    if change == "delete"
+                                else "UPDATE data_artifacts SET byte_size=byte_size+1 "
+                                "WHERE sha256=:hash"
+                                )
+                                await writer.execute(text(sql), {"hash": other.sha256})
+                        changed = True
+                    return value
+
+            await _check_known_sources(session, ConcurrentStore(), document, cutoff)
+            assert changed
+    finally:
+        await factory.kw["bind"].dispose()

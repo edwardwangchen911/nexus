@@ -25,11 +25,18 @@ async def _install_mixed_or_legacy_disclosure(
     output_id: UUID,
     expected_predecessor_id: UUID | None,
     now: datetime,
+    _single_kind: bool = False,
 ) -> MonitorPlan:
     now = require_utc(now)
     source = await load_qualified_source(
         session, account_id=account_id, output_id=output_id, now=now
     )
+    if _single_kind and (
+        isinstance(source.context, MixedMonitorContext)
+        or isinstance(source.context, AgentPaperResearchContext)
+        and getattr(source.context, "pending_monitoring_v2", None) is not None
+    ):
+        raise ValueError("MONITOR_MIXED_ATOMIC_RECONCILIATION_REQUIRED")
     context = source.context
     by_role = {row.role: row for row in source.role_outputs}
     proposal = by_role["market_state"].disclosure_proposal
@@ -146,18 +153,11 @@ async def install_disclosure_plan(
     now: datetime,
 ) -> MonitorPlan:
     """Single-kind public entry; typed batches close only through atomic reconciliation."""
-    source = await load_qualified_source(
-        session, account_id=account_id, output_id=output_id, now=now
-    )
-    if isinstance(source.context, MixedMonitorContext) or (
-        isinstance(source.context, AgentPaperResearchContext)
-        and getattr(source.context, "pending_monitoring_v2", None) is not None
-    ):
-        raise ValueError("MONITOR_MIXED_ATOMIC_RECONCILIATION_REQUIRED")
     return await _install_mixed_or_legacy_disclosure(
         session,
         account_id=account_id,
         output_id=output_id,
         expected_predecessor_id=expected_predecessor_id,
         now=now,
+        _single_kind=True,
     )

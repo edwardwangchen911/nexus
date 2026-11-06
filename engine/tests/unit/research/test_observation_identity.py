@@ -51,3 +51,81 @@ def test_observation_rejects_future_or_broken_originals(fault):
         data[1] = json.dumps(receipt).encode()
     with pytest.raises(ValueError, match="RESEARCH_OBSERVATION_SOURCE_INVALID"):
         validate(data, cutoff)
+
+
+def test_mapping_parse_scope_reuses_only_exact_content_and_never_receipt_authority(monkeypatch):
+    from unittest.mock import Mock
+
+    from nexus.research import identity_sources as sources
+
+    cutoff = datetime(2026, 1, 8, 14, tzinfo=UTC)
+    data = list(originals(cutoff))
+    parser = Mock(wraps=sources.parse_identity_source)
+    monkeypatch.setattr(sources, "parse_identity_source", parser)
+    with sources.identity_source_parse_scope():
+        for _ in range(3):
+            assert sources.directory_binding_from_raw(data[0], "AAPL") == ("0000123456", "XNYS")
+            sources.require_submissions_from_raw(data[2], "AAPL", "0000123456", "XNYS")
+        assert parser.call_count == 2
+        # Full reader still checks receipt hashes and cutoff on every invocation.
+        assert validate(data, cutoff).available_at == cutoff
+        with pytest.raises(ValueError):
+            validate(data, cutoff - timedelta(seconds=1))
+        with pytest.raises(ValueError):
+            sources.directory_binding_from_raw(data[0], "NVDA")
+        with pytest.raises(ValueError):
+            sources.require_submissions_from_raw(data[2], "AAPL", "0000999999", "XNYS")
+        malformed = b'{"data":[],"data":[]}'
+        before = parser.call_count
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                sources.directory_binding_from_raw(malformed, "AAPL")
+        assert parser.call_count == before + 2
+    before = parser.call_count
+    sources.directory_binding_from_raw(data[0], "AAPL")
+    assert parser.call_count == before + 1
+
+
+def test_mapping_parse_scope_is_bounded_and_cleared_after_exception(monkeypatch):
+    from unittest.mock import Mock
+
+    from nexus.research import identity_sources as sources
+
+    raw = originals(datetime(2026, 1, 8, 14, tzinfo=UTC))[0]
+    parser = Mock(wraps=sources.parse_identity_source)
+    monkeypatch.setattr(sources, "parse_identity_source", parser)
+    with pytest.raises(RuntimeError), sources.identity_source_parse_scope():
+        for count in range(129):
+            sources.directory_binding_from_raw(raw + b" " * count, "AAPL")
+        before = parser.call_count
+        sources.directory_binding_from_raw(raw + b" " * 128, "AAPL")
+        assert parser.call_count == before + 1
+        raise RuntimeError("end read")
+    before = parser.call_count
+    with sources.identity_source_parse_scope():
+        sources.directory_binding_from_raw(raw, "AAPL")
+    assert parser.call_count == before + 1
+
+
+@pytest.mark.asyncio
+async def test_mapping_parse_scope_cannot_escape_in_an_inherited_task(monkeypatch):
+    import asyncio
+    from unittest.mock import Mock
+
+    from nexus.research import identity_sources as sources
+
+    raw = originals(datetime(2026, 1, 8, 14, tzinfo=UTC))[0]
+    parser = Mock(wraps=sources.parse_identity_source)
+    monkeypatch.setattr(sources, "parse_identity_source", parser)
+    released = asyncio.Event()
+
+    async def inherited():
+        await released.wait()
+        sources.directory_binding_from_raw(raw, "AAPL")
+
+    with sources.identity_source_parse_scope():
+        sources.directory_binding_from_raw(raw, "AAPL")
+        task = asyncio.create_task(inherited())
+    released.set()
+    await task
+    assert parser.call_count == 2

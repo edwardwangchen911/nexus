@@ -32,6 +32,7 @@ from nexus.persistence.models.monitoring import (
 )
 from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobLease
+from nexus.research.identity_sources import identity_source_parse_scope
 from nexus.workbench.evidence_read_scope import evidence_read_scope
 
 _CONTEXT_SOURCES = frozenset({"nexus_agent_paper_context", "nexus_price_monitor_increment"})
@@ -223,7 +224,7 @@ async def _scope_evidence(
 async def reconcile_account_results(
     session: AsyncSession, *, account_id: UUID, instrument_ids: tuple[UUID, ...], now: datetime
 ) -> dict[str, object]:
-    with identity_parse_scope(), evidence_read_scope(session):
+    with identity_parse_scope(), identity_source_parse_scope(), evidence_read_scope(session):
         return await _reconcile_candidates(
             session, account_id=account_id, instrument_ids=instrument_ids, now=now
         )

@@ -31,11 +31,12 @@ from nexus.research.current_identity_storage import (
     _clock,
     _payload_hash,
     _read_artifact,
+    _read_registered_artifact,
 )
 from nexus.research.identity_sources import (
-    directory_binding,
+    directory_binding_from_raw,
     parse_identity_source,
-    require_submissions_binding,
+    require_submissions_from_raw,
 )
 from nexus.research.observation_identity import POLICY_HASH, validate_observation_source_originals
 from nexus.research.sec_exhibit_storage import ExhibitStore, configured_exhibit_store
@@ -235,19 +236,30 @@ async def _check_known_sources(
     )
     directory_url = "https://www.sec.gov/files/company_tickers_exchange.json"
     submissions_url = f"https://data.sec.gov/submissions/CIK{document.issuer_cik}.json"
+    relevant = []
     for artifact in receipts:
-        receipt_raw = await _read_artifact(session, store, _binding(artifact), cutoff)
+        receipt_raw = await _read_registered_artifact(store, artifact, _binding(artifact), cutoff)
         receipt = parse_identity_source(receipt_raw)
         url = receipt.get("source_url")
         if url not in {directory_url, submissions_url}:
             continue
         received = require_utc(datetime.fromisoformat(receipt["received_at"]))
-        original = await session.scalar(
-            select(DataArtifact).where(DataArtifact.sha256 == receipt["sha256"])
+        relevant.append((receipt, url, received))
+    # Read every currently visible receipt again on each invocation. Batch only
+    # registration lookup; no successful identity/qualification result is cached.
+    originals = {
+        row.sha256: row
+        for row in await session.scalars(
+            select(DataArtifact).where(
+                DataArtifact.sha256.in_(receipt["sha256"] for receipt, _, _ in relevant)
+            )
         )
+    }
+    for receipt, url, received in relevant:
+        original = originals.get(receipt["sha256"])
         if original is None or original.source != "sec" or received > cutoff:
             raise ValueError("RESEARCH_OBSERVATION_SOURCE_INVALID")
-        raw = await _read_artifact(session, store, _binding(original), cutoff)
+        raw = await _read_registered_artifact(store, original, _binding(original), cutoff)
         if (
             type(receipt.get("byte_length")) is not int
             or type(receipt.get("http_status")) is not int
@@ -262,16 +274,15 @@ async def _check_known_sources(
             }
         ):
             raise ValueError("RESEARCH_OBSERVATION_SOURCE_INVALID")
-        parsed = parse_identity_source(raw)
         if url == directory_url:
-            if directory_binding(parsed, document.symbol) != (
+            if directory_binding_from_raw(raw, document.symbol) != (
                 document.issuer_cik,
                 document.exchange,
             ):
                 raise ValueError("RESEARCH_OBSERVATION_MAPPING_CONFLICT")
         else:
-            require_submissions_binding(
-                parsed, document.symbol, document.issuer_cik, document.exchange
+            require_submissions_from_raw(
+                raw, document.symbol, document.issuer_cik, document.exchange
             )
 
 

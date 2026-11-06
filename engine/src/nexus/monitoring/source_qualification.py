@@ -54,6 +54,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.monitoring import MonitorTrigger
 from nexus.persistence.models.paper import AgentPaperCycleRecord
+from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job, JobLease
 from nexus.strategy.intents import ResearchIntent
 
@@ -72,6 +73,7 @@ async def _qualify_source(
     | MixedMonitorContext
     | IndependentMonitorContext,
     tuple[EvidenceRef, ...],
+    tuple[ResearchEvidenceRef, ...],
 ]:
     from nexus.agents.comparison_manifest import require_business_run
 
@@ -293,7 +295,11 @@ async def _qualify_source(
         )
     ):
         raise ValueError(invalid)
-    return context, tuple(domain_evidence(row) for row in records)
+    return (
+        context,
+        tuple(domain_evidence(row) for row in records),
+        records,
+    )
 
 
 @dataclass(frozen=True)
@@ -329,7 +335,7 @@ async def load_qualified_source(
         or run.schema_hash != _schema_hash(portfolio_prompt_version=prompts["portfolio"].version)
     ):
         raise ValueError(invalid)
-    context, evidence = await _qualify_source(
+    context, evidence, frozen_records = await _qualify_source(
         session, run=run, output=output, intent=intent, account_id=account_id, now=now
     )
     from nexus.agents.platform_native import native_platform_semantics
@@ -384,7 +390,7 @@ async def load_qualified_source(
         native_platform_semantics_verified=native_platform,
         price_authority_valid=(
             not isinstance(context, IndependentMonitorContext)
-            or await _independent_price_valid(session, run, evidence)
+            or await _independent_price_valid(session, run, evidence, _records=frozen_records)
         ),
         portfolio_context=await read_portfolio_context(
             session, run.data_snapshot_id, run.instrument_id, run.decision_time
@@ -396,14 +402,24 @@ async def load_qualified_source(
 
 
 async def _independent_price_valid(
-    session: AsyncSession, run: AgentResearchRunRecord, evidence: tuple[EvidenceRef, ...]
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    evidence: tuple[EvidenceRef, ...],
+    *,
+    _records: tuple[ResearchEvidenceRef, ...] | None = None,
 ) -> bool:
     from nexus.agents.price_authority import (
         FrozenPriceAuthorityStatus,
         revalidate_frozen_price_authority,
     )
 
-    records = await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+    # Only the same load_qualified_source call supplies its already checked
+    # frozen members. Re-read the current price owner below on every use.
+    records = (
+        await load_frozen_evidence(session, run, allow_fixture_evidence=False)
+        if _records is None
+        else _records
+    )
     return (
         await revalidate_frozen_price_authority(
             session, run=run, evidence_records=records, allow_fixture=False
