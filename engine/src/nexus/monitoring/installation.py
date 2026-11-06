@@ -94,12 +94,23 @@ def consumed_baseline(
 
 
 async def load_approved_source(
-    session: AsyncSession, *, account_id: UUID, output_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    output_id: UUID,
+    now: datetime,
+    _single_kind: bool = False,
 ) -> ApprovedSource:
     """Require the original role approvals in addition to qualified research facts."""
     source = await load_qualified_source(
         session, account_id=account_id, output_id=output_id, now=now
     )
+    if _single_kind and (
+        isinstance(source.context, MixedMonitorContext)
+        or isinstance(source.context, AgentPaperResearchContext)
+        and getattr(source.context, "pending_monitoring_v2", None) is not None
+    ):
+        raise ValueError("MONITOR_MIXED_ATOMIC_RECONCILIATION_REQUIRED")
     if isinstance(source.context, IndependentMonitorContext):
         from nexus.monitoring.source_qualification import _independent_price_valid
 
@@ -134,10 +145,11 @@ async def _install_mixed_or_legacy_plan(
     output_id: UUID,
     expected_predecessor_id: UUID | None,
     now: datetime,
+    _single_kind: bool = False,
 ) -> MonitorPlan:
     now = require_utc(now)
     source = await load_approved_source(
-        session, account_id=account_id, output_id=output_id, now=now
+        session, account_id=account_id, output_id=output_id, now=now, _single_kind=_single_kind
     )
     if (
         isinstance(source.context, MonitorResearchContext)
@@ -269,18 +281,11 @@ async def install_plan_from_output(
     now: datetime,
 ) -> MonitorPlan:
     """Single-kind public entry; typed batches close only through atomic reconciliation."""
-    source = await load_qualified_source(
-        session, account_id=account_id, output_id=output_id, now=now
-    )
-    if isinstance(source.context, MixedMonitorContext) or (
-        isinstance(source.context, AgentPaperResearchContext)
-        and getattr(source.context, "pending_monitoring_v2", None) is not None
-    ):
-        raise ValueError("MONITOR_MIXED_ATOMIC_RECONCILIATION_REQUIRED")
     return await _install_mixed_or_legacy_plan(
         session,
         account_id=account_id,
         output_id=output_id,
         expected_predecessor_id=expected_predecessor_id,
         now=now,
+        _single_kind=True,
     )

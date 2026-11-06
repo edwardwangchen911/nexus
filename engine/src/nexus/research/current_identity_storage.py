@@ -23,6 +23,7 @@ from nexus.market.current_identity_storage import (
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.research.artifact_read_scope import ArtifactRegistration, read_artifact
 from nexus.research.current_identity_archive import (
     POLICY_HASH,
     load_identity_source_archive,
@@ -74,7 +75,7 @@ class ResearchIdentityBinding(BaseModel):
         ).encode()
 
 
-def _binding(artifact: DataArtifact) -> ArtifactBinding:
+def _binding(artifact: DataArtifact | ArtifactRegistration) -> ArtifactBinding:
     return ArtifactBinding(
         uri=artifact.uri,
         sha256=artifact.sha256,
@@ -148,7 +149,19 @@ async def _read_artifact(
     *,
     canonical: bool = False,
 ) -> bytes:
-    record = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == binding.sha256))
+    record = await read_artifact(session, binding.sha256)
+    return await _read_registered_artifact(store, record, binding, as_of, canonical=canonical)
+
+
+async def _read_registered_artifact(
+    store: ExhibitStore,
+    record: DataArtifact | ArtifactRegistration | None,
+    binding: ArtifactBinding,
+    as_of: datetime,
+    *,
+    canonical: bool = False,
+) -> bytes:
+    """Validate a row selected by this read, including its exact stored original."""
     if (
         record is None
         or _binding(record) != binding
@@ -394,7 +407,7 @@ async def read_identity_bindings(
             raise ValueError
         content = document.canonical_bytes()
         digest = sha256(content).hexdigest()
-        canonical = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
+        canonical = await read_artifact(session, digest)
         if (
             canonical is None
             or canonical.uri != evidence.location

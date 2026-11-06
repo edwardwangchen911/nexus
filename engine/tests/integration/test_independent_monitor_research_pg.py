@@ -387,6 +387,26 @@ async def test_independent_source_rechecks_current_pricing_for_historical_reads(
         migrated_database_url, monkeypatch, tmp_path, independent=True
     )
     original_time = captured["clock"][0]
+    from nexus.monitoring import source_qualification
+
+    frozen_reads = []
+    original_load = source_qualification.load_frozen_evidence
+
+    async def counted_load(*args, **kwargs):
+        frozen_reads.append(1)
+        return await original_load(*args, **kwargs)
+
+    monkeypatch.setattr(source_qualification, "load_frozen_evidence", counted_load)
+    from nexus.agents import price_authority
+
+    price_checks = []
+    original_price = price_authority.revalidate_frozen_price_authority
+
+    async def checked_price(*args, **kwargs):
+        price_checks.append(kwargs["run"].id)
+        return await original_price(*args, **kwargs)
+
+    monkeypatch.setattr(price_authority, "revalidate_frozen_price_authority", checked_price)
     async with factory() as session:
         source = await load_qualified_source(
             session,
@@ -394,6 +414,8 @@ async def test_independent_source_rechecks_current_pricing_for_historical_reads(
             output_id=pointer.source_output_id,
             now=original_time,
         )
+        assert len(frozen_reads) == 1
+        assert len(price_checks) == 2
         model = await session.get(AgentModelConfigRecord, source.run.model_config_id)
         captured["clock"][0] = model.pricing_expires_at
         with pytest.raises(ValueError, match="MONITOR_SOURCE_INVALID"):
@@ -669,3 +691,88 @@ async def test_legacy_independent_rollback_keeps_original_admission_contract(
     await test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three_calls(
         migrated_database_url, monkeypatch, tmp_path, "rollback", independent=True
     )
+
+
+@pytest.mark.asyncio
+async def test_public_install_qualifies_once_at_each_actual_kind_writer(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from helpers.disclosure_observations import reader_source
+    from nexus.monitoring import disclosure_installation, installation, source_qualification
+
+    factory, _, _, captured, pointer = await reader_source(
+        migrated_database_url, monkeypatch, tmp_path, independent=True
+    )
+    calls = []
+    original = source_qualification.load_qualified_source
+
+    async def counted(*args, **kwargs):
+        calls.append(kwargs["output_id"])
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(installation, "load_qualified_source", counted)
+    monkeypatch.setattr(disclosure_installation, "load_qualified_source", counted)
+    try:
+        async with factory.begin() as session:
+            for writer in (
+                installation.install_plan_from_output,
+                disclosure_installation.install_disclosure_plan,
+            ):
+                plan = await writer(
+                    session,
+                    account_id=pointer.account_id,
+                    output_id=pointer.source_output_id,
+                    expected_predecessor_id=None,
+                    now=captured["clock"][0],
+                )
+                assert plan.source_output_id == pointer.source_output_id
+        assert calls == [pointer.source_output_id] * 2
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_source_reconstruction_keeps_second_current_price_verdict(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from helpers.disclosure_observations import reader_source
+    from nexus.agents import price_authority
+    from nexus.monitoring import source_qualification as qualification
+
+    factory, _, _, captured, pointer = await reader_source(
+        migrated_database_url, monkeypatch, tmp_path, independent=True
+    )
+    original_price = price_authority.revalidate_frozen_price_authority
+    original_final = qualification._independent_price_valid
+    checks = []
+    final = price_authority.FrozenPriceAuthorityStatus.VALID
+
+    async def current_price(*args, **kwargs):
+        checks.append(1)
+        return await original_price(*args, **kwargs) if len(checks) == 1 else final
+
+    async def old_double_read(session, run, evidence, **_kwargs):
+        return await original_final(session, run, evidence)
+
+    monkeypatch.setattr(price_authority, "revalidate_frozen_price_authority", current_price)
+    try:
+        for final in price_authority.FrozenPriceAuthorityStatus:
+            results = []
+            for reader in (old_double_read, original_final):
+                checks.clear()
+                monkeypatch.setattr(qualification, "_independent_price_valid", reader)
+                async with factory() as session:
+                    try:
+                        value = await qualification.load_qualified_source(
+                            session,
+                            account_id=pointer.account_id,
+                            output_id=pointer.source_output_id,
+                            now=captured["clock"][0],
+                        )
+                        results.append(("qualified", value.intent.model_dump(mode="json")))
+                    except ValueError as error:
+                        results.append(("rejected", str(error)))
+                assert len(checks) == 2
+            assert results[0] == results[1]
+    finally:
+        await factory.kw["bind"].dispose()

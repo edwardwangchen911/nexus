@@ -8,9 +8,9 @@ from hashlib import sha256
 from nexus.domain.time import require_utc
 from nexus.providers.fmp_profile import validate_symbol
 from nexus.research.identity_sources import (
-    directory_binding,
+    directory_binding_from_raw,
     parse_identity_source,
-    require_submissions_binding,
+    require_submissions_from_raw,
 )
 
 POLICY_ID = "research_observation_identity_v1"
@@ -94,9 +94,9 @@ def validate_observation_source_originals(
                     IdentitySourceOriginal(receipt_raw, RECEIPT_SCHEMA, received),
                 )
             )
-        if directory_binding(parse_identity_source(directory), symbol) != (cik, exchange):
+        if directory_binding_from_raw(directory, symbol) != (cik, exchange):
             raise ValueError
-        require_submissions_binding(parse_identity_source(submissions), symbol, cik, exchange)
+        require_submissions_from_raw(submissions, symbol, cik, exchange)
         return ValidatedIdentitySources(
             symbol,
             cik,

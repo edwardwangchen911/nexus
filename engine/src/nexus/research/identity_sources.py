@@ -1,9 +1,58 @@
 """Strict public SEC identity mappings shared by collection and frozen readback."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from hashlib import sha256
 from typing import Any, NoReturn
 
 _EXCHANGES = {"Nasdaq": "XNAS", "NYSE": "XNYS", "NYSE American": "XASE"}
+
+
+class _ParseScope:
+    def __init__(self) -> None:
+        self.active = True
+        self.directory: dict[tuple[str, str], tuple[str, str]] = {}
+        self.submissions: set[tuple[str, str, str, str]] = set()
+
+
+_PARSE_SCOPE: ContextVar[_ParseScope | None] = ContextVar("identity_source_parse", default=None)
+
+
+@contextmanager
+def identity_source_parse_scope() -> Iterator[None]:
+    """Bound pure mapping parsing to one read; retain no database or receipt authority."""
+    scope = _ParseScope()
+    token = _PARSE_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        scope.active = False
+        scope.directory.clear()
+        scope.submissions.clear()
+        _PARSE_SCOPE.reset(token)
+
+
+def directory_binding_from_raw(raw: bytes, symbol: str) -> tuple[str, str]:
+    scope = _PARSE_SCOPE.get()
+    key = (sha256(raw).hexdigest(), symbol)
+    if scope is not None and scope.active and key in scope.directory:
+        return scope.directory[key]
+    result = directory_binding(parse_identity_source(raw), symbol)
+    if scope is not None and scope.active and len(scope.directory) < 128:
+        scope.directory[key] = result
+    return result
+
+
+def require_submissions_from_raw(raw: bytes, symbol: str, cik: str, exchange: str) -> None:
+    scope = _PARSE_SCOPE.get()
+    key = (sha256(raw).hexdigest(), symbol, cik, exchange)
+    if scope is not None and scope.active and key in scope.submissions:
+        return
+    require_submissions_binding(parse_identity_source(raw), symbol, cik, exchange)
+    if scope is not None and scope.active and len(scope.submissions) < 128:
+        scope.submissions.add(key)
 
 
 def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

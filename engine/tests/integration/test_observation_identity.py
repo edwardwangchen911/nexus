@@ -230,3 +230,318 @@ async def test_register_observation_exact_readback_and_fail_closed(
                         await session.flush()
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_known_receipts_batch_registration_reads_without_skipping_originals(
+    migrated_database_url, tmp_path
+):
+    from nexus.research.observation_identity_storage import (
+        ResearchIdentityBinding,
+        _check_known_sources,
+    )
+    from sqlalchemy import event
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    client = FakeS3Client()
+    store = S3ProviderEvidenceStore(settings, client=client)
+    engine = factory.kw["bind"]
+    reads = []
+
+    def record(_conn, _cursor, statement, _params, _context, _many):
+        if "FROM data_artifacts" in statement:
+            reads.append(statement)
+
+    try:
+        await fixture(factory, settings, store, tmp_path)
+        async with factory() as session:
+            snapshot = await session.scalar(
+                select(DataSnapshot).where(DataSnapshot.source == "research_current_identity")
+            )
+            document = ResearchIdentityBinding.model_validate(snapshot.payload)
+            cutoff = await session.scalar(select(func.clock_timestamp()))
+            client.get_calls.clear()
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            await _check_known_sources(session, store, document, cutoff)
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+            # Receipts plus their exact originals, not one registration query per object.
+            assert len(reads) == 2
+            assert len(client.get_calls) == 4
+            # Already-read bytes are never treated as authority on the next invocation.
+            raw_key = urlsplit(document.source_artifacts[0].uri).path.lstrip("/")
+            client.objects[raw_key] = b"corrupt"
+            with pytest.raises(ValueError):
+                await _check_known_sources(session, store, document, cutoff)
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", record):
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["delete", "metadata"])
+async def test_batched_original_registration_is_immutable_during_read(
+    migrated_database_url, tmp_path, change
+):
+    from nexus.research.observation_identity_storage import (
+        ResearchIdentityBinding,
+        _check_known_sources,
+    )
+    from sqlalchemy import text
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    changed = False
+    try:
+        await fixture(factory, settings, store, tmp_path)
+        async with factory() as session:
+            snapshot = await session.scalar(
+                select(DataSnapshot).where(DataSnapshot.source == "research_current_identity")
+            )
+            document = ResearchIdentityBinding.model_validate(snapshot.payload)
+            cutoff = await session.scalar(select(func.clock_timestamp()))
+
+            class ConcurrentStore:
+                async def read_raw(self, key, *, uri):
+                    nonlocal changed
+                    value = await store.read_raw(key, uri=uri)
+                    if not changed and uri in {
+                        document.source_artifacts[0].uri,
+                        document.source_artifacts[2].uri,
+                    }:
+                        other = document.source_artifacts[
+                            2 if uri == document.source_artifacts[0].uri else 0
+                        ]
+                        with pytest.raises(
+                            IntegrityError, match="diagnostic authority record is immutable"
+                        ):
+                            async with factory.begin() as writer:
+                                sql = (
+                                    "DELETE FROM data_artifacts WHERE sha256=:hash"
+                                    if change == "delete"
+                                    else "UPDATE data_artifacts SET byte_size=byte_size+1 "
+                                    "WHERE sha256=:hash"
+                                )
+                                await writer.execute(text(sql), {"hash": other.sha256})
+                        changed = True
+                    return value
+
+            await _check_known_sources(session, ConcurrentStore(), document, cutoff)
+            assert changed
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_scoped_registration_still_checks_cutoff_binding_and_original(
+    migrated_database_url, tmp_path
+):
+    from nexus.research.artifact_read_scope import artifact_read_scope
+    from nexus.research.current_identity_storage import _read_artifact
+    from nexus.research.observation_identity_storage import ResearchIdentityBinding
+    from sqlalchemy import event
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    client = FakeS3Client()
+    store = S3ProviderEvidenceStore(settings, client=client)
+    engine = factory.kw["bind"]
+    reads = []
+
+    def record(_conn, _cursor, statement, _params, _context, _many):
+        if "FROM data_artifacts" in statement:
+            reads.append(statement)
+
+    try:
+        await fixture(factory, settings, store, tmp_path)
+        async with factory() as session:
+            snapshot = await session.scalar(
+                select(DataSnapshot).where(DataSnapshot.source == "research_current_identity")
+            )
+            document = ResearchIdentityBinding.model_validate(snapshot.payload)
+            binding = document.source_artifacts[0]
+            cutoff = await session.scalar(select(func.clock_timestamp()))
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            with artifact_read_scope(session):
+                original = await _read_artifact(session, store, binding, cutoff)
+                assert await _read_artifact(session, store, binding, cutoff) == original
+                assert len(reads) == 1
+                with pytest.raises(ValueError, match="RESEARCH_IDENTITY_ARTIFACT_INVALID"):
+                    await _read_artifact(
+                        session, store, binding, snapshot.created_at - timedelta(days=1)
+                    )
+                with pytest.raises(ValueError, match="RESEARCH_IDENTITY_ARTIFACT_INVALID"):
+                    await _read_artifact(
+                        session, store, binding.model_copy(update={"source": "wrong"}), cutoff
+                    )
+                client.objects[urlsplit(binding.uri).path.lstrip("/")] = b"corrupt"
+                with pytest.raises(ValueError, match="RESEARCH_IDENTITY_ARTIFACT_INVALID"):
+                    await _read_artifact(session, store, binding, cutoff)
+                assert len(reads) == 1
+            with artifact_read_scope(session), pytest.raises(ValueError):
+                await _read_artifact(session, store, binding, cutoff)
+            assert len(reads) == 2
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", record):
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scoped_registration_preserves_real_dirty_session_autoflush(
+    migrated_database_url, tmp_path
+):
+    from nexus.persistence.models.data import DataArtifact
+    from nexus.research.artifact_read_scope import artifact_read_scope, read_artifact
+    from nexus.research.observation_identity_storage import ResearchIdentityBinding
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={
+            "object_store_endpoint": "http://127.0.0.1:9000",
+            "object_store_bucket": "synthetic-identity",
+            "object_store_prefix": "synthetic-identity",
+        }
+    )
+    factory = session_factory(settings)
+    store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
+    try:
+        await fixture(factory, settings, store, tmp_path)
+        async with factory() as session:
+            snapshot = await session.scalar(
+                select(DataSnapshot).where(DataSnapshot.source == "research_current_identity")
+            )
+            digest = (
+                ResearchIdentityBinding.model_validate(snapshot.payload).source_artifacts[0].sha256
+            )
+            with artifact_read_scope(session):
+                identity = (await read_artifact(session, digest)).id
+                frozen = await read_artifact(session, digest)
+                row = await session.get(DataArtifact, identity)
+                row.source = "wrong"
+                with pytest.raises(
+                    IntegrityError, match="diagnostic authority record is immutable"
+                ):
+                    await read_artifact(session, digest)
+                await session.rollback()
+            assert (await read_artifact(session, digest)).source == frozen.source
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_scoped_registration_does_not_survive_savepoint_rollback(migrated_database_url):
+    from datetime import UTC, datetime
+
+    from nexus.persistence.models.data import DataArtifact
+    from nexus.research.artifact_read_scope import artifact_read_scope, read_artifact
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    digest = "e" * 64
+    try:
+        async with factory() as session, session.begin():
+            with artifact_read_scope(session):
+                async with session.begin_nested() as savepoint:
+                    now = datetime.now(UTC)
+                    session.add(
+                        DataArtifact(
+                            uri="s3://synthetic/raw/one?versionId=one",
+                            sha256=digest,
+                            byte_size=1,
+                            mime_type="application/json",
+                            schema_version="test_v1",
+                            source="test",
+                            observed_at=now,
+                            available_at=now,
+                            received_at=now,
+                        )
+                    )
+                    await session.flush()
+                    session.expunge_all()
+                    assert await read_artifact(session, digest) is not None
+                    assert await read_artifact(session, digest) is not None
+                    await savepoint.rollback()
+                assert await read_artifact(session, digest) is None
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+async def test_scoped_registration_rejects_partial_rollback_before_explicit_close(
+    migrated_database_url, nested
+):
+    from datetime import UTC, datetime
+
+    from nexus.persistence.models.data import DataArtifact
+    from nexus.research.artifact_read_scope import artifact_read_scope, read_artifact
+    from sqlalchemy.exc import PendingRollbackError
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    digest = "d" * 64
+
+    def row():
+        now = datetime.now(UTC)
+        return DataArtifact(
+            uri="s3://synthetic/raw/two?versionId=one",
+            sha256=digest,
+            byte_size=1,
+            mime_type="application/json",
+            schema_version="test_v1",
+            source="test",
+            observed_at=now,
+            available_at=now,
+            received_at=now,
+        )
+
+    try:
+        async with factory() as session:
+            await session.begin()
+            savepoint = await session.begin_nested() if nested else None
+            with artifact_read_scope(session):
+                session.add(row())
+                await session.flush()
+                session.expunge_all()
+                assert await read_artifact(session, digest) is not None
+                assert await read_artifact(session, digest) is not None
+                before = (
+                    session.sync_session.get_transaction(),
+                    session.sync_session.get_nested_transaction(),
+                )
+                session.add(row())
+                with pytest.raises(IntegrityError):
+                    await session.flush()
+                assert not session.is_active
+                assert before == (
+                    session.sync_session.get_transaction(),
+                    session.sync_session.get_nested_transaction(),
+                )
+                assert not (session.new or session.dirty or session.deleted or session.identity_map)
+                with pytest.raises(PendingRollbackError):
+                    await read_artifact(session, digest)
+                if savepoint is not None:
+                    await savepoint.rollback()
+                else:
+                    await session.rollback()
+                assert await read_artifact(session, digest) is None
+    finally:
+        await factory.kw["bind"].dispose()
