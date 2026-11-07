@@ -2174,7 +2174,7 @@ def _emit_agent_paper_unknown_failure(
         }
         if action is not None:
             payload["failure_action"] = action.value
-        if stage == "heartbeat" and error is not None:
+        if stage in {"heartbeat", "inspect"} and error is not None:
             payload["failure_kind"] = (
                 "timeout"
                 if isinstance(error, TimeoutError)
@@ -2327,8 +2327,8 @@ async def run_foreground_loop(
             return AgentPaperLoopAction.STOP_REQUESTED
         try:
             snapshot = await inspect()
-        except Exception:
-            _emit_agent_paper_unknown_failure("inspect", clock())
+        except Exception as error:
+            _emit_agent_paper_unknown_failure("inspect", clock(), error=error)
             raise
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED

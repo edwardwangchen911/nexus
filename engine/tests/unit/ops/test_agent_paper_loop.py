@@ -939,16 +939,26 @@ def test_foreground_loop_logs_safe_heartbeat_failure_kind(
     assert "private-" not in captured.err
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_kind"),
+    (
+        (TimeoutError("private-inspection-canary"), "timeout"),
+        (SQLAlchemyError("private-inspection-canary"), "database"),
+        (RuntimeError("private-inspection-canary"), "unexpected_exception"),
+    ),
+)
 def test_foreground_loop_logs_safe_inspection_failure_stage(
     capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+    expected_kind: str,
 ) -> None:
     async def inspect() -> loop.AgentPaperLoopSnapshot:
-        raise RuntimeError("private-inspection-canary")
+        raise failure
 
     async def execute(*_args) -> None:
         raise AssertionError("execution must not run after inspection fails")
 
-    with pytest.raises(RuntimeError, match="private-inspection-canary"):
+    with pytest.raises(type(failure), match="private-inspection-canary"):
         asyncio.run(
             loop.run_foreground_loop(
                 inspect=inspect,
@@ -962,6 +972,7 @@ def test_foreground_loop_logs_safe_inspection_failure_stage(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert json.loads(captured.err)["failure_stage"] == "inspect"
+    assert json.loads(captured.err)["failure_kind"] == expected_kind
     assert "private-inspection-canary" not in captured.err
 
 
