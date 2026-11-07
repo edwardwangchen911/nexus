@@ -109,8 +109,21 @@ def _ended_pending_consumer(
 
 @pytest.mark.parametrize("cross_schema", [False, True])
 def test_pending_consumer_closes_once_and_next_enable_consumes_its_proof(tmp_path, cross_schema):
+    _assert_pending_consumer_closure(tmp_path, cross_schema=cross_schema)
+
+
+def test_0119_pending_consumer_retains_full_closure(tmp_path):
+    _assert_pending_consumer_closure(
+        tmp_path, cross_schema=False, target_schema="0119_compact_budget_obligations"
+    )
+
+
+def _assert_pending_consumer_closure(tmp_path, *, cross_schema, target_schema=None):
+    consumer_options = {"cross_schema": cross_schema}
+    if target_schema is not None:
+        consumer_options["target_schema"] = target_schema
     root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(
-        tmp_path, cross_schema=cross_schema
+        tmp_path, **consumer_options
     )
     before = json.loads(state_path.read_text())
     pending = before["attempt"]
@@ -264,7 +277,9 @@ def test_pending_consumer_closes_once_and_next_enable_consumes_its_proof(tmp_pat
     assert len(starts(root)) == 2
 
 
-@pytest.mark.parametrize("fault", ["enabled", "exit75", "write_pending", "unknown"])
+@pytest.mark.parametrize(
+    "fault", ["enabled", "exit75", "write_pending", "unknown", "unreviewed_schema"]
+)
 def test_pending_consumer_refusal_preserves_original_chain_and_does_not_start(tmp_path, fault):
     root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(tmp_path)
     state = json.loads(state_path.read_text())
@@ -275,6 +290,9 @@ def test_pending_consumer_refusal_preserves_original_chain_and_does_not_start(tm
         _register(root, state="inactive", exit_code=75)
     elif fault == "write_pending":
         receipt.with_suffix(".write-pending").write_text("unconfirmed\n")
+    elif fault == "unreviewed_schema":
+        state["schema"] = "9999_unreviewed_schema"
+        state_path.write_text(json.dumps(state))
     else:
         options(root, recovery_status="blocked", blocking_codes=["MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"])
     frozen = {p.name: p.read_bytes() for p in receipt.parent.glob("recovery*") if p.is_file()}
@@ -487,4 +505,26 @@ def test_concurrent_pending_close_produces_one_management_transition(tmp_path):
         prior_proof.read_bytes(),
         receipt.read_bytes(),
     ) == frozen_sources
+    assert len(starts(root)) == 1
+
+
+def test_pending_0119_consumer_exit_cannot_grant_a_0120_recovery_target(tmp_path):
+    old_schema = "0119_compact_budget_obligations"
+    new_schema = "0120_sol_formal_output_binding"
+    root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(
+        tmp_path, target_schema=old_schema
+    )
+    engine = root / ".venv/bin/nexus-engine-agent-paper-loop"
+    old_engine = engine.read_text()
+    assert old_schema in old_engine
+    # Simulate installing the next engine; keep all original lifecycle facts.
+    engine.write_text(old_engine.replace(old_schema, new_schema))
+    frozen = {p.name: p.read_bytes() for p in receipt.parent.glob("recovery*.json")}
+    for flags in (("--check-only",), ()):
+        result = _invoke(root, env, "reconcile-exit", *flags)
+        assert result.returncode != 0
+        assert json.loads(result.stdout)["blocking_codes"] == [
+            "AGENT_PAPER_EXIT_RECONCILIATION_SCHEMA_MISMATCH"
+        ]
+        assert {p.name: p.read_bytes() for p in receipt.parent.glob("recovery*.json")} == frozen
     assert len(starts(root)) == 1

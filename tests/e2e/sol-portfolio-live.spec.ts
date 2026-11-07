@@ -5,7 +5,7 @@ import { expect, test } from "@playwright/test";
 const directory = process.env.NEXUS_TEST_MONITOR_BROWSER_DIR;
 test.skip(!directory || !fs.existsSync(path.join(directory, "ready.json")), "requires an isolated Sol cycle");
 
-test("reads the frozen Sol portfolio and stock evidence", async ({ page, request }) => {
+test("reads the frozen Sol portfolio evidence", async ({ page, request }) => {
   const ready = JSON.parse(fs.readFileSync(path.join(directory!, "ready.json"), "utf8"));
   const detail = ready.cycle;
   test.skip(!detail, "requires portfolio facts");
@@ -17,7 +17,11 @@ test("reads the frozen Sol portfolio and stock evidence", async ({ page, request
   const api = await request.get(`/api/v1/paper/management/cycles/${id}`);
   expect(api.status()).toBe(200);
   expect((await api.json()).data).toEqual(detail);
+  const detailRead = page.waitForResponse(response => response.url().includes(`/api/v1/paper/management/cycles/${id}`));
   await page.goto(`/decisions/${id}`);
+  const detailResponse = await detailRead;
+  expect(detailResponse.status()).toBe(200);
+  expect((await detailResponse.json()).data).toEqual(detail);
   const usage = page.getByRole("note", { name: "组合模型用量" });
   await expect(usage).toContainText("Responses API · gpt-6.1-sol");
   if (detail.synthesis.responses_usage.settled_cost_usd === null) {
@@ -31,6 +35,16 @@ test("reads the frozen Sol portfolio and stock evidence", async ({ page, request
     await expect(page.locator(".pm-agent strong").filter({hasText: "暂缓"})).toHaveCount(3);
   }
   await page.screenshot({ path: path.join(directory!, "portfolio.png"), fullPage: true });
+  expect(writes).toEqual([]);
+});
+
+test("reads the same cycle's frozen Sol stock evidence", async ({ page }) => {
+  const ready = JSON.parse(fs.readFileSync(path.join(directory!, "ready.json"), "utf8"));
+  test.skip(!ready.cycle, "requires portfolio facts");
+  const writes: string[] = [];
+  page.on("request", r => { if (r.url().includes("/api/") && r.method() !== "GET") writes.push(r.method()); });
+  await page.route("**/*", route => ["127.0.0.1", "localhost"].includes(new URL(route.request().url()).hostname)
+    ? route.continue() : route.abort());
   for (const stock of ready.stocks) {
     const endpoint = `/api/v1/research-runs/${stock.run_id}`;
     const read = page.waitForResponse(r => r.url().includes(endpoint));

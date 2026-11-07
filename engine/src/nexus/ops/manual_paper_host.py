@@ -11,6 +11,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.market.current_identity import identity_parse_scope
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
 from nexus.paper.current_preparation_recovery import (
     begin_preparation_effects,
@@ -26,7 +27,10 @@ from nexus.paper.manual_request import (
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.manual_paper import ManualPaperRequest, ManualPaperRequestEvent
 from nexus.persistence.session import session_factory
+from nexus.research.artifact_read_scope import artifact_read_scope
+from nexus.research.identity_sources import identity_source_parse_scope
 from nexus.settings import EngineSettings
+from nexus.workbench.evidence_read_scope import evidence_read_scope
 
 if TYPE_CHECKING:
     from nexus.ops.agent_paper_loop import AgentPaperLoopSnapshot
@@ -378,10 +382,16 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
             await session.execute(text("SET TRANSACTION READ ONLY"))
             from nexus.paper.formal_intraday_intent import due_intent
 
-            return (
-                await peek_manual_request(session, account_id=account_id) is not None
-                or await due_intent(session, account_id) is not None
-            )
+            with (
+                identity_parse_scope(),
+                identity_source_parse_scope(),
+                artifact_read_scope(session),
+                evidence_read_scope(session),
+            ):
+                return (
+                    await peek_manual_request(session, account_id=account_id) is not None
+                    or await due_intent(session, account_id) is not None
+                )
     finally:
         await factory.kw["bind"].dispose()
 

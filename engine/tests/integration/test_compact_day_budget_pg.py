@@ -19,6 +19,7 @@ from nexus.agents.platform_schema import (
     CURRENT_PLATFORM_UNITS_VERSION,
 )
 from nexus.paper.single_sol_compat import budget_model_compatible
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -125,8 +126,9 @@ async def test_compact_natural_cycle_consumes_existing_legacy_day_protection(
                 command.downgrade, Config("engine/alembic.ini"), "0118_compact_sol_profile"
             )
         async with factory() as db:
-            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0119_compact_budget_obligations"
+            assert (
+                await db.scalar(text("SELECT version_num FROM alembic_version"))
+                == CURRENT_MIGRATION_HEAD
             )
             assert await db.scalar(text("SELECT count(*) FROM single_sol_budget_credits")) == 4
         if not downgrade_race:

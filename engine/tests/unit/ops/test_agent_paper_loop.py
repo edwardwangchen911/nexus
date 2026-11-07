@@ -939,16 +939,26 @@ def test_foreground_loop_logs_safe_heartbeat_failure_kind(
     assert "private-" not in captured.err
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_kind"),
+    (
+        (TimeoutError("private-inspection-canary"), "timeout"),
+        (SQLAlchemyError("private-inspection-canary"), "database"),
+        (RuntimeError("private-inspection-canary"), "unexpected_exception"),
+    ),
+)
 def test_foreground_loop_logs_safe_inspection_failure_stage(
     capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+    expected_kind: str,
 ) -> None:
     async def inspect() -> loop.AgentPaperLoopSnapshot:
-        raise RuntimeError("private-inspection-canary")
+        raise failure
 
     async def execute(*_args) -> None:
         raise AssertionError("execution must not run after inspection fails")
 
-    with pytest.raises(RuntimeError, match="private-inspection-canary"):
+    with pytest.raises(type(failure), match="private-inspection-canary"):
         asyncio.run(
             loop.run_foreground_loop(
                 inspect=inspect,
@@ -962,6 +972,8 @@ def test_foreground_loop_logs_safe_inspection_failure_stage(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert json.loads(captured.err)["failure_stage"] == "inspect"
+    assert json.loads(captured.err)["failure_kind"] == expected_kind
+    assert json.loads(captured.err)["inspection_site"] == "snapshot"
     assert "private-inspection-canary" not in captured.err
 
 
@@ -6252,3 +6264,40 @@ def test_manual_preparation_diagnostic_preserves_only_safe_phase_and_code(capsys
     captured = capsys.readouterr().err
     assert "private-credential-canary" not in captured
     assert "failure_code" not in json.loads(captured)
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("private-wake"), RuntimeError("private-wake")])
+def test_pending_work_failure_has_safe_inspection_site(capsys, failure):
+    async def inspect():
+        return loop.AgentPaperLoopSnapshot(now=NOW, enabled=True)
+
+    async def execute(*args):
+        raise AssertionError("failed read cannot execute")
+
+    async def sleep(seconds):
+        pass
+
+    async def wake():
+        raise failure
+
+    from unittest.mock import patch
+
+    with patch.object(loop, "choose_loop_action", return_value=A.WAIT_FOR_SLOT):
+        result = asyncio.run(
+            loop.run_foreground_loop(
+                inspect=inspect,
+                execute=execute,
+                sleep=sleep,
+                heartbeat=noop_heartbeat,
+                clock=lambda: NOW,
+                wake_for_pending_work=wake,
+            )
+        )
+    assert result == A.STOP_RESULT_UNKNOWN
+    data = json.loads(capsys.readouterr().err)
+    assert data["failure_stage"] == "inspect"
+    assert data["inspection_site"] == "pending_work"
+    assert data["failure_kind"] == (
+        "timeout" if isinstance(failure, TimeoutError) else "unexpected_exception"
+    )
+    assert "private-wake" not in str(data)

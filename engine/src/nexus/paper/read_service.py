@@ -983,7 +983,10 @@ class PaperReadService:
             strategy_decision_id=decision.id,
             target_version_id=target.target_version_id,
             batch_id=None if batch is None else batch.id,
-            as_of=event.created_at,
+            # created_at is the transaction start, which may precede the
+            # exact activation or a new decision reusing an older target.
+            # Report when all three bound facts are available.
+            as_of=max(event.created_at, decision.created_at, target.as_of),
         )
 
     def _cycle_blocker(

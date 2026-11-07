@@ -2161,6 +2161,7 @@ def _emit_agent_paper_unknown_failure(
     *,
     action: AgentPaperLoopAction | None = None,
     error: Exception | None = None,
+    inspection_site: str | None = None,
 ) -> None:
     """Best-effort safe stage evidence for one fail-closed unknown result."""
     if stage not in {"execute", "heartbeat", "inspect", "planner"}:
@@ -2172,9 +2173,11 @@ def _emit_agent_paper_unknown_failure(
             "failure_stage": stage,
             "occurred_at": occurred_at.isoformat(),
         }
+        if stage == "inspect" and inspection_site in {"snapshot", "pending_work"}:
+            payload["inspection_site"] = inspection_site
         if action is not None:
             payload["failure_action"] = action.value
-        if stage == "heartbeat" and error is not None:
+        if stage in {"heartbeat", "inspect"} and error is not None:
             payload["failure_kind"] = (
                 "timeout"
                 if isinstance(error, TimeoutError)
@@ -2277,8 +2280,12 @@ async def run_foreground_loop(
         last_heartbeat_at = seen_at
         return seen_at
 
-    def stop_unknown(stage: str, *, error: Exception | None = None) -> AgentPaperLoopAction:
-        _emit_agent_paper_unknown_failure(stage, clock(), error=error)
+    def stop_unknown(
+        stage: str, *, error: Exception | None = None, inspection_site: str | None = None
+    ) -> AgentPaperLoopAction:
+        _emit_agent_paper_unknown_failure(
+            stage, clock(), error=error, inspection_site=inspection_site
+        )
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
     async def wait_before_reinspection(
@@ -2306,7 +2313,7 @@ async def run_foreground_loop(
                         if await wake_for_pending_work():
                             break
                 except Exception as error:
-                    return stop_unknown("inspect", error=error)
+                    return stop_unknown("inspect", error=error, inspection_site="pending_work")
             if (
                 wall_started_at is not None
                 and seen_at >= wall_started_at
@@ -2327,8 +2334,10 @@ async def run_foreground_loop(
             return AgentPaperLoopAction.STOP_REQUESTED
         try:
             snapshot = await inspect()
-        except Exception:
-            _emit_agent_paper_unknown_failure("inspect", clock())
+        except Exception as error:
+            _emit_agent_paper_unknown_failure(
+                "inspect", clock(), error=error, inspection_site="snapshot"
+            )
             raise
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
