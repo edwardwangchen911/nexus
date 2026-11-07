@@ -18,8 +18,10 @@ from nexus.domain.time import require_utc
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.research.identity_sources import (
     directory_binding,
+    directory_binding_from_raw,
     parse_identity_source,
     require_submissions_binding,
+    require_submissions_from_raw,
 )
 from nexus.research.sec_disclosure_index import SecDisclosureIndex, build_disclosure_index
 from nexus.research.sec_exhibit_storage import ExhibitStore, _read_identity
@@ -293,12 +295,10 @@ async def read_index_capture(
         session, store, snapshot_id=capture.index.identity_snapshot_id, as_of=row.available_at
     )
     _receipt(originals[0], originals[1], source_url=DIRECTORY_URL, now=row.available_at)
-    cik, exchange = directory_binding(parse_identity_source(originals[0]), identity.identity.symbol)
+    cik, exchange = directory_binding_from_raw(originals[0], identity.identity.symbol)
     if (cik, exchange) != (identity.identity.cik, identity.identity.exchange):
         raise ValueError("SEC_INDEX_IDENTITY_INVALID")
-    require_submissions_binding(
-        parse_identity_source(originals[2]), identity.identity.symbol, cik, exchange
-    )
+    require_submissions_from_raw(originals[2], identity.identity.symbol, cik, exchange)
     rebuilt = build_disclosure_index(
         originals[2],
         originals[3],

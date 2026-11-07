@@ -107,15 +107,23 @@ def _ended_pending_consumer(
     return root, env, state_path, old_receipt, prior_proof, target
 
 
-@pytest.mark.parametrize(
-    ("cross_schema", "target_schema"),
-    [(False, None), (False, "0119_compact_budget_obligations"), (True, None)],
-)
-def test_pending_consumer_closes_once_and_next_enable_consumes_its_proof(
-    tmp_path, cross_schema, target_schema
-):
+@pytest.mark.parametrize("cross_schema", [False, True])
+def test_pending_consumer_closes_once_and_next_enable_consumes_its_proof(tmp_path, cross_schema):
+    _assert_pending_consumer_closure(tmp_path, cross_schema=cross_schema)
+
+
+def test_0119_pending_consumer_retains_full_closure(tmp_path):
+    _assert_pending_consumer_closure(
+        tmp_path, cross_schema=False, target_schema="0119_compact_budget_obligations"
+    )
+
+
+def _assert_pending_consumer_closure(tmp_path, *, cross_schema, target_schema=None):
+    consumer_options = {"cross_schema": cross_schema}
+    if target_schema is not None:
+        consumer_options["target_schema"] = target_schema
     root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(
-        tmp_path, cross_schema=cross_schema, target_schema=target_schema
+        tmp_path, **consumer_options
     )
     before = json.loads(state_path.read_text())
     pending = before["attempt"]
