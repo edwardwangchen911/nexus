@@ -1010,7 +1010,12 @@ async def test_native_increment_worker_settles_only_child_and_retains_parent(
 
 @pytest.mark.asyncio
 async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
-    migrated_database_url, monkeypatch, tmp_path, portfolio_case="orphan", after_admission=None
+    migrated_database_url,
+    monkeypatch,
+    tmp_path,
+    portfolio_case="orphan",
+    after_admission=None,
+    all_approved=False,
 ):
     from integration.test_sol_native_preparation_pg import (
         test_formal_root_preserves_cycle_owner_and_freezes_native_sol_routes as prepare,
@@ -1102,7 +1107,7 @@ async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
 
         requests, clients = install_sol_http(monkeypatch, None, model_response=reviewed_response)
         for run_id, job_id in routes:
-            approved = run_id != routes[-1].run_id
+            approved = all_approved or run_id != routes[-1].run_id
             snapshot = loop.AgentPaperLoopSnapshot(
                 now=cycle.decision_time,
                 cycle_id=cycle_id,
@@ -1134,8 +1139,12 @@ async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
                     select(MonitorCoverageReceipt.reason, MonitorCoverageReceipt.quality_status)
                 )
             ).all()
-        assert result["installed"] == 2 and result["gap"] == 1, coverage
-        assert ("MONITOR_AUDIT_REJECTED", "partial") in coverage
+        if all_approved:
+            assert result["installed"] == 3 and result["gap"] == 0, coverage
+            assert ("MONITOR_AUDIT_REJECTED", "partial") not in coverage
+        else:
+            assert result["installed"] == 2 and result["gap"] == 1, coverage
+            assert ("MONITOR_AUDIT_REJECTED", "partial") in coverage
         assert (
             result["execution_locked"]
             and result["model_requests"] == result["provider_requests"] == 0
@@ -1144,8 +1153,9 @@ async def test_normal_sol_formal_research_reconciles_monitor_plans_once(
         assert again["installed"] == 0 and again["recorded"] == 0
         async with factory() as session:
             plans = tuple(await session.scalars(select(MonitorPlan)))
-            assert len(plans) == 2 and {p.source_run_id for p in plans} == {
-                r.run_id for r in routes[:-1]
+            expected = routes if all_approved else routes[:-1]
+            assert len(plans) == len(expected) and {p.source_run_id for p in plans} == {
+                r.run_id for r in expected
             }
             assert (
                 await session.scalar(select(func.count()).select_from(MonitorCoverageReceipt)) == 3

@@ -617,7 +617,10 @@ async def _rebuild_portfolio_proposal(
     ):
         raise ValueError("PORTFOLIO_PROPOSAL_OUTPUT_CONFLICT")
     projection = await load_paper_projection(
-        session, account_id=cycle.account_id, as_of=cycle.decision_time
+        session,
+        account_id=cycle.account_id,
+        as_of=cycle.decision_time,
+        derived_snapshots_known_at=frozen.admitted_at if now is None else None,
     )
     if projection.projection_hash != frozen.projection_hash:
         raise ValueError("PORTFOLIO_PROPOSAL_PROJECTION_CONFLICT")

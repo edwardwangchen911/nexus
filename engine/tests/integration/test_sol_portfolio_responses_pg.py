@@ -50,7 +50,17 @@ async def test_formal_responses_portfolio(
 
 
 async def _run_native_portfolio_http(
-    factory, host, portfolio, job, at, monkeypatch, case, root, env_file
+    factory,
+    host,
+    portfolio,
+    job,
+    at,
+    monkeypatch,
+    case,
+    root,
+    env_file,
+    *,
+    expected_complete_code="PORTFOLIO_ASSESSMENT_DEFERRED",
 ):
     import asyncio
 
@@ -510,4 +520,4 @@ async def _run_native_portfolio_http(
                 session, account_id=host.agent_paper_account_id, now=after_leases, read_only=True
             )
         if case == "complete":
-            assert ended.result_code == "PORTFOLIO_ASSESSMENT_DEFERRED"
+            assert ended.result_code == expected_complete_code

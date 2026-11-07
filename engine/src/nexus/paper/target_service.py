@@ -317,10 +317,16 @@ async def load_initial_approval_projection(
     ):
         raise ValueError("PORTFOLIO_PROPOSAL_INITIAL_APPROVAL_CONFLICT")
     projection = await load_paper_projection(
-        session, account_id=approval.account_id, as_of=approval.projection_as_of
+        session,
+        account_id=approval.account_id,
+        as_of=approval.projection_as_of,
+        derived_snapshots_known_at=approval.approved_at if now is None else None,
     )
     approved = await load_paper_projection(
-        session, account_id=approval.account_id, as_of=approval.approved_at
+        session,
+        account_id=approval.account_id,
+        as_of=approval.approved_at,
+        derived_snapshots_known_at=approval.approved_at if now is None else None,
     )
     require_unoccupied_projection(projection)
     require_unoccupied_projection(approved)

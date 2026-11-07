@@ -61,8 +61,11 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.market import Instrument
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
+from nexus.research.artifact_read_scope import artifact_read_scope
+from nexus.research.identity_sources import identity_source_parse_scope
 from nexus.settings import AgentRuntimeMode, EngineSettings
 from nexus.strategy.intents import ResearchIntent
+from nexus.workbench.evidence_read_scope import evidence_read_scope
 from pydantic import ValidationError
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -357,7 +360,12 @@ async def _hydrate_response(
     observation_reader: ObservationReadback | None = None,
     window_summary: bool = False,
 ) -> ResearchRunResponse:
-    with identity_parse_scope():
+    with (
+        identity_parse_scope(),
+        identity_source_parse_scope(),
+        evidence_read_scope(session),
+        artifact_read_scope(session),
+    ):
         evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = ()
         if output is not None:
             evidence_records = tuple(

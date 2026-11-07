@@ -136,8 +136,8 @@ def test_activation_result_requires_exact_event_batch_and_target_identity() -> N
     target_id = uuid4()
     batch_id = uuid4()
     service = PaperReadService(cast(AsyncSession, None), now)
-    decision = SimpleNamespace(id=decision_id)
-    target = SimpleNamespace(target_version_id=target_id)
+    decision = SimpleNamespace(id=decision_id, created_at=now)
+    target = SimpleNamespace(target_version_id=target_id, as_of=now)
     batch = SimpleNamespace(id=batch_id)
 
     exact = SimpleNamespace(
@@ -196,8 +196,8 @@ def test_no_order_activation_reports_recorded_time_after_proposal() -> None:
 
     result = service._activation_result(
         event=cast(Any, event),
-        decision=cast(Any, SimpleNamespace(id=decision_id)),
-        target=cast(Any, SimpleNamespace(target_version_id=target_id)),
+        decision=cast(Any, SimpleNamespace(id=decision_id, created_at=decision_time)),
+        target=cast(Any, SimpleNamespace(target_version_id=target_id, as_of=decision_time)),
         batch=None,
         strict_identity=True,
     )
@@ -346,3 +346,57 @@ def test_candidate_batch_activation_rejects_missing_authority_rows(missing: str)
         )
 
     assert caught.value.code.value == "DATA_PARTIAL"
+
+
+@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize("target_later", [False, True])
+def test_activation_read_time_includes_exact_target_effective_time(planned, target_later):
+    transaction_start = datetime(2026, 11, 3, 15, tzinfo=UTC)
+    effective_at = transaction_start + timedelta(seconds=15)
+    recorded_at = transaction_start if target_later else effective_at + timedelta(seconds=1)
+    decision_id, target_id, batch_id = uuid4(), uuid4(), uuid4()
+    facts = {"strategy_decision_id": str(decision_id), "target_version_id": str(target_id)}
+    if planned:
+        facts["batch_id"] = str(batch_id)
+    event = SimpleNamespace(
+        result_code="PAPER_BATCH_EVALUATED" if planned else "NO_ORDER_REQUIRED",
+        fact_ids=facts,
+        occurred_at=transaction_start,
+        created_at=recorded_at,
+    )
+    service = PaperReadService(cast(AsyncSession, None), effective_at + timedelta(minutes=1))
+    result = service._activation_result(
+        event=cast(Any, event),
+        decision=cast(Any, SimpleNamespace(id=decision_id, created_at=transaction_start)),
+        target=cast(Any, SimpleNamespace(target_version_id=target_id, as_of=effective_at)),
+        batch=cast(Any, SimpleNamespace(id=batch_id)) if planned else None,
+        strict_identity=True,
+    )
+    assert result is not None
+    assert result.as_of == max(recorded_at, effective_at)
+    assert result.result_code == ("PLAN_CREATED" if planned else "NO_ORDER_REQUIRED")
+    assert event.created_at == recorded_at and event.occurred_at == transaction_start
+
+
+def test_reused_target_activation_cannot_predate_the_new_decision():
+    started = datetime(2026, 11, 3, 15, tzinfo=UTC)
+    decision_at = started + timedelta(seconds=15)
+    decision_id, target_id = uuid4(), uuid4()
+    event = SimpleNamespace(
+        result_code="NO_ORDER_REQUIRED",
+        fact_ids={"strategy_decision_id": str(decision_id), "target_version_id": str(target_id)},
+        occurred_at=started,
+        created_at=started,
+    )
+    service = PaperReadService(cast(AsyncSession, None), decision_at + timedelta(minutes=1))
+    result = service._activation_result(
+        event=cast(Any, event),
+        decision=cast(Any, SimpleNamespace(id=decision_id, created_at=decision_at)),
+        target=cast(
+            Any, SimpleNamespace(target_version_id=target_id, as_of=started - timedelta(days=1))
+        ),
+        batch=None,
+        strict_identity=True,
+    )
+    assert result is not None and result.as_of == decision_at
+    assert result.target_version_id == target_id and result.strategy_decision_id == decision_id
