@@ -1,5 +1,6 @@
 """Single-host persisted queue inspection and one-time protected-scope claim."""
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -370,6 +371,28 @@ async def peek_manual_request(
     return None if not pending else pending[0]
 
 
+PENDING_WORK_PHASES = frozenset(
+    {
+        "session_open",
+        "read_setup",
+        "manual_requests",
+        "intraday_intents",
+        "session_close",
+        "engine_dispose",
+    }
+)
+
+
+def _mark_pending_failure(error: BaseException, phase: str) -> None:
+    try:
+        existing = getattr(error, "_nexus_pending_work_phase", None)
+        if not isinstance(existing, str) or existing not in PENDING_WORK_PHASES:
+            setattr(error, "_nexus_pending_work_phase", phase)
+    except Exception:
+        # Diagnostics must never replace the original failure or cancellation.
+        return
+
+
 async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> bool:
     """Read-only wakeup signal, never permission to collect or resume unknown work."""
     if not settings.agent_paper_manual_enabled:
@@ -377,23 +400,40 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
     if account_id != settings.agent_paper_account_id:
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     factory = session_factory(settings)
+    phase = "session_open"
     try:
         async with factory.begin() as session:
-            await session.execute(text("SET TRANSACTION READ ONLY"))
-            from nexus.paper.formal_intraday_intent import due_intent
+            try:
+                phase = "read_setup"
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+                from nexus.paper.formal_intraday_intent import due_intent
 
-            with (
-                identity_parse_scope(),
-                identity_source_parse_scope(),
-                artifact_read_scope(session),
-                evidence_read_scope(session),
-            ):
-                return (
-                    await peek_manual_request(session, account_id=account_id) is not None
-                    or await due_intent(session, account_id) is not None
-                )
+                with (
+                    identity_parse_scope(),
+                    identity_source_parse_scope(),
+                    artifact_read_scope(session),
+                    evidence_read_scope(session),
+                ):
+                    phase = "manual_requests"
+                    pending = await peek_manual_request(session, account_id=account_id) is not None
+                    if not pending:
+                        phase = "intraday_intents"
+                        pending = await due_intent(session, account_id) is not None
+            except (Exception, asyncio.CancelledError) as error:
+                _mark_pending_failure(error, phase)
+                raise
+            finally:
+                phase = "session_close"
+        return pending
+    except (Exception, asyncio.CancelledError) as error:
+        _mark_pending_failure(error, phase)
+        raise
     finally:
-        await factory.kw["bind"].dispose()
+        try:
+            await factory.kw["bind"].dispose()
+        except (Exception, asyncio.CancelledError) as error:
+            _mark_pending_failure(error, "engine_dispose")
+            raise
 
 
 async def claim_configured_manual_request(
