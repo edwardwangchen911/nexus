@@ -2175,6 +2175,18 @@ def _emit_agent_paper_unknown_failure(
         }
         if stage == "inspect" and inspection_site in {"snapshot", "pending_work"}:
             payload["inspection_site"] = inspection_site
+        if stage == "inspect" and inspection_site == "pending_work":
+            from nexus.ops.manual_paper_host import PENDING_WORK_PHASES
+
+            candidate: BaseException | None = error
+            seen: set[int] = set()
+            while candidate is not None and id(candidate) not in seen:
+                seen.add(id(candidate))
+                pending_phase = getattr(candidate, "_nexus_pending_work_phase", None)
+                if isinstance(pending_phase, str) and pending_phase in PENDING_WORK_PHASES:
+                    payload["pending_work_phase"] = pending_phase
+                    break
+                candidate = candidate.__cause__ or candidate.__context__
         if action is not None:
             payload["failure_action"] = action.value
         if stage in {"heartbeat", "inspect"} and error is not None:
