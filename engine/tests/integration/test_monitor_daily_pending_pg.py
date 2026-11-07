@@ -2,6 +2,7 @@
 
 import json
 from datetime import timedelta
+from uuid import UUID
 
 import pytest
 from helpers.paper_batch import CALENDAR_ID
@@ -310,10 +311,23 @@ async def test_normal_daily_freezes_pending_without_rewriting_trigger(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["addressed", "mixed", "unresolved", "rejected", "unknown"])
+@pytest.mark.parametrize(
+    ("mode", "appended_first"),
+    [
+        ("addressed", False),
+        pytest.param("mixed", False, id="mixed-original-first"),
+        pytest.param("mixed", True, id="mixed-appended-first"),
+        ("unresolved", False),
+        ("rejected", False),
+        ("unknown", False),
+    ],
+)
 async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
-    migrated_database_url, monkeypatch, mode
+    migrated_database_url, monkeypatch, mode, appended_first
 ):
+    # Equal check times are ordered by UUID, not insertion order. Exercise both
+    # valid orders so a random fixture ID cannot select the covered trigger.
+    from integration import test_monitor_pending_pg as pending_fixture
     from nexus.agents import codex_staged
     from nexus.monitoring.pending import pending_stock
     from nexus.monitoring.reconciliation import reconcile_account_results
@@ -321,9 +335,14 @@ async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
     from nexus.ops.research_monitor import run as monitor_entry
     from unit.agents.test_codex_sdk import _restore_view
 
-    factory, settings, trigger, parent, now, result = await prepare_daily(
-        migrated_database_url, monkeypatch, pending_count=2 if mode == "mixed" else 1
-    )
+    with monkeypatch.context() as fixture_patch:
+        if mode == "mixed":
+            prefix = "00000000-0000-4000-8000" if appended_first else "ffffffff-ffff-4fff-bfff"
+            ids = iter(UUID(f"{prefix}-{suffix:012x}") for suffix in (1, 2))
+            fixture_patch.setattr(pending_fixture, "uuid4", lambda: next(ids))
+        factory, settings, trigger, parent, now, result = await prepare_daily(
+            migrated_database_url, monkeypatch, pending_count=2 if mode == "mixed" else 1
+        )
     late_id = None
     if mode == "addressed":
         from integration.test_monitor_pending_pg import pending_members
@@ -352,6 +371,8 @@ async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
                 "trigger_checks"
             ]
         ]
+        if mode == "mixed":
+            assert (frozen_ids[0] != str(trigger.id)) is appended_first
         jobs = tuple(
             await session.scalars(
                 select(Job).where(Job.payload["run_id"].astext.in_([str(run.id) for run in runs]))
@@ -465,7 +486,8 @@ async def test_daily_native_worker_consumes_only_reviewed_known_frozen_triggers(
         )
         if mode in {"addressed", "mixed"}:
             assert len(receipts) == 1
-            assert receipts[0].trigger_id == trigger.id and receipts[0].run_id == target.id
+            assert receipts[0].trigger_id == UUID(frozen_ids[0])
+            assert receipts[0].run_id == target.id
             remaining_id = (
                 late_id
                 if mode == "addressed"
