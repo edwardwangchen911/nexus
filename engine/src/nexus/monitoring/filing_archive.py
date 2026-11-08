@@ -35,11 +35,12 @@ from nexus.research.sec_index_storage import (
 
 SOURCE = "nexus_sec_monitor_filing"
 SCHEMA: Literal["sec_monitor_filing_v1"] = "sec_monitor_filing_v1"
+TRANSPORT_SCHEMA = "sec_monitor_filing_v2"
 
 
 class FilingArchive(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal["sec_monitor_filing_v1"] = SCHEMA
+    schema_version: Literal["sec_monitor_filing_v1", "sec_monitor_filing_v2"] = SCHEMA
     instrument_id: UUID
     issuer_cik: str
     index_snapshot_id: UUID
@@ -147,17 +148,28 @@ async def import_filing_content(
     inventory = read(inventory_name)
     rows = document_inventory(inventory[0], entry=entry, issuer_cik=index.issuer_cik)
     bodies = {name: read(name) for name, _, _ in rows}
+    submission_name = accession + ".txt"
+    submission = read(submission_name) if (archive_dir / submission_name).exists() else None
     documents = verify_filing_documents(
-        entry=entry, issuer_cik=index.issuer_cik, inventory=inventory, documents=bodies, now=now
+        entry=entry,
+        issuer_cik=index.issuer_cik,
+        inventory=inventory,
+        documents=bodies,
+        now=now,
+        submission=submission,
     )
     originals = {}
-    for name, (raw, receipt) in {inventory_name: inventory, **bodies}.items():
+    source_pairs = {inventory_name: inventory, **bodies}
+    if submission is not None:
+        source_pairs[submission_name] = submission
+    for name, (raw, receipt) in source_pairs.items():
         received = _receipt(raw, receipt, source_url=root + name, now=now)
         originals[name] = (
             await _save_original(session, store, raw, received=received, now=now),
             await _save_original(session, store, receipt, received=received, now=now),
         )
     document = FilingArchive(
+        schema_version="sec_monitor_filing_v2" if submission is not None else SCHEMA,
         instrument_id=index.instrument_id,
         issuer_cik=index.issuer_cik,
         index_snapshot_id=source.id,
@@ -206,7 +218,7 @@ async def import_filing_content(
         observed_at=entry.accepted_at,
         available_at=now,
         received_at=now,
-        schema_version=SCHEMA,
+        schema_version=document.schema_version,
         payload=document.model_dump(mode="json"),
     )
     session.add_all((evidence, snapshot))
@@ -215,7 +227,7 @@ async def import_filing_content(
         session,
         actor_id="research-monitor",
         action="research.monitor.filing_content_received",
-        schema_version=SCHEMA,
+        schema_version=document.schema_version,
         occurred_at=now,
         payload={
             "snapshot_id": str(snapshot.id),
@@ -237,7 +249,7 @@ async def read_filing_content(
     if (
         row is None
         or row.source != SOURCE
-        or row.schema_version != SCHEMA
+        or row.schema_version not in {SCHEMA, TRANSPORT_SCHEMA}
         or max(row.created_at, row.observed_at, row.available_at, row.received_at) > as_of
     ):
         return None
@@ -246,7 +258,8 @@ async def read_filing_content(
         raw = document.canonical()
         digest = sha256(raw).hexdigest()
         if (
-            row.revision != digest
+            row.schema_version != document.schema_version
+            or row.revision != digest
             or row.provider_object_id != f"{document.issuer_cik}:{document.entry.accession_number}"
             or row.observed_at != document.entry.accepted_at
         ):
@@ -300,12 +313,18 @@ async def read_filing_content(
             originals[name] = (pair[0], pair[1])
         name = document.entry.accession_number + "-index.html"
         inventory = originals.pop(name)
+        submission = (
+            originals.pop(document.entry.accession_number + ".txt")
+            if document.schema_version == TRANSPORT_SCHEMA
+            else None
+        )
         rebuilt = verify_filing_documents(
             entry=document.entry,
             issuer_cik=document.issuer_cik,
             inventory=inventory,
             documents=originals,
             now=as_of,
+            submission=submission,
         )
         canonical = await store.read_evidence(
             f"evidence/monitor-filing/{document.issuer_cik}/{document.entry.accession_number}/sha256/{digest}.json",
