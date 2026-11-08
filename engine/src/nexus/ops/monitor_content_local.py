@@ -166,10 +166,14 @@ async def _collect_documents(
                 inventory = await get(entry.accession_number + "-index.html")
                 rows = document_inventory(inventory, entry=entry, issuer_cik=issuer_cik)
                 stage = "documents"
+                needs_submission = False
                 for name, _, size in rows:
                     raw = await get(name)
                     if len(raw) != size:
-                        raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
+                        needs_submission = True
+                if needs_submission:
+                    stage = "submission"
+                    await get(entry.accession_number + ".txt")
             return requests
         except asyncio.CancelledError as error:
             _failure(archive_dir, error=error, requests=requests, stage=stage)

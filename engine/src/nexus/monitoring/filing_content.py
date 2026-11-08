@@ -187,6 +187,7 @@ def verify_filing_documents(
     inventory: tuple[bytes, bytes],
     documents: dict[str, tuple[bytes, bytes]],
     now: datetime,
+    submission: tuple[bytes, bytes] | None = None,
 ) -> tuple[FilingDocument, ...]:
     require_html_entry(entry)
     now = require_utc(now)
@@ -197,6 +198,12 @@ def verify_filing_documents(
         )
         if inventory_received < max(entry.accepted_at, entry.filed_at):
             raise ValueError("SEC_MONITOR_DOCUMENT_TIME_INVALID")
+        if submission is not None:
+            submitted = _receipt(
+                *submission, source_url=root + entry.accession_number + ".txt", now=now
+            )
+            if submitted < max(entry.accepted_at, entry.filed_at):
+                raise ValueError("SEC_MONITOR_DOCUMENT_TIME_INVALID")
         rows = document_inventory(inventory[0], entry=entry, issuer_cik=issuer_cik)
         if (
             set(documents) != {row[0] for row in rows}
@@ -206,13 +213,30 @@ def verify_filing_documents(
         result = []
         for filename, kind, size in rows:
             raw, receipt = documents[filename]
-            if not 0 < size == len(raw) <= MAX_ARCHIVE_BYTES:
+            if not 0 < size <= MAX_ARCHIVE_BYTES or not 0 < len(raw) <= MAX_ARCHIVE_BYTES:
                 raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
+            content = raw
+            if submission is None:
+                if size != len(raw):
+                    raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
+            else:
+                from nexus.monitoring.filing_transport import prove_document
+
+                content = prove_document(
+                    submission[0],
+                    raw,
+                    accession=entry.accession_number,
+                    issuer_cik=issuer_cik,
+                    form=entry.form,
+                    filename=filename,
+                    kind=kind,
+                    declared_size=size,
+                )
             received = _receipt(raw, receipt, source_url=root + filename, now=now)
             if received < max(entry.accepted_at, entry.filed_at):
                 raise ValueError("SEC_MONITOR_DOCUMENT_TIME_INVALID")
             parser = _VisibleText()
-            parser.feed(raw.decode("utf-8-sig"))
+            parser.feed(content.decode("utf-8-sig"))
             parser.close()
             text = " ".join(" ".join(parser.parts).split())
             if not 20 <= len(text) <= 32000:
