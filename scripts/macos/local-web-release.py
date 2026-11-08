@@ -188,6 +188,8 @@ def serve(root, release, env_file, port, check=False):
         compatibility_flags=config["compatibility_flags"],
         assets={**config.get("assets", {}), "directory": str(release / "dist/client")},
         no_bundle=True,
+        base_dir=str(release / "dist/server"),
+        rules=config.get("rules", []),
     )
     config_path = runtime / "wrangler.json"
     private_write(config_path, json.dumps(local_config))

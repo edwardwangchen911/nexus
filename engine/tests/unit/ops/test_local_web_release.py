@@ -49,6 +49,7 @@ def release(tmp_path):
                 compatibility_date="2026-01-01",
                 compatibility_flags=["nodejs_compat"],
                 assets={"directory": "../client"},
+                rules=[{"type": "ESModule", "globs": ["**/*.js", "**/*.mjs"]}],
             )
         )
     )
@@ -125,6 +126,9 @@ def test_serve_runs_prebuilt_local_worker_with_only_private_bff_bindings(release
     assert "OPENAI_API_KEY" not in bindings and "FOSUN_PASSWORD" not in bindings
     assert (built / "runtime/.dev.vars").stat().st_mode & 0o777 == 0o600
     assert json.loads((built / "runtime/wrangler.json").read_bytes())["no_bundle"] is True
+    config = json.loads((built / "runtime/wrangler.json").read_bytes())
+    assert config["rules"] == [{"type": "ESModule", "globs": ["**/*.js", "**/*.mjs"]}]
+    assert config["base_dir"] == str(built / "dist/server")
     assert web.verify_release(root, built)
 
 
