@@ -22,7 +22,7 @@ from nexus.persistence.models.runtime import Job
 from sqlalchemy import func, select
 
 
-def archive(root, entry, *, extra=False, exhibit_text=""):
+def archive(root, entry, *, extra=False, exhibit_text="", sec_display=False):
     root.mkdir(parents=True)
     accession = entry["accession_number"]
     base = f"https://www.sec.gov/Archives/edgar/data/123456/{accession.replace('-', '')}/"
@@ -50,6 +50,18 @@ def archive(root, entry, *, extra=False, exhibit_text=""):
         f"<td>{kind}</td><td>{len(body)}</td></tr>"
         for number, (name, (kind, body)) in enumerate(documents.items(), 1)
     )
+    if sec_display:
+        primary = entry["primary_document"]
+        rows = rows.replace(
+            f'<a href="{base}{primary}">{primary}</a>',
+            f'<a href="/ix?doc={base.removeprefix("https://www.sec.gov")}{primary}">'
+            f'{primary}</a> <span class="xbrlviewer">iXBRL</span>',
+        )
+        rows += (
+            "<tr><td>&nbsp;</td><td>Complete submission text file</td>"
+            f'<td><a href="{base}{accession}.txt">{accession}.txt</a></td>'
+            "<td>&nbsp;</td><td>10000</td></tr>"
+        )
     inventory = (
         '<table summary="Document Format Files"><tr><th>Seq</th><th>Description</th>'
         "<th>Document</th><th>Type</th><th>Size</th></tr>" + rows + "</table>"
@@ -75,8 +87,9 @@ def archive(root, entry, *, extra=False, exhibit_text=""):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sec_display", [False, True])
 async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cutoff(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, sec_display
 ):
     factory, settings, store, captured, pointer = await installed(
         migrated_database_url, monkeypatch, tmp_path
@@ -151,7 +164,9 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
                 action="import-content",
                 index_snapshot_id=current.id,
                 accession=entry["accession_number"],
-                archive_dir=archive(tmp_path / f"body-{number}", entry, extra=number == 1),
+                archive_dir=archive(
+                    tmp_path / f"body-{number}", entry, extra=number == 1, sec_display=sec_display
+                ),
             ),
         )
         assert (
