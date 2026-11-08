@@ -8,6 +8,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from hashlib import sha256
@@ -1098,9 +1099,13 @@ def _single_exchange_record(
 class _IdentityParseCache(dict[tuple[str, str, str], CurrentCommonStockIdentity]):
     active: bool = True
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.covers: dict[str, _Cover] = {}
 
-_PARSE_CACHE: ContextVar[_IdentityParseCache | None] = (
-    ContextVar("identity_parse_cache", default=None)
+
+_PARSE_CACHE: ContextVar[_IdentityParseCache | None] = ContextVar(
+    "identity_parse_cache", default=None
 )
 
 
@@ -1113,6 +1118,7 @@ def identity_parse_scope() -> Iterator[None]:
     finally:
         cache.active = False
         cache.clear()
+        cache.covers.clear()
         _PARSE_CACHE.reset(token)
 
 
@@ -1127,19 +1133,39 @@ def parse_current_common_stock(
     cache = _PARSE_CACHE.get()
     # Custom member policies continue through their original uncached path.
     use_cache = (
-        cache is not None and cache.active
-        and _member_definition is None and not _allow_outside_definition
+        cache is not None
+        and cache.active
+        and _member_definition is None
+        and not _allow_outside_definition
     )
     key = (symbol, sha256(fmp_raw).hexdigest(), sha256(sec_raw).hexdigest()) if use_cache else None
     if cache is not None and key is not None and key in cache:
         return cache[key].model_copy(deep=True)
     result = _parse_current_common_stock(
-        symbol=symbol, fmp_raw=fmp_raw, sec_raw=sec_raw,
-        _member_definition=_member_definition, _allow_outside_definition=_allow_outside_definition,
+        symbol=symbol,
+        fmp_raw=fmp_raw,
+        sec_raw=sec_raw,
+        _member_definition=_member_definition,
+        _allow_outside_definition=_allow_outside_definition,
     )
     if cache is not None and key is not None and len(cache) < 16:
         cache[key] = result.model_copy(deep=True)
     return result
+
+
+def _parse_sec_cover(sec_raw: bytes, *, use_cache: bool = True) -> _Cover:
+    cache = _PARSE_CACHE.get() if use_cache else None
+    key = sha256(sec_raw).hexdigest()
+    if cache is not None and cache.active and key in cache.covers:
+        return deepcopy(cache.covers[key])
+    parser = _Cover(dual_listing=True, hidden_listing=True)
+    parser.feed(sec_raw.decode("utf-8-sig"))
+    parser.close()
+    if parser.stack or parser.active or parser.parents or parser.context:
+        raise invalid()
+    if cache is not None and cache.active and len(cache.covers) < 16:
+        cache.covers[key] = deepcopy(parser)
+    return parser
 
 
 def _parse_current_common_stock(
@@ -1164,11 +1190,9 @@ def _parse_current_common_stock(
         exchange = _EXCHANGES.get(row.get("exchange", ""))
         if exchange not in {"XNYS", "XNAS"} or not 0 < len(sec_raw) <= MAX_SEC_BYTES:
             raise invalid()
-        parser = _Cover(dual_listing=True, hidden_listing=True)
-        parser.feed(sec_raw.decode("utf-8-sig"))
-        parser.close()
-        if parser.stack or parser.active or parser.parents or parser.context:
-            raise invalid()
+        parser = _parse_sec_cover(
+            sec_raw, use_cache=_member_definition is None and not _allow_outside_definition
+        )
         fixed_ns = {
             "xmlns:ix": "http://www.xbrl.org/2013/inlineXBRL",
             "xmlns:xbrli": "http://www.xbrl.org/2003/instance",

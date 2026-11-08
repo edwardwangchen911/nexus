@@ -108,6 +108,9 @@ async def send_response_stage(
             raise StreamProtocolError("RESPONSES_REQUEST_ABANDONED")
         if loop.time() >= work_deadline:
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
+        from nexus.agents.model_io_guard import require_offline_http_transport
+
+        require_offline_http_transport(client, url=request.url)
         if before_send is not None:
             before_send()
         if loop.time() >= work_deadline:

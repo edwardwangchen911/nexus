@@ -48,6 +48,7 @@ from nexus.agents.committee import (
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL
 from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
+from nexus.agents.model_io_guard import guard_worker_model_io
 from nexus.agents.models import ResearchRequest
 from nexus.agents.portfolio_decision_model import (
     BoundPortfolioResponsesClient,
@@ -111,6 +112,7 @@ _PORTFOLIO_ONCE_WORKER_ID = f"portfolio-decision-once-{new_uuid7()}"
 _PORTFOLIO_ONCE_STARTED_AT = datetime.now(UTC)
 
 
+@guard_worker_model_io
 async def run_portfolio_synthesis_worker_once(
     settings: EngineSettings,
     *,
@@ -200,6 +202,7 @@ class _AgentResearchJobPayload(BaseModel):
     )
 
 
+@guard_worker_model_io
 async def run_agent_worker_once(
     settings: EngineSettings,
     *,
@@ -560,6 +563,7 @@ def _openai_portfolio_responses_client(
     )
 
 
+@guard_worker_model_io
 async def run_portfolio_decision_worker_once(
     settings: EngineSettings,
     *,

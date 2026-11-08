@@ -62,6 +62,7 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim
 
 MODEL_ID = "gpt-5.6-terra"
+_LIVE_SDK_FACTORY = AsyncCodex
 _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192
@@ -126,6 +127,7 @@ class CodexInvocationError(ValueError):
             "CODEX_TIMEOUT": "timeout",
             "CODEX_UNEXPECTED_EXCEPTION": "unexpected_exception",
             "CODEX_RESEARCH_STOPPED": "unexpected_exception",
+            "CODEX_OFFLINE_TRANSPORT_REQUIRED": "unexpected_exception",
         }
         self.reason = reason if reason in kinds else "CODEX_UNEXPECTED_EXCEPTION"
         self.kind = kinds[self.reason]
@@ -408,6 +410,22 @@ def runtime_environment() -> dict[str, str]:
     }
 
 
+def _require_offline_sdk_transport() -> None:
+    from nexus.agents.model_io_guard import offline_model_io_required
+
+    if offline_model_io_required() and (
+        AsyncCodex is _LIVE_SDK_FACTORY
+        or isinstance(AsyncCodex, type)
+        and issubclass(AsyncCodex, _LIVE_SDK_FACTORY)
+    ):
+        raise CodexInvocationError(
+            "CODEX_OFFLINE_TRANSPORT_REQUIRED",
+            phase="preflight",
+            usage=UsageSnapshot(),
+            provider_call_started=False,
+        )
+
+
 def sdk_config(directory: Path) -> CodexConfig:
     """SDK env merges with os.environ: env -i clears credentials before exec.
 
@@ -458,6 +476,7 @@ def sdk_config(directory: Path) -> CodexConfig:
 async def sdk_status() -> dict[str, object]:
     """Read login state without inference, login mutation, or exposing identity."""
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
+        _require_offline_sdk_transport()
         client = AsyncCodex(sdk_config(Path(temporary)))
         try:
             async with asyncio.timeout(10):
@@ -695,6 +714,7 @@ async def _invoke_codex(
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
         directory = Path(temporary)
         with _invocation_boundary("client_init", state=invocation_state):
+            _require_offline_sdk_transport()
             client = AsyncCodex(sdk_config(directory))
         run_task = None
         initialization_attempted = False
