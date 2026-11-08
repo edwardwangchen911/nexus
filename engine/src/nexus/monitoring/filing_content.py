@@ -41,10 +41,12 @@ class _Inventory(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.depth = 0
         self.tables = 0
-        self.rows: list[list[tuple[str, tuple[str, ...]]]] = []
-        self.row: list[tuple[str, tuple[str, ...]]] | None = None
+        self.rows: list[list[tuple[str, tuple[str, ...], tuple[str, ...]]]] = []
+        self.row: list[tuple[str, tuple[str, ...], tuple[str, ...]]] | None = None
         self.parts: list[str] | None = None
         self.links: list[str] = []
+        self.labels: list[str] = []
+        self.anchor_parts: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "table":
@@ -60,21 +62,32 @@ class _Inventory(HTMLParser):
         elif self.depth and tag == "td":
             if self.row is None or self.parts is not None:
                 raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
-            self.parts, self.links = [], []
+            self.parts, self.links, self.labels = [], [], []
         elif self.parts is not None and tag == "a":
-            if len([key for key, _ in attrs if key == "href"]) != 1:
+            if (
+                self.anchor_parts is not None
+                or len([key for key, _ in attrs if key == "href"]) != 1
+            ):
                 raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
             self.links.append(dict(attrs).get("href") or "")
+            self.anchor_parts = []
 
     def handle_data(self, data: str) -> None:
         if self.parts is not None:
             self.parts.append(data)
+        if self.anchor_parts is not None:
+            self.anchor_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if self.depth and tag == "td":
-            if self.row is None or self.parts is None:
+        if tag == "a" and self.anchor_parts is not None:
+            self.labels.append(" ".join("".join(self.anchor_parts).split()))
+            self.anchor_parts = None
+        elif self.depth and tag == "td":
+            if self.row is None or self.parts is None or self.anchor_parts is not None:
                 raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
-            self.row.append((" ".join("".join(self.parts).split()), tuple(self.links)))
+            self.row.append(
+                (" ".join("".join(self.parts).split()), tuple(self.links), tuple(self.labels))
+            )
             self.parts = None
         elif self.depth and tag == "tr":
             if self.row:
@@ -105,19 +118,36 @@ def document_inventory(
         parser.tables != 1
         or parser.depth
         or parser.parts is not None
-        or not 1 <= len(parser.rows) <= MAX_DOCUMENTS
+        or not 1 <= len(parser.rows) <= MAX_DOCUMENTS + 1
     ):
         raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
     result, sequences = [], []
-    for row in parser.rows:
-        if (
-            len(row) != 5
-            or not row[0][0].isdigit()
-            or not row[4][0].isdigit()
-            or len(row[2][1]) != 1
-        ):
+    for position, row in enumerate(parser.rows):
+        if len(row) != 5 or not row[4][0].isdigit() or len(row[2][1]) != 1 or len(row[2][2]) != 1:
             raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
-        filename, links, kind = row[2][0], row[2][1], row[3][0]
+        filename, links, kind = row[2][2][0], row[2][1], row[3][0]
+        if not row[0][0]:
+            # SEC's final aggregate row is not a separately sequenced exhibit.
+            # Keep it in the immutable original inventory; reject every other blank row.
+            summary = entry.accession_number + ".txt"
+            if (
+                position != len(parser.rows) - 1
+                or row[1][0] != "Complete submission text file"
+                or kind
+                or filename != summary
+                or row[2][0] != summary
+                or any(row[i][1] for i in (0, 1, 3, 4))
+                or any(token in links[0] for token in ("%", "\\", "..", "#", "?"))
+                or urljoin(root, links[0]) != root + summary
+                or int(row[4][0]) <= 0
+            ):
+                raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
+            continue
+        if not row[0][0].isdigit():
+            raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
+        inline = links[0].startswith("/ix?doc=")
+        if row[2][0] != filename and not (inline and row[2][0] == filename + " iXBRL"):
+            raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(?:html?|txt)", filename):
             raise ValueError("SEC_MONITOR_ATTACHMENT_UNSUPPORTED")
         href = links[0]
@@ -135,7 +165,8 @@ def document_inventory(
         sequences.append(int(row[0][0]))
         result.append((filename, kind, int(row[4][0])))
     if (
-        sequences != sorted(set(sequences))
+        not 1 <= len(result) <= MAX_DOCUMENTS
+        or sequences != sorted(set(sequences))
         or len({row[0] for row in result}) != len(result)
         or sum(row[0] == entry.primary_document for row in result) != 1
     ):

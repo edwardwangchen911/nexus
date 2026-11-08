@@ -193,3 +193,78 @@ def test_nontext_declared_exhibit_is_explicitly_unsupported_and_never_omitted():
     inventory = inventory.replace(b"ex992.htm", b"ex992.pdf")
     with pytest.raises(ValueError, match="SEC_MONITOR_ATTACHMENT_UNSUPPORTED"):
         document_inventory(inventory, entry=entry, issuer_cik="0000123456")
+
+
+def sec_display_inventory():
+    entry, inventory, raw = source()
+    inventory = inventory.replace(
+        f'<a href="{BASE}main.htm">main.htm</a>'.encode(),
+        (
+            b'<a href="/ix?doc=/Archives/edgar/data/123456/000012345626000002/main.htm">'
+            b'main.htm</a> <span class="xbrlviewer">iXBRL</span>'
+        ),
+    )
+    summary = (
+        "<tr><td>&nbsp;</td><td>Complete submission text file</td>"
+        f'<td><a href="{BASE}{ACCESSION}.txt">{ACCESSION}.txt</a></td>'
+        "<td>&nbsp;</td><td>1000</td></tr>"
+    ).encode()
+    return entry, inventory.replace(b"</table>", summary + b"</table>"), raw
+
+
+def test_real_sec_inline_label_and_exact_submission_summary_are_not_extra_attachments():
+    from nexus.monitoring.filing_content import document_inventory
+
+    entry, inventory, raw = sec_display_inventory()
+    rows = document_inventory(inventory, entry=entry, issuer_cik="0000123456")
+    assert [x[0] for x in rows] == list(raw)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "tail",
+        "anchor",
+        "wrong_accession",
+        "wrong_issuer",
+        "blank_seq",
+        "duplicate_summary",
+        "graphic",
+    ],
+)
+def test_sec_display_rows_do_not_relax_link_identity_or_attachment_contract(damage):
+    from nexus.monitoring.filing_content import document_inventory
+
+    entry, inventory, _ = sec_display_inventory()
+    if damage == "tail":
+        inventory = inventory.replace(b"iXBRL</span>", b"iXBRL arbitrary</span>")
+    elif damage == "anchor":
+        inventory = inventory.replace(b">main.htm</a>", b">wrong.htm</a>")
+    elif damage == "wrong_accession":
+        inventory = inventory.replace((ACCESSION + ".txt").encode(), b"0000123456-26-999999.txt")
+    elif damage == "wrong_issuer":
+        inventory = inventory.replace(
+            (BASE + ACCESSION + ".txt").encode(),
+            (BASE.replace("123456/", "654321/") + ACCESSION + ".txt").encode(),
+        )
+    elif damage == "blank_seq":
+        inventory = inventory.replace(b"<td>2</td>", b"<td>&nbsp;</td>")
+    elif damage == "duplicate_summary":
+        summary = inventory[inventory.index(b"<tr><td>&nbsp;") : inventory.index(b"</table>")]
+        inventory = inventory.replace(b"</table>", summary + b"</table>")
+    elif damage == "graphic":
+        inventory = inventory.replace(
+            b"</table>",
+            b'<tr><td>7</td><td>Logo</td><td><a href="logo.jpg">logo.jpg</a></td>'
+            b'<td>GRAPHIC</td><td>100</td></tr></table>',
+        )
+    with pytest.raises(ValueError):
+        document_inventory(inventory, entry=entry, issuer_cik="0000123456")
+
+
+def test_submission_aggregate_size_is_not_a_new_document_capacity_limit():
+    from nexus.monitoring.filing_content import document_inventory
+
+    entry, inventory, raw = sec_display_inventory()
+    inventory = inventory.replace(b"<td>1000</td>", b"<td>9999999</td>")
+    assert len(document_inventory(inventory, entry=entry, issuer_cik="0000123456")) == len(raw)
