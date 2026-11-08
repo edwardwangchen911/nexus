@@ -27,6 +27,8 @@ from nexus.persistence.models.manual_paper import (
 )
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job, JobLease
+from nexus.research.artifact_read_scope import artifact_read_scope
+from nexus.research.identity_sources import identity_source_parse_scope
 from nexus.workbench.activity import ActivityObject, choose_activity
 from nexus.workbench.activity_schema import (
     WorkbenchActivityResponse,
@@ -98,7 +100,12 @@ async def read_activity(
 ) -> WorkbenchActivityResponse:
     # Cache only source parsing within this single consistent read transaction.
     # Every reference and persisted proof is still validated independently.
-    with identity_parse_scope(), evidence_read_scope(session):
+    with (
+        identity_parse_scope(),
+        identity_source_parse_scope(),
+        artifact_read_scope(session),
+        evidence_read_scope(session),
+    ):
         return await _read_activity(session, read_at=read_at, decision_session=decision_session)
 
 
