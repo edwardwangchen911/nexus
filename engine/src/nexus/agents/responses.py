@@ -96,6 +96,9 @@ class ResponsesResearchModel:
         )
         if tuple(tools.names) != tuple(definitions):
             raise ValueError("fixed tool registry required")
+        from nexus.agents.model_io_guard import require_offline_openai_transport
+
+        require_offline_openai_transport(self._client)
         responses = getattr(self._client, "responses")
         create = getattr(responses, "create")
         input_items: list[Mapping[str, object]] = [
@@ -259,6 +262,9 @@ class ResponsesCommittee:
         definitions = response_function_tools(
             allow_sec_amendments=bool(getattr(self._tools, "allow_sec_amendments", False))
         )
+        from nexus.agents.model_io_guard import require_offline_openai_transport
+
+        require_offline_openai_transport(self._client)
         responses = getattr(self._client, "responses")
         create = getattr(responses, "create")
         input_items: list[Mapping[str, object]] = [

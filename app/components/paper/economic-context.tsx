@@ -32,7 +32,7 @@ export function EconomicContextBoundary({ view, cycleId, children }: { view: Vie
   return <EconomicLanePage key={`${context.pairId}:${context.lane}:${cycleId ?? ""}`} context={context} view={view} cycleId={cycleId} />;
 }
 
-function EconomicLanePage({ context, view, cycleId }: { context: Context; view: View; cycleId?: string }): React.ReactElement {
+export function EconomicLanePage({ context, view, cycleId }: { context: Context; view: View; cycleId?: string }): React.ReactElement {
   const [fact, setFact] = useState<Fact | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "stale" | "error" | "forbidden">("loading");
   const version = useRef(0);

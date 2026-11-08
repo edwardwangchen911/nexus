@@ -126,3 +126,30 @@ def test_exited_scope_cannot_be_refilled_by_inherited_context():
         inherited.run(parse)
         inherited.run(parse)
         assert feed.call_count == 3
+
+
+def test_same_sec_original_is_parsed_once_across_distinct_profiles():
+    with patch.object(
+        identity._Cover, "feed", autospec=True, side_effect=identity._Cover.feed
+    ) as feed:
+        with identity.identity_parse_scope():
+            first = parse()
+            second = identity.parse_current_common_stock(
+                symbol="AAPL", fmp_raw=profile(price=123), sec_raw=filing()
+            )
+            assert first == second
+            with pytest.raises(ValueError):
+                identity.parse_current_common_stock(
+                    symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=filing()
+                )
+            assert feed.call_count == 1
+        parse()
+        assert feed.call_count == 2
+
+
+def test_resolver_cannot_mutate_shared_sec_cover():
+    with identity.identity_parse_scope():
+        parser = identity._parse_sec_cover(filing())
+        parser.namespaces.clear()
+        parser.facts.clear()
+        assert parse().symbol == "AAPL"

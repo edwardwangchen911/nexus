@@ -240,7 +240,12 @@ async def invoke_stage(
 
     hooks = codex_sdk.ResearchLifecycle(configure=configure, checked=checked, close=close)
     try:
-        result = await codex_sdk.invoke_codex(payload, **options, lifecycle=hooks)
+        from nexus.agents.model_io_guard import model_io_scope
+
+        factory = getattr(protocol, "factory", None)
+        engine = getattr(factory, "kw", {}).get("bind")
+        with model_io_scope(getattr(engine, "url", None)):
+            result = await codex_sdk.invoke_codex(payload, **options, lifecycle=hooks)
         if not cleanup_seen:
             raise ProtocolRejected("SDK_CLEANUP_UNCONFIRMED")
         return result

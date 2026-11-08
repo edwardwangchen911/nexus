@@ -1,6 +1,6 @@
 "use client";
 
-import { EconomicContextBoundary } from "../../components/paper/economic-context";
+import { EconomicContextBoundary } from "../../components/paper/economic-context-boundary";
 
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
