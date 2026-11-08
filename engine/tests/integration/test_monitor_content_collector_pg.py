@@ -35,7 +35,7 @@ def documents(entry, *, invalid_text=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["8-K", "8-K/A", "failed_document", "absent_entry", "import_failure"]
+    "mode", ["8-K", "8-K/A", "failed_document", "absent_entry", "import_failure", "transport_v2"]
 )
 async def test_normal_collector_binds_exact_index_and_preserves_failed_originals(
     migrated_database_url, tmp_path, monkeypatch, mode
@@ -57,6 +57,33 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
     recent = metadata["filings"]["recent"]
     raw_inventory, bodies = documents(recent, invalid_text=mode == "import_failure")
     accession = recent["accessionNumber"][0]
+    if mode == "transport_v2":
+        from helpers.current_identity import CIK
+
+        members = []
+        rows = []
+        for number, (name, raw) in enumerate(bodies.items(), 1):
+            kind = "8-K" if number == 1 else "EX-99.2"
+            body = b"<html><body>" + raw + b"</body></html>"
+            members.append(
+                f"<DOCUMENT>\n<TYPE>{kind}\n<FILENAME>{name}\n<TEXT>\n".encode()
+                + body
+                + b"\n</TEXT>\n</DOCUMENT>\n"
+            )
+            rows.append(
+                f'<tr><td>{number}</td><td>Report</td><td><a href="{name}">{name}</a></td>'
+                f"<td>{kind}</td><td>{len(body)}</td></tr>"
+            )
+            bodies[name] = body.replace(
+                b"</body>", b'<script type="text/javascript" src="/delivery/path"></script></body>'
+            )
+        raw_inventory = (
+            '<table summary="Document Format Files">' + "".join(rows) + "</table>"
+        ).encode()
+        bodies[accession + ".txt"] = (
+            f"ACCESSION NUMBER: {accession}\nCENTRAL INDEX KEY: {CIK}\n"
+            "CONFORMED SUBMISSION TYPE: 8-K\n</SEC-HEADER>\n"
+        ).encode() + b"".join(members)
     # A newer capture deliberately disagrees. The collector must honor first's
     # exact ID, not pick this more recent primary or revise the frozen old entry.
     recent["primaryDocument"][0] = "newer.htm"
@@ -102,7 +129,7 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
         else:
             result = await collect_filing_content(settings, **kwargs)
             assert result["status"] == "created"
-            assert result["provider_requests"] == 3
+            assert result["provider_requests"] == (4 if mode == "transport_v2" else 3)
             assert result["model_requests"] == 0 and result["job_created"] is False
         assert not client.is_closed
     factory = session_factory(settings)
@@ -131,6 +158,12 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
                 assert read.archive.index_snapshot_id == UUID(first["snapshot_id"])
                 assert read.archive.entry.primary_document == "first.htm"
                 assert [d.filename for d in read.archive.documents] == ["first.htm", "ex992.htm"]
+                if mode == "transport_v2":
+                    assert read.archive.schema_version == "sec_monitor_filing_v2"
+                    assert len(requests) == 4
+                    assert (archive / (accession + ".txt")).read_bytes() == bodies[
+                        accession + ".txt"
+                    ]
                 assert read.archive.accounting_revision_status == "unverified"
                 assert read.archive.amendment_relation_status == "not_assessed"
                 assert all(not d.truncated for d in read.archive.documents)
