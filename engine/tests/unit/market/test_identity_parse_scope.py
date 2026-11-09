@@ -153,3 +153,24 @@ def test_resolver_cannot_mutate_shared_sec_cover():
         parser.namespaces.clear()
         parser.facts.clear()
         assert parse().symbol == "AAPL"
+
+
+def test_summary_can_explicitly_reuse_parent_parse_without_changing_default_isolation():
+    with patch.object(
+        identity._Cover, "feed", autospec=True, side_effect=identity._Cover.feed
+    ) as feed:
+        with identity.identity_parse_scope():
+            parse()
+            with pytest.raises(RuntimeError), identity.identity_parse_scope(reuse_active=True):
+                value = parse()
+                value.context.clear()
+                assert parse().context
+                raise RuntimeError("summary cancelled")
+            assert parse().context
+            assert feed.call_count == 1
+            with identity.identity_parse_scope():
+                parse()
+            assert feed.call_count == 2
+        with identity.identity_parse_scope(reuse_active=True):
+            parse()
+        assert feed.call_count == 3
