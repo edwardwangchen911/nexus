@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from nexus.workbench.snapshot_rows import snapshot_rows
-from sqlalchemy import JSON, Integer, event, func, select, text
+from sqlalchemy import JSON, Integer, String, event, func, inspect, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -180,3 +180,147 @@ async def test_callable_parameters_are_evaluated_once_per_query_and_never_reused
                 assert (await session.scalar(stmt)).id == 1
                 assert (await session.scalar(stmt)).id == 2
         assert len(reads) == 2
+
+
+class OtherRow(Base):
+    __tablename__ = "other_scope_rows"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+
+
+class ThirdRow(Base):
+    __tablename__ = "third_scope_rows"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+
+
+@pytest.mark.asyncio
+async def test_refresh_keeps_unrelated_rows_but_invalidates_both_join_dependencies(
+    temporary_database_url,
+):
+    async with database(temporary_database_url) as (factory, reads):
+        async with factory.begin() as writer:
+            writer.add(OtherRow(id=1, payload={"v": "other"}))
+            writer.add(ThirdRow(id=1, payload={"v": "third"}))
+        pair = select(Row, OtherRow).join(OtherRow, OtherRow.id == Row.id)
+        third = select(ThirdRow).where(ThirdRow.id == 1)
+        async with factory.begin() as session:
+            await readonly(session)
+            async with snapshot_rows(session):
+                result = (await session.execute(pair)).all()
+                assert [(a.id, b.id) for a, b in result] == [(1, 1)]
+                assert [a.id for a in (await session.scalars(pair)).all()] == [1]
+                assert len(reads) == 1
+                await session.scalar(third)
+                await session.execute(
+                    select(Row).where(Row.id == 1).execution_options(populate_existing=True)
+                )
+                assert (await session.scalar(third)).payload == {"v": "third"}
+                assert len(reads) == 3
+                await session.execute(pair)
+                assert len(reads) == 4
+                await session.execute(select(OtherRow).execution_options(populate_existing=True))
+                await session.execute(pair)
+                assert len(reads) == 6
+                await session.scalar(third)
+                assert len(reads) == 6
+
+
+@pytest.mark.asyncio
+async def test_outer_join_none_and_entity_budget_are_preserved(temporary_database_url):
+    async with database(temporary_database_url) as (factory, reads):
+        async with factory.begin() as writer:
+            writer.add(OtherRow(id=1, payload={"v": "other"}))
+        pair = select(Row, OtherRow).outerjoin(OtherRow, OtherRow.id == Row.id).order_by(Row.id)
+        async with factory.begin() as session:
+            await readonly(session)
+            async with snapshot_rows(session):
+                for _ in range(2):
+                    result = (await session.execute(pair)).all()
+                    assert [(a.id, b.id if b else None) for a, b in result] == [(1, 1), (2, None)]
+                assert len(reads) == 1
+                session.expunge(result[0][1])
+                await session.execute(pair)
+                assert len(reads) == 2
+        async with factory.begin() as session:
+            await readonly(session)
+            start = len(reads)
+            async with snapshot_rows(session, max_rows=1):
+                for _ in range(2):
+                    await session.execute(
+                        select(Row, OtherRow).join(OtherRow, OtherRow.id == Row.id)
+                    )
+            assert len(reads) == start + 2
+
+
+@pytest.mark.asyncio
+async def test_unidentified_refresh_still_clears_all_rows(temporary_database_url):
+    async with database(temporary_database_url) as (factory, reads):
+        async with factory.begin() as session:
+            await readonly(session)
+            async with snapshot_rows(session):
+                await session.scalar(select(Row).where(Row.id == 1))
+                await session.execute(text("SELECT 1").execution_options(populate_existing=True))
+                await session.scalar(select(Row).where(Row.id == 1))
+                assert len(reads) == 2
+
+
+class ParentRow(Base):
+    __tablename__ = "inherit_scope_rows"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    payload: Mapped[dict] = mapped_column(JSON)
+    __mapper_args__ = {"polymorphic_on": kind, "polymorphic_identity": "parent"}
+
+
+class ChildRow(ParentRow):
+    __mapper_args__ = {"polymorphic_identity": "child"}
+
+
+@pytest.mark.asyncio
+async def test_parent_refresh_invalidates_child_and_loader_options_fall_back(
+    temporary_database_url,
+):
+    from sqlalchemy.orm import load_only
+
+    async with database(temporary_database_url) as (factory, reads):
+        async with factory.begin() as writer:
+            writer.add(ChildRow(id=1, payload={"v": "child"}))
+            writer.add(ThirdRow(id=1, payload={"v": "unrelated"}))
+        async with factory.begin() as session:
+            await readonly(session)
+            async with snapshot_rows(session):
+                await session.scalar(select(ChildRow))
+                await session.scalar(select(ThirdRow))
+                await session.execute(select(ParentRow).execution_options(populate_existing=True))
+                await session.scalar(select(ChildRow))
+                await session.scalar(select(ThirdRow))
+                assert len(reads) == 4
+                await session.execute(select(Row).options(load_only(Row.id)))
+                await session.execute(select(Row).options(load_only(Row.id)))
+                assert len(reads) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dual", [False, True])
+async def test_partially_expired_member_is_loaded_by_entity_select(temporary_database_url, dual):
+    async with database(temporary_database_url) as (factory, reads):
+        async with factory.begin() as writer:
+            writer.add(OtherRow(id=1, payload={"v": "other"}))
+        statement = (
+            select(Row, OtherRow).join(OtherRow, OtherRow.id == Row.id)
+            if dual
+            else select(Row).where(Row.id == 1)
+        )
+        async with factory.begin() as session:
+            await readonly(session)
+            async with snapshot_rows(session):
+                initial = (await session.execute(statement)).one()
+                member = initial[1] if dual else initial[0]
+                session.expire(member, ["payload"])
+                assert not inspect(member).expired
+                fresh = (await session.execute(statement)).one()
+                assert (fresh[1] if dual else fresh[0]).payload == {
+                    "v": "other" if dual else "original"
+                }
+                assert len(reads) == 2

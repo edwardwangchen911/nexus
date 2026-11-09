@@ -155,9 +155,11 @@ async def test_valid_saved_review_excerpt_never_becomes_verified_system_gap(migr
 @pytest.mark.asyncio
 @pytest.mark.parametrize("defect", [None, "event_hash", "run_snapshot"])
 async def test_cycle_freezes_order_and_partial_candidate_failure(migrated_database_url, defect):
+    from contextlib import asynccontextmanager
     from decimal import Decimal
 
     from helpers.paper_batch import DECISION_TIME, INSTRUMENTS, seed_paper_batch
+    from nexus.api.routes.workbench import workbench_read_session
     from nexus.paper import agent_cycle
     from nexus.paper.agent_cycle_models import floor_decision_slot
     from nexus.paper.candidate_batch import create_agent_paper_candidate_batch
@@ -234,7 +236,7 @@ async def test_cycle_freezes_order_and_partial_candidate_failure(migrated_databa
                 {"snapshot": runs[1].data_snapshot_id, "id": damaged_id},
             )
             await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
-    async with factory() as session:
+    async with asynccontextmanager(workbench_read_session)(factory) as session:
         cycle = await session.get(AgentPaperCycleRecord, started.cycle_id)
         if defect == "event_hash":
             with pytest.raises(ValueError, match="WORKBENCH_CANDIDATE_BINDING_INVALID"):
