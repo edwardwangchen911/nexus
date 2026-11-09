@@ -1110,7 +1110,13 @@ _PARSE_CACHE: ContextVar[_IdentityParseCache | None] = ContextVar(
 
 
 @contextmanager
-def identity_parse_scope() -> Iterator[None]:
+def identity_parse_scope(*, reuse_active: bool = False) -> Iterator[None]:
+    # A nested summary belongs to the same read operation. Independent callers
+    # keep the existing separate scope unless they explicitly opt in.
+    parent = _PARSE_CACHE.get()
+    if reuse_active and parent is not None and parent.active:
+        yield
+        return
     cache = _IdentityParseCache()
     token = _PARSE_CACHE.set(cache)
     try:

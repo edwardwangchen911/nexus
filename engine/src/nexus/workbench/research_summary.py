@@ -355,7 +355,7 @@ async def _project(
             }
         )
     try:
-        with identity_parse_scope():
+        with identity_parse_scope(reuse_active=True):
             intent = await _validated_intent(session, run, outputs, reader, read_at=read_at)
     except (ValueError, TypeError, KeyError):
         intent = None
