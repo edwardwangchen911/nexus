@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -14,6 +16,7 @@ from datetime import UTC, date, datetime
 from hashlib import sha256
 from html.parser import HTMLParser
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from uuid import UUID
 
@@ -1094,13 +1097,63 @@ def _single_exchange_record(
     return stock, record, [*record, proof]
 
 
+# Process-local syntax only: no symbol, member policy, receipt or DB authority.
+# Each request still runs _parse_current_common_stock and source qualifications.
+_COVER_PARSE_ENTRIES = 4
+_COVER_PARSE_BYTES = 16 * 1024 * 1024
+_COVER_PARSES: OrderedDict[str, tuple[_Cover, int]] = OrderedDict()
+_COVER_PARSE_LOCK = Lock()
+_COVER_PARSE_SIZE = 0
+
+
+def _tree_bytes(value: Any, seen: set[int]) -> int:
+    if id(value) in seen:
+        return 0
+    seen.add(id(value))
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        return size + sum(_tree_bytes(k, seen) + _tree_bytes(v, seen) for k, v in value.items())
+    if isinstance(value, list | tuple | set | frozenset):
+        return size + sum(_tree_bytes(v, seen) for v in value)
+    return size
+
+
+def _shared_cover(key: str) -> _Cover | None:
+    with _COVER_PARSE_LOCK:
+        entry = _COVER_PARSES.get(key)
+        if entry is None:
+            return None
+        _COVER_PARSES.move_to_end(key)
+        return deepcopy(entry[0])
+
+
+def _remember_cover(key: str, parser: _Cover) -> None:
+    global _COVER_PARSE_SIZE
+    size = _tree_bytes(vars(parser), set()) + sys.getsizeof(parser) + sys.getsizeof(key)
+    if size > _COVER_PARSE_BYTES or _COVER_PARSE_ENTRIES < 1:
+        return
+    with _COVER_PARSE_LOCK:
+        previous = _COVER_PARSES.pop(key, None)
+        if previous is not None:
+            _COVER_PARSE_SIZE -= previous[1]
+        while _COVER_PARSES and (
+            len(_COVER_PARSES) >= _COVER_PARSE_ENTRIES
+            or _COVER_PARSE_SIZE + size > _COVER_PARSE_BYTES
+        ):
+            _, (_, removed) = _COVER_PARSES.popitem(last=False)
+            _COVER_PARSE_SIZE -= removed
+        _COVER_PARSES[key] = (deepcopy(parser), size)
+        _COVER_PARSE_SIZE += size
+
+
 # Opt-in per-read memoization of pure parsing only. Storage bytes, receipts,
 # database bindings and current aliases are still verified by every caller.
 class _IdentityParseCache(dict[tuple[str, str, str], CurrentCommonStockIdentity]):
     active: bool = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, reuse_cover_parses: bool = False) -> None:
         super().__init__()
+        self.reuse_cover_parses = reuse_cover_parses
         self.covers: dict[str, _Cover] = {}
 
 
@@ -1110,14 +1163,16 @@ _PARSE_CACHE: ContextVar[_IdentityParseCache | None] = ContextVar(
 
 
 @contextmanager
-def identity_parse_scope(*, reuse_active: bool = False) -> Iterator[None]:
+def identity_parse_scope(
+    *, reuse_active: bool = False, reuse_cover_parses: bool = False
+) -> Iterator[None]:
     # A nested summary belongs to the same read operation. Independent callers
     # keep the existing separate scope unless they explicitly opt in.
     parent = _PARSE_CACHE.get()
     if reuse_active and parent is not None and parent.active:
         yield
         return
-    cache = _IdentityParseCache()
+    cache = _IdentityParseCache(reuse_cover_parses=reuse_cover_parses)
     token = _PARSE_CACHE.set(cache)
     try:
         yield
@@ -1164,13 +1219,22 @@ def _parse_sec_cover(sec_raw: bytes, *, use_cache: bool = True) -> _Cover:
     key = sha256(sec_raw).hexdigest()
     if cache is not None and cache.active and key in cache.covers:
         return deepcopy(cache.covers[key])
+    if cache is not None and cache.active and cache.reuse_cover_parses:
+        shared = _shared_cover(key)
+        if shared is not None:
+            if len(cache.covers) < 16:
+                cache.covers[key] = deepcopy(shared)
+            return shared
     parser = _Cover(dual_listing=True, hidden_listing=True)
     parser.feed(sec_raw.decode("utf-8-sig"))
     parser.close()
     if parser.stack or parser.active or parser.parents or parser.context:
         raise invalid()
-    if cache is not None and cache.active and len(cache.covers) < 16:
-        cache.covers[key] = deepcopy(parser)
+    if cache is not None and cache.active:
+        if len(cache.covers) < 16:
+            cache.covers[key] = deepcopy(parser)
+        if cache.reuse_cover_parses:
+            _remember_cover(key, parser)
     return parser
 
 
