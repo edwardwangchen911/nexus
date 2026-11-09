@@ -1,5 +1,7 @@
 """HTTP API process entry point for the NEXUS engine."""
 
+import gc
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -159,6 +161,23 @@ def _install_what_if_request_schema(app: FastAPI) -> None:
     app.openapi = openapi  # type: ignore[method-assign]
 
 
+_API_GC_PREPARED = False
+
+
 def run() -> None:
-    """Run the API process."""
-    uvicorn.run(create_engine_app(), host="0.0.0.0", port=8000)
+    """Run one dedicated API process; the reusable app factory has no GC effects."""
+    global _API_GC_PREPARED
+    app = create_engine_app()
+    if not _API_GC_PREPARED:
+        _API_GC_PREPARED = True
+        if gc.isenabled():
+            # Before requests or DB sessions exist, exclude the startup object
+            # graph from full scans. New request cycles remain collectible.
+            gc.collect()
+            gc.freeze()
+        print(
+            f"NEXUS_API_GC_STARTUP enabled={int(gc.isenabled())} "
+            f"frozen_objects={gc.get_freeze_count()} thresholds={gc.get_threshold()}",
+            flush=True,
+        )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
