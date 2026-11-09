@@ -27,6 +27,7 @@ describe("workbench BFF route", () => {
     const response = await GET(new Request("https://nexus.test/api/v1/workbench"));
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("server-timing")).toMatch(/^bff;dur=\d+\.\d$/);
     expect(engineFetch).toHaveBeenCalledWith(
       "/internal/v1/workbench",
       { method: "GET", actor },

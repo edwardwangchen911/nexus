@@ -62,7 +62,15 @@ export async function sanitizeEngineResponse<Path extends InternalPath>(
   if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return internalFailure<Path>();
   const bytes = await boundedResponseBytes(response, responseLimit(requestUrl, schemaPath));
   if (!bytes) return internalFailure<Path>();
-  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl, schemaPath, requestMethod) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
+  try {
+    const safe = rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl, schemaPath, requestMethod) ?? internalFailure<Path>();
+    const timing = response.headers.get("server-timing");
+    const isWorkbench = schemaPath === "/internal/v1/workbench" || schemaPath === undefined && requestUrl !== undefined && new URL(requestUrl).pathname === "/api/v1/workbench";
+    if (isWorkbench && safe.status === 200 && timing && /^(?:workbench;dur=\d{1,6}(?:\.\d{1,3})?(?:, bff;dur=\d{1,6}(?:\.\d{1,3})?)?|bff;dur=\d{1,6}(?:\.\d{1,3})?)$/.test(timing)) {
+      safe.headers.set("Server-Timing", timing);
+    }
+    return safe as EngineResponse<Path>;
+  } catch { return internalFailure<Path>(); }
 }
 
 export async function sanitizeAuditExportResponse<Path extends InternalPath>(

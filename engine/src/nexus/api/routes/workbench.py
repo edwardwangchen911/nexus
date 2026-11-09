@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime
+from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_session_factory, get_settings, require_service_actor
 from nexus.api.errors import ErrorCode, NexusError
@@ -45,6 +46,7 @@ async def workbench_read_session(
 )
 async def get_internal_paper_workbench(
     request: Request,
+    response: Response,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(workbench_read_session),
     now: datetime = Depends(_utc_now),
@@ -56,11 +58,13 @@ async def get_internal_paper_workbench(
             "The workbench query is invalid.",
             status_code=422,
         )
+    started = perf_counter()
     data = await WorkbenchReadService(
         session,
         now,
         expected_release_revision=settings.release_revision,
     ).read()
+    response.headers["Server-Timing"] = f"workbench;dur={(perf_counter() - started) * 1000:.1f}"
     return WorkbenchEnvelope(
         data=data,
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
