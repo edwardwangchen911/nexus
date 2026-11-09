@@ -15,6 +15,7 @@ from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaRespon
 from nexus.api.schemas.workbench import WorkbenchEnvelope
 from nexus.settings import EngineSettings
 from nexus.workbench.read_service import WorkbenchReadService
+from nexus.workbench.snapshot_rows import snapshot_rows
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,7 +33,8 @@ async def workbench_read_session(
     # separate consistent snapshot and cannot write any business state.
     async with factory() as session, session.begin():
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
-        yield session
+        async with snapshot_rows(session):
+            yield session
 
 
 @router.get(
