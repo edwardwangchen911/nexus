@@ -98,10 +98,10 @@ async def _cycle_settled(session: AsyncSession, cycle_id: UUID, now: datetime) -
 async def read_activity(
     session: AsyncSession, *, read_at: datetime, decision_session: date | None
 ) -> WorkbenchActivityResponse:
-    # Cache only source parsing within this single consistent read transaction.
+    # Row/byte reuse stays read-local; only pure cover syntax spans refreshes.
     # Every reference and persisted proof is still validated independently.
     with (
-        identity_parse_scope(),
+        identity_parse_scope(reuse_cover_parses=True),
         identity_source_parse_scope(),
         artifact_read_scope(session),
         evidence_read_scope(session),
