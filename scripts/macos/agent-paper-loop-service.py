@@ -669,10 +669,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--acknowledge-unconfirmed", action="store_true")
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--target-model-config-id")
     args = parser.parse_args(argv)
-    if (args.check_only and args.action != "reconcile-exit") or (
-        args.acknowledge_unconfirmed and args.action != "stop"
-    ):
+    if (
+        (args.check_only or args.target_model_config_id is not None)
+        and args.action != "reconcile-exit"
+    ) or (args.acknowledge_unconfirmed and args.action != "stop"):
         _emit({"error_code": "AGENT_PAPER_SERVICE_ACTION_INVALID"})
         return 2
     try:
@@ -695,6 +697,11 @@ def main(argv: list[str] | None = None) -> int:
                     "--service-project-name",
                     args.project_name,
                     *_engine_arguments(root, env_file),
+                    *(
+                        ["--target-model-config-id", args.target_model_config_id]
+                        if args.target_model_config_id is not None
+                        else []
+                    ),
                 ],
                 cwd=root,
                 env=_engine_environment(root),
