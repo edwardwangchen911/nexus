@@ -29,6 +29,7 @@ from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPape
 from nexus.persistence.models.runtime import Job, JobLease
 from nexus.research.artifact_read_scope import artifact_read_scope
 from nexus.research.identity_sources import identity_source_parse_scope
+from nexus.research.sec_disclosure_index import sec_index_parse_scope
 from nexus.workbench.activity import ActivityObject, choose_activity
 from nexus.workbench.activity_schema import (
     WorkbenchActivityResponse,
@@ -103,6 +104,7 @@ async def read_activity(
     with (
         identity_parse_scope(),
         identity_source_parse_scope(),
+        sec_index_parse_scope(),
         artifact_read_scope(session),
         evidence_read_scope(session),
     ):

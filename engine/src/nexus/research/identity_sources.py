@@ -13,6 +13,8 @@ _EXCHANGES = {"Nasdaq": "XNAS", "NYSE": "XNYS", "NYSE American": "XASE"}
 class _ParseScope:
     def __init__(self) -> None:
         self.active = True
+        self.structures: dict[str, dict[str, list[tuple[Any, Any]]]] = {}
+        self.structure_bytes = 0
         self.directory: dict[tuple[str, str], tuple[str, str]] = {}
         self.submissions: set[tuple[str, str, str, str]] = set()
 
@@ -30,6 +32,7 @@ def identity_source_parse_scope() -> Iterator[None]:
     finally:
         scope.active = False
         scope.directory.clear()
+        scope.structures.clear()
         scope.submissions.clear()
         _PARSE_SCOPE.reset(token)
 
@@ -39,7 +42,46 @@ def directory_binding_from_raw(raw: bytes, symbol: str) -> tuple[str, str]:
     key = (sha256(raw).hexdigest(), symbol)
     if scope is not None and scope.active and key in scope.directory:
         return scope.directory[key]
-    result = directory_binding(parse_identity_source(raw), symbol)
+    if scope is None or not scope.active:
+        return directory_binding(parse_identity_source(raw), symbol)
+    digest = key[0]
+    structure = scope.structures.get(digest) if scope is not None and scope.active else None
+    if structure is None:
+        document = parse_identity_source(raw)
+        if document.get("fields") != ["cik", "name", "ticker", "exchange"]:
+            raise ValueError("IDENTITY_COLLECTION_MAPPING_INVALID")
+        rows = document.get("data")
+        if not isinstance(rows, list) or any(not isinstance(r, list) or len(r) != 4 for r in rows):
+            raise ValueError("IDENTITY_COLLECTION_MAPPING_INVALID")
+        if (
+            len(rows) > 16384
+            or len(scope.structures) >= 16
+            or scope.structure_bytes + len(raw) > 8 * 1024 * 1024
+        ):
+            result = directory_binding(document, symbol)
+            if len(scope.directory) < 128:
+                scope.directory[key] = result
+            return result
+        structure = {}
+        for row in rows:
+            if isinstance(row[2], str):
+                structure.setdefault(row[2], []).append((row[0], row[3]))
+        if (
+            scope is not None
+            and scope.active
+            and len(scope.structures) < 16
+            and scope.structure_bytes + len(raw) <= 8 * 1024 * 1024
+            and len(rows) <= 16384
+        ):
+            scope.structures[digest] = structure
+            scope.structure_bytes += len(raw)
+    matches = structure.get(symbol, [])
+    if len(matches) != 1:
+        raise ValueError("IDENTITY_COLLECTION_MAPPING_INVALID")
+    cik, exchange = matches[0]
+    if type(cik) is not int or not 0 < cik < 10**10 or exchange not in _EXCHANGES:
+        raise ValueError("IDENTITY_COLLECTION_MAPPING_INVALID")
+    result = str(cik).zfill(10), _EXCHANGES[exchange]
     if scope is not None and scope.active and len(scope.directory) < 128:
         scope.directory[key] = result
     return result

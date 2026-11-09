@@ -2,6 +2,9 @@
 
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, date, datetime, time
 from hashlib import sha256
 from typing import Any, Literal, Self
@@ -153,6 +156,96 @@ def build_disclosure_index(
     received_at = _timestamp(proof["received_at"])
     if received_at > datetime.now(UTC):
         raise ValueError("SEC_INDEX_RECEIPT_TIME_INVALID")
+    entries, coverage, complete = _source_rows(raw, digest, issuer_cik, received_at)
+    return SecDisclosureIndex(
+        instrument_id=instrument_id,
+        identity_snapshot_id=identity_snapshot_id,
+        issuer_cik=issuer_cik,
+        received_at=received_at,
+        source_url=url,
+        raw_content_hash=digest,
+        entries=entries,
+        coverage_start_at=coverage,
+        history_complete=complete,
+    )
+
+
+_EntryValue = tuple[str, Literal["8-K", "8-K/A"], datetime, datetime, str]
+
+
+class _SourceRows:
+    def __init__(self) -> None:
+        self.active = True
+        self.bytes = 0
+        self.rows: dict[
+            tuple[str, str, datetime], tuple[tuple[_EntryValue, ...], datetime | None, bool]
+        ] = {}
+
+
+_SOURCE_ROWS: ContextVar[_SourceRows | None] = ContextVar("sec_index_source_rows", default=None)
+
+
+@contextmanager
+def sec_index_parse_scope() -> Iterator[None]:
+    scope = _SourceRows()
+    token = _SOURCE_ROWS.set(scope)
+    try:
+        yield
+    finally:
+        scope.active = False
+        scope.rows.clear()
+        _SOURCE_ROWS.reset(token)
+
+
+def _source_rows(
+    raw: bytes, digest: str, issuer_cik: str, received_at: datetime
+) -> tuple[tuple[SecIndexEntry, ...], datetime | None, bool]:
+    scope = _SOURCE_ROWS.get()
+    key = (digest, issuer_cik, received_at)
+    if scope is not None and scope.active and key in scope.rows:
+        entries, coverage, complete = scope.rows[key]
+        return (
+            tuple(
+                SecIndexEntry(
+                    accession_number=entry[0],
+                    form=entry[1],
+                    accepted_at=entry[2],
+                    filed_at=entry[3],
+                    primary_document=entry[4],
+                )
+                for entry in entries
+            ),
+            coverage,
+            complete,
+        )
+    result = _parse_source_rows(raw, issuer_cik, received_at)
+    if (
+        scope is not None
+        and scope.active
+        and len(scope.rows) < 16
+        and scope.bytes + len(raw) <= 32 * 1024 * 1024
+    ):
+        scope.rows[key] = (
+            tuple(
+                (
+                    entry.accession_number,
+                    entry.form,
+                    entry.accepted_at,
+                    entry.filed_at,
+                    entry.primary_document,
+                )
+                for entry in result[0]
+            ),
+            result[1],
+            result[2],
+        )
+        scope.bytes += len(raw)
+    return result
+
+
+def _parse_source_rows(
+    raw: bytes, issuer_cik: str, received_at: datetime
+) -> tuple[tuple[SecIndexEntry, ...], datetime | None, bool]:
     document = _object(raw)
     cik = document.get("cik")
     if (
@@ -209,14 +302,4 @@ def build_disclosure_index(
                     primary_document=primary,
                 )
             )
-    return SecDisclosureIndex(
-        instrument_id=instrument_id,
-        identity_snapshot_id=identity_snapshot_id,
-        issuer_cik=issuer_cik,
-        received_at=received_at,
-        source_url=url,
-        raw_content_hash=digest,
-        entries=tuple(entries),
-        coverage_start_at=min(accepted_times) if accepted_times else None,
-        history_complete=files == [],
-    )
+    return tuple(entries), min(accepted_times) if accepted_times else None, files == []
