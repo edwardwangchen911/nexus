@@ -489,7 +489,7 @@ describe("engineFetch runtime boundary", () => {
       return jsonResponse(
         String(input).endsWith("/internal/v1/workbench") ? workbenchEnvelope() : cycleDetailEnvelope(),
         200,
-        { etag: '"safe"', "x-upstream-secret": "discard" },
+        { etag: '"safe"', "x-upstream-secret": "discard", "server-timing": "workbench;dur=123.4" },
       );
     });
 
@@ -511,6 +511,12 @@ describe("engineFetch runtime boundary", () => {
     expect(detail.status).toBe(200);
     expect(workbench.headers.get("etag")).toBe('"safe"');
     expect(workbench.headers.get("x-upstream-secret")).toBeNull();
+    expect(workbench.headers.get("server-timing")).toBe("workbench;dur=123.4");
+    const forwarded = workbench.clone();
+    forwarded.headers.append("server-timing", "bff;dur=124.5");
+    const browserResponse = await sanitizeEngineResponse(forwarded, "http://localhost/api/v1/workbench", undefined, "GET");
+    expect(browserResponse.headers.get("server-timing")).toBe("workbench;dur=123.4, bff;dur=124.5");
+    expect(detail.headers.get("server-timing")).toBeNull();
     expect(await workbench.json()).toEqual(workbenchEnvelope());
     expect(await detail.json()).toEqual(cycleDetailEnvelope());
     expect(calls.map((call) => call.input)).toEqual([
@@ -873,3 +879,11 @@ describe("engineFetch runtime boundary", () => {
     expect(sentHeaders.get("x-nexus-body-sha256")).toBe(expectedHeaders["X-Nexus-Body-SHA256"]);
   });
 });
+
+ it.each(["workbench;dur=NaN", "workbench;dur=2;desc=private", "other;dur=123.4", "workbench;dur=1234567", "workbench;dur=-1"])("drops non-allowlisted workbench timing %s", async (timing) => {
+   setEngineEnvironment();
+   vi.stubGlobal("fetch", async () => jsonResponse(workbenchEnvelope(), 200, { "server-timing": timing }));
+   const result = await engineFetch("/internal/v1/workbench", { method: "GET", actor });
+   expect(result.status).toBe(200);
+   expect(result.headers.get("server-timing")).toBeNull();
+ });

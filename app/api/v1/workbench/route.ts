@@ -4,5 +4,8 @@ import { rejectQuery } from "../../../lib/paper/bff";
 
 export const GET = withNexusBff(async (request, actor) => {
   rejectQuery(request, "The workbench query is invalid.");
-  return engineFetch("/internal/v1/workbench", { method: "GET", actor });
+  const started = performance.now();
+  const response = await engineFetch("/internal/v1/workbench", { method: "GET", actor });
+  response.headers.append("Server-Timing", `bff;dur=${(performance.now() - started).toFixed(1)}`);
+  return response;
 });

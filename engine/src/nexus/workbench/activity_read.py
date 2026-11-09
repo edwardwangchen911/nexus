@@ -12,6 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import CompoundSelect
 
 from nexus.api.errors import NexusError
+from nexus.backtest.universe import universe_definition_parse_scope
 from nexus.market.current_identity import identity_parse_scope
 from nexus.paper.independent_unknown_acceptance import read_independent_disposition
 from nexus.paper.manual_preparation_close import preparation_closed
@@ -101,6 +102,7 @@ async def read_activity(
     # Row/byte reuse stays read-local; only pure cover syntax spans refreshes.
     # Every reference and persisted proof is still validated independently.
     with (
+        universe_definition_parse_scope(),
         identity_parse_scope(reuse_cover_parses=True),
         identity_source_parse_scope(),
         artifact_read_scope(session),

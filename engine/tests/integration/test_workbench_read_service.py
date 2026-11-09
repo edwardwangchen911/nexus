@@ -396,6 +396,8 @@ async def test_readiness_round_trips_persisted_adjacent_cycles_through_read_only
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
     assert response.status_code == 200
+    assert response.headers["server-timing"].startswith("workbench;dur=")
+    assert float(response.headers["server-timing"].split("=", 1)[1]) >= 0
     assert response.json()["data"] == result.model_dump(mode="json")
 
 
