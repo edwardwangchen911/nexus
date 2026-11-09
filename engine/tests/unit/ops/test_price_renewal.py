@@ -87,6 +87,22 @@ def test_valid_output_format_change_is_not_a_price_renewal():
         require_equivalent_price_renewal(old, changed)
 
 
+def test_same_exact_rates_with_different_decimal_spelling_keep_both_original_hashes():
+    old, new = pair()
+    price = new.platform_profile["price_record"] | {
+        "ordinary_input_usd_per_million": "2.00",
+        "cache_read_usd_per_million": "0.1",
+        "cache_write_30m_usd_per_million": "2.5",
+        "output_usd_per_million": "10.000000",
+    }
+    changed = AgentModelConfigRecord(
+        id=new.id, **sol_business_model_fields(price, units_version=COMPACT_PLATFORM_UNITS_VERSION)
+    )
+    result = require_equivalent_price_renewal(old, changed)
+    assert result["new_model_hash"] == changed.config_hash
+    assert changed.platform_profile["price_record"] == price
+
+
 @pytest.mark.parametrize(
     "fault", ["same_id", "same_record", "backdated", "old_tampered", "unknown_profile_field"]
 )

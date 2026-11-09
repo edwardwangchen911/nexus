@@ -1169,7 +1169,7 @@ def _source_environment_path(root, attempt_id):
 
 def _read_source_environment(root, attempt_id, digest, *, repair=False):
     path = _source_environment_path(root, attempt_id)
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
         info = os.fstat(stream.fileno())
         if (
             not stat.S_ISREG(info.st_mode)
@@ -1179,8 +1179,14 @@ def _read_source_environment(root, attempt_id, digest, *, repair=False):
             or not 0 < info.st_size <= 1024 * 1024
         ):
             _reject("PROOF_INVALID")
-        raw = stream.read()
-        if hashlib.sha256(raw).hexdigest() != digest:
+        raw = stream.read(1024 * 1024 + 1)
+        if (
+            len(raw) != info.st_size
+            or len(raw) > 1024 * 1024
+            or _stable_stat(os.fstat(stream.fileno())) != _stable_stat(info)
+            or _stable_stat(path.lstat()) != _stable_stat(info)
+            or hashlib.sha256(raw).hexdigest() != digest
+        ):
             _reject("PROOF_INVALID")
         if info.st_nlink == 2:
             if not repair:

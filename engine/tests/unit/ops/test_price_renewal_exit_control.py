@@ -126,6 +126,32 @@ def test_check_apply_switch_enable_and_child_binding(tmp_path, monkeypatch):
     assert state["config_hash"] == target["config_hash"]
     assert state["exit_reconciliation"]["consumed_by"] == state["attempt"]["id"]
     helper.validate_pending_activation(root, state, state["attempt"])
+    from nexus.ops.agent_paper_recovery_activation import RecoveryActivation
+    from nexus.settings import EngineSettings
+
+    effective = EngineSettings(
+        database_url="postgresql+asyncpg://local@127.0.0.1/test",
+        agent_runtime_mode="codex_sdk",
+        agent_paper_cycle_enabled=True,
+        agent_paper_account_id=UUID(int=1),
+        agent_paper_candidate_batch_id=UUID(int=2),
+        agent_paper_formal_model_config_id=UUID(int=4),
+        release_revision=state["revision"],
+    )
+    monkeypatch.setattr("nexus.ops.agent_paper_recovery_activation._boot_id", lambda: state["boot"])
+    guard = RecoveryActivation(
+        effective,
+        repo_root=root,
+        env_file=config,
+        generation=state["generation"],
+        attempt_id=state["attempt"]["id"],
+    )
+    guard._validate(effective)
+    config.write_bytes(changed + b"NEW_PERMISSION=true\n")
+    with pytest.raises(ValueError):
+        guard._validate(effective)
+    config.write_bytes(changed)
+    guard._validate(effective)
     _invoke(root, env, "enable-recovery")
     _invoke(root, env, "recover")
     assert len(starts(root)) == 1
@@ -440,3 +466,57 @@ def test_interrupted_snapshot_link_publication_reuses_exact_bytes(tmp_path, monk
     assert publish()["status"] == "reconciled"
     assert snapshot.read_bytes() == source and snapshot.stat().st_nlink == 1 and not orphan.exists()
     assert starts(root) == []
+
+
+def test_fifo_private_snapshot_rejected_without_state_change(tmp_path, monkeypatch):
+    import os
+
+    (
+        root,
+        env,
+        state_path,
+        receipt,
+        config,
+        source,
+        changed,
+        capture,
+        target,
+        helper,
+        recovery,
+        publish,
+    ) = setup(tmp_path, monkeypatch)
+    snapshot = helper._source_environment_path(root, capture["producer"]["active_attempt"]["id"])
+    os.mkfifo(snapshot, 0o600)
+    old_state = state_path.read_bytes()
+    old_receipt = receipt.read_bytes()
+    # No writer is opened: a blocking open would hang, O_NONBLOCK reaches type rejection.
+    with pytest.raises(ValueError, match="PROOF_INVALID"):
+        publish()
+    assert state_path.read_bytes() == old_state and receipt.read_bytes() == old_receipt
+    assert not list(receipt.parent.glob("recovery-reconciliation-*")) and starts(root) == []
+
+
+@pytest.mark.asyncio
+async def test_interpolated_source_is_rejected_before_readiness_or_database(tmp_path, monkeypatch):
+    from nexus.ops import managed_exit_reconciliation as adapter
+    from nexus.settings import EngineSettings
+
+    old = UUID(int=3)
+    new = UUID(int=4)
+    source = (
+        f"NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID={old}\nOTHER=${{NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID}}\n"
+    ).encode()
+    env = tmp_path / "source.env"
+    env.write_bytes(source)
+    monkeypatch.setattr(
+        adapter, "session_factory", lambda *_: pytest.fail("interpolated input reached database")
+    )
+    with pytest.raises(ValueError, match="SCOPE_INVALID"):
+        await adapter._price_target(
+            EngineSettings(agent_paper_formal_model_config_id=old),
+            source,
+            env,
+            new,
+            {"producer": {"config_hash": hashlib.sha256(source).hexdigest()}},
+        )
+    assert env.read_bytes() == source

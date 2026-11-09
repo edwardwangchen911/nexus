@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from nexus.agents.platform_profile import register_sol_business_profile, sol_business_model_fields
 from nexus.agents.platform_schema import COMPACT_PLATFORM_UNITS_VERSION
+from nexus.ops.agent_paper_loop import _FileEngineSettings, load_agent_paper_service_environment
 from nexus.ops.managed_exit_reconciliation import _price_target
 from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.session import session_factory
@@ -60,6 +61,9 @@ async def test_real_price_target_is_read_only_and_exact(migrated_database_url, t
         )
         source = (
             f"NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID={old_id}\nPRIVATE_CANARY=must-not-appear\n"
+            f"DATABASE_URL={migrated_database_url}\n"
+            f"NEXUS_AGENT_PAPER_ACCOUNT_ID={UUID(int=1)}\n"
+            f"NEXUS_AGENT_PAPER_CANDIDATE_BATCH_ID={UUID(int=2)}\n"
         ).encode()
         if fault == "duplicate_key":
             source += f"NEXUS_AGENT_PAPER_FORMAL_MODEL_CONFIG_ID={new_id}\n".encode()
@@ -83,6 +87,16 @@ async def test_real_price_target_is_read_only_and_exact(migrated_database_url, t
                 "agent_paper_formal_model_config_id": new_id
             }
             expected = source.replace(str(old_id).encode(), str(new_id).encode())
+            actual_target_file = tmp_path / "target.env"
+            actual_target_file.write_bytes(expected)
+            loaded = _FileEngineSettings.model_validate(
+                load_agent_paper_service_environment(tmp_path, {}, env_file=actual_target_file)
+            )
+            assert [
+                name
+                for name, value in target_settings.model_dump().items()
+                if getattr(loaded, name) != value
+            ] == []
             assert proof["config_hash"] == hashlib.sha256(expected).hexdigest()
             assert proof["old_model_id"] == str(old_id) and proof["new_model_id"] == str(new_id)
             assert "PRIVATE_CANARY" not in repr(proof)

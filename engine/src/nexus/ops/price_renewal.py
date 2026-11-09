@@ -31,11 +31,20 @@ def require_equivalent_price_renewal(
     old_price = sol_price_record(old.platform_profile["price_record"])
     new_price = sol_price_record(new.platform_profile["price_record"])
     allowed = {"verified_at", "expires_at", "source_evidence_sha256"}
+    # Compare the four prices as exact integer picodollars, preserving their
+    # original spelling and hashes (for example 0.10 and 0.1 are the same fee).
+    rates = {
+        "ordinary_input_usd_per_million",
+        "cache_read_usd_per_million",
+        "cache_write_30m_usd_per_million",
+        "output_usd_per_million",
+    }
     old_terms = old_price.model_dump(mode="json")
     new_terms = new_price.model_dump(mode="json")
     if (
-        {key: value for key, value in old_terms.items() if key not in allowed}
-        != {key: value for key, value in new_terms.items() if key not in allowed}
+        {key: value for key, value in old_terms.items() if key not in allowed | rates}
+        != {key: value for key, value in new_terms.items() if key not in allowed | rates}
+        or old_price.token_picodollars != new_price.token_picodollars
         or new_price.verified_at <= old_price.verified_at
         or new_price.expires_at <= old_price.expires_at
     ):
