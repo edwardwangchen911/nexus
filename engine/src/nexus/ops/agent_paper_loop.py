@@ -5112,11 +5112,14 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics.add_argument("--service-status", action="store_true")
     diagnostics.add_argument("--service-exit-reconciliation", choices=("check", "apply"))
     parser.add_argument("--service-project-name")
+    parser.add_argument("--target-model-config-id", type=UUID)
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--recovery-generation")
     parser.add_argument("--recovery-attempt")
     args = parser.parse_args(argv)
+    if args.target_model_config_id is not None and not args.service_exit_reconciliation:
+        parser.error("--target-model-config-id requires --service-exit-reconciliation")
     if (
         (
             args.service_exit_reconciliation is not None
@@ -5192,6 +5195,11 @@ def main(argv: list[str] | None = None) -> int:
                     env_file=env_file,
                     project=args.service_project_name,
                     check_only=args.service_exit_reconciliation == "check",
+                    **(
+                        {"target_model_config_id": args.target_model_config_id}
+                        if args.target_model_config_id is not None
+                        else {}
+                    ),
                 )
             except Exception:
                 result = {

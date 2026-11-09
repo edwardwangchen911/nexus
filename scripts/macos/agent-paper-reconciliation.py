@@ -63,13 +63,68 @@ def _reject(suffix):
 def _target(evidence):
     if (
         type(evidence.get("version")) is not int
-        or evidence["version"] not in {1, 2, 3}
+        or evidence["version"] not in {1, 2, 3, 4}
         or evidence.get("historical_effects") != "not_determined"
         or evidence.get("business_disposition") != "unchanged"
         or evidence.get("execution_locked") is not True
         or evidence.get("replay_authorized") is not False
     ):
         _reject("PROOF_INVALID")
+    if evidence["version"] == 4:
+        target = evidence.get("recovery_target")
+        capture = evidence.get("capture", {})
+        producer = capture.get("producer", {})
+        observed = evidence.get("observed_readiness", {})
+        fields = {
+            "schema",
+            "revision",
+            "policy",
+            "config_hash",
+            "scope_hash",
+            "old_model_id",
+            "new_model_id",
+            "old_model_hash",
+            "new_model_hash",
+            "old_price_hash",
+            "new_price_hash",
+        }
+        if (
+            not isinstance(target, dict)
+            or set(target) != fields
+            or target.get("policy") != "same_schema_price_renewal_v1"
+            or target.get("schema") != producer.get("schema")
+            or target.get("revision") != capture.get("reconciliation_revision")
+            or not isinstance(target.get("revision"), str)
+            or re.fullmatch(r"[0-9a-f]{40}", target["revision"]) is None
+            or "pending_attempt" in producer
+            or target.get("old_model_id") == target.get("new_model_id")
+            or target.get("config_hash") == producer.get("config_hash")
+            or any(
+                not isinstance(target.get(k), str)
+                or re.fullmatch(r"[0-9a-f]{64}", target[k]) is None
+                for k in fields
+                if k.endswith("hash")
+            )
+            or observed.get("migration_head") != target["schema"]
+            or observed.get("scope_hash") != target["scope_hash"]
+            or observed.get("status") != "ready"
+            or observed.get("blocking_codes") != []
+            or observed.get("execution_locked") is not True
+            or observed.get("external_requests") != 0
+        ):
+            _reject("PROOF_INVALID")
+        try:
+            for k in ("old_model_id", "new_model_id"):
+                if str(UUID(target[k])) != target[k]:
+                    _reject("PROOF_INVALID")
+        except (ValueError, TypeError, KeyError):
+            _reject("PROOF_INVALID")
+        if (
+            evidence.get("source_environment_file")
+            != f"recovery-source-env-{producer.get('active_attempt', {}).get('id')}.env"
+        ):
+            _reject("PROOF_INVALID")
+        return target
     if evidence["version"] == 1:
         if "recovery_target" in evidence:
             _reject("PROOF_INVALID")
@@ -150,9 +205,15 @@ def _check_schema_binding(evidence, state, pointer):
     if (
         not canonical_generation
         or binding
-        != {"schema": target["schema"], "revision": target["revision"], "generation": generation}
+        != {
+            "schema": target["schema"],
+            "revision": target["revision"],
+            "generation": generation,
+            **({"config_hash": target["config_hash"]} if "config_hash" in target else {}),
+        }
         or state.get("schema") != target["schema"]
         or state.get("revision") != target["revision"]
+        or ("config_hash" in target and state.get("config_hash") != target["config_hash"])
     ):
         _reject("BINDING_CHANGED")
 
@@ -164,6 +225,13 @@ def validate_target_readiness(service, root, state, checked):
         _reject("BUSINESS_BLOCKED")
     if target is not None and service._checkout_revision(root) != target["revision"]:
         _reject("BINDING_CHANGED")
+    if target is not None and "config_hash" in target:
+        if (
+            hashlib.sha256(Path(state["env_file"]).read_bytes()).hexdigest()
+            != target["config_hash"]
+            or checked.get("scope_hash") != target["scope_hash"]
+        ):
+            _reject("BINDING_CHANGED")
 
 
 def bind_enabled_target(root, state):
@@ -181,6 +249,7 @@ def bind_enabled_target(root, state):
         "schema": target["schema"],
         "revision": target["revision"],
         "generation": state["generation"],
+        **({"config_hash": target["config_hash"]} if "config_hash" in target else {}),
     }
 
 
@@ -206,6 +275,27 @@ def _producer(service, recovery, root, env_file, project, state):
     pointer = state.get("exit_reconciliation") if state else None
     if isinstance(pointer, dict):
         evidence = _bound_proof(root, state)
+        if evidence["version"] == 4:
+            _validate_original(root, state, pointer)
+            producer = evidence["capture"]["producer"]
+            current = recovery.binding(service, root, env_file, project)
+            target = _target(evidence)
+            if any(
+                producer.get(k) != current[k] for k in ("root", "env_file", "project")
+            ) or current["config_hash"] not in (
+                {target["config_hash"]}
+                if pointer.get("target_binding") is not None
+                else {producer["config_hash"], target["config_hash"]}
+            ):
+                _reject("BINDING_CHANGED")
+            if state.get("attempt") is not None or state.get("unconfirmed_exit") is not None:
+                _reject("STATE_INVALID")
+            if (
+                state["boot"] != recovery.boot_id()
+                or recovery.process(producer["instance"]["pid"]) is not None
+            ):
+                _reject("PROCESS_PRESENT")
+            return producer
         if evidence["version"] == 3:
             _validate_original(root, state, pointer)
             producer = evidence["capture"]["producer"]
@@ -422,7 +512,19 @@ def _read_publication(target, capture, *, repair):
     return evidence, hashlib.sha256(raw).hexdigest()
 
 
-def publish_exit(service, recovery, root, env_file, project, *, capture, readiness, check_only):
+def publish_exit(
+    service,
+    recovery,
+    root,
+    env_file,
+    project,
+    *,
+    capture,
+    readiness,
+    check_only,
+    price_target=None,
+    source_environment=None,
+):
     if (
         readiness.get("status") != "ready"
         or readiness.get("blocking_codes") != []
@@ -431,6 +533,8 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
     ):
         _reject("BUSINESS_BLOCKED")
     if "pending_attempt" in capture["producer"]:
+        if price_target is not None:
+            _reject("STATE_INVALID")
         return _publish_pending_exit(
             service,
             recovery,
@@ -444,7 +548,9 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
     source_schema, current_schema = capture["producer"]["schema"], readiness.get("migration_head")
     if not isinstance(source_schema, str) or not isinstance(current_schema, str):
         _reject("SCHEMA_MISMATCH")
-    recovery_target = None
+    recovery_target = price_target
+    if price_target is not None and (source_schema != current_schema or source_environment is None):
+        _reject("SCHEMA_MISMATCH")
     if source_schema != current_schema:
         policy = _CROSS_SCHEMA_POLICIES.get((source_schema, current_schema))
         if policy is None:
@@ -458,6 +564,20 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
         _reject("BINDING_CHANGED")
     attempt_id = capture["producer"]["active_attempt"]["id"]
     target = _proof_path(root, attempt_id)
+    if price_target is not None:
+        _target(
+            {
+                "version": 4,
+                "capture": capture,
+                "observed_readiness": readiness,
+                "recovery_target": price_target,
+                "source_environment_file": _source_environment_path(root, attempt_id).name,
+                "historical_effects": "not_determined",
+                "business_disposition": "unchanged",
+                "execution_locked": True,
+                "replay_authorized": False,
+            }
+        )
     result = {
         "status": "eligible_at_check",
         "check_only": check_only,
@@ -475,6 +595,18 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
         if _target(evidence) != recovery_target:
             _reject("SCHEMA_MISMATCH")
         _matching_pointer(state, attempt_id, digest)
+    if price_target is not None:
+        if (
+            type(source_environment) is not bytes
+            or not 0 < len(source_environment) <= 1024 * 1024
+            or hashlib.sha256(source_environment).hexdigest() != capture["producer"]["config_hash"]
+        ):
+            _reject("BINDING_CHANGED")
+        snapshot_path = _source_environment_path(root, attempt_id)
+        if check_only and (snapshot_path.exists() or snapshot_path.is_symlink()):
+            _read_source_environment(root, attempt_id, capture["producer"]["config_hash"])
+        if not check_only:
+            _preserve_source_environment(root, attempt_id, source_environment)
     if check_only:
         return result
     if existing:
@@ -484,7 +616,7 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
         _sync(target.parent)
     else:
         evidence = {
-            "version": 1 if recovery_target is None else 2,
+            "version": 4 if price_target is not None else 1 if recovery_target is None else 2,
             "capture": capture,
             "observed_readiness": readiness,
             "historical_effects": "not_determined",
@@ -492,6 +624,8 @@ def publish_exit(service, recovery, root, env_file, project, *, capture, readine
             "execution_locked": True,
             "replay_authorized": False,
         }
+        if price_target is not None:
+            evidence["source_environment_file"] = _source_environment_path(root, attempt_id).name
         if recovery_target is not None:
             evidence["recovery_target"] = recovery_target
         _target(evidence)
@@ -681,14 +815,18 @@ def _validate_original(root, state, pointer):
         _validate_pending_proof(root, state, pointer, evidence, digest)
         return evidence
     producer = evidence.get("capture", {}).get("producer", {})
+    expected_config = producer.get("config_hash")
+    if evidence["version"] == 4:
+        _read_source_environment(root, pointer["attempt_id"], expected_config)
+    if evidence["version"] == 4 and pointer.get("target_binding") is not None:
+        expected_config = _target(evidence)["config_hash"]
+    if state.get("config_hash") != expected_config:
+        _reject("BINDING_CHANGED")
     if (
         digest != pointer.get("evidence_sha256")
         or producer.get("active_attempt") != state.get("active_attempt")
         or producer.get("instance") != state.get("instance")
-        or any(
-            producer.get(k) != state.get(k)
-            for k in ("root", "env_file", "project", "config_hash", "boot")
-        )
+        or any(producer.get(k) != state.get(k) for k in ("root", "env_file", "project", "boot"))
     ):
         _reject("BINDING_CHANGED")
     receipt_path = (
@@ -1020,4 +1158,75 @@ def archive_unused_prior_boot(root, state, current_boot, *, observed_at):
         observed_at,
         old_boot=state["boot"],
         observed_boot=current_boot,
+    )
+
+
+def _source_environment_path(root, attempt_id):
+    if str(UUID(attempt_id)) != attempt_id:
+        _reject("PROOF_INVALID")
+    return root / ".secrets/nexus-agent-paper" / f"recovery-source-env-{attempt_id}.env"
+
+
+def _read_source_environment(root, attempt_id, digest, *, repair=False):
+    path = _source_environment_path(root, attempt_id)
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink not in {1, 2}
+            or not 0 < info.st_size <= 1024 * 1024
+        ):
+            _reject("PROOF_INVALID")
+        raw = stream.read()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            _reject("PROOF_INVALID")
+        if info.st_nlink == 2:
+            if not repair:
+                _reject("PROOF_INVALID")
+            candidates = [
+                p
+                for p in path.parent.glob("source-env.*")
+                if (p.lstat().st_dev, p.lstat().st_ino) == (info.st_dev, info.st_ino)
+            ]
+            if len(candidates) != 1 or _stable_stat(path.lstat()) != _stable_stat(info):
+                _reject("PROOF_INVALID")
+            candidates[0].unlink()
+            os.fsync(stream.fileno())
+            _sync(path.parent)
+        return raw
+
+
+def _preserve_source_environment(root, attempt_id, raw):
+    path = _source_environment_path(root, attempt_id)
+    digest = hashlib.sha256(raw).hexdigest()
+    if path.exists() or path.is_symlink():
+        _read_source_environment(root, attempt_id, digest, repair=True)
+        return
+    with NamedTemporaryFile(dir=path.parent, prefix="source-env.", delete=False) as stream:
+        temporary = Path(stream.name)
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.link(temporary, path, follow_symlinks=False)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _sync(path.parent)
+
+
+def price_source_environment(root, env_file):
+    """Read private immutable source bytes after the explicit target switch."""
+    state, _ = _read(root / ".secrets/nexus-agent-paper/recovery.json")
+    if state.get("exit_reconciliation") is None:
+        return env_file.read_bytes()
+    evidence = _validate_original(root, state, state["exit_reconciliation"])
+    if evidence["version"] != 4:
+        _reject("STATE_INVALID")
+    return _read_source_environment(
+        root,
+        state["exit_reconciliation"]["attempt_id"],
+        evidence["capture"]["producer"]["config_hash"],
     )
