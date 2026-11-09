@@ -28,6 +28,7 @@ from nexus.agents.execution_authority import (
 )
 from nexus.agents.paper_context import AgentPaperResearchContext, read_agent_paper_research_context
 from nexus.agents.persistence import _schema_hash
+from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.research_only import require_formal_research
 from nexus.agents.synthesis import domain_evidence, synthesize_intent
@@ -133,13 +134,24 @@ async def _qualify_source(
             raise ValueError(invalid)
         context = paper[0]
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    # A completed independent Sol parent keeps its original price evidence.
+    # This read never grants a new child admission: its selected model must
+    # still pass the current-price gate in the normal admission path.
+    historical_sol_parent = (
+        isinstance(context, IndependentMonitorContext)
+        and model is not None
+        and sol_business_model_matches(model)
+    )
+    price_at = run.decision_time if historical_sol_parent else now
     if isinstance(context, IndependentMonitorContext):
         checked_at = await session.scalar(select(func.clock_timestamp()))
         if (
             model is None
             or not isinstance(checked_at, datetime)
             or now > checked_at
-            or not model.pricing_available_at <= checked_at < model.pricing_expires_at
+            or not model.pricing_available_at
+            <= (run.decision_time if historical_sol_parent else checked_at)
+            < model.pricing_expires_at
         ):
             raise ValueError(invalid)
     jobs = tuple(
@@ -163,7 +175,7 @@ async def _qualify_source(
         or not formal_preparation_model_matches(model)
         or model.config_hash != run.model_hash
         or model.version != run.pricing_version
-        or not model.pricing_available_at <= now < model.pricing_expires_at
+        or not model.pricing_available_at <= price_at < model.pricing_expires_at
         or model.created_at > run.decision_time
         or run.status != "completed"
         or run.retry_count != 0
