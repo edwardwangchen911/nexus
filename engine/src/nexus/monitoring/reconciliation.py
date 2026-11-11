@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import Select, String, cast, or_, select
+from sqlalchemy import Select, String, cast, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS
@@ -146,6 +146,7 @@ async def _native_finished(
     session: AsyncSession, run: AgentResearchRunRecord, now: datetime
 ) -> bool:
     from nexus.agents.codex_formal_stage import _formal_stage_job_hash
+    from nexus.monitoring.admission import _monitor_job_finished
 
     jobs = tuple(
         await session.scalars(
@@ -160,7 +161,7 @@ async def _native_finished(
 
         return await preclaim_rejection_qualified(session, run=run, now=now)
     leases = tuple(await session.scalars(select(JobLease).where(JobLease.job_id == job.id)))
-    return bool(
+    valid_identity = bool(
         job.job_type == "agent.paper.research"
         and job.schema_version == "agent_research_job_v1"
         and job.payload == {"run_id": str(run.id)}
@@ -172,7 +173,26 @@ async def _native_finished(
         and job.effective_at == run.decision_time
         and job.input_hash == _formal_stage_job_hash(run)
         and len(leases) == 1
-        and await job_lease_consumed(session, job=job, lease=leases[0], now=now)
+    )
+    if not valid_identity:
+        return False
+    if await job_lease_consumed(session, job=job, lease=leases[0], now=now):
+        staged = await session.scalar(
+            text(
+                "SELECT EXISTS(SELECT 1 FROM research_stage_route WHERE job_id=:job) "
+                "OR EXISTS(SELECT 1 FROM research_stage_member WHERE run_id=:run)"
+            ),
+            {"job": job.id, "run": run.id},
+        )
+        if not staged:
+            return True
+    return await _monitor_job_finished(
+        session,
+        run=run,
+        job=job,
+        leases=leases,
+        now=now,
+        rejected_before_claim=False,
     )
 
 
@@ -369,9 +389,6 @@ async def _reconcile_candidates(
                     counts["recorded"] += 1
                     counts[mixed_receipt.status] += 1
             continue
-        if not await _native_finished(session, run, now):
-            counts["awaiting_native_finish"] += 1
-            continue
         kinds: tuple[Literal["price", "disclosure"], ...] = ("price",)
         # Ordinary daily research adopts each independently audited kind. A
         # price-only incremental review cannot acquire disclosure authority.
@@ -389,6 +406,21 @@ async def _reconcile_candidates(
             is not None
         ):
             kinds = ("price", "disclosure")
+        if existing is not None and (
+            kinds == ("price",)
+            or await session.scalar(
+                select(MonitorCoverageReceipt.id).where(
+                    MonitorCoverageReceipt.kind == "disclosure",
+                    MonitorCoverageReceipt.account_id == account_id,
+                    MonitorCoverageReceipt.run_id == run.id,
+                )
+            )
+            is not None
+        ):
+            continue
+        if not await _native_finished(session, run, now):
+            counts["awaiting_native_finish"] += 1
+            continue
         receipts = []
         try:
             # Both newly adopted kinds share a savepoint. A legal absent
