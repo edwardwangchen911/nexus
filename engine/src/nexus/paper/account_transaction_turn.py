@@ -21,13 +21,20 @@ _TURNS: WeakKeyDictionary[asyncio.AbstractEventLoop, WeakValueDictionary[_Key, a
 
 
 @asynccontextmanager
-async def account_transaction_turn(settings: EngineSettings | None) -> AsyncIterator[None]:
+async def account_transaction_turn(
+    settings: EngineSettings | None, *, account_id: UUID | None = None
+) -> AsyncIterator[None]:
     """Wait without DB resources; release only after the caller's owned cleanup."""
-    if settings is None or not settings.database_url or settings.agent_paper_account_id is None:
+    owner = (
+        account_id
+        if account_id is not None
+        else (settings.agent_paper_account_id if settings else None)
+    )
+    if settings is None or not settings.database_url or owner is None:
         yield
         return
     url = make_url(settings.database_url)
-    key = (url.host, url.port or 5432, url.database, settings.agent_paper_account_id)
+    key = (url.host, url.port or 5432, url.database, owner)
     loop = asyncio.get_running_loop()
     turns = _TURNS.setdefault(loop, WeakValueDictionary())
     # No await separates lookup and registration. A holder/waiter keeps this

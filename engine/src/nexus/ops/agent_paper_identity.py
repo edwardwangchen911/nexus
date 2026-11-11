@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from nexus.ops.preparation_diagnostics import (
     preparation_unavailable,
 )
 from nexus.ops.research_identity_local import collect_identity_sources
+from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
 from nexus.paper.portfolio_policy import PORTFOLIO_ALLOCATION_V1
@@ -69,7 +71,13 @@ async def _read_scope(
     _validate_local_database(settings.database_url)
     factory = session_factory(settings)
     try:
-        async with factory() as session, session.begin():
+        async with (
+            account_transaction_turn(settings, account_id=account_id)
+            if execution is not None
+            else nullcontext(),
+            factory() as session,
+            session.begin(),
+        ):
             if execution is None:
                 await session.execute(text("SET TRANSACTION READ ONLY"))
             if (
@@ -335,7 +343,13 @@ async def prepare_agent_paper_identity_once(
         factory = session_factory(settings)
         try:
             with preparation_step("research_identity", "import"):
-                async with factory() as session, session.begin():
+                async with (
+                    account_transaction_turn(settings, account_id=account_id)
+                    if execution is not None
+                    else nullcontext(),
+                    factory() as session,
+                    session.begin(),
+                ):
                     if execution is not None:
                         from nexus.ops.formal_research_preparation import require_preparation_scope
 

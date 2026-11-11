@@ -1,5 +1,6 @@
 """Publish optional SEC baselines from the scheduled host's verified identity originals."""
 
+from contextlib import nullcontext
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from nexus.ops.preparation_diagnostics import exception_code, preparation_unavailable
+from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.session import session_factory
 from nexus.research.current_identity_storage import ResearchIdentityBinding, _clock, _read_artifact
@@ -37,7 +39,12 @@ async def prepare_identity_indexes(
     try:
         for binding in bindings:
             try:
-                async with factory.begin() as session:
+                async with (
+                    account_transaction_turn(settings, account_id=execution.account_id)
+                    if execution is not None
+                    else nullcontext(),
+                    factory.begin() as session,
+                ):
                     now = await _clock(session)
                     if binding.decision_session != day or not _in_window(now, day, cutoff):
                         return
