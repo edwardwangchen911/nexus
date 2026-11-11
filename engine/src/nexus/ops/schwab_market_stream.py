@@ -489,6 +489,7 @@ async def capture_and_import_schwab_level_one_batch(
     checked_at: datetime | None = None,
     capture: Callable[..., Awaitable[dict[str, Any]]] = run_schwab_stream,
     process_environment: Mapping[str, str] | None = None,
+    before_import: Callable[[], Awaitable[None]] | None = None,
 ) -> SchwabMarketStreamImportResult:
     """Freeze one capture only after every explicitly bound candidate has a fresh quote."""
     try:
@@ -567,6 +568,11 @@ async def capture_and_import_schwab_level_one_batch(
             raise ProviderMarketStreamError(
                 "PROVIDER_MARKET_STREAM_INCOMPLETE", capture_summary=summary
             )
+        # No database operation has occurred in this capture function yet.
+        # The caller may queue publication now, retaining its turn until its
+        # original import + verification + receipt transaction has closed.
+        if before_import is not None:
+            await before_import()
         imported_at = await session.scalar(select(func.clock_timestamp()))
         if not isinstance(imported_at, datetime):
             raise RuntimeError("SCHWAB_MARKET_STREAM_DATABASE_CLOCK_INVALID")

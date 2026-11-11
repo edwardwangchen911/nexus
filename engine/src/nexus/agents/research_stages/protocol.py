@@ -277,6 +277,31 @@ class StagedProtocol:
         not_after: datetime | None = None,
         platform_wire: Any = None,
     ) -> Ticket:
+        from nexus.paper.account_transaction_turn import account_transaction_turn
+
+        # The monitor may own the account lock for its complete scan. Queue
+        # before opening a transaction or holding scope/claim locks; the normal
+        # authorization rechecks origin, deadlines and every DB gate afterward.
+        async with account_transaction_turn(self.native_settings):
+            return await self._authorize(
+                claim,
+                stage=stage,
+                now=now,
+                wire=wire,
+                not_after=not_after,
+                platform_wire=platform_wire,
+            )
+
+    async def _authorize(
+        self,
+        claim: ClaimedJob,
+        *,
+        stage: int,
+        now: datetime,
+        wire: bytes,
+        not_after: datetime | None = None,
+        platform_wire: Any = None,
+    ) -> Ticket:
         from nexus.agents.research_maintenance import require_research_open
 
         require_research_open()

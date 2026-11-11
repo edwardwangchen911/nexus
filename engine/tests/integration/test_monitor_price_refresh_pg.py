@@ -146,6 +146,7 @@ async def test_tick_claim_native_capture_and_no_replay(
             if mode == "envelope":
                 assert state["envelope"] == 90
             raise TimeoutError("synthetic transport uncertainty")
+        await kwargs["before_import"]()
         state["scope"] = replace(scope, needed=(), observations=refs)
         if mode == "changed":
             session.add(
@@ -251,7 +252,7 @@ async def test_tick_claim_native_capture_and_no_replay(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("price", [True, False])
 async def test_native_installed_plan_fresh_then_real_l1_import(
-    migrated_database_url, monkeypatch, tmp_path, price
+    migrated_database_url, monkeypatch, tmp_path, price, publication_fault=None
 ):
     """Only the socket is synthetic: normal archive parser/import and plan readers run."""
     import json
@@ -381,7 +382,12 @@ async def test_native_installed_plan_fresh_then_real_l1_import(
         return result
 
     async def normal_capture(*args, **options):
-        return await original(*args, **options, capture=capture)
+        result = await original(*args, **options, capture=capture)
+        if publication_fault == "cancel":
+            raise asyncio.CancelledError()
+        if publication_fault == "bucket":
+            captured["clock"][0] = refresh._bucket(captured["clock"][0]) + timedelta(minutes=5)
+        return result
 
     monkeypatch.setattr(native, "capture_and_import_schwab_level_one_batch", normal_capture)
     try:
@@ -413,6 +419,26 @@ async def test_native_installed_plan_fresh_then_real_l1_import(
             "NEXUS_SCHWAB_APP_SECRET": "synthetic-secret",
             "NEXUS_SCHWAB_CALLBACK_URL": "https://127.0.0.1",
         }
+        if publication_fault is not None:
+            async with factory() as session:
+                original_quotes = set(await session.scalars(select(LatestQuote.id)))
+                original_artifacts = set(await session.scalars(select(DataArtifact.id)))
+            if publication_fault == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await refresh.refresh_price_observations(
+                        settings, **{**kwargs, "environment": environment}
+                    )
+            else:
+                refused = await refresh.refresh_price_observations(
+                    settings, **{**kwargs, "environment": environment}
+                )
+                assert refused["status"] == "unknown", refused
+            async with factory() as session:
+                assert set(await session.scalars(select(LatestQuote.id))) == original_quotes
+                assert set(await session.scalars(select(DataArtifact.id))) == original_artifacts
+                assert await research_facts(session) == before_facts
+            assert calls == [["AAPL"]]
+            return
         result = await refresh.refresh_price_observations(
             settings, **{**kwargs, "environment": environment}
         )
@@ -572,3 +598,13 @@ async def test_cancellation_during_close_has_no_background_writer(
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["bucket", "cancel"])
+async def test_unapproved_real_import_remains_invisible_after_publication_failure(
+    migrated_database_url, monkeypatch, tmp_path, fault
+):
+    await test_native_installed_plan_fresh_then_real_l1_import(
+        migrated_database_url, monkeypatch, tmp_path, True, publication_fault=fault
+    )
