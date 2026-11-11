@@ -3,6 +3,7 @@
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from hashlib import sha256
+from ipaddress import ip_address
 from typing import Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -41,6 +42,15 @@ def exhibit_store_factory(session: AsyncSession) -> Callable[[], ExhibitStore]:
     settings = session.info.get("engine_settings")
     if not isinstance(settings, EngineSettings):
         raise ValueError("SEC_EXHIBIT_STORE_UNAVAILABLE")
+    host = urlsplit(settings.object_store_endpoint or "").hostname
+    local = host == "localhost"
+    if host is not None and not local:
+        try:
+            local = ip_address(host).is_loopback
+        except ValueError:
+            pass
+    if local:
+        return lambda: S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
     return lambda: S3ProviderEvidenceStore(settings)
 
 
