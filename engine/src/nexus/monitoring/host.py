@@ -1,7 +1,8 @@
 """One bounded background price scan per observed UTC five-minute bucket."""
 
-from asyncio import CancelledError, Task, create_task, shield, timeout
+from asyncio import CancelledError, Task, create_task, get_running_loop, shield, timeout
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import datetime
 from math import isfinite
 
@@ -37,6 +38,7 @@ class PriceMonitorCoordinator:
         timeout_seconds: float = 8.0,
         prepare: Callable[[datetime], Awaitable[object]] | None = None,
         preparation_timeout_seconds: float = 240.0,
+        scan_turn: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> None:
         if (
             isinstance(timeout_seconds, bool)
@@ -52,6 +54,7 @@ class PriceMonitorCoordinator:
             or preparation_timeout_seconds <= 0
         ):
             raise ValueError("MONITOR_OBSERVATION_TIMEOUT_INVALID")
+        self._scan_turn = scan_turn
         self._prepare = prepare
         self._preparation_timeout_seconds = float(preparation_timeout_seconds)
         self._scan = scan
@@ -95,6 +98,14 @@ class PriceMonitorCoordinator:
         return True
 
     async def _run_scan(self, bucket: datetime) -> None:
+        # Account scheduling belongs to the existing preparation allowance.
+        # The actual scan retains its original eight-second deadline. Retain
+        # the same turn through transaction/session cleanup, with no gap.
+        async with AsyncExitStack() as stack:
+            await self._run_scan_owned(bucket, stack)
+
+    async def _run_scan_owned(self, bucket: datetime, stack: AsyncExitStack) -> None:
+        preparation_deadline = get_running_loop().time() + self._preparation_timeout_seconds
         phase = "observations" if self._prepare is not None else "scan"
         try:
             if self._prepare is not None:
@@ -112,9 +123,20 @@ class PriceMonitorCoordinator:
                     self._last_diagnostic = "MONITOR_OBSERVATIONS_TIMEOUT"
                 except Exception:
                     self._last_diagnostic = "MONITOR_OBSERVATIONS_FAILED"
+            if self._scan_turn is not None:
+                phase = "observations"
+                remaining = preparation_deadline - get_running_loop().time()
+                try:
+                    async with timeout(max(0.0, remaining)):
+                        await stack.enter_async_context(self._scan_turn())
+                except TimeoutError:
+                    self._last_diagnostic = "MONITOR_OBSERVATIONS_TIMEOUT"
+                    return
             phase = "scan"
             async with timeout(self._timeout_seconds):
-                await self._scan()
+                result = await self._scan()
+            if isinstance(result, dict) and result.get("status") == "missed_bucket":
+                self._last_diagnostic = "MONITOR_SCAN_MISSED_BUCKET"
         except TimeoutError:
             self._last_diagnostic = "MONITOR_SCAN_TIMEOUT"
         except CancelledError:

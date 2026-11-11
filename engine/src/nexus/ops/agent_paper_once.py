@@ -1037,6 +1037,7 @@ async def trigger_once(
     process_environment: Mapping[str, str] | None = None,
 ) -> AgentPaperCycleResult:
     from nexus.agents.research_maintenance import require_research_open
+    from nexus.paper.account_transaction_turn import account_transaction_turn
 
     require_research_open()
     _validate_trigger_dependencies(settings)
@@ -1053,7 +1054,11 @@ async def trigger_once(
             expire_on_commit=False,
             info={"engine_settings": settings},
         )
-        async with factory() as claim_session, claim_session.begin():
+        async with (
+            account_transaction_turn(settings, account_id=request.account_id),
+            factory() as claim_session,
+            claim_session.begin(),
+        ):
             now = await claim_session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("AGENT_PAPER_RESULT_UNKNOWN")
@@ -1097,6 +1102,7 @@ async def trigger_once(
                 )
             store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
             async with (
+                account_transaction_turn(settings, account_id=request.account_id),
                 factory() as session,
                 session.begin(),
                 schwab_http_client(timeout=30) as client,
@@ -1122,7 +1128,11 @@ async def trigger_once(
                 return result
         except Exception as error:
             try:
-                async with factory() as failure_session, failure_session.begin():
+                async with (
+                    account_transaction_turn(settings, account_id=request.account_id),
+                    factory() as failure_session,
+                    failure_session.begin(),
+                ):
                     await finish_schwab_agent_paper_trigger(
                         failure_session,
                         reservation=reservation,

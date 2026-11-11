@@ -95,6 +95,24 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
 
     if fail_at in {"prepare", "identity_scope"} and trigger_mode != "scheduled":
         pytest.skip("Recovery bypasses collection by contract")
+    from nexus.paper import account_transaction_turn as turns
+
+    active = False
+    real_turn = turns.account_transaction_turn
+
+    @asynccontextmanager
+    async def observed_turn(settings, *, account_id=None):
+        nonlocal active
+        assert account_id == UUID(int=1)
+        async with real_turn(settings):
+            assert not active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+    monkeypatch.setattr(turns, "account_transaction_turn", observed_turn)
     events = []
     original = RuntimeError("private-source-response")
     reservation = AgentPaperTriggerReservation(
@@ -122,6 +140,7 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
 
     @asynccontextmanager
     async def factory():
+        assert active, "root transaction opened outside account turn"
         yield Session()
 
     @asynccontextmanager
@@ -150,6 +169,7 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
         monkeypatch.setattr(identity, "_read_scope", AsyncMock(return_value=None))
 
     async def prepare(*a, **kw):
+        assert not active, "producer orchestration must not own the account turn"
         events.append("prepare")
         if fail_at == "identity_scope":
             return await original_prepare(*a, **kw)
@@ -178,7 +198,9 @@ async def test_native_trigger_prepares_after_claim_once_and_preserves_failure(
     monkeypatch.setattr(once, "finish_schwab_agent_paper_trigger", finish)
     monkeypatch.setattr(once, "S3ProviderEvidenceStore", lambda *a, **kw: object())
     monkeypatch.setattr(once, "schwab_http_client", client)
-    settings = SimpleNamespace(database_url="postgresql+asyncpg://localhost/test")
+    settings = SimpleNamespace(
+        database_url="postgresql+asyncpg://localhost/test", agent_paper_account_id=UUID(int=1)
+    )
     request = once.AgentPaperTriggerRequest(
         action="trigger",
         account_id=UUID(int=1),

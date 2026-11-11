@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.persistence import select_authoritative_snapshot
 from nexus.jobs.models import job_input_hash
 from nexus.ops.agent_paper_identity import prepare_agent_paper_identity_once
+from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.paper.agent_cycle_authority import (
     ServiceCalendarAuthority,
     load_agent_paper_service_calendar_authority,
@@ -154,7 +155,11 @@ async def read_preparation_scope(
 ) -> FormalPreparationScope:
     factory = session_factory(settings)
     try:
-        async with factory() as session, session.begin():
+        async with (
+            account_transaction_turn(settings, account_id=context.account_id),
+            factory() as session,
+            session.begin(),
+        ):
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("AGENT_PAPER_TRIGGER_FAILED")
@@ -184,7 +189,11 @@ async def freeze_prepared_snapshots(
         )
         factory = session_factory(settings)
         try:
-            async with factory() as session, session.begin():
+            async with (
+                account_transaction_turn(settings, account_id=context.account_id),
+                factory() as session,
+                session.begin(),
+            ):
                 now = await session.scalar(select(func.clock_timestamp()))
                 if not isinstance(now, datetime):
                     raise ValueError("AGENT_PAPER_TRIGGER_FAILED")
