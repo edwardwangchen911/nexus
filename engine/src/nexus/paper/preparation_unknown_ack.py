@@ -597,14 +597,14 @@ async def require_formal_grant_history(
         return
     # A verifier/closer may already hold scope and claim. Never wait for an
     # account or shared budget lock in this stage transaction.
-    from nexus.agents.budget import ResearchAccountingBusy
     from nexus.agents.persistence import try_lock_budget_day
+    from nexus.agents.research_stages.formal_defer import FormalGrantLockBusy
     from nexus.paper.target_service import try_lock_portfolio_account
 
     if not await try_lock_portfolio_account(
         session, cycle.account_id
     ) or not await try_lock_budget_day(session, now.date().isoformat()):
-        raise ResearchAccountingBusy()
+        raise FormalGrantLockBusy()
     run = await session.get(AgentResearchRunRecord, run_id)
     if run is None or cycle.formal_budget_binding_id is not None:
         raise ValueError(BLOCKED)

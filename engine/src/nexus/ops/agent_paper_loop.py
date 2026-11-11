@@ -32,6 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from nexus.agents.codex_sdk import sdk_status
 from nexus.agents.persistence import select_authoritative_snapshot
+from nexus.agents.research_stages.formal_defer import (
+    FormalStageGrantBusy,
+)
+from nexus.agents.research_stages.formal_defer import (
+    deferred_lease_remaining as read_deferred_lease,
+)
 from nexus.agents.snapshots import prepare_research_snapshot
 from nexus.agents.synthesis_lifecycle import SYNTHESIS_JOB_VERSIONS
 from nexus.domain.ids import new_uuid7
@@ -2173,7 +2179,11 @@ def _emit_agent_paper_unknown_failure(
             "failure_stage": stage,
             "occurred_at": occurred_at.isoformat(),
         }
-        if stage == "inspect" and inspection_site in {"snapshot", "pending_work"}:
+        if stage == "inspect" and inspection_site in {
+            "snapshot",
+            "pending_work",
+            "deferred_formal_lease",
+        }:
             payload["inspection_site"] = inspection_site
         if stage == "inspect" and inspection_site == "pending_work":
             from nexus.ops.manual_paper_host import PENDING_WORK_PHASES
@@ -2257,6 +2267,7 @@ async def run_foreground_loop(
     sleep: Callable[[float], Awaitable[None]],
     wait_sleep: Callable[[float], Awaitable[None]] | None = None,
     wake_for_pending_work: Callable[[], Awaitable[bool]] | None = None,
+    deferred_lease_remaining: Callable[[FormalStageGrantBusy], Awaitable[float]] | None = None,
     heartbeat: Callable[[datetime], Awaitable[None]],
     shutdown_requested: Callable[[], bool] = lambda: False,
     confirm_shutdown: Callable[
@@ -2341,6 +2352,7 @@ async def run_foreground_loop(
         await persist_heartbeat()
     except Exception as error:
         return stop_unknown("heartbeat", error=error)
+    deferred: FormalStageGrantBusy | None = None
     while True:
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
@@ -2355,6 +2367,36 @@ async def run_foreground_loop(
             return AgentPaperLoopAction.STOP_REQUESTED
         if prepared_market_open_at is not None:
             snapshot = replace(snapshot, host_prepared_market_open_at=prepared_market_open_at)
+        if deferred is not None:
+            if not snapshot.enabled:
+                return AgentPaperLoopAction.STOP_DISABLED
+            if (
+                deferred_lease_remaining is None
+                or snapshot.cycle_id != deferred.scope_id
+                or snapshot.research_job_id != deferred.claim.job_id
+                or snapshot.research_job_status not in {"running", "running_expired"}
+                or snapshot.cycle_status != "researching"
+            ):
+                return stop_unknown("inspect")
+            resume = replace(snapshot, research_job_status="running_expired")
+            if choose_loop_action(resume) != AgentPaperLoopAction.RESUME:
+                return stop_unknown("planner")
+            try:
+                async with asyncio.timeout(interval_seconds):
+                    remaining = await deferred_lease_remaining(deferred)
+            except Exception as error:
+                return stop_unknown("inspect", error=error, inspection_site="deferred_formal_lease")
+            if remaining > 0:
+                stopped = await wait_before_reinspection(
+                    snapshot_now=snapshot.now,
+                    wait_until=snapshot.now + timedelta(seconds=min(remaining, interval_seconds)),
+                    elapsed_by_monotonic=False,
+                )
+                if stopped is not None:
+                    return stopped
+                continue
+            snapshot = resume
+            deferred = None
         action = choose_loop_action(snapshot)
         if action in {
             AgentPaperLoopAction.STOP_RESULT_UNKNOWN,
@@ -2468,6 +2510,17 @@ async def run_foreground_loop(
             if action_error is not None or heartbeat_error is not None or not confirmed:
                 return AgentPaperLoopAction.STOP_UNCONFIRMED
             return AgentPaperLoopAction.STOP_REQUESTED
+        if (
+            isinstance(action_error, FormalStageGrantBusy)
+            and action == AgentPaperLoopAction.RUN_RESEARCH_JOB
+            and action_error.scope_id == snapshot.cycle_id
+            and action_error.claim.job_id == snapshot.research_job_id
+            and deferred_lease_remaining is not None
+            and heartbeat_error is None
+        ):
+            deferred = action_error
+            action_error = None
+            stop = None
         if action_error is not None:
             _emit_agent_paper_unknown_failure("execute", clock(), action=action, error=action_error)
             raise action_error
@@ -2969,6 +3022,7 @@ async def run_local_agent_paper_loop(
                     clock=clock,
                     monotonic=monotonic,
                     wake_for_pending_work=wake_for_pending_work,
+                    deferred_lease_remaining=lambda notice: read_deferred_lease(settings, notice),
                 )
             except ValueError as error:
                 if str(error) == "AGENT_PAPER_CALENDAR_UNAVAILABLE":

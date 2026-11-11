@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from nexus.agents.execution import _persist_terminal, _settle_or_hold_usage
 from nexus.agents.persistence import require_reserved_daily_budget
 from nexus.agents.research_dispatch import dispatch_failure_boundary
+from nexus.agents.research_stages.formal_defer import FormalGrantLockBusy, FormalStageGrantBusy
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.synthesis import observed_usage_cost
 from nexus.jobs.repository import (
@@ -355,6 +356,15 @@ class StagedProtocol:
                         run_id=route["run_id"],
                         now=self._now(now),
                     )
+                except FormalGrantLockBusy as error:
+                    if stage not in (2, 3):
+                        raise
+                    raise FormalStageGrantBusy(
+                        scope_id=route["scope_id"],
+                        run_id=member["run_id"],
+                        stage=stage,
+                        claim=claim,
+                    ) from error
                 except ValueError as error:
                     # The history read is before any new ticket or commit attempt.
                     raise ProtocolRejected("FORMAL_SUCCESSOR_HISTORY_BLOCKED") from error

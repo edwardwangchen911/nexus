@@ -212,7 +212,7 @@ def serve(root, release, env_file, port, check=False):
         node,
         [
             node,
-            str(root / "node_modules/wrangler/bin/wrangler.js"),
+            str(release / "node_modules/wrangler/bin/wrangler.js"),
             "dev",
             "--config",
             str(config_path),
