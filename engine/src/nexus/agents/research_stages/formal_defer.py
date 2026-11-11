@@ -1,5 +1,6 @@
 """Wait for a stopped original formal claim without granting another send right."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, text
@@ -67,9 +68,11 @@ async def deferred_lease_remaining(settings: EngineSettings, notice: FormalStage
                     prior_count=notice.stage - 1,
                 ),
             )
-            if notice.stage not in (2, 3) or expiry is None:
+            if notice.stage not in (2, 3) or not isinstance(expiry, datetime):
                 raise ValueError("FORMAL_STAGE_DEFER_BINDING_INVALID")
             now = await session.scalar(select(func.clock_timestamp()))
+            if not isinstance(now, datetime):
+                raise ValueError("FORMAL_STAGE_DEFER_BINDING_INVALID")
             return max(0.0, (expiry - now).total_seconds())
     finally:
         await factory.kw["bind"].dispose()

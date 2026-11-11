@@ -161,15 +161,19 @@ def test_current_checkout_rejects_historical_acceptance(report):
 
 def test_current_checkout_clean_scan_needs_no_risk_extension():
     report = json.loads(
-        (Path(__file__).parent / "fixtures/npm-audit-clean-20261102.json").read_text()
+        (Path(__file__).parent / "fixtures/npm-audit-clean-20261111.json").read_text()
     )
     assert gate.evaluate(report, 0, Path(__file__).resolve().parents[2], gate.EXPIRES_AT) == "clean"
 
 
-def test_historical_clean_inventory_cannot_certify_new_dependency_tree():
+def test_clean_scan_with_different_dependency_inventory_is_rejected():
     report = json.loads(
-        (Path(__file__).parent / "fixtures/npm-audit-clean-20261029.json").read_text()
+        (Path(__file__).parent / "fixtures/npm-audit-clean-20261102.json").read_text()
     )
+    current = json.loads(
+        (Path(__file__).parent / "fixtures/npm-audit-clean-20261111.json").read_text()
+    )
+    assert report["metadata"]["dependencies"] != current["metadata"]["dependencies"]
     with pytest.raises(gate.AuditRejected, match="AUDIT_DEPENDENCY_SCAN_INVALID"):
         gate.evaluate(report, 0, Path(__file__).resolve().parents[2], gate.EXPIRES_AT)
 

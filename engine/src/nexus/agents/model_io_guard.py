@@ -2,10 +2,11 @@
 
 import os
 import sys
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
+from typing import Any
 
 import httpx
 from sqlalchemy.engine import URL, make_url
@@ -30,7 +31,9 @@ def model_io_scope(database_url: str | URL | None) -> Iterator[None]:
         _ISOLATED.reset(token)
 
 
-def guard_worker_model_io[**P, T](call: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
+def guard_worker_model_io[**P, T](
+    call: Callable[P, Awaitable[T]],
+) -> Callable[P, Coroutine[Any, Any, T]]:
     @wraps(call)
     async def guarded(*args: P.args, **kwargs: P.kwargs) -> T:
         settings = args[0] if args else kwargs.get("settings")

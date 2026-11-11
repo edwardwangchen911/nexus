@@ -117,6 +117,7 @@ def test_serve_runs_prebuilt_local_worker_with_only_private_bff_bindings(release
     with pytest.raises(Exec):
         web.serve(root, built, env, 5173)
     executable, argv, child = calls[0]
+    assert argv[1] == str(built / "node_modules/wrangler/bin/wrangler.js")
     assert "--local" in argv and "--no-bundle" in argv
     assert argv[argv.index("--ip") + 1] == "127.0.0.1"
     assert "--tunnel" not in argv and "--remote" not in argv
