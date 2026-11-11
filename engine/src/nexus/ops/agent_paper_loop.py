@@ -2414,17 +2414,6 @@ async def run_foreground_loop(
             raise
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
-        if recovery_inspect:
-            fresh_action = choose_loop_action(snapshot)
-            if fresh_action.value.startswith("stop_"):
-                return fresh_action
-            assert record_probe is not None
-            try:
-                async with asyncio.timeout(interval_seconds):
-                    await record_probe(None)
-            except Exception as error:
-                return stop_unknown("inspect", error=error, inspection_site="pending_work")
-            recovery_inspect = paused = False
         if prepared_market_open_at is not None:
             snapshot = replace(snapshot, host_prepared_market_open_at=prepared_market_open_at)
         if deferred is not None:
@@ -2469,6 +2458,18 @@ async def run_foreground_loop(
             if action == AgentPaperLoopAction.STOP_RESULT_UNKNOWN:
                 return stop_unknown("planner")
             return action
+        if recovery_inspect:
+            # A live original lease keeps intake paused. Only the final action
+            # selected after claim identity and lease readback may reopen it.
+            if action.value.startswith("stop_"):
+                return action
+            assert record_probe is not None
+            try:
+                async with asyncio.timeout(interval_seconds):
+                    await record_probe(None)
+            except Exception as error:
+                return stop_unknown("inspect", error=error, inspection_site="pending_work")
+            recovery_inspect = paused = False
         if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
             next_slot = floor_decision_slot(snapshot.now) + timedelta(minutes=5)
             stopped = await wait_before_reinspection(

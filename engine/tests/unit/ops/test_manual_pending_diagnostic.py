@@ -218,7 +218,8 @@ async def test_only_ended_owned_read_is_a_safe_deadline(monkeypatch, failure):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "finish", ["queued", "unknown", "due_failed", "publish_failed", "monitor_unknown"]
+    "finish",
+    ["queued", "unknown", "due_failed", "publish_failed", "monitor_unknown", "deferred_wrong_job"],
 )
 async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, finish):
     from datetime import timedelta
@@ -228,6 +229,12 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
     account, request = uuid4(), uuid4()
     settings = EngineSettings.for_test().model_copy(
         update={"agent_paper_manual_enabled": True, "agent_paper_account_id": account}
+    )
+    from nexus.agents.research_stages.formal_defer import FormalStageGrantBusy
+
+    job, other, scope = uuid4(), uuid4(), uuid4()
+    notice = FormalStageGrantBusy(
+        scope_id=scope, run_id=uuid4(), stage=2, claim=SimpleNamespace(job_id=job)
     )
     base = datetime(2026, 10, 12, 15, tzinfo=UTC)
     logs, heartbeats, actions = [], [], []
@@ -286,6 +293,14 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
         logs.append("inspect")
         cycles += 1
         now = base + timedelta(seconds=elapsed) + clock_shift
+        if finish == "deferred_wrong_job":
+            return snapshot(
+                now=now,
+                cycle_id=scope,
+                cycle_status="researching",
+                research_job_status="running" if cycles == 2 else "queued",
+                research_job_id=other if cycles > 2 else job,
+            )
         if cycles == 1:
             return snapshot(now=now, cycle_status="completed", cycle_slot_at=base.replace(hour=14))
         return snapshot(
@@ -308,6 +323,9 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
             raise OSError("commit unconfirmed")
 
     async def execute(action, state):
+        if finish == "deferred_wrong_job":
+            actions.append((action, state.research_job_id))
+            raise notice
         actions.append((action, state.manual_pending_request_id, state.now.date()))
         return loop.AgentPaperLoopAction.STOP_REQUESTED
 
@@ -329,6 +347,7 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
         monitor_busy=monitor_busy,
         monitor_confirmed=lambda: finish != "monitor_unknown",
         record_probe=record,
+        deferred_lease_remaining=AsyncMock(return_value=15),
         clock=lambda: base + timedelta(seconds=elapsed) + clock_shift,
         monotonic=lambda: elapsed,
     )
@@ -342,6 +361,10 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
             (loop.AgentPaperLoopAction.TRIGGER_MANUAL, request, (base + timedelta(days=1)).date())
         ]
         assert result == loop.AgentPaperLoopAction.STOP_REQUESTED
+    elif finish == "deferred_wrong_job":
+        assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, job)]
+        assert logs.count("pause") == 2 and "ready" not in logs
+        assert result == loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     else:
         assert not actions and "ready" not in logs
         assert result == loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN
