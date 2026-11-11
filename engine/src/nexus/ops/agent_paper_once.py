@@ -1790,8 +1790,19 @@ def main(argv: list[str] | None = None) -> int:
             request = AgentPaperApproveInitialTargetRequest.model_validate(values)
         else:
             request = AgentPaperCollectWindowRequest.model_validate(values)
-        environment = load_local_environment(Path.cwd(), {})
-        settings = EngineSettings.model_validate(environment)
+        if isinstance(request, AgentPaperResumeRequest) and request.formal_stage_capacity:
+            from nexus.ops.agent_paper_loop import (
+                _FileEngineSettings,
+                load_agent_paper_service_environment,
+            )
+
+            environment = load_agent_paper_service_environment(
+                Path.cwd(), {}, env_file=Path.cwd() / "infra" / ".env.local"
+            )
+            settings: EngineSettings = _FileEngineSettings.model_validate(environment)
+        else:
+            environment = load_local_environment(Path.cwd(), {})
+            settings = EngineSettings.model_validate(environment)
         if not settings.agent_paper_cycle_enabled:
             return _emit_error("AGENT_PAPER_CYCLE_DISABLED")
         result: (
