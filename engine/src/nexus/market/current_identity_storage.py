@@ -22,6 +22,7 @@ from nexus.market.current_identity import (
     CurrentCommonStockIdentity,
     IdentityInputs,
     cik,
+    identity_original_digest,
     load_identity_archives,
     member_for,
     validate_identity_originals,
@@ -188,7 +189,7 @@ async def _read_artifact(store: IdentityStore, binding: ArtifactBinding) -> byte
         raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
     key = "raw/" + path.split("/raw/", 1)[1]
     content = await store.read_raw(key, uri=binding.uri)
-    if len(content) != binding.byte_size or sha256(content).hexdigest() != binding.sha256:
+    if len(content) != binding.byte_size or identity_original_digest(content) != binding.sha256:
         raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
     return content
 

@@ -1155,11 +1155,46 @@ class _IdentityParseCache(dict[tuple[str, str, str], CurrentCommonStockIdentity]
         super().__init__()
         self.reuse_cover_parses = reuse_cover_parses
         self.covers: dict[str, _Cover] = {}
+        self.original_digests: dict[int, tuple[bytes, str]] = {}
+        self.original_bytes = 0
+        self.original_lock = Lock()
 
 
 _PARSE_CACHE: ContextVar[_IdentityParseCache | None] = ContextVar(
     "identity_parse_cache", default=None
 )
+
+_ORIGINAL_DIGEST_ENTRIES = 512
+_ORIGINAL_DIGEST_BYTES = 16 * 1024 * 1024
+
+
+def identity_original_digest(raw: bytes) -> str:
+    """Reuse only an exact immutable original's digest within the active read.
+
+    Retaining the bytes prevents object-id reuse. Each consumer must still
+    compare its own expected hash and validate receipt, time and DB bindings.
+    Mutable buffers and bytes subclasses retain the uncached behavior.
+    """
+    cache = _PARSE_CACHE.get()
+    if cache is None or not cache.active or type(raw) is not bytes:
+        return sha256(raw).hexdigest()
+    with cache.original_lock:
+        entry = cache.original_digests.get(id(raw)) if cache.active else None
+        if entry is not None and entry[0] is raw:
+            return entry[1]
+    digest = sha256(raw).hexdigest()
+    # Native hashing may release the GIL in an inherited worker context.
+    # Recheck liveness and capacity after hashing, without blocking scope exit.
+    with cache.original_lock:
+        if (
+            cache.active
+            and id(raw) not in cache.original_digests
+            and len(cache.original_digests) < _ORIGINAL_DIGEST_ENTRIES
+            and cache.original_bytes + len(raw) <= _ORIGINAL_DIGEST_BYTES
+        ):
+            cache.original_digests[id(raw)] = (raw, digest)
+            cache.original_bytes += len(raw)
+    return digest
 
 
 @contextmanager
@@ -1180,6 +1215,9 @@ def identity_parse_scope(
         cache.active = False
         cache.clear()
         cache.covers.clear()
+        with cache.original_lock:
+            cache.original_digests.clear()
+            cache.original_bytes = 0
         _PARSE_CACHE.reset(token)
 
 
@@ -1199,7 +1237,11 @@ def parse_current_common_stock(
         and _member_definition is None
         and not _allow_outside_definition
     )
-    key = (symbol, sha256(fmp_raw).hexdigest(), sha256(sec_raw).hexdigest()) if use_cache else None
+    key = (
+        (symbol, identity_original_digest(fmp_raw), identity_original_digest(sec_raw))
+        if use_cache
+        else None
+    )
     if cache is not None and key is not None and key in cache:
         return cache[key].model_copy(deep=True)
     result = _parse_current_common_stock(
@@ -1216,7 +1258,7 @@ def parse_current_common_stock(
 
 def _parse_sec_cover(sec_raw: bytes, *, use_cache: bool = True) -> _Cover:
     cache = _PARSE_CACHE.get() if use_cache else None
-    key = sha256(sec_raw).hexdigest()
+    key = identity_original_digest(sec_raw)
     if cache is not None and cache.active and key in cache.covers:
         return deepcopy(cache.covers[key])
     if cache is not None and cache.active and cache.reuse_cover_parses:
@@ -1443,7 +1485,7 @@ class IdentityInputs:
             (
                 self.identity.symbol
                 + ":us_liquid_v1:"
-                + ":".join(sha256(b).hexdigest() for b in self.contents)
+                + ":".join(identity_original_digest(b) for b in self.contents)
             ).encode()
         ).hexdigest()
 
@@ -1484,7 +1526,7 @@ def validate_identity_originals(
             origin="https://financialmodelingprep.com",
             path="/stable/profile",
             symbol=symbol,
-            raw_sha256=sha256(fmp).hexdigest(),
+            raw_sha256=identity_original_digest(fmp),
             raw_byte_length=len(fmp),
             received_at=f["received_at"],
         )
@@ -1501,7 +1543,7 @@ def validate_identity_originals(
             != dict(
                 source_url=s["source_url"],
                 received_at=s["received_at"],
-                sha256=sha256(sec).hexdigest(),
+                sha256=identity_original_digest(sec),
                 byte_length=len(sec),
                 http_status=200,
             )

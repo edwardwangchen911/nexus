@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
+from nexus.market.current_identity import identity_original_digest
 from nexus.market.current_identity_storage import (
     ArtifactBinding,
     CurrentIdentityProof,
@@ -179,7 +180,7 @@ async def _read_registered_artifact(
         if canonical
         else store.read_raw(key, uri=binding.uri)
     )
-    if len(raw) != binding.byte_size or sha256(raw).hexdigest() != binding.sha256:
+    if len(raw) != binding.byte_size or identity_original_digest(raw) != binding.sha256:
         raise ValueError("RESEARCH_IDENTITY_ARTIFACT_INVALID")
     return raw
 
