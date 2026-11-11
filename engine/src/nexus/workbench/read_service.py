@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
@@ -58,7 +59,8 @@ class WorkbenchReadService:
         portfolio = await paper.portfolio()
         active_orders = await paper.active_orders(limit=20)
         latest = cycles.items[0] if cycles.items else None
-        loop, compatibility = await self._loop_status()
+        account, _ = await paper.account()
+        loop, compatibility = await self._loop_status(account.id)
         return WorkbenchResponse(
             activity=await read_activity(
                 self._session,
@@ -128,6 +130,7 @@ class WorkbenchReadService:
 
     async def _loop_status(
         self,
+        account_id: UUID,
     ) -> tuple[WorkbenchLoopResponse, WorkbenchCompatibilityResponse]:
         heads = tuple(
             await self._session.scalars(
@@ -182,7 +185,14 @@ class WorkbenchReadService:
         if heads != (CURRENT_MIGRATION_HEAD,):
             compatibility.status = "incompatible"
             classification = "incompatible"
+        if classification == "fresh":
+            from nexus.paper.host_probe_state import latest_probe_state
+
+            state = await latest_probe_state(self._session, account_id)
+            if state and state.consecutive:
+                classification = "degraded"
         reasons = {
+            "degraded": "READ_PROBE_DEADLINE",
             "missing": "HEARTBEAT_MISSING",
             "unavailable": "HEARTBEAT_INVALID",
             "stale": "HEARTBEAT_STALE",
@@ -192,6 +202,8 @@ class WorkbenchReadService:
             {
                 "status": "online"
                 if classification == "fresh"
+                else "degraded"
+                if classification == "degraded"
                 else ("offline" if classification in {"stale", "incompatible"} else "unknown"),
                 "reason_code": reasons.get(str(classification)),
                 "started_at": heartbeat.started_at if heartbeat else None,

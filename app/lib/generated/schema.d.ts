@@ -8871,7 +8871,7 @@ export interface components {
             /** Last Seen At */
             last_seen_at: string | null;
             /** Reason Code */
-            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE" | "HEARTBEAT_INVALID") | null;
+            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE" | "HEARTBEAT_INVALID" | "READ_PROBE_DEADLINE") | null;
             /**
              * Stale After Seconds
              * @constant
@@ -8883,7 +8883,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "online" | "offline" | "unknown";
+            status: "online" | "offline" | "unknown" | "degraded";
         };
         /** WorkbenchReadinessResponse */
         WorkbenchReadinessResponse: {

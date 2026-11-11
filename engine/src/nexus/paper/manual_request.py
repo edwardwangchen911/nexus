@@ -935,7 +935,9 @@ async def claim_manual_request(
     row = await session.get(ManualPaperRequest, request_id)
     if row is None:
         raise ValueError("MANUAL_REQUEST_INVALID")
-    await lock_portfolio_account(session, row.account_id)
+    from nexus.paper.host_probe_state import require_host_admitting
+
+    await require_host_admitting(session, row.account_id)
     row = await session.scalar(
         select(ManualPaperRequest).where(ManualPaperRequest.id == request_id).with_for_update()
     )

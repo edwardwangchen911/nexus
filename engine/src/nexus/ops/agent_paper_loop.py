@@ -79,6 +79,7 @@ from nexus.ops.local_stack import LocalStackConfigurationError, _validate_local_
 from nexus.ops.openai_local import local_settings
 from nexus.ops.paper_once import PaperAdvanceRequest, read_agent_window_advance_result
 from nexus.ops.paper_once import run_once as run_paper_once
+from nexus.ops.pending_probe import ReadProbeDeadline, bounded_probe
 from nexus.ops.preparation_diagnostics import (
     PHASES,
     exception_code,
@@ -2267,6 +2268,11 @@ async def run_foreground_loop(
     sleep: Callable[[float], Awaitable[None]],
     wait_sleep: Callable[[float], Awaitable[None]] | None = None,
     wake_for_pending_work: Callable[[], Awaitable[bool]] | None = None,
+    monitor_busy: Callable[[], bool] = lambda: False,
+    kick_monitor: Callable[[datetime], None] = lambda _: None,
+    record_probe: Callable[[ReadProbeDeadline | None], Awaitable[None]] | None = None,
+    read_initial_pause: Callable[[], Awaitable[bool]] | None = None,
+    monitor_confirmed: Callable[[], bool] = lambda: True,
     deferred_lease_remaining: Callable[[FormalStageGrantBusy], Awaitable[float]] | None = None,
     heartbeat: Callable[[datetime], Awaitable[None]],
     shutdown_requested: Callable[[], bool] = lambda: False,
@@ -2311,6 +2317,9 @@ async def run_foreground_loop(
         )
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
+    recovery_inspect = False
+    paused = False
+
     async def wait_before_reinspection(
         *,
         snapshot_now: datetime,
@@ -2318,11 +2327,13 @@ async def run_foreground_loop(
         elapsed_by_monotonic: bool,
     ) -> AgentPaperLoopAction | None:
         """Wait until due, but break early when wall time jumps across the target."""
+        nonlocal paused, recovery_inspect
+        must_probe = paused
         remaining = max(0.0, (wait_until - snapshot_now).total_seconds())
         deadline = monotonic() + remaining
         wall_started_at = last_heartbeat_at
-        while remaining > 0:
-            duration = min(remaining, interval_seconds)
+        while remaining > 0 or must_probe:
+            duration = interval_seconds if must_probe else min(remaining, interval_seconds)
             await (wait_sleep or sleep)(duration)
             if shutdown_requested():
                 return AgentPaperLoopAction.STOP_REQUESTED
@@ -2331,10 +2342,34 @@ async def run_foreground_loop(
             except Exception as error:
                 return stop_unknown("heartbeat", error=error)
             if wake_for_pending_work is not None:
+                # Already-started monitoring retains its original bounds. A deferred
+                # inspection cannot establish that no work is pending.
+                if monitor_busy():
+                    must_probe = True
+                    continue
                 try:
-                    async with asyncio.timeout(interval_seconds):
-                        if await wake_for_pending_work():
-                            break
+                    result = await bounded_probe(
+                        wake_for_pending_work, asyncio.timeout(interval_seconds)
+                    )
+                    if isinstance(result, ReadProbeDeadline):
+                        paused = True
+                        if record_probe is None or not monitor_confirmed():
+                            raise RuntimeError("HOST_READ_PROBE_STATE_INVALID")
+                        await persist_heartbeat()
+                        async with asyncio.timeout(interval_seconds):
+                            await record_probe(result)
+                        await persist_heartbeat()
+                        paused = must_probe = True
+                        continue
+                    if paused:
+                        if record_probe is None or not monitor_confirmed():
+                            raise RuntimeError("HOST_READ_PROBE_STATE_INVALID")
+                        await persist_heartbeat()
+                        recovery_inspect = True
+                        return None
+                    kick_monitor(seen_at)
+                    if result or must_probe:
+                        break
                 except Exception as error:
                     return stop_unknown("inspect", error=error, inspection_site="pending_work")
             if (
@@ -2349,9 +2384,23 @@ async def run_foreground_loop(
     if shutdown_requested():
         return AgentPaperLoopAction.STOP_REQUESTED
     try:
-        await persist_heartbeat()
+        seen = await persist_heartbeat()
+        if read_initial_pause is not None:
+            async with asyncio.timeout(interval_seconds):
+                paused = await read_initial_pause()
+        if not paused:
+            kick_monitor(seen)
     except Exception as error:
         return stop_unknown("heartbeat", error=error)
+    if paused:
+        if wake_for_pending_work is None or record_probe is None:
+            return stop_unknown("inspect", inspection_site="pending_work")
+        now = clock()
+        stopped = await wait_before_reinspection(
+            snapshot_now=now, wait_until=now, elapsed_by_monotonic=False
+        )
+        if stopped is not None:
+            return stopped
     deferred: FormalStageGrantBusy | None = None
     while True:
         if shutdown_requested():
@@ -2365,6 +2414,17 @@ async def run_foreground_loop(
             raise
         if shutdown_requested():
             return AgentPaperLoopAction.STOP_REQUESTED
+        if recovery_inspect:
+            fresh_action = choose_loop_action(snapshot)
+            if fresh_action.value.startswith("stop_"):
+                return fresh_action
+            assert record_probe is not None
+            try:
+                async with asyncio.timeout(interval_seconds):
+                    await record_probe(None)
+            except Exception as error:
+                return stop_unknown("inspect", error=error, inspection_site="pending_work")
+            recovery_inspect = paused = False
         if prepared_market_open_at is not None:
             snapshot = replace(snapshot, host_prepared_market_open_at=prepared_market_open_at)
         if deferred is not None:
@@ -2487,7 +2547,7 @@ async def run_foreground_loop(
                 await heartbeat_task
                 heartbeat_task = None
                 try:
-                    await persist_heartbeat()
+                    kick_monitor(await persist_heartbeat())
                 except Exception as error:
                     heartbeat_error = error
                     break
@@ -2529,7 +2589,7 @@ async def run_foreground_loop(
         if action == AgentPaperLoopAction.PREPARE_INPUTS and stop is None:
             prepared_market_open_at = snapshot.market_open_at
         try:
-            await persist_heartbeat()
+            kick_monitor(await persist_heartbeat())
         except Exception as error:
             return stop_unknown("heartbeat", error=error)
         if stop is not None:
@@ -2707,6 +2767,26 @@ async def confirm_agent_paper_shutdown(
         result=action_result,
         after=after_snapshot,
     )
+
+
+async def read_initial_probe_pause(settings: EngineSettings, account_id: UUID | None) -> bool:
+    from nexus.paper.host_probe_state import latest_probe_state
+    from nexus.persistence.session import session_factory
+
+    if account_id is None:
+        if settings.agent_paper_manual_enabled:
+            raise ValueError("HOST_READ_PROBE_STATE_INVALID")
+        return False
+    factory = session_factory(settings)
+    try:
+        async with factory.begin() as session:
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            state = await latest_probe_state(session, account_id)
+            if state and state.consecutive and not settings.agent_paper_manual_enabled:
+                raise ValueError("HOST_READ_PROBE_STATE_INVALID")
+            return bool(state and state.consecutive)
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 async def run_local_agent_paper_loop(
@@ -2978,6 +3058,8 @@ async def run_local_agent_paper_loop(
                     seen_at=seen_at,
                 )
                 report_monitor_diagnostic()
+
+            def kick_monitor(seen_at: datetime) -> None:
                 if settings.agent_paper_cycle_enabled and not shutdown.is_set():
                     monitor.kick(seen_at)
 
@@ -2996,6 +3078,29 @@ async def run_local_agent_paper_loop(
                     return True
                 return False
 
+            from nexus.paper.host_probe_state import publish_probe_state
+            from nexus.persistence.session import session_factory
+
+            async def record_probe(deadline: ReadProbeDeadline | None) -> None:
+                if account_id is None:
+                    raise ValueError("HOST_READ_PROBE_STATE_INVALID")
+                worker, version = agent_paper_host_identity(
+                    settings, worker_id=worker_id, account_id=account_id
+                )
+                factory = session_factory(settings)
+                try:
+                    async with factory.begin() as session:
+                        await publish_probe_state(
+                            session,
+                            account_id=account_id,
+                            worker=worker,
+                            started=started_at,
+                            version=version,
+                            deadline=deadline,
+                        )
+                finally:
+                    await factory.kw["bind"].dispose()
+
             async def confirm_shutdown(
                 action: AgentPaperLoopAction,
                 before_snapshot: AgentPaperLoopSnapshot,
@@ -3013,6 +3118,11 @@ async def run_local_agent_paper_loop(
             try:
                 return await run_foreground_loop(
                     inspect=inspect,
+                    monitor_busy=lambda: settings.agent_paper_manual_enabled and monitor.busy,
+                    kick_monitor=kick_monitor,
+                    record_probe=record_probe,
+                    read_initial_pause=lambda: read_initial_probe_pause(settings, account_id),
+                    monitor_confirmed=lambda: not monitor.busy and monitor.last_diagnostic is None,
                     execute=execute,
                     sleep=sleep,
                     wait_sleep=wait_sleep,
@@ -5118,7 +5228,9 @@ def _classify_agent_paper_service_heartbeat(
     }
 
 
-async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[str, object]:
+async def read_agent_paper_service_heartbeat(
+    database_url: str | None, *, account_id: UUID | None = None
+) -> dict[str, object]:
     """Read one persisted liveness fact and classify it against the database clock."""
     from nexus.paper.manual_host_exit import valid_host_exit
 
@@ -5149,7 +5261,15 @@ async def read_agent_paper_service_heartbeat(database_url: str | None) -> dict[s
                 if row is None:
                     return {"status": "missing"}
                 now, heartbeat = row
-                return _classify_agent_paper_service_heartbeat(now, heartbeat)
+                result = _classify_agent_paper_service_heartbeat(now, heartbeat)
+                if account_id is not None and result["status"] == "fresh":
+                    from nexus.paper.host_probe_state import latest_probe_state
+
+                    state = await latest_probe_state(session, account_id)
+                    result["dispatch_ready"] = not (state and state.consecutive)
+                    if not result["dispatch_ready"]:
+                        result["dispatch_reason"] = "READ_PROBE_DEADLINE"
+                return result
         finally:
             await engine.dispose()
     except Exception:
@@ -5334,10 +5454,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.service_status:
                 try:
                     heartbeat = asyncio.run(
-                        read_agent_paper_service_heartbeat(environment.get("DATABASE_URL"))
+                        read_agent_paper_service_heartbeat(
+                            environment.get("DATABASE_URL"),
+                            account_id=UUID(environment["NEXUS_AGENT_PAPER_ACCOUNT_ID"])
+                            if environment.get("NEXUS_AGENT_PAPER_ACCOUNT_ID")
+                            else None,
+                        )
                     )
                 except Exception:
                     heartbeat = {"status": "unavailable"}
+                if heartbeat.get("dispatch_ready") is False:
+                    existing_codes = result.get("blocking_codes")
+                    result = {
+                        **result,
+                        "status": "blocked",
+                        "blocking_codes": [
+                            *(existing_codes if isinstance(existing_codes, list) else []),
+                            "HOST_READ_PROBE_PAUSED",
+                        ],
+                    }
                 print(
                     json.dumps(
                         {"heartbeat": heartbeat, "preflight": result, "execution_locked": True},

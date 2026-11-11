@@ -2971,6 +2971,7 @@ def test_due_evaluation_keeps_priority_over_normal_cycle(monkeypatch, tmp_path, 
 def test_waiting_evaluation_is_reinspected_before_normal_wait_deadline(
     monkeypatch, tmp_path, normal_wait
 ):
+    monkeypatch.setattr(loop, "read_initial_probe_pause", lambda *_: asyncio.sleep(0, result=False))
     from nexus.ops import manual_paper_host
 
     async def no_manual_close(_settings, *, snapshot, **_kwargs):
@@ -3067,6 +3068,7 @@ def test_waiting_evaluation_is_reinspected_before_normal_wait_deadline(
 def test_host_suspend_reinspects_wall_clock_schedule_before_stale_monotonic_deadline(
     monkeypatch, tmp_path
 ):
+    monkeypatch.setattr(loop, "read_initial_probe_pause", lambda *_: asyncio.sleep(0, result=False))
     env_file = explicit_service_config(tmp_path)
     started_at = datetime(2026, 9, 18, 17, 0, tzinfo=UTC)
     normal_slot = datetime(2026, 9, 21, 14, 0, tzinfo=UTC)
@@ -3142,6 +3144,7 @@ def test_host_suspend_reinspects_wall_clock_schedule_before_stale_monotonic_dead
 
 
 def test_running_normal_action_finishes_before_due_evaluation_is_selected(monkeypatch, tmp_path):
+    monkeypatch.setattr(loop, "read_initial_probe_pause", lambda *_: asyncio.sleep(0, result=False))
     env_file = explicit_service_config(tmp_path)
     current = [NOW]
     evaluation_slot = NOW + timedelta(seconds=5)
@@ -3371,10 +3374,11 @@ def test_local_loop_reinspection_uses_service_environment_loader(
     async def select_initial(_settings):
         return CALENDAR_AUTHORITY_ID
 
-    async def run_loop(*, inspect, heartbeat, **_kwargs):
+    async def run_loop(*, inspect, heartbeat, kick_monitor, **_kwargs):
         await inspect()
         await inspect()
         await heartbeat(NOW)
+        kick_monitor(NOW)
         return A.STOP_SESSION_CLOSED
 
     async def record_heartbeat(settings, **kwargs):
@@ -3730,7 +3734,7 @@ def test_service_status_keeps_heartbeat_independent_of_runtime_validation(
         },
     )
 
-    async def heartbeat(database_url: str | None) -> dict[str, object]:
+    async def heartbeat(database_url: str | None, *, account_id=None) -> dict[str, object]:
         observed_database_urls.append(database_url)
         return {"status": "fresh", "seen_at": NOW.isoformat()}
 

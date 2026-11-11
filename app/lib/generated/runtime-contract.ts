@@ -18520,7 +18520,8 @@ export const runtimeContractSchemas = {
               "HEARTBEAT_MISSING",
               "HEARTBEAT_STALE",
               "HEARTBEAT_INCOMPATIBLE",
-              "HEARTBEAT_INVALID"
+              "HEARTBEAT_INVALID",
+              "READ_PROBE_DEADLINE"
             ],
             "type": "string"
           },
@@ -18551,7 +18552,8 @@ export const runtimeContractSchemas = {
         "enum": [
           "online",
           "offline",
-          "unknown"
+          "unknown",
+          "degraded"
         ],
         "title": "Status",
         "type": "string"

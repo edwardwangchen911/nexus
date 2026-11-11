@@ -371,6 +371,9 @@ async def refresh_price_observations(
         async with asyncio.timeout(PRICE_REFRESH_SECONDS):
             async with factory() as session, session.begin():
                 await _locks(session, account_id)
+                from nexus.paper.host_probe_state import require_host_admitting
+
+                await require_host_admitting(session, account_id)
                 now = await _clock(session)
                 if _bucket(now) != scheduled_at:
                     return _result("blocked", "MONITOR_TICK_NOT_CURRENT")

@@ -267,6 +267,9 @@ async def prepare_pending_batch(
     try:
         async with factory() as session, session.begin():
             batch, now = await _lock_scope(session, account_id, batch_id)
+            from nexus.paper.host_probe_state import require_host_admitting
+
+            await require_host_admitting(session, account_id)
             prior = await session.scalar(
                 select(MonitorIncrement).where(MonitorIncrement.batch_id == batch_id)
             )

@@ -21,10 +21,14 @@ class _StrictSchema(BaseModel):
 
 
 class WorkbenchLoopResponse(_StrictSchema):
-    status: Literal["online", "offline", "unknown"]
+    status: Literal["online", "offline", "unknown", "degraded"]
     reason_code: (
         Literal[
-            "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE", "HEARTBEAT_INVALID"
+            "HEARTBEAT_MISSING",
+            "HEARTBEAT_STALE",
+            "HEARTBEAT_INCOMPATIBLE",
+            "HEARTBEAT_INVALID",
+            "READ_PROBE_DEADLINE",
         ]
         | None
     )
