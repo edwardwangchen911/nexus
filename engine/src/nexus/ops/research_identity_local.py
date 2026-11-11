@@ -8,6 +8,7 @@ import stat
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 from typing import Any, NoReturn
 
 import httpx
@@ -73,10 +74,13 @@ async def collect_identity_sources(
     transport = client or httpx.AsyncClient(follow_redirects=False, timeout=30)
     requests = 0
     stage = "directory"
+    phase = "request"
+    started = monotonic()
 
     async def get(host: str, parts: tuple[str, ...], name: str) -> dict[str, Any]:
-        nonlocal requests
+        nonlocal requests, phase
         requests += 1
+        phase = "request"
         fixed = _Exact200Client(
             provider_name="sec",
             origin=AllowedOrigin("https", host),
@@ -85,8 +89,10 @@ async def collect_identity_sources(
         )
         raw = await fixed.get_bytes(parts, (), (("User-Agent", f"NEXUS {contact}"),))
         received = datetime.now(UTC)
+        phase = "binding"
         if contact.encode() in raw:
             raise ValueError("IDENTITY_COLLECTION_CONTACT_REFLECTION")
+        phase = "archive"
         write_private(output_dir / f"{name}.json", raw)
         receipt = {
             "schema": "sec_identity_source_receipt_v1",
@@ -99,6 +105,7 @@ async def collect_identity_sources(
         write_private(
             output_dir / f"{name}-receipt.json", json.dumps(receipt, sort_keys=True).encode()
         )
+        phase = "parse"
         return _document(raw)
 
     try:
@@ -106,12 +113,14 @@ async def collect_identity_sources(
             directory = await get(
                 "www.sec.gov", ("files", "company_tickers_exchange.json"), "directory"
             )
+            phase = "binding"
             bindings = {symbol: _binding(directory, symbol) for symbol in symbols}
             for symbol, (cik, exchange) in bindings.items():
                 stage = "submissions"
                 document = await get(
                     "data.sec.gov", ("submissions", f"CIK{cik}.json"), f"{symbol}-submissions"
                 )
+                phase = "binding"
                 _require_submissions(document, symbol, cik, exchange)
         result: dict[str, object] = {
             "status": "archived",
@@ -119,22 +128,55 @@ async def collect_identity_sources(
             "authority_registered": False,
             "execution_locked": True,
         }
+        phase = "archive"
         write_private(output_dir / "result.json", json.dumps(result).encode())
         return result
-    except Exception:
+    except Exception as error:
+        # Closed, value-free diagnostics only. Never serialize exception text,
+        # request URLs, headers, contact identity or raw provider responses.
+        failure_code = _failure_code(error)
         result = {
             "status": "unavailable",
             "code": "IDENTITY_COLLECTION_FAILED",
             "stage": stage,
+            "failure_phase": phase,
+            "failure_code": failure_code,
+            "elapsed_ms": max(0, int((monotonic() - started) * 1000)),
             "requests": requests,
             "authority_registered": False,
             "execution_locked": True,
         }
+        if isinstance(error, HttpPolicyError) and error.http_status is not None:
+            result["http_status"] = error.http_status
         write_private(output_dir / "result.json", json.dumps(result).encode())
         raise ValueError("IDENTITY_COLLECTION_FAILED") from None
     finally:
         if owned:
             await transport.aclose()
+
+
+def _failure_code(error: Exception) -> str:
+    if isinstance(error, TimeoutError):
+        return "IDENTITY_COLLECTION_DEADLINE_EXCEEDED"
+    if isinstance(error, json.JSONDecodeError | UnicodeDecodeError):
+        return "IDENTITY_COLLECTION_JSON_INVALID"
+    if isinstance(error, HttpPolicyError | ValueError):
+        code = str(error)
+        if code in {
+            "DEADLINE_EXCEEDED",
+            "RETRY_BUDGET_EXHAUSTED",
+            "STATUS_REJECTED",
+            "REDIRECT_REJECTED",
+            "RESPONSE_TOO_LARGE",
+            "IDENTITY_COLLECTION_JSON_INVALID",
+            "IDENTITY_COLLECTION_MAPPING_INVALID",
+            "IDENTITY_COLLECTION_ISSUER_INVALID",
+            "IDENTITY_COLLECTION_CONTACT_REFLECTION",
+        }:
+            return code
+    if isinstance(error, OSError):
+        return "IDENTITY_COLLECTION_ARCHIVE_UNAVAILABLE"
+    return "IDENTITY_COLLECTION_UNEXPECTED"
 
 
 class _Parser(argparse.ArgumentParser):
