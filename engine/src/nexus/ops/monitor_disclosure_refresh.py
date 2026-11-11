@@ -25,6 +25,7 @@ from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.monitor_batch_prepare import _archive_root
 from nexus.ops.monitor_content_local import _contact
 from nexus.ops.sec_index_local import collect_index
+from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
 from nexus.paper.target_service import lock_portfolio_account
@@ -284,7 +285,7 @@ async def refresh_disclosure_observations(
     in_flight = False
     try:
         async with asyncio.timeout(TOTAL_TIMEOUT_SECONDS):
-            async with factory() as session, session.begin():
+            async with account_transaction_turn(settings), factory() as session, session.begin():
                 _, instruments = await _scope(
                     session, settings, account_id, calendar_authority_id, scheduled_at
                 )
@@ -292,7 +293,11 @@ async def refresh_disclosure_observations(
                 return _result("market_closed")
             for instrument in instruments:
                 try:
-                    async with factory() as session, session.begin():
+                    async with (
+                        account_transaction_turn(settings),
+                        factory() as session,
+                        session.begin(),
+                    ):
                         claim = await _claim(
                             session,
                             settings,
@@ -324,7 +329,11 @@ async def refresh_disclosure_observations(
                             client=client,
                             listed_history=claim.get("listed_history") is True,
                         )
-                    async with factory() as session, session.begin():
+                    async with (
+                        account_transaction_turn(settings),
+                        factory() as session,
+                        session.begin(),
+                    ):
                         now = await session.scalar(select(func.clock_timestamp()))
                         if not isinstance(now, datetime):
                             raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
@@ -384,7 +393,11 @@ async def refresh_disclosure_observations(
                         "reason": "SEC_INDEX_REFRESH_FAILED",
                         "provider_requests": count,
                     }
-                    async with factory() as session, session.begin():
+                    async with (
+                        account_transaction_turn(settings),
+                        factory() as session,
+                        session.begin(),
+                    ):
                         now = await session.scalar(select(func.clock_timestamp()))
                         if not isinstance(now, datetime):
                             raise ValueError("MONITOR_CLOCK_UNAVAILABLE")

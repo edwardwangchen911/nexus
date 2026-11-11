@@ -333,6 +333,33 @@ async def _collect_content_with_scope(
 
 
 async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, object]:
+    from nexus.paper.account_transaction_turn import account_transaction_turn
+
+    if args.action not in {"scan", "reconcile"} or settings.agent_paper_account_id is None:
+        return await _run(settings, args)
+    bucket = None
+    if args.action == "scan":
+        _validate_local_database(settings.database_url)
+        factory = session_factory(settings)
+        try:
+            async with factory.begin() as session:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+                at = await session.scalar(select(func.clock_timestamp()))
+                if not isinstance(at, datetime) or at.utcoffset() is None:
+                    raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+                bucket = at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0)
+        finally:
+            await factory.kw["bind"].dispose()
+    async with account_transaction_turn(settings):
+        return await _run(settings, args, expected_scan_bucket=bucket)
+
+
+async def _run(
+    settings: EngineSettings,
+    args: argparse.Namespace,
+    *,
+    expected_scan_bucket: datetime | None = None,
+) -> dict[str, object]:
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
@@ -371,6 +398,21 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+            if (
+                expected_scan_bucket is not None
+                and now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+                != expected_scan_bucket
+            ):
+                return {
+                    "status": "missed_bucket",
+                    "scheduled_at": expected_scan_bucket.isoformat(),
+                    "observed_at": now.isoformat(),
+                    "checks": 0,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "execution_locked": True,
+                    "reconciled_results": 0,
+                }
             if args.action == "prepare-batch":
                 from nexus.monitoring.batch_inputs import prepare_batch_inputs
 

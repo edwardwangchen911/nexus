@@ -1,6 +1,7 @@
 """One durable, bounded Schwab L1 observation per current five-minute source tick."""
 
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from nexus.monitoring.evaluation import evaluate_price
 from nexus.monitoring.observations import read_latest_price
 from nexus.monitoring.reconciliation import plan_covered
 from nexus.monitoring.storage import lock_security
+from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.paper.candidate_batch import CandidateInstrumentIdentity
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.models.monitoring import MonitorPlan
@@ -217,52 +219,68 @@ async def _produce(
 
     factory = session_factory(settings)
     try:
-        # No account/security/audit lock crosses provider I/O. Normal import preserves
-        # source bytes, receipt, observed_at/available_at and actual database receipt time.
-        async with factory() as session, session.begin():
-            async with schwab_http_client(timeout=30) as client:
-                imported = await capture_and_import_schwab_level_one_batch(
+        async with AsyncExitStack() as publication:
+            # No account/security/audit lock crosses provider I/O. Normal import preserves
+            # source bytes, receipt, observed_at/available_at and actual database receipt time.
+            async with factory() as session, session.begin():
+                publication_started = False
+
+                async def before_import() -> None:
+                    nonlocal publication_started
+                    if publication_started:
+                        raise ValueError("MONITOR_PRICE_PUBLICATION_ALREADY_STARTED")
+                    publication_started = True
+                    # Producer calls before its first SQL; release only after
+                    # original import/verification/receipt transaction cleanup.
+                    await publication.enter_async_context(account_transaction_turn(settings))
+
+                async with schwab_http_client(timeout=30) as client:
+                    imported = await capture_and_import_schwab_level_one_batch(
+                        session,
+                        S3ProviderEvidenceStore(settings, disable_environment_proxies=True),
+                        repo_root=repo_root,
+                        client=client,
+                        bindings={row.symbol: row.instrument_id for row in scope.needed},
+                        max_instruments=5,
+                        process_environment=environment,
+                        before_import=before_import,
+                    )
+                if set(imported.quote_ids) != {row.symbol for row in scope.needed}:
+                    raise ValueError("MONITOR_PRICE_CAPTURE_INCOMPLETE")
+                # Source I/O has finished. Publish its metadata only with an exact
+                # current-scope proof and the durable tick result in this transaction.
+                await _locks(session, scope.account_id)
+                now = await _clock(session)
+                current = await _select_scope(
                     session,
-                    S3ProviderEvidenceStore(settings, disable_environment_proxies=True),
-                    repo_root=repo_root,
-                    client=client,
-                    bindings={row.symbol: row.instrument_id for row in scope.needed},
-                    max_instruments=5,
-                    process_environment=environment,
+                    settings,
+                    account_id=scope.account_id,
+                    calendar_authority_id=scope.calendar_id,
+                    now=now,
                 )
-            if set(imported.quote_ids) != {row.symbol for row in scope.needed}:
-                raise ValueError("MONITOR_PRICE_CAPTURE_INCOMPLETE")
-            # Source I/O has finished. Publish its metadata only with an exact
-            # current-scope proof and the durable tick result in this transaction.
-            await _locks(session, scope.account_id)
-            now = await _clock(session)
-            current = await _select_scope(
-                session,
-                settings,
-                account_id=scope.account_id,
-                calendar_authority_id=scope.calendar_id,
-                now=now,
-            )
-            refs = {str(row["instrument_id"]): str(row["quote_id"]) for row in current.observations}
-            expected = {
-                str(row.instrument_id): str(imported.quote_ids[row.symbol]) for row in scope.needed
-            }
-            if (
-                not scheduled_at <= now < scheduled_at + timedelta(minutes=5)
-                or current.binding() != scope.binding()
-                or current.needed
-                or any(refs.get(key) != value for key, value in expected.items())
-            ):
-                raise ValueError("MONITOR_PRICE_REFRESH_UNVERIFIED")
-            result = _result(
-                "prepared",
-                "MONITOR_PRICE_REFRESHED",
-                requests=None,
-                capture_count=1,
-                observations=list(current.observations),
-            )
-            await _record(session, claim, result, now)
-            return result
+                refs = {
+                    str(row["instrument_id"]): str(row["quote_id"]) for row in current.observations
+                }
+                expected = {
+                    str(row.instrument_id): str(imported.quote_ids[row.symbol])
+                    for row in scope.needed
+                }
+                if (
+                    not scheduled_at <= now < scheduled_at + timedelta(minutes=5)
+                    or current.binding() != scope.binding()
+                    or current.needed
+                    or any(refs.get(key) != value for key, value in expected.items())
+                ):
+                    raise ValueError("MONITOR_PRICE_REFRESH_UNVERIFIED")
+                result = _result(
+                    "prepared",
+                    "MONITOR_PRICE_REFRESHED",
+                    requests=None,
+                    capture_count=1,
+                    observations=list(current.observations),
+                )
+                await _record(session, claim, result, now)
+                return result
     finally:
         await factory.kw["bind"].dispose()
 
@@ -369,7 +387,7 @@ async def refresh_price_observations(
     claim = None
     try:
         async with asyncio.timeout(PRICE_REFRESH_SECONDS):
-            async with factory() as session, session.begin():
+            async with account_transaction_turn(settings), factory() as session, session.begin():
                 await _locks(session, account_id)
                 from nexus.paper.host_probe_state import require_host_admitting
 
@@ -444,7 +462,11 @@ async def refresh_price_observations(
             result = _result("unknown", "MONITOR_PRICE_REFRESH_UNKNOWN", requests=None)
 
             async def close() -> None:
-                async with factory() as session, session.begin():
+                async with (
+                    account_transaction_turn(settings),
+                    factory() as session,
+                    session.begin(),
+                ):
                     await _locks(session, account_id)
                     # A commit acknowledgement may have been cancelled: never append
                     # a competing outcome if the terminal event already committed.
