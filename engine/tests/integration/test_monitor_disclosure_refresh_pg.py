@@ -596,3 +596,67 @@ async def test_forward_refresh_dbapi_ack_loss(
     await test_forward_refresh_commit_ack_loss_preserves_claim_and_never_recollects(
         migrated_database_url, monkeypatch, tmp_path, server_committed, fault_level="dbapi"
     )
+
+
+@pytest.mark.asyncio
+async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_claim(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    import json
+    from pathlib import Path
+
+    factory, store, captured, pointer, calls, client, invoke = await setup(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    original_client = refresh._client
+    failed_requests = []
+
+    def unavailable(request):
+        failed_requests.append(request.url.path)
+        raise httpx.ReadTimeout("private contact test@example.invalid")
+
+    monkeypatch.setattr(
+        refresh, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(unavailable))
+    )
+    try:
+        captured["clock"][0] = AT + timedelta(minutes=10)
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        failed = await invoke()
+        assert failed["items"][0]["status"] == "failed"
+        assert failed_requests == ["/files/company_tickers_exchange.json"]
+        async with factory() as session:
+            audit = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.action == refresh.RESULT,
+                    AuditEvent.payload["status"].astext == "failed",
+                )
+            )
+            payload = dict(audit.payload)
+            receipt_path = Path(payload["archive_dir"]) / "result.json"
+            receipt_bytes = receipt_path.read_bytes()
+            receipt = json.loads(receipt_bytes)
+            assert receipt["failure_phase"] == "request"
+            assert receipt["failure_code"] == "RETRY_BUDGET_EXHAUSTED"
+            assert receipt["stage"] == "directory" and receipt["requests"] == 1
+            assert receipt.get("http_status") is None
+            observed = await refresh.read_disclosure_observation(
+                session, plan=pointer, now=captured["clock"][0]
+            )
+            assert observed.result == "unknown" and observed.reason == "SEC_INDEX_STALE"
+        assert (await invoke())["items"][0]["status"] == "already_claimed"
+        assert len(failed_requests) == 1
+        monkeypatch.setattr(refresh, "_client", original_client)
+        captured["clock"][0] += timedelta(minutes=5)
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        assert (await invoke())["status"] == "refreshed"
+        assert len(calls) == 2 and len(failed_requests) == 1
+        assert receipt_path.read_bytes() == receipt_bytes
+        async with factory() as session:
+            assert (await session.get(AuditEvent, audit.id)).payload == payload
+            observed = await refresh.read_disclosure_observation(
+                session, plan=pointer, now=captured["clock"][0]
+            )
+            assert observed.reason != "SEC_INDEX_STALE"
+    finally:
+        await client.aclose()
+        await factory.kw["bind"].dispose()

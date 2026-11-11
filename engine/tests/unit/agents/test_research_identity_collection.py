@@ -156,3 +156,61 @@ async def test_non_200_success_never_becomes_complete_source_receipt(tmp_path, s
     assert not (out / f"{stem}-receipt.json").exists()
     if stage == "submissions":
         assert json.loads((out / "directory-receipt.json").read_bytes())["http_status"] == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault,expected,phase,status",
+    [
+        ("read_timeout", "RETRY_BUDGET_EXHAUSTED", "request", None),
+        ("deadline", "DEADLINE_EXCEEDED", "request", None),
+        ("http_403", "STATUS_REJECTED", "request", 403),
+        ("invalid_json", "IDENTITY_COLLECTION_JSON_INVALID", "parse", None),
+        ("wrong_issuer", "IDENTITY_COLLECTION_ISSUER_INVALID", "binding", None),
+        ("unsafe_code", "IDENTITY_COLLECTION_UNEXPECTED", "request", None),
+    ],
+)
+async def test_failure_receipt_preserves_safe_phase_without_retry_or_private_error(
+    tmp_path, monkeypatch, fault, expected, phase, status
+):
+    module = importlib.import_module("nexus.ops.research_identity_local")
+    bodies, calls = payloads(), []
+
+    def respond(request):
+        calls.append(request.url.path)
+        if fault == "read_timeout":
+            raise httpx.ReadTimeout("secret test@example.invalid https://private.invalid/token")
+        if fault == "http_403":
+            return httpx.Response(403, text="secret test@example.invalid")
+        if fault == "invalid_json":
+            return httpx.Response(200, text="invalid-json")
+        if fault == "wrong_issuer" and request.url.host == "data.sec.gov":
+            return httpx.Response(
+                200, json={"cik": "42", "tickers": ["AAPL"], "exchanges": ["Nasdaq"]}
+            )
+        return httpx.Response(200, json=bodies[request.url.path])
+
+    if fault in {"deadline", "unsafe_code"}:
+
+        async def rejected(*args, **kwargs):
+            if fault == "deadline":
+                raise module.HttpPolicyError("DEADLINE_EXCEEDED")
+            raise ValueError("secret test@example.invalid https://private.invalid/token")
+
+        monkeypatch.setattr(module._Exact200Client, "get_bytes", rejected)
+    out = tmp_path / "diagnostic"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="^IDENTITY_COLLECTION_FAILED$"):
+            await module.collect_identity_sources(
+                symbols=("AAPL",), contact="test@example.invalid", output_dir=out, client=client
+            )
+    receipt = json.loads((out / "result.json").read_bytes())
+    assert receipt["failure_code"] == expected
+    assert receipt["failure_phase"] == phase
+    assert receipt.get("http_status") == status
+    assert type(receipt["elapsed_ms"]) is int and receipt["elapsed_ms"] >= 0
+    assert receipt["requests"] == (2 if fault == "wrong_issuer" else 1)
+    assert len(calls) <= receipt["requests"]
+    assert receipt["authority_registered"] is False
+    assert "secret" not in json.dumps(receipt) and "test@example.invalid" not in json.dumps(receipt)
+    assert "private.invalid" not in json.dumps(receipt)
