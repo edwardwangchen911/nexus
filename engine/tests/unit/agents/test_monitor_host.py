@@ -263,3 +263,40 @@ async def test_preparation_timeout_still_checks_persisted_unknown_without_same_b
     assert collected.is_set() and deadlines == [240.0, 8.0]
     assert not monitor.kick(NOW + timedelta(minutes=1))
     assert monitor.last_diagnostic == "MONITOR_OBSERVATIONS_TIMEOUT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("occupied", [False, True])
+async def test_exhausted_preparation_gets_only_immediate_account_turn(monkeypatch, occupied):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from nexus.paper.account_transaction_turn import account_transaction_turn
+    from nexus.settings import EngineSettings
+
+    now = [0.0]
+    monkeypatch.setattr(host, "get_running_loop", lambda: SimpleNamespace(time=lambda: now[0]))
+    settings = EngineSettings.for_test().model_copy(
+        update={
+            "database_url": "postgresql+asyncpg://localhost/fixture",
+            "agent_paper_account_id": UUID(int=1),
+        }
+    )
+    scans = []
+
+    async def prepare(bucket):
+        now[0] = 240.0
+        raise TimeoutError
+
+    async def scan():
+        scans.append("persisted-unknown-check")
+
+    async with account_transaction_turn(settings) if occupied else nullcontext():
+        monitor = host.PriceMonitorCoordinator(
+            scan, prepare=prepare, scan_turn=lambda: account_transaction_turn(settings)
+        )
+        assert monitor.kick(NOW)
+        await monitor.close()
+    assert scans == ([] if occupied else ["persisted-unknown-check"])
+    assert monitor.last_diagnostic == "MONITOR_OBSERVATIONS_TIMEOUT"

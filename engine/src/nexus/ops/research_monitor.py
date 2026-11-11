@@ -86,6 +86,7 @@ async def scan_host_once(
     calendar_authority_id: UUID,
     repo_root: Path,
     env_file: Path | None = None,
+    scheduled_at: datetime | None = None,
 ) -> dict[str, object]:
     current = await load_host_settings(
         settings,
@@ -96,7 +97,9 @@ async def scan_host_once(
     )
     if not current.agent_paper_cycle_enabled:
         return {"status": "disabled", "model_requests": 0, "provider_requests": 0}
-    return await scan_configured_once(current, calendar_authority_id=calendar_authority_id)
+    return await scan_configured_once(
+        current, calendar_authority_id=calendar_authority_id, scheduled_at=scheduled_at
+    )
 
 
 async def refresh_host_observations(
@@ -274,10 +277,13 @@ async def load_host_settings(
 
 
 async def scan_configured_once(
-    settings: EngineSettings, *, calendar_authority_id: UUID
+    settings: EngineSettings, *, calendar_authority_id: UUID, scheduled_at: datetime | None = None
 ) -> dict[str, object]:
     return await run(
-        settings, argparse.Namespace(action="scan", calendar_authority_id=calendar_authority_id)
+        settings,
+        argparse.Namespace(
+            action="scan", calendar_authority_id=calendar_authority_id, scheduled_at=scheduled_at
+        ),
     )
 
 
@@ -347,7 +353,14 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 at = await session.scalar(select(func.clock_timestamp()))
                 if not isinstance(at, datetime) or at.utcoffset() is None:
                     raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
-                bucket = at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0)
+                from nexus.domain.time import require_utc
+
+                original = getattr(args, "scheduled_at", None)
+                bucket = (
+                    at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0)
+                    if original is None
+                    else require_utc(original)
+                )
         finally:
             await factory.kw["bind"].dispose()
     async with account_transaction_turn(settings):

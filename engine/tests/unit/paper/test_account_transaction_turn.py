@@ -116,3 +116,23 @@ async def test_explicit_request_owner_shares_monitor_turn_without_configured_own
         assert not entered.is_set()
     await task
     assert entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_nested_turn_is_owned_by_exact_task_and_child_still_waits():
+    turn = import_module("nexus.paper.account_transaction_turn").account_transaction_turn
+    entered = asyncio.Event()
+
+    async def child():
+        async with turn(settings()):
+            entered.set()
+
+    async with turn(settings()):
+        async with turn(settings()):
+            task = asyncio.create_task(child())
+            await asyncio.sleep(0)
+            assert not entered.is_set()
+        await asyncio.sleep(0)
+        assert not entered.is_set()
+    await task
+    assert entered.is_set()

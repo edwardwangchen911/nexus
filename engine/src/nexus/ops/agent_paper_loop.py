@@ -2891,9 +2891,12 @@ async def run_local_agent_paper_loop(
                 else None
             )
 
+            monitor_scan_bucket: datetime | None = None
+
             async def scan_monitor() -> object:
                 return await scan_host_once(
                     settings,
+                    scheduled_at=monitor_scan_bucket,
                     account_id=account_id,
                     calendar_authority_id=calendar_authority_id,
                     repo_root=repo_root,
@@ -2901,6 +2904,8 @@ async def run_local_agent_paper_loop(
                 )
 
             async def prepare_monitor(scheduled_at: datetime) -> object:
+                nonlocal monitor_scan_bucket
+                monitor_scan_bucket = scheduled_at
                 return await refresh_host_observations(
                     settings,
                     account_id=account_id,
@@ -2910,7 +2915,13 @@ async def run_local_agent_paper_loop(
                     env_file=env_file,
                 )
 
-            monitor = PriceMonitorCoordinator(scan_monitor, prepare=prepare_monitor)
+            from nexus.paper.account_transaction_turn import account_transaction_turn
+
+            monitor = PriceMonitorCoordinator(
+                scan_monitor,
+                prepare=prepare_monitor,
+                scan_turn=lambda: account_transaction_turn(settings, account_id=account_id),
+            )
             reported_monitor_bucket: datetime | None = None
 
             def report_monitor_diagnostic() -> None:
