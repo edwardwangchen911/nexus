@@ -721,11 +721,36 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 )
                 if args.action == "reconcile":
                     return reconciled
+                # Reconciliation can publish a plan and its inherited SEC
+                # origin after the initial clock. Scan only facts visible at
+                # the new clock, without moving this request to another bucket.
+                scan_at = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    not isinstance(scan_at, datetime)
+                    or scan_at.utcoffset() is None
+                    or scan_at < now
+                ):
+                    raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+                scheduled_at = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+                scan_bucket = scan_at.replace(
+                    minute=scan_at.minute // 5 * 5, second=0, microsecond=0
+                )
+                if scan_bucket != scheduled_at:
+                    return {
+                        "status": "missed_bucket",
+                        "scheduled_at": scheduled_at.isoformat(),
+                        "observed_at": scan_at.isoformat(),
+                        "checks": 0,
+                        "model_requests": 0,
+                        "provider_requests": 0,
+                        "execution_locked": True,
+                        "reconciled_results": reconciled["recorded"],
+                    }
                 scanned = await scan_account(
                     session,
                     account_id=settings.agent_paper_account_id,
                     calendar_authority_id=args.calendar_authority_id,
-                    now=now,
+                    now=scan_at,
                     instrument_ids=batch.instrument_ids,
                 )
                 return {**scanned, "reconciled_results": reconciled["recorded"]}

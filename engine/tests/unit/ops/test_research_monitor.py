@@ -31,6 +31,83 @@ async def test_unconfigured_scope_rejected_before_connection(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "before_time,advance",
+    [("15:05:12", 4), ("15:05:12", 288), ("15:05:12", -1), ("20:59:58", 4), ("14:29:58", 4)],
+)
+async def test_scan_uses_post_reconciliation_clock_without_moving_original_bucket(
+    monkeypatch, before_time, advance
+):
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    from nexus.monitoring import reconciliation
+    from nexus.ops import research_monitor
+    from nexus.paper import candidate_batch
+
+    before = datetime.fromisoformat(f"2026-11-09T{before_time}").replace(tzinfo=UTC)
+    after = before + timedelta(seconds=advance)
+    account, batch_id, instrument, calendar = (UUID(int=n) for n in (1, 2, 3, 4))
+    clocks = iter((before, after))
+
+    async def scalar(statement):
+        if "clock_timestamp()" in str(statement):
+            return next(clocks)
+        return research_monitor.CURRENT_MIGRATION_HEAD
+
+    session = SimpleNamespace(execute=AsyncMock(), scalar=scalar)
+
+    @asynccontextmanager
+    async def opened():
+        yield session
+
+    session.begin = opened
+
+    class Factory:
+        kw = {"bind": SimpleNamespace(dispose=AsyncMock())}
+
+        def __call__(self):
+            return opened()
+
+    factory = Factory()
+    monkeypatch.setattr(research_monitor, "session_factory", lambda _: factory)
+    batch = SimpleNamespace(account_id=account, created_at=before, instrument_ids=(instrument,))
+    monkeypatch.setattr(
+        candidate_batch, "load_agent_paper_candidate_batch", AsyncMock(return_value=batch)
+    )
+    reconciled = AsyncMock(return_value={"recorded": 1})
+    monkeypatch.setattr(reconciliation, "reconcile_account_results", reconciled)
+    scanned = AsyncMock(return_value={"status": "scanned", "checks": 1})
+    monkeypatch.setattr(research_monitor, "scan_account", scanned)
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus_test_monitor",
+        agent_paper_account_id=account,
+        agent_paper_candidate_batch_id=batch_id,
+    )
+    args = parser().parse_args(["scan", "--calendar-authority-id", str(calendar)])
+    if advance < 0:
+        with pytest.raises(ValueError, match="MONITOR_CLOCK_UNAVAILABLE"):
+            await research_monitor.run(settings, args)
+        scanned.assert_not_awaited()
+    else:
+        result = await research_monitor.run(settings, args)
+        assert result["reconciled_results"] == 1
+        scheduled = before.replace(minute=before.minute // 5 * 5, second=0)
+        if after.replace(minute=after.minute // 5 * 5, second=0) == scheduled:
+            assert scanned.await_args.kwargs["now"] == after
+            assert result["status"] == "scanned"
+        else:
+            scanned.assert_not_awaited()
+            assert result["status"] == "missed_bucket" and result["checks"] == 0
+            assert result["scheduled_at"] == scheduled.isoformat()
+            assert result["provider_requests"] == result["model_requests"] == 0
+    assert reconciled.await_args.kwargs["now"] == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["missing_apply", "disabled", "calendar_changed", "bound"])
 async def test_spending_entry_uses_applied_scope_and_honors_producer_stop(monkeypatch, mode):
     from uuid import UUID
