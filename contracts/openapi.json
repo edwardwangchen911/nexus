@@ -20140,7 +20140,8 @@
                   "HEARTBEAT_MISSING",
                   "HEARTBEAT_STALE",
                   "HEARTBEAT_INCOMPATIBLE",
-                  "HEARTBEAT_INVALID"
+                  "HEARTBEAT_INVALID",
+                  "READ_PROBE_DEADLINE"
                 ],
                 "type": "string"
               },
@@ -20171,7 +20172,8 @@
             "enum": [
               "online",
               "offline",
-              "unknown"
+              "unknown",
+              "degraded"
             ],
             "title": "Status",
             "type": "string"

@@ -713,6 +713,9 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                     or batch.created_at > now
                 ):
                     raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+                from nexus.paper.host_probe_state import require_host_admitting
+
+                await require_host_admitting(session, settings.agent_paper_account_id)
                 reconciled = await reconcile_account_results(
                     session,
                     account_id=settings.agent_paper_account_id,

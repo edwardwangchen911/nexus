@@ -131,3 +131,240 @@ async def test_pending_cleanup_failure_records_cleanup_not_original_read(monkeyp
     assert raised.value is cleanup
     assert cleanup._nexus_pending_work_phase == "session_close"
     assert original._nexus_pending_work_phase == "manual_requests"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["own", "inner", "close", "dispose", "external", "object_reader"]
+)
+async def test_only_ended_owned_read_is_a_safe_deadline(monkeypatch, failure):
+    from nexus.ops.pending_probe import ReadProbeDeadline, bounded_probe
+
+    deadline = asyncio.timeout(None)
+    import threading
+
+    entered = asyncio.Event()
+    release = threading.Event()
+    drained = asyncio.Event()
+    event_loop = asyncio.get_running_loop()
+
+    @asynccontextmanager
+    async def begin():
+        try:
+            yield SimpleNamespace(execute=AsyncMock(), info={})
+        finally:
+            if failure == "close":
+                raise OSError("close")
+
+    async def dispose():
+        if failure == "dispose":
+            raise OSError("dispose")
+
+    async def peek(*args, **kwargs):
+        if failure == "object_reader":
+            from nexus.market.object_store import _run_object_io
+
+            def block():
+                event_loop.call_soon_threadsafe(entered.set)
+                try:
+                    release.wait(10)
+                finally:
+                    event_loop.call_soon_threadsafe(drained.set)
+
+            return await _run_object_io(block)
+        entered.set()
+        if failure == "inner":
+            raise TimeoutError("driver")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(host, "peek_manual_request", peek)
+    monkeypatch.setattr(
+        host,
+        "session_factory",
+        lambda _: SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=dispose)}),
+    )
+    monkeypatch.setattr(host, "artifact_read_scope", lambda _: nullcontext())
+    monkeypatch.setattr(host, "evidence_read_scope", lambda _: nullcontext())
+    account = uuid4()
+    settings = EngineSettings.for_test().model_copy(
+        update={"agent_paper_manual_enabled": True, "agent_paper_account_id": account}
+    )
+    task = asyncio.create_task(
+        bounded_probe(lambda: host.manual_work_pending(settings, account_id=account), deadline)
+    )
+    await entered.wait()
+    if failure != "inner":
+        deadline.reschedule(asyncio.get_running_loop().time())
+    if failure == "external":
+        task.cancel()
+    if failure == "own":
+        assert isinstance(await task, ReadProbeDeadline)
+    else:
+        with pytest.raises(
+            {
+                "inner": TimeoutError,
+                "object_reader": TimeoutError,
+                "external": asyncio.CancelledError,
+                "close": OSError,
+                "dispose": OSError,
+            }[failure]
+        ):
+            await task
+
+    if failure == "object_reader":
+        release.set()
+        await asyncio.wait_for(drained.wait(), 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "finish",
+    ["queued", "unknown", "due_failed", "publish_failed", "monitor_unknown", "deferred_wrong_job"],
+)
+async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, finish):
+    from datetime import timedelta
+
+    from unit.ops.test_agent_paper_loop import snapshot
+
+    account, request = uuid4(), uuid4()
+    settings = EngineSettings.for_test().model_copy(
+        update={"agent_paper_manual_enabled": True, "agent_paper_account_id": account}
+    )
+    from nexus.agents.research_stages.formal_defer import FormalStageGrantBusy
+
+    job, other, scope = uuid4(), uuid4(), uuid4()
+    notice = FormalStageGrantBusy(
+        scope_id=scope, run_id=uuid4(), stage=2, claim=SimpleNamespace(job_id=job)
+    )
+    base = datetime(2026, 10, 12, 15, tzinfo=UTC)
+    logs, heartbeats, actions = [], [], []
+    elapsed = 0
+    clock_shift = timedelta()
+    cycles = 0
+    attempts = 0
+    busy = True
+    timer = None
+    real_bounded = loop.bounded_probe
+
+    @asynccontextmanager
+    async def begin():
+        try:
+            yield SimpleNamespace(execute=AsyncMock(), info={})
+        finally:
+            logs.append("closed")
+
+    monkeypatch.setattr(
+        host,
+        "session_factory",
+        lambda _: SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())}),
+    )
+    monkeypatch.setattr(host, "artifact_read_scope", lambda _: nullcontext())
+    monkeypatch.setattr(host, "evidence_read_scope", lambda _: nullcontext())
+
+    async def owned_probe(read, owned):
+        nonlocal timer
+        timer = owned
+        return await real_bounded(read, owned)
+
+    monkeypatch.setattr(loop, "bounded_probe", owned_probe)
+
+    async def peek(*args, **kwargs):
+        nonlocal attempts, elapsed, clock_shift
+        attempts += 1
+        logs.append("peek")
+        if attempts <= 2:
+            elapsed += 15
+            timer.reschedule(asyncio.get_running_loop().time())
+            await asyncio.Event().wait()
+        clock_shift = timedelta(days=1)
+        return object()
+
+    monkeypatch.setattr(host, "peek_manual_request", peek)
+
+    async def due(*args):
+        logs.append("due")
+        if finish == "due_failed":
+            raise ValueError("MANUAL_RESULT_UNKNOWN")
+
+    monkeypatch.setattr(formal_intraday_intent, "due_intent", due)
+
+    async def inspect():
+        nonlocal cycles
+        logs.append("inspect")
+        cycles += 1
+        now = base + timedelta(seconds=elapsed) + clock_shift
+        if finish == "deferred_wrong_job":
+            return snapshot(
+                now=now,
+                cycle_id=scope,
+                cycle_status="researching",
+                research_job_status="running" if cycles == 2 else "queued",
+                research_job_id=other if cycles > 2 else job,
+            )
+        if cycles == 1:
+            return snapshot(now=now, cycle_status="completed", cycle_slot_at=base.replace(hour=14))
+        return snapshot(
+            now=now,
+            manual_research_only=True,
+            manual_pending_request_id=request,
+            manual_pending_status="unknown" if finish == "unknown" else "queued",
+        )
+
+    async def sleep(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    async def heartbeat(_):
+        heartbeats.append(elapsed)
+
+    async def record(notice):
+        logs.append("pause" if notice else "ready")
+        if notice and finish == "publish_failed":
+            raise OSError("commit unconfirmed")
+
+    async def execute(action, state):
+        if finish == "deferred_wrong_job":
+            actions.append((action, state.research_job_id))
+            raise notice
+        actions.append((action, state.manual_pending_request_id, state.now.date()))
+        return loop.AgentPaperLoopAction.STOP_REQUESTED
+
+    def monitor_busy():
+        nonlocal busy
+        if busy:
+            logs.append("busy")
+            busy = False
+            return True
+        return False
+
+    result = await loop.run_foreground_loop(
+        inspect=inspect,
+        execute=execute,
+        heartbeat=heartbeat,
+        sleep=sleep,
+        wake_for_pending_work=lambda: host.manual_work_pending(settings, account_id=account),
+        kick_monitor=lambda _: logs.append("kick"),
+        monitor_busy=monitor_busy,
+        monitor_confirmed=lambda: finish != "monitor_unknown",
+        record_probe=record,
+        deferred_lease_remaining=AsyncMock(return_value=15),
+        clock=lambda: base + timedelta(seconds=elapsed) + clock_shift,
+        monotonic=lambda: elapsed,
+    )
+    assert logs.index("busy") < logs.index("peek")
+    assert "kick" not in logs[logs.index("busy") + 1 : logs.index("peek")]
+    assert max(b - a for a, b in zip(heartbeats, heartbeats[1:], strict=False)) <= 15
+    if finish == "queued":
+        assert logs.count("pause") == 2 and logs.index("ready") > logs.index("due")
+        assert logs[logs.index("ready") - 1] == "inspect"
+        assert actions == [
+            (loop.AgentPaperLoopAction.TRIGGER_MANUAL, request, (base + timedelta(days=1)).date())
+        ]
+        assert result == loop.AgentPaperLoopAction.STOP_REQUESTED
+    elif finish == "deferred_wrong_job":
+        assert actions == [(loop.AgentPaperLoopAction.RUN_RESEARCH_JOB, job)]
+        assert logs.count("pause") == 2 and "ready" not in logs
+        assert result == loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+    else:
+        assert not actions and "ready" not in logs
+        assert result == loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN

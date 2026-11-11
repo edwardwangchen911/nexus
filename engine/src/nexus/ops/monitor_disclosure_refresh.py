@@ -115,6 +115,9 @@ async def _claim(
     contact: str | None,
 ) -> dict[str, object] | None:
     now, instruments = await _scope(session, settings, account_id, calendar_id, scheduled)
+    from nexus.paper.host_probe_state import require_host_admitting
+
+    await require_host_admitting(session, account_id)
     if instrument_id not in instruments:
         return None
     await lock_security(session, account_id=account_id, instrument_id=instrument_id)

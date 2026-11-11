@@ -308,6 +308,9 @@ async def prepare_batch_market_inputs(
     try:
         async with factory() as session, session.begin():
             await _locks(session, account_id, batch_id)
+            from nexus.paper.host_probe_state import require_host_admitting
+
+            await require_host_admitting(session, account_id)
             now = await _clock(session)
             if await session.scalar(
                 select(MonitorIncrement.id).where(MonitorIncrement.batch_id == batch_id)

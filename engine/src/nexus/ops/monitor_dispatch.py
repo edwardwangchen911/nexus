@@ -17,6 +17,7 @@ from nexus.ops.agent_paper_loop import (
     AgentPaperLoopSnapshot,
     choose_loop_action,
 )
+from nexus.paper.host_probe_state import require_host_admitting
 from nexus.persistence.models.monitoring import MonitorIncrement, MonitorTrigger
 from nexus.persistence.models.runtime import AuditEvent, Job
 from nexus.persistence.session import session_factory
@@ -237,7 +238,6 @@ async def dispatch_configured_once(
     from nexus.monitoring.admission import require_increment_binding
     from nexus.ops.agent_paper_once import _validate_local_database
     from nexus.ops.research_monitor import run
-    from nexus.paper.target_service import lock_portfolio_account
     from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
     from nexus.persistence.models.agents import AgentResearchRunRecord
     from nexus.worker import run_agent_worker_once
@@ -260,7 +260,7 @@ async def dispatch_configured_once(
                 != CURRENT_MIGRATION_HEAD
             ):
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
-            await lock_portfolio_account(session, settings.agent_paper_account_id)
+            await require_host_admitting(session, settings.agent_paper_account_id)
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
@@ -391,7 +391,7 @@ async def dispatch_configured_once(
         if job_id is not None:
             # Native claim, one attempt, exact Job and capacity/lease checks. No fallback key.
             async with factory() as session, session.begin():
-                await lock_portfolio_account(session, settings.agent_paper_account_id)
+                await require_host_admitting(session, settings.agent_paper_account_id)
                 sent = await session.scalar(
                     select(AuditEvent.id)
                     .where(

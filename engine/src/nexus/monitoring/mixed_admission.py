@@ -5,6 +5,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from nexus.paper.host_probe_state import require_host_admitting
+
 if TYPE_CHECKING:
     from nexus.ops.platform_credentials import PlatformCredential
 
@@ -101,7 +103,6 @@ async def _admit_batch(
     from nexus.paper.candidate_batch import validate_agent_paper_candidate_batch
     from nexus.paper.manual_request import require_manual_account_available
     from nexus.paper.projection import load_paper_projection
-    from nexus.paper.target_service import lock_portfolio_account
     from nexus.persistence.models.agents import AgentResearchOutputRecord
     from nexus.persistence.models.monitoring import MonitorPlan
     from nexus.strategy.intents import ResearchIntent
@@ -109,7 +110,7 @@ async def _admit_batch(
     now = require_utc(now)
     if type(daily_sdk_call_limit) is not int or not 3 <= daily_sdk_call_limit <= 90:
         raise ValueError("MONITOR_CALL_LIMIT_INVALID")
-    await lock_portfolio_account(session, account_id)
+    await require_host_admitting(session, account_id)
     frozen_now = await session.scalar(select(func.clock_timestamp()))
     if not isinstance(frozen_now, datetime):
         raise ValueError("MONITOR_CLOCK_UNAVAILABLE")

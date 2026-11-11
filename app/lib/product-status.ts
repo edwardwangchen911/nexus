@@ -23,7 +23,7 @@ type DecisionSummaryKey = "research_not_actionable" | "unknown" | "in_progress" 
 type RiskKey = "not_evaluated" | "risk_no_change" | "risk_approved" | "risk_reduced" | "risk_rejected";
 type ExecutionKey = "no_order" | "waiting_market" | "submitted" | "partially_filled" | "filled"
   | "completed" | "cancelled" | "rejected" | "reconciling" | "result_unknown" | "unknown";
-type LoopKey = "online" | "offline" | "unknown";
+type LoopKey = "online" | "offline" | "unknown" | "degraded";
 type AttentionKey = "data_insufficient" | "model_failed" | "risk_rejected" | "result_unknown"
   | "loop_offline" | "unknown";
 
@@ -117,6 +117,9 @@ export function executionPresentation(cycle: Cycle, orders: Order[]): Actionable
 
 export function loopPresentation(loop: Loop, session: Session): ProductPresentation<LoopKey> {
   const sessionLabel = sessionStatusLabel(session.status);
+  if (loop.status === "degraded") {
+    return presentation("degraded", "存活，暂停接单", "宿主仍在发送心跳，完整核验待处理请求后恢复接单。", "warning", loop.reason_code);
+  }
   if (loop.status === "online") {
     return presentation("online", "循环在线", `30 秒内收到心跳；已保存会话状态为${sessionLabel}。`, "positive", loop.reason_code);
   }

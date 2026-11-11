@@ -8,7 +8,9 @@ import hmac
 import logging
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Protocol, cast
 from urllib.parse import quote, unquote, urlsplit
 
@@ -408,6 +410,20 @@ def _has_valid_percent_escapes(value: str) -> bool:
     return True
 
 
+_readers: ContextVar[list[threading.Thread] | None] = ContextVar("object_readers", default=None)
+
+
+@contextmanager
+def track_object_readers() -> Iterator[list[threading.Thread]]:
+    """Keep the caller from confirming read cleanup while a blocking operation survives."""
+    readers: list[threading.Thread] = []
+    token = _readers.set(readers)
+    try:
+        yield readers
+    finally:
+        _readers.reset(token)
+
+
 async def _run_object_io[T](
     operation: Callable[..., T],
     *args: object,
@@ -449,6 +465,9 @@ async def _run_object_io[T](
     )
     try:
         thread.start()
+        readers = _readers.get()
+        if readers is not None:
+            readers.append(thread)
     except BaseException:
         _OBJECT_IO_GATE.release()
         raise

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
@@ -13,11 +14,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.market.current_identity import identity_parse_scope
+from nexus.ops.pending_probe import ReadProbeDeadline, probe_stage, trace
 from nexus.paper.agent_cycle_authority import select_agent_paper_service_calendar_authority
 from nexus.paper.current_preparation_recovery import (
     begin_preparation_effects,
     start_preparation_execution,
 )
+from nexus.paper.host_probe_state import require_host_admitting
 from nexus.paper.independent_history_scope import SAFE_CODES as HISTORY_SCOPE_CODES
 from nexus.paper.manual_request import (
     ManualRequestView,
@@ -333,6 +336,7 @@ async def peek_manual_request(
         .limit(1)
         .scalar_subquery()
     )
+    probe_stage("candidates")
     rows = (
         await session.scalars(
             select(ManualPaperRequest).where(
@@ -349,15 +353,19 @@ async def peek_manual_request(
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     pending = []
     for row in rows:
+        probe_stage("request_events")
         view = await read_manual_request(session, row)
-        if view.status == "unknown" and (
-            await preparation_closed(session, row, now=now)
-            or await independent_unknown_accepted(session, row, now=now)
-        ):
-            continue
+        if view.status == "unknown":
+            probe_stage("preparation")
+            if await preparation_closed(session, row, now=now):
+                continue
+            probe_stage("independent_proof")
+            if await independent_unknown_accepted(session, row, now=now):
+                continue
         pending.append(view)
     from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
 
+    probe_stage("native_claims")
     await require_acknowledged_native_claims(
         session,
         account_id=account_id,
@@ -401,6 +409,8 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
         raise ValueError("MANUAL_RESULT_UNKNOWN")
     factory = session_factory(settings)
     phase = "session_open"
+    current = trace.get()
+    cancelled = closed = None
     try:
         async with factory.begin() as session:
             try:
@@ -415,22 +425,39 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
                     evidence_read_scope(session),
                 ):
                     phase = "manual_requests"
+                    probe_stage("manual_requests")
                     pending = await peek_manual_request(session, account_id=account_id) is not None
-                    if not pending:
-                        phase = "intraday_intents"
-                        pending = await due_intent(session, account_id) is not None
+                    phase = "intraday_intents"
+                    intent = await due_intent(session, account_id)
+                    pending = pending or intent is not None
             except (Exception, asyncio.CancelledError) as error:
+                if (
+                    current is not None
+                    and isinstance(error, asyncio.CancelledError)
+                    and phase == "manual_requests"
+                ):
+                    cancelled = error
+                    end = monotonic()
+                    current.interrupted = ReadProbeDeadline(
+                        current.stage,
+                        int((end - current.since) * 1000),
+                        int((end - current.started) * 1000),
+                    )
                 _mark_pending_failure(error, phase)
                 raise
             finally:
                 phase = "session_close"
         return pending
     except (Exception, asyncio.CancelledError) as error:
+        if error is cancelled:
+            closed = cancelled
         _mark_pending_failure(error, phase)
         raise
     finally:
         try:
             await factory.kw["bind"].dispose()
+            if current is not None:
+                current.closed_cancel = closed
         except (Exception, asyncio.CancelledError) as error:
             _mark_pending_failure(error, "engine_dispose")
             raise
@@ -447,7 +474,7 @@ async def claim_configured_manual_request(
     account_id = settings.agent_paper_account_id
     if account_id is None:
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
-    await lock_portfolio_account(session, account_id)
+    await require_host_admitting(session, account_id)
     row = await session.get(ManualPaperRequest, request_id)
     if row is None or row.account_id != account_id:
         raise ValueError("MANUAL_NOT_FOUND")

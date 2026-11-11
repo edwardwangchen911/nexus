@@ -177,8 +177,11 @@ async def lookup_configured_manual_request(
 async def require_configured_manual_host(
     session: AsyncSession, settings: EngineSettings, *, now: datetime
 ) -> None:
+    from nexus.paper.host_probe_state import require_host_admitting
     from nexus.paper.manual_host_exit import valid_host_exit
 
+    if settings.agent_paper_account_id is not None:
+        await require_host_admitting(session, settings.agent_paper_account_id)
     heartbeats = (
         await session.scalars(
             select(WorkerHeartbeat).where(
