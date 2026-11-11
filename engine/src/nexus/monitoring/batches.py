@@ -108,13 +108,12 @@ async def _report(
     }
 
 
-async def disclosure_source_current(
+async def _latest_disclosure_source_id(
     session: AsyncSession, plan: MonitorPlan, now: datetime
-) -> bool:
-    """An unreconciled newer daily result cannot leave an old SEC plan silently active."""
+) -> UUID | None:
     from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS
 
-    latest = await session.scalar(
+    latest: UUID | None = await session.scalar(
         select(AgentResearchRunRecord.id)
         .join(DataSnapshot, DataSnapshot.id == AgentResearchRunRecord.data_snapshot_id)
         .outerjoin(
@@ -144,6 +143,14 @@ async def disclosure_source_current(
         )
         .limit(1)
     )
+    return latest
+
+
+async def disclosure_source_current(
+    session: AsyncSession, plan: MonitorPlan, now: datetime
+) -> bool:
+    """An unreconciled newer daily result cannot leave an old SEC plan silently active."""
+    latest = await _latest_disclosure_source_id(session, plan, now)
     if latest == plan.source_run_id:
         return True
     from nexus.persistence.models.monitoring import MonitorCoverageReceipt
@@ -161,6 +168,25 @@ async def disclosure_source_current(
         )
         is not None
     )
+
+
+async def disclosure_inactive_reason(
+    session: AsyncSession, plan: MonitorPlan, now: datetime
+) -> str:
+    """Explain a known latest-result gap without granting old-plan authority."""
+    from nexus.persistence.models.monitoring import MonitorCoverageReceipt
+
+    latest = await _latest_disclosure_source_id(session, plan, now)
+    receipt = await session.scalar(
+        select(MonitorCoverageReceipt).where(
+            MonitorCoverageReceipt.kind == "disclosure",
+            MonitorCoverageReceipt.account_id == plan.account_id,
+            MonitorCoverageReceipt.run_id == latest,
+            MonitorCoverageReceipt.status.in_(("gap", "unknown", "unverified", "superseded")),
+            MonitorCoverageReceipt.observed_at <= now,
+        )
+    )
+    return receipt.reason if receipt is not None else "MONITOR_AWAITING_RECONCILIATION"
 
 
 async def _check(
@@ -239,7 +265,7 @@ async def scan_stock_batch(
             else:
                 quote = await read_latest_price(session, instrument_id=instrument_id, now=now)
         elif not await disclosure_source_current(session, plan, now):
-            reason = "MONITOR_AWAITING_RECONCILIATION"
+            reason = await disclosure_inactive_reason(session, plan, now)
         else:
             try:
                 disclosure = await read_disclosure_observation(session, plan=plan, now=now)
