@@ -6,6 +6,8 @@
 
 Docker Desktop 不是必需品。任何提供 Docker API 与 Compose v2 的兼容运行时都可以，包括 Docker Desktop、OrbStack 或 Colima。
 
+既有本机环境的交付遵循 [AGENTS.md](../../AGENTS.md)。远端 CI 在后台执行，候选通过相关本地验证且满足本机部署条件后直接验收。下文历史资格轮和资金授权各自受原批准条件及期限约束。
+
 ## 预检
 
 ```bash
