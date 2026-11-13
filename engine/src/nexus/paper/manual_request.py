@@ -836,6 +836,14 @@ async def _legacy_require_cycle_jobs_settled(
         runs_by_id = {str(run.id): run for run in research}
         for lease in leases:
             job = jobs_by_id[lease.job_id]
+            # A successful native finalization can retain its immutable lease
+            # audit until expiry. Exact attempt/fence/finish matching proves
+            # the lease is consumed, not model usage or cleanup; the original
+            # run settlement and shared staged terminal checks remain required.
+            if job.status == "succeeded" and await job_lease_consumed(
+                session, job=job, lease=lease, now=now
+            ):
+                continue
             run = runs_by_id.get(str(job.payload.get("run_id")))
             # A freshly finalized cancellation retains its fenced lease audit.
             # Only its exact skipped attempt and untouched zero-cost Run prove
