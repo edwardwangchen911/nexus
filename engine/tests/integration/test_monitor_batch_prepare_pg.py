@@ -14,7 +14,15 @@ from nexus.persistence.models.runtime import AuditEvent, Job, JobLease
 from sqlalchemy import func, select
 
 
-async def setup(database_url, monkeypatch, tmp_path, *, added=2, kinds=("price", "disclosure")):
+async def setup(
+    database_url,
+    monkeypatch,
+    tmp_path,
+    *,
+    added=2,
+    kinds=("price", "disclosure"),
+    before_lease_expiry=False,
+):
     factory, settings, store, captured, pointer = await installed(
         database_url, monkeypatch, tmp_path, added=added, kinds=kinds
     )
@@ -30,7 +38,13 @@ async def setup(database_url, monkeypatch, tmp_path, *, added=2, kinds=("price",
             now=captured["clock"][0],
         )
     async with factory() as session:
-        later = await session.scalar(select(func.max(JobLease.expires_at))) + timedelta(seconds=1)
+        expiry = await session.scalar(select(func.max(JobLease.expires_at)))
+        later = (
+            captured["clock"][0] + timedelta(seconds=1)
+            if before_lease_expiry
+            else expiry + timedelta(seconds=1)
+        )
+        assert not before_lease_expiry or later < expiry
         before = await session.scalar(select(func.count()).select_from(Job))
     captured["clock"][0] = later
     await _set_test_insert_clock(factory, later)
@@ -88,11 +102,12 @@ def mocked_collector(monkeypatch, store, captured, *, fail=False, wait=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("before_lease_expiry", [False, True])
 async def test_one_exact_filing_per_operation_then_zero_http_prepared_reuse(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, before_lease_expiry
 ):
     factory, settings, store, captured, batch_id, jobs = await setup(
-        migrated_database_url, monkeypatch, tmp_path
+        migrated_database_url, monkeypatch, tmp_path, before_lease_expiry=before_lease_expiry
     )
     from nexus.ops.monitor_batch_prepare import (
         confirm_batch_preparation,
@@ -323,3 +338,31 @@ async def test_source_overflow_and_existing_unknown_account_cannot_claim_collect
             == 0
         )
         assert await preparation.inspect_batch_preparation(session, batch_id) == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_success_status_without_consumed_fence_still_blocks_before_collection(
+    migrated_database_url, monkeypatch, tmp_path
+):
+    from nexus.jobs import repository
+    from nexus.ops.monitor_batch_prepare import prepare_pending_batch
+
+    factory, settings, store, captured, batch_id, jobs = await setup(
+        migrated_database_url, monkeypatch, tmp_path, before_lease_expiry=True
+    )
+    calls = mocked_collector(monkeypatch, store, captured)
+
+    async def unproven(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(repository, "job_lease_consumed", unproven)
+    try:
+        result = await prepare_pending_batch(
+            settings, batch_id=batch_id, repo_root=tmp_path, sec_contact="test@example.invalid"
+        )
+        assert result["status"] == "blocked" and not calls
+        assert result["provider_requests"] == result["model_requests"] == 0
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(Job)) == jobs
+    finally:
+        await factory.kw["bind"].dispose()
