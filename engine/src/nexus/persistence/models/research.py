@@ -145,7 +145,18 @@ class FinancialFactRecord(ImmutableCreatedAt, Base):
         CheckConstraint(
             "canonical_fact IN ('revenue', 'gross_profit', 'operating_income', 'net_income', "
             "'operating_cash_flow', 'capital_expenditure', 'total_assets', 'total_liabilities', "
-            "'stockholders_equity', 'diluted_shares', 'diluted_eps')",
+            "'stockholders_equity', 'diluted_shares', 'diluted_eps', "
+            "'depreciation_depletion_amortization', "
+            "'share_based_compensation', "
+            "'deferred_income_tax_expense_benefit', "
+            "'investment_gain_loss', "
+            "'other_noncash_income_expense', "
+            "'cash_flow_change_accounts_receivable', "
+            "'cash_flow_change_inventories', "
+            "'cash_flow_change_accounts_payable', "
+            "'cash_flow_change_accrued_operating_liabilities', "
+            "'cash_flow_change_prepaid_other_assets', "
+            "'cash_flow_change_other_noncurrent_liabilities')",
             name="canonical_fact_allowed",
         ),
         CheckConstraint("period_kind IN ('instant', 'duration')", name="period_kind_allowed"),

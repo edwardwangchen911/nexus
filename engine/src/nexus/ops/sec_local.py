@@ -114,7 +114,7 @@ async def project_saved_sec_facts(
     if store is None:
         if urlsplit(settings.object_store_endpoint or "").hostname not in _LOOPBACK:
             raise ValueError("SEC_LOCAL_OBJECT_STORE_REQUIRED")
-        store = S3ProviderEvidenceStore(settings)
+        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
     factory = session_factory(settings)
     try:
         async with factory() as session, session.begin():

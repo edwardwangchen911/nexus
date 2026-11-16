@@ -42,6 +42,27 @@ _SEC_TAG_TO_CANONICAL_FACT = {
     ("us-gaap", "OperatingIncomeLoss"): "operating_income",
     ("us-gaap", "NetIncomeLoss"): "net_income",
     ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"): "operating_cash_flow",
+    # Raw reported components: values retain their SEC sign and period.
+    ("us-gaap", "DepreciationDepletionAndAmortization"): "depreciation_depletion_amortization",
+    ("us-gaap", "ShareBasedCompensation"): "share_based_compensation",
+    ("us-gaap", "DeferredIncomeTaxExpenseBenefit"): "deferred_income_tax_expense_benefit",
+    ("us-gaap", "GainLossOnInvestments"): "investment_gain_loss",
+    ("us-gaap", "OtherNoncashIncomeExpense"): "other_noncash_income_expense",
+    ("us-gaap", "IncreaseDecreaseInAccountsReceivable"): "cash_flow_change_accounts_receivable",
+    ("us-gaap", "IncreaseDecreaseInInventories"): "cash_flow_change_inventories",
+    ("us-gaap", "IncreaseDecreaseInAccountsPayable"): "cash_flow_change_accounts_payable",
+    (
+        "us-gaap",
+        "IncreaseDecreaseInAccruedLiabilitiesAndOtherOperatingLiabilities",
+    ): "cash_flow_change_accrued_operating_liabilities",
+    (
+        "us-gaap",
+        "IncreaseDecreaseInPrepaidDeferredExpenseAndOtherAssets",
+    ): "cash_flow_change_prepaid_other_assets",
+    (
+        "us-gaap",
+        "IncreaseDecreaseInOtherNoncurrentLiabilities",
+    ): "cash_flow_change_other_noncurrent_liabilities",
     ("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment"): "capital_expenditure",
     ("us-gaap", "Assets"): "total_assets",
     ("us-gaap", "Liabilities"): "total_liabilities",
