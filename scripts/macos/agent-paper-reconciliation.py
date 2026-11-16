@@ -984,6 +984,7 @@ def _validate_pending_proof(root, state, pointer, evidence, digest):
         item
         for item in state.get("exit_reconciliation_history", [])
         if item.get("attempt_id") == original["attempt_id"]
+        and item.get("consumed_by") == original.get("consumed_by")
     ]
     resolutions = [
         item
@@ -1114,20 +1115,99 @@ def archive_consumed(root, state, attempt, *, reason, observed_at, confirmed_ins
     if pointer is None or pointer.get("consumed_by") != attempt.get("id"):
         return
     validate_pending_activation(root, state, attempt)
+    repeated = _prior_rejected_consumers(root, state, pointer)
     _archive_pointer(
         state,
         pointer,
         reason,
         observed_at,
+        validated_rejected_consumers=repeated,
         consumer_attempt=attempt,
         confirmed_instance=confirmed_instance,
     )
 
 
-def _archive_pointer(state, pointer, reason, observed_at, **facts):
+def _prior_rejected_consumers(root, state, pointer):
+    """Only a fully bound pre-activation rejection can precede a new consumer."""
+    repeated = False
+    seen = set()
+    for old in state.get("exit_reconciliation_history", []):
+        if not isinstance(old, dict):
+            _reject("PROOF_INVALID")
+        if old.get("attempt_id") != pointer["attempt_id"]:
+            continue
+        prior = old.get("consumer_attempt")
+        if (
+            not isinstance(prior, dict)
+            or old.get("archive_reason") != "REVOKED_BEFORE_ACTIVATION"
+            or old.get("evidence_sha256") != pointer.get("evidence_sha256")
+            or old.get("consumed_by") != prior.get("id")
+            or prior.get("id") == pointer.get("consumed_by")
+            or old.get("enable_generation") != prior.get("generation")
+            or prior.get("exit_reconciliation_sha256") != pointer.get("evidence_sha256")
+            or state.get("attempts", []).count(prior) != 1
+            or prior.get("id") in seen
+        ):
+            _reject("PROOF_INVALID")
+        try:
+            if any(str(UUID(prior[key])) != prior[key] for key in ("id", "generation", "boot")):
+                _reject("PROOF_INVALID")
+        except (ValueError, TypeError, KeyError):
+            _reject("PROOF_INVALID")
+        seen.add(prior["id"])
+        receipt_path = (
+            root / ".secrets/nexus-agent-paper" / f"recovery-activation-{prior['id']}.json"
+        )
+        negative = receipt_path.with_suffix(".write-pending")
+        if negative.exists() or negative.is_symlink():
+            _reject("PROOF_INVALID")
+        receipt, _ = _read(receipt_path)
+        if negative.exists() or negative.is_symlink():
+            _reject("PROOF_INVALID")
+        resolutions = [
+            r for r in state.get("attempt_resolutions", []) if r.get("attempt_id") == prior["id"]
+        ]
+        if (
+            receipt.get("version") != 1
+            or type(receipt.get("pid")) is not int
+            or receipt["pid"] <= 0
+            or not isinstance(receipt.get("process_started"), str)
+            or not receipt["process_started"]
+            or receipt.get("phase") != "rejected"
+            or receipt.get("reason") != "PRE_ACTIVATION_REJECTED"
+            or any(
+                receipt.get(r) != prior.get(a)
+                for r, a in (
+                    ("attempt_id", "id"),
+                    ("generation", "generation"),
+                    ("boot", "boot"),
+                    ("revision", "revision"),
+                )
+            )
+            or len(resolutions) != 1
+            or resolutions[0].get("reason") != "REVOKED_BEFORE_ACTIVATION"
+            or type(resolutions[0].get("exit")) is not int
+            or resolutions[0]["exit"] == 75
+        ):
+            _reject("PROOF_INVALID")
+        repeated = True
+    return repeated
+
+
+def _archive_pointer(
+    state, pointer, reason, observed_at, *, validated_rejected_consumers=False, **facts
+):
     history = state.setdefault("exit_reconciliation_history", [])
     if not isinstance(history, list) or any(
-        not isinstance(item, dict) or item.get("attempt_id") == pointer["attempt_id"]
+        not isinstance(item, dict)
+        or item.get("attempt_id") == pointer["attempt_id"]
+        and (
+            not validated_rejected_consumers
+            or not item.get("consumed_by")
+            or not pointer.get("consumed_by")
+            or item.get("consumed_by") == pointer.get("consumed_by")
+            or item.get("evidence_sha256") != pointer.get("evidence_sha256")
+        )
         for item in history
     ):
         _reject("PROOF_INVALID")
