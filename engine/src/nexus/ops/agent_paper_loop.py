@@ -156,6 +156,7 @@ from nexus.persistence.models.runtime import IdempotencyRecord, Job, JobLease, W
 from nexus.providers.http import HttpPolicyError
 from nexus.providers.market.schwab_oauth import (
     SchwabOAuthError,
+    inspect_schwab_token_readiness,
     load_schwab_app_config,
     load_schwab_token,
     require_live_schwab_access_token,
@@ -795,6 +796,14 @@ def agent_paper_service_preflight(
             )
     except OSError:
         blocking_codes.add("AGENT_PAPER_SCHWAB_TOKEN_INVALID")
+    authentication = inspect_schwab_token_readiness(
+        repo_root, now=now or datetime.now(UTC), process_environment=environment
+    )
+    if authentication.get("reason_code") in {
+        "SCHWAB_OAUTH_REFRESH_PREVIOUSLY_REJECTED",
+        "SCHWAB_OAUTH_REFRESH_REJECTION_STORE_INVALID",
+    }:
+        optional_codes.append(str(authentication["reason_code"]))
     if not _agent_paper_output_directory_valid(repo_root):
         blocking_codes.add("AGENT_PAPER_OUTPUT_DIRECTORY_INVALID")
     if not _nonempty_environment_values(environment, ("FRED_API_KEY",)):

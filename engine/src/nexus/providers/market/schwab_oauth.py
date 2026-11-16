@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -376,7 +377,170 @@ def require_live_schwab_access_token(
     return token.access_token
 
 
-def inspect_schwab_token_readiness(repo_root: Path, *, now: datetime) -> dict[str, str | None]:
+_REFRESH_REJECTION_STORE_INVALID = "SCHWAB_OAUTH_REFRESH_REJECTION_STORE_INVALID"
+_REFRESH_PREVIOUSLY_REJECTED = "SCHWAB_OAUTH_REFRESH_PREVIOUSLY_REJECTED"
+
+
+def _refresh_rejection_path(
+    repo_root: Path, token: SchwabOAuthToken, config: SchwabAppConfig, *, create: bool = False
+) -> tuple[Path, str] | None:
+    """Credential identities remain private; no token or fingerprint enters diagnostics."""
+    directory = repo_root.resolve() / ".secrets" / "nexus-schwab-local" / ".refresh-rejections"
+    try:
+        if create:
+            directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            return None
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.geteuid()
+        ):
+            raise ValueError
+        identity = json.dumps(
+            [
+                "nexus-schwab-refresh-rejection-v1",
+                token.access_token,
+                token.refresh_token,
+                token.obtained_at.isoformat(),
+                token.expires_at.isoformat(),
+                config.app_key,
+                config.app_secret,
+                config.callback_url,
+            ],
+            separators=(",", ":"),
+        ).encode()
+        version = sha256(identity).hexdigest()
+        return directory / f"{version}.json", version
+    except (OSError, ValueError):
+        raise SchwabOAuthError(_REFRESH_REJECTION_STORE_INVALID) from None
+
+
+def _read_refresh_rejection(
+    repo_root: Path, token: SchwabOAuthToken, config: SchwabAppConfig
+) -> dict[str, str | None] | None:
+    selected = _refresh_rejection_path(repo_root, token, config)
+    if selected is None:
+        return None
+    path, version = selected
+    matched = None
+    try:
+        for candidate in path.parent.iterdir():
+            identity = candidate.stem
+            if (
+                candidate.suffix != ".json"
+                or len(identity) != 64
+                or any(ch not in "0123456789abcdef" for ch in identity)
+            ):
+                raise SchwabOAuthError(_REFRESH_REJECTION_STORE_INVALID)
+            evidence = _read_refresh_rejection_record(candidate, identity)
+            if identity == version:
+                matched = evidence
+    except OSError:
+        raise SchwabOAuthError(_REFRESH_REJECTION_STORE_INVALID) from None
+    return matched
+
+
+def _read_refresh_rejection_record(path: Path, version: str) -> dict[str, str | None]:
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.geteuid()
+            or info.st_size > 4096
+        ):
+            raise ValueError
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            payload = json.loads(source.read(4097), object_pairs_hook=_unique_json)
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema",
+            "credential_version",
+            "error_code",
+            "oauth_error_code",
+            "observed_at",
+        }:
+            raise ValueError
+        observed = datetime.fromisoformat(payload["observed_at"])
+        if (
+            payload["schema"] != "nexus_schwab_refresh_rejection_v1"
+            or payload["credential_version"] != version
+            or payload["error_code"] != "SCHWAB_OAUTH_REFRESH_HTTP_400"
+            or payload["oauth_error_code"] is not None
+            and payload["oauth_error_code"] not in _TOKEN_ERROR_CODES
+            or observed.tzinfo is None
+            or observed.utcoffset() is None
+        ):
+            raise ValueError
+        return payload
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, RecursionError):
+        raise SchwabOAuthError(_REFRESH_REJECTION_STORE_INVALID) from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _require_refresh_not_rejected(
+    repo_root: Path, token: SchwabOAuthToken, config: SchwabAppConfig
+) -> None:
+    previous = _read_refresh_rejection(repo_root, token, config)
+    if previous is not None:
+        raise SchwabOAuthError(
+            _REFRESH_PREVIOUSLY_REJECTED, oauth_error_code=previous["oauth_error_code"]
+        )
+
+
+def _save_refresh_rejection(
+    repo_root: Path,
+    token: SchwabOAuthToken,
+    config: SchwabAppConfig,
+    error: SchwabOAuthError,
+    *,
+    now: datetime,
+) -> None:
+    selected = _refresh_rejection_path(repo_root, token, config, create=True)
+    if selected is None:
+        raise SchwabOAuthError(_REFRESH_REJECTION_STORE_INVALID)
+    path, version = selected
+    payload = json.dumps(
+        {
+            "schema": "nexus_schwab_refresh_rejection_v1",
+            "credential_version": version,
+            "error_code": "SCHWAB_OAUTH_REFRESH_HTTP_400",
+            "oauth_error_code": safe_schwab_oauth_error_code(error),
+            "observed_at": now.isoformat(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = None
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError:
+        raise SchwabOAuthError(_REFRESH_REJECTION_STORE_INVALID) from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def inspect_schwab_token_readiness(
+    repo_root: Path, *, now: datetime, process_environment: Mapping[str, str] | None = None
+) -> dict[str, str | None]:
     """Inspect stored validity only; current tokens do not prove remote authorization."""
     state, reason = "current", None
     try:
@@ -388,12 +552,29 @@ def inspect_schwab_token_readiness(repo_root: Path, *, now: datetime) -> dict[st
         reason = str(error)
     except OSError:
         state, reason = "invalid", "SCHWAB_OAUTH_TOKEN_STORE_INVALID"
-    return {
+    result: dict[str, str | None] = {
         "local_access_token": state,
         "reason_code": reason,
         "remote_authentication": "not_checked",
         "market_window_evidence": "not_evaluated",
     }
+    directory = repo_root.resolve() / ".secrets" / "nexus-schwab-local" / ".refresh-rejections"
+    if directory.exists() or directory.is_symlink():
+        try:
+            token = load_schwab_token(repo_root)
+            config = load_schwab_app_config(repo_root, process_environment or {})
+            previous = _read_refresh_rejection(repo_root, token, config)
+            if previous is not None:
+                result.update(
+                    remote_authentication="known_rejected",
+                    reason_code=_REFRESH_PREVIOUSLY_REJECTED,
+                    oauth_error_code=previous["oauth_error_code"] or "unknown",
+                )
+        except (OSError, SchwabOAuthError):
+            result.update(
+                remote_authentication="unknown", reason_code=_REFRESH_REJECTION_STORE_INVALID
+            )
+    return result
 
 
 @asynccontextmanager
@@ -439,16 +620,30 @@ async def load_or_refresh_schwab_token(
     if now.tzinfo is None or now.utcoffset() is None:
         raise SchwabOAuthError("SCHWAB_OAUTH_TIME_INVALID")
     token = load_schwab_token(repo_root)
-    if not force and token.expires_at - now > refresh_window:
+    rejection_directory = (
+        repo_root.resolve() / ".secrets" / "nexus-schwab-local" / ".refresh-rejections"
+    )
+    if (
+        not force
+        and token.expires_at - now > refresh_window
+        and not (rejection_directory.exists() or rejection_directory.is_symlink())
+    ):
         return token
     async with _exclusive_schwab_token_refresh(repo_root):
         token = load_schwab_token(repo_root)
+        config = load_schwab_app_config(repo_root, process_environment)
+        _require_refresh_not_rejected(repo_root, token, config)
         if not force and token.expires_at - now > refresh_window:
             return token
-        config = load_schwab_app_config(repo_root, process_environment)
+        _refresh_rejection_path(repo_root, token, config, create=True)
 
         async def refresh_and_commit() -> SchwabOAuthToken:
-            refreshed = await refresh_schwab_access_token(config, token, client, now=now)
+            try:
+                refreshed = await refresh_schwab_access_token(config, token, client, now=now)
+            except SchwabOAuthError as error:
+                if str(error) == "SCHWAB_OAUTH_REFRESH_HTTP_400":
+                    _save_refresh_rejection(repo_root, token, config, error, now=now)
+                raise
             save_schwab_token(repo_root, refreshed)
             return refreshed
 

@@ -236,6 +236,22 @@ def _archive_result(directory: Path) -> object:
         os.close(fd)
 
 
+def _collection_failure_diagnostic(result: object) -> str | None:
+    """Project a saved collector failure without exposing provider text or retrying."""
+    if not isinstance(result, dict) or (
+        result.get("status") != "unavailable"
+        or result.get("code") != "IDENTITY_COLLECTION_FAILED"
+        or result.get("authority_registered") is not False
+        or result.get("execution_locked") is not True
+        or result.get("stage") not in ("directory", "submissions")
+        or result.get("failure_phase") not in ("request", "binding", "archive", "parse")
+    ):
+        return None
+    if result.get("failure_code") in ("DEADLINE_EXCEEDED", "IDENTITY_COLLECTION_DEADLINE_EXCEEDED"):
+        return "TIMEOUT"
+    return "COLLECTION_UNAVAILABLE"
+
+
 def _import_failure_marker(path: Path) -> None:
     # The transaction context has already rolled back a known validation failure.
     # A sibling receipt does not alter the strict source archive's file set.
@@ -311,8 +327,14 @@ async def prepare_agent_paper_identity_once(
                     raise
                 # The collector persisted its fixed failure receipt. Keep other
                 # independent preparations running without retrying this source.
+                try:
+                    saved = _archive_result(directory)
+                except (OSError, ValueError):
+                    saved = None
                 return preparation_unavailable(
-                    "research_identity", "collect", "COLLECTION_UNAVAILABLE"
+                    "research_identity",
+                    "collect",
+                    _collection_failure_diagnostic(saved) or "COLLECTION_UNAVAILABLE",
                 )
         else:
             # Existing incomplete or failed archives never cause a fresh request.
@@ -322,7 +344,11 @@ async def prepare_agent_paper_identity_once(
             except (OSError, ValueError):
                 return preparation_unavailable("research_identity", "archive", "ARCHIVE_INVALID")
         if not isinstance(result, dict) or result.get("status") != "archived":
-            return preparation_unavailable("research_identity", "archive", "ARCHIVE_INVALID")
+            return preparation_unavailable(
+                "research_identity",
+                "archive",
+                _collection_failure_diagnostic(result) or "ARCHIVE_INVALID",
+            )
         refreshed = await preparation_call(
             "research_identity",
             "readback",
