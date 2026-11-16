@@ -78,7 +78,10 @@ def test_new_increment_reserves_the_daily_slot_worst_case_time(minute, expected)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["allowed", "daily_due", "disabled", "changed_batch", "unknown"])
-async def test_dispatch_reloads_scope_and_rechecks_current_priority(monkeypatch, tmp_path, mode):
+@pytest.mark.parametrize("materials_only", [False, True])
+async def test_dispatch_reloads_scope_and_rechecks_current_priority(
+    monkeypatch, tmp_path, mode, materials_only
+):
     from nexus.ops import manual_paper_host, monitor_dispatch, research_monitor
     from nexus.settings import EngineSettings
 
@@ -102,6 +105,17 @@ async def test_dispatch_reloads_scope_and_rechecks_current_priority(monkeypatch,
         monitor_trigger_id=UUID(int=4),
         monitor_trigger_status="unknown" if mode == "unknown" else "pending",
     )
+    if materials_only:
+        opening = AT.replace(hour=13, minute=30)
+        selected = replace(
+            selected,
+            now=opening + timedelta(minutes=15),
+            market_open_at=opening,
+            decision_window_start_at=opening,
+            host_prepared_market_open_at=opening,
+            monitor_batch_id=UUID(int=7),
+            monitor_materials_status="pending",
+        )
     if mode == "daily_due":
         selected = replace(selected, cycle_status="researching", research_job_status="queued")
     calls = []
@@ -120,6 +134,7 @@ async def test_dispatch_reloads_scope_and_rechecks_current_priority(monkeypatch,
         return kwargs["snapshot"]
 
     async def dispatch(*args, **kwargs):
+        assert kwargs["prepare_materials_only"] == materials_only
         calls.append(kwargs["trigger_id"])
         return {"status": "completed"}
 
@@ -138,6 +153,7 @@ async def test_dispatch_reloads_scope_and_rechecks_current_priority(monkeypatch,
                 trigger_id=UUID(int=4),
                 calendar_authority_id=UUID(int=1),
                 repo_root=tmp_path,
+                prepare_materials_only=materials_only,
             )
     else:
         result = await monitor_dispatch.dispatch_host_once(
@@ -146,6 +162,7 @@ async def test_dispatch_reloads_scope_and_rechecks_current_priority(monkeypatch,
             trigger_id=UUID(int=4),
             calendar_authority_id=UUID(int=1),
             repo_root=tmp_path,
+            prepare_materials_only=materials_only,
         )
         assert result["status"] == ("completed" if mode == "allowed" else "deferred")
     assert calls == ([UUID(int=4)] if mode == "allowed" else [])

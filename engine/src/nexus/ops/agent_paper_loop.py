@@ -246,6 +246,7 @@ class AgentPaperLoopAction(StrEnum):
     WAIT_FOR_EVALUATION = "wait_for_evaluation"
     WAIT_FOR_EVALUATION_JOB = "wait_for_evaluation_job"
     RUN_MONITOR_INCREMENT = "run_monitor_increment"
+    PREPARE_MONITOR_MATERIALS = "prepare_monitor_materials"
     TRIGGER = "trigger"
     FINISH_MANUAL = "finish_manual"
     TRIGGER_MANUAL = "trigger_manual"
@@ -312,6 +313,7 @@ class AgentPaperLoopSnapshot:
     monitor_trigger_id: UUID | None = None
     monitor_trigger_status: str | None = None
     monitor_batch_id: UUID | None = None
+    monitor_materials_status: str | None = None
     host_prepared_market_open_at: datetime | None = None
 
 
@@ -1919,10 +1921,18 @@ def choose_loop_action(
                     )
                 )
                 daily_slot = _portfolio_slot(snapshot.decision_window_start_at)
-                if (
-                    snapshot.now < snapshot.market_open_at
-                    or snapshot.now < daily_slot < snapshot.now + headroom
-                ):
+                if snapshot.now < snapshot.market_open_at:
+                    return ordinary
+                if snapshot.now < daily_slot < snapshot.now + headroom:
+                    # Material collection is independently bounded and grants no
+                    # child admission. Preserve the full increment's original margin.
+                    if (
+                        snapshot.monitor_batch_id is not None
+                        and snapshot.monitor_materials_status == "pending"
+                        and snapshot.now + timedelta(seconds=BATCH_PREPARATION_HEADROOM_SECONDS)
+                        <= daily_slot
+                    ):
+                        return AgentPaperLoopAction.PREPARE_MONITOR_MATERIALS
                     return ordinary
             return AgentPaperLoopAction.RUN_MONITOR_INCREMENT
         return ordinary
@@ -2668,6 +2678,22 @@ async def confirm_agent_paper_shutdown(
     action_result: AgentPaperLoopAction | None,
 ) -> bool:
     """Read once and verify the exact action's persisted shutdown postcondition."""
+    if action == AgentPaperLoopAction.PREPARE_MONITOR_MATERIALS:
+        from nexus.ops.monitor_dispatch import confirm_monitor_materials_shutdown
+
+        if (
+            before_snapshot.monitor_trigger_id is None
+            or before_snapshot.monitor_batch_id is None
+            or before_snapshot.calendar_authority_id != expected_calendar_authority_id
+            or action_result is not None
+        ):
+            return False
+        return await confirm_monitor_materials_shutdown(
+            settings,
+            account_id=account_id,
+            trigger_id=before_snapshot.monitor_trigger_id,
+            batch_id=before_snapshot.monitor_batch_id,
+        )
     if action == AgentPaperLoopAction.RUN_MONITOR_INCREMENT:
         from nexus.ops.monitor_dispatch import confirm_monitor_shutdown
 
@@ -3296,7 +3322,10 @@ async def execute_agent_paper_loop_action(
     env_file: Path | None = None,
 ) -> AgentPaperLoopAction | None:
     """Execute exactly one planner-approved action through existing product services."""
-    if action == AgentPaperLoopAction.RUN_MONITOR_INCREMENT:
+    if action in {
+        AgentPaperLoopAction.RUN_MONITOR_INCREMENT,
+        AgentPaperLoopAction.PREPARE_MONITOR_MATERIALS,
+    }:
         from nexus.ops.monitor_dispatch import dispatch_host_once
 
         if (
@@ -3313,6 +3342,7 @@ async def execute_agent_paper_loop_action(
             repo_root=repo_root,
             env_file=env_file,
             prepared_market_open_at=snapshot.host_prepared_market_open_at,
+            prepare_materials_only=action == AgentPaperLoopAction.PREPARE_MONITOR_MATERIALS,
         )
         return (
             AgentPaperLoopAction.STOP_RESULT_UNKNOWN
