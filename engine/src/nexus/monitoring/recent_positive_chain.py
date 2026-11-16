@@ -274,6 +274,24 @@ async def _binding_values(
     )
 
 
+async def _plan_active_at(session: AsyncSession, plan: MonitorPlan, now: datetime) -> bool:
+    if not max(plan.created_at, plan.effective_at) <= now < plan.valid_until:
+        return False
+    replacement = await session.scalar(
+        select(MonitorPlan.id)
+        .where(
+            MonitorPlan.account_id == plan.account_id,
+            MonitorPlan.instrument_id == plan.instrument_id,
+            MonitorPlan.kind == plan.kind,
+            MonitorPlan.generation > plan.generation,
+            MonitorPlan.created_at <= now,
+            MonitorPlan.effective_at <= now,
+        )
+        .limit(1)
+    )
+    return replacement is None
+
+
 async def read_member(
     session: AsyncSession, plan: MonitorPlan, now: datetime
 ) -> tuple[DataSnapshot, PositiveChainMember] | None:
@@ -303,7 +321,14 @@ async def read_member(
             or not max(plan.created_at, plan.effective_at) <= member.effective_at < plan.valid_until
         ):
             raise ValueError(INVALID)
-        return (row, member) if await _active(session, scope_row, scope, now) else None
+        return (
+            (row, member)
+            if (
+                await _active(session, scope_row, scope, now)
+                and await _plan_active_at(session, plan, now)
+            )
+            else None
+        )
     # An active applicable scope with a missing registration is unknown, not permission.
     scopes = tuple(
         await session.scalars(
@@ -317,7 +342,11 @@ async def read_member(
     )
     for row in scopes:
         scope = await _scope(session, row, now)
-        if await _descends(session, plan, scope, now) and await _active(session, row, scope, now):
+        if (
+            await _descends(session, plan, scope, now)
+            and await _active(session, row, scope, now)
+            and await _plan_active_at(session, plan, now)
+        ):
             raise ValueError(INVALID)
     return None
 

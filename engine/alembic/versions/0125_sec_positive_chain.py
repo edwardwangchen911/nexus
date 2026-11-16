@@ -168,8 +168,8 @@ BEGIN
   ELSE
    SELECT * INTO scope FROM public.data_snapshots WHERE id=(NEW.payload->>'scope_snapshot_id')::uuid AND source='nexus_sec_positive_chain_scope' AND schema_version='sec_positive_chain_scope_v1';
    IF scope.id IS NULL OR scope.revision IS DISTINCT FROM NEW.payload->>'scope_hash' OR scope.created_at>at_time THEN RAISE EXCEPTION 'SEC_POSITIVE_CHAIN_INVALID' USING ERRCODE='23514'; END IF;
-   PERFORM pg_advisory_xact_lock(hashtextextended('sec-positive-chain:'||scope.id::text,0));
    PERFORM pg_advisory_xact_lock(hashtextextended('research-monitor:'||(scope.payload->>'account_id')||':'||(scope.payload->>'instrument_id'),0));
+   PERFORM pg_advisory_xact_lock(hashtextextended('sec-positive-chain:'||scope.id::text,0));
    IF EXISTS(SELECT FROM public.data_snapshots WHERE source='nexus_sec_positive_chain_revoke' AND provider_object_id=scope.id::text) THEN RAISE EXCEPTION 'SEC_POSITIVE_CHAIN_INVALID' USING ERRCODE='23514'; END IF;
    IF NEW.source='nexus_sec_positive_chain_revoke' THEN
     expected:=jsonb_build_object('policy','sec_positive_chain_revoke_v1','scope_snapshot_id',scope.id::text,'scope_hash',scope.revision,

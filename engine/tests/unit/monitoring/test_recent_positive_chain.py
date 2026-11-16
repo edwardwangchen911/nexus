@@ -38,6 +38,7 @@ def plan_value(**changes):
         created_at=NOW - timedelta(hours=2),
         effective_at=NOW - timedelta(hours=2),
         generation=1,
+        valid_until=NOW + timedelta(days=1),
         predecessor_id=None,
     )
     return SimpleNamespace(**{**values, **changes})
@@ -153,7 +154,11 @@ async def test_missing_active_member_is_unknown_and_read_never_writes(monkeypatc
     monkeypatch.setattr(chain, "_visible", AsyncMock(return_value=()))
     monkeypatch.setattr(chain, "_scope", AsyncMock(return_value=scope_value()))
     monkeypatch.setattr(chain, "_active", AsyncMock(return_value=True))
-    session = SimpleNamespace(scalars=AsyncMock(return_value=(object(),)), get=AsyncMock())
+    session = SimpleNamespace(
+        scalars=AsyncMock(return_value=(object(),)),
+        get=AsyncMock(),
+        scalar=AsyncMock(return_value=None),
+    )
     with pytest.raises(ValueError, match=chain.INVALID):
         await chain.read_member(session, plan_value(), NOW)
     monkeypatch.setattr(chain, "_active", AsyncMock(return_value=False))
@@ -258,7 +263,10 @@ async def test_chain_true_partial_normal_reader_reuses_existing_raw_checks(monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mutation", [None, "source", "scopehash", "expiry"])
+@pytest.mark.parametrize(
+    "mutation",
+    [None, "source", "scopehash", "expiry", "plan_expired", "plan_replaced", "historical"],
+)
 async def test_member_hash_custody_and_expiry_readback(monkeypatch, mutation):
     scope = scope_value()
     bindings = scope.model_dump(
@@ -282,8 +290,16 @@ async def test_member_hash_custody_and_expiry_readback(monkeypatch, mutation):
     monkeypatch.setattr(chain, "_scope", AsyncMock(return_value=scope))
     monkeypatch.setattr(chain, "_binding_values", AsyncMock(return_value=bindings))
     monkeypatch.setattr(chain, "_active", AsyncMock(return_value=mutation != "expiry"))
-    session = SimpleNamespace(get=AsyncMock(return_value=scope_row))
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=scope_row),
+        scalar=AsyncMock(return_value=UUID(int=501) if mutation == "plan_replaced" else None),
+    )
     plan = plan_value(valid_until=NOW + timedelta(days=1))
+    read_at = plan.valid_until if mutation == "plan_expired" else NOW
+    if mutation == "historical":
+        session.scalar = AsyncMock(side_effect=[UUID(int=501), None])
+        assert await chain.read_member(session, plan, NOW + timedelta(seconds=3)) is None
+        read_at = NOW + timedelta(seconds=1)
     if mutation == "source":
         bindings["source_hash"] = "f" * 64
     if mutation == "scopehash":
@@ -292,8 +308,13 @@ async def test_member_hash_custody_and_expiry_readback(monkeypatch, mutation):
         with pytest.raises(ValueError, match=chain.INVALID):
             await chain.read_member(session, plan, NOW)
     else:
-        result = await chain.read_member(session, plan, NOW)
-        assert (result is None) == (mutation == "expiry")
+        result = await chain.read_member(session, plan, read_at)
+        assert (result is None) == (mutation in {"expiry", "plan_expired", "plan_replaced"})
+        if mutation == "historical":
+            query = session.scalar.await_args.args[0]
+            params = query.compile().params
+            assert read_at in params.values()
+            assert "created_at" in str(query) and "effective_at" in str(query)
 
 
 @pytest.mark.asyncio
