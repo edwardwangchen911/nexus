@@ -633,6 +633,23 @@ async def test_v6_root_one_price_increment_is_permanent(
                 )
             ).one()
             assert claim == (receipt.request_id, first.run_id)
+            if unknown:
+                reservation = (
+                    await db.execute(
+                        text(
+                            "SELECT state,reserved_usd,settled_usd "
+                            "FROM agent_daily_budget_reservations WHERE run_id=:r"
+                        ),
+                        {"r": first.run_id},
+                    )
+                ).one()
+                assert reservation.state == "reserved" and reservation.settled_usd is None
+                assert reservation.reserved_usd > 0
+                assert await db.scalar(
+                    text("SELECT settled_cost_usd IS NULL FROM agent_research_runs WHERE id=:r"),
+                    {"r": first.run_id},
+                )
+
             # Recursive resolver also handles a real child; no source relabeling.
             assert (
                 await db.scalar(
