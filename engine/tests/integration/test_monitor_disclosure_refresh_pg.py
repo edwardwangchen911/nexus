@@ -667,11 +667,8 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
 async def test_reuse_keeps_full_host_preparation_and_scan_freshness_budget(
     migrated_database_url, monkeypatch, tmp_path, age_seconds
 ):
-    from types import SimpleNamespace
-
     from nexus.monitoring.disclosure_observations import read_disclosure_observation
     from nexus.persistence.models.monitoring import MonitorPlan
-    from sqlalchemy import literal
 
     factory, store, captured, pointer, calls, client, invoke = await setup(
         migrated_database_url, monkeypatch, tmp_path
@@ -687,11 +684,13 @@ async def test_reuse_keeps_full_host_preparation_and_scan_freshness_budget(
         captured["clock"][0] = now
         await _set_test_insert_clock(factory, now)
         # This inclusive budget boundary is business time, independent of wall-clock test speed.
-        monkeypatch.setattr(
-            refresh,
-            "func",
-            SimpleNamespace(clock_timestamp=lambda: literal(now)),
-        )
+        original_scope = refresh._scope
+
+        async def scope_at_business_time(*args, **kwargs):
+            _, instruments = await original_scope(*args, **kwargs)
+            return now, instruments
+
+        monkeypatch.setattr(refresh, "_scope", scope_at_business_time)
         result = await invoke()
         if age_seconds <= 52:
             assert result["provider_requests"] == 0 and not calls
