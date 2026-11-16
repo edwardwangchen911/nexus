@@ -598,7 +598,9 @@ async def _run(
                     ):
                         raise
                     reason = (
-                        "MONITOR_DAILY_LIMIT_REACHED"
+                        "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED"
+                        if str(error) == "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED"
+                        else "MONITOR_DAILY_LIMIT_REACHED"
                         if str(error) == "MONITOR_DAILY_CALL_LIMIT"
                         else "MONITOR_BUDGET_UNAVAILABLE"
                         if isinstance(error, BudgetExhausted)
@@ -613,6 +615,7 @@ async def _run(
                     )
                     safe_codes = {
                         "MONITOR_DAILY_CALL_LIMIT",
+                        "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED",
                         "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
                         "MONITOR_MARKET_CLOSED",
                         "MONITOR_SOURCE_INVALID",
@@ -720,7 +723,9 @@ async def _run(
                     )
                 except (ValueError, BudgetExhausted) as error:
                     reason = (
-                        "MONITOR_DAILY_LIMIT_REACHED"
+                        "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED"
+                        if str(error) == "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED"
+                        else "MONITOR_DAILY_LIMIT_REACHED"
                         if str(error) == "MONITOR_DAILY_CALL_LIMIT"
                         else "MONITOR_BUDGET_UNAVAILABLE"
                         if isinstance(error, BudgetExhausted)
@@ -738,6 +743,7 @@ async def _run(
                         "MONITOR_PENDING_OVERFLOW",
                         "MONITOR_PENDING_CONDITION_UNRESOLVED",
                         "MONITOR_DAILY_CALL_LIMIT",
+                        "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED",
                         "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
                         "MONITOR_SOURCE_INVALID",
                         "MONITOR_CONTEXT_INVALID",
@@ -1019,6 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
             "MONITOR_PENDING_OVERFLOW",
             "MONITOR_PREPARED_INPUTS_CHANGED",
             "MONITOR_DAILY_CALL_LIMIT",
+            "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED",
             "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
             "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN",
             "MANUAL_PREPARATION_ACK_BLOCKED",

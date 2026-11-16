@@ -36,6 +36,7 @@ export const researchStatuses = {
 
 export const blockedReasons = {
   budget: "预算不足或预算仍被占用。", account_occupied: "账户已有研究任务占用。",
+  one_time_limit: "本次仅允许一笔增量研究，名额已使用。",
   inputs: "研究输入尚不满足要求。", overflow: "待处理任务达到容量上限。", unknown: "受阻原因尚未确认。",
 } as const;
 

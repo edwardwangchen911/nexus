@@ -21,7 +21,9 @@ type CoverageReason = Literal[
     "review_unverified",
     "replacement_rejected",
 ]
-type BlockedReason = Literal["budget", "account_occupied", "inputs", "overflow", "unknown"]
+type BlockedReason = Literal[
+    "budget", "account_occupied", "inputs", "overflow", "one_time_limit", "unknown"
+]
 type UsageStatus = Literal["not_started", "in_progress", "known", "unknown"]
 
 

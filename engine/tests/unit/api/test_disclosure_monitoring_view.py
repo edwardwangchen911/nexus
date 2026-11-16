@@ -72,3 +72,9 @@ async def test_future_native_settlement_cannot_be_shown_as_known_at_old_read_tim
         scalar=AsyncMock(return_value=SimpleNamespace(finished_at=now + timedelta(seconds=1)))
     )
     assert await _usage(session, run, now) == "unknown"
+
+
+def test_once_consumption_has_a_specific_readonly_blocked_reason():
+    from pydantic import TypeAdapter
+
+    assert TypeAdapter(schemas.BlockedReason).validate_python("one_time_limit") == "one_time_limit"

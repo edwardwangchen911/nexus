@@ -164,3 +164,12 @@ describe("saved price monitoring readback", () => {
     expect(screen.queryByRole("region", { name: "价格监控记录" })).not.toBeInTheDocument();
   });
 });
+
+it("keeps the consumed one-time increment separate from input and budget gaps", () => {
+  render(<ResearchMonitoring instrumentId={instrumentId} monitoring={monitoring({ trigger_count: 1,
+    triggers: [trigger({ status: "blocked", blocked_reason: "one_time_limit", usage_status: "not_started" })],
+  })} />);
+  fireEvent.click(screen.getByText(/查看最近/));
+  expect(screen.getByText("本次仅允许一笔增量研究，名额已使用。")).toBeVisible();
+  expect(screen.queryByText("研究输入尚不满足要求。")).not.toBeInTheDocument();
+});
