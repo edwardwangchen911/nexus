@@ -379,8 +379,22 @@ async def scan_stock_batch(
                 if checked.plan_id != sec.id:
                     raise ValueError("MONITOR_DISCLOSURE_IDENTITY_CONFLICT")
                 checks.append(checked)
+                from nexus.monitoring.durable_sec_claims import claim_notice
+
+                trigger_id = new_uuid7()
+                if not await claim_notice(
+                    session,
+                    account_id=account_id,
+                    instrument_id=instrument_id,
+                    event_key=event_key,
+                    outbox_id=outbox_id,
+                    legacy_trigger_id=trigger_id,
+                    now=now,
+                ):
+                    continue
                 session.add(
                     MonitorTrigger(
+                        id=trigger_id,
                         account_id=account_id,
                         instrument_id=instrument_id,
                         kind="disclosure",

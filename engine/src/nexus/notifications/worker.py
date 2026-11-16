@@ -19,6 +19,7 @@ from nexus.notifications.bark import (
     validate_bark_read_only_url,
     validate_local_bark_server_url,
 )
+from nexus.notifications.durable_sec_gate import DurableSecPublisher, notice_claim_condition
 from nexus.outbox.dispatcher import dispatch_outbox_once
 from nexus.outbox.models import Publisher, PublisherSpec
 from nexus.outbox.registry import PublisherRegistry
@@ -173,7 +174,7 @@ async def run_bark_worker(
             encryption_key=credentials.encryption_key,
             read_only_url=settings.read_only_url,
         )
-        registry = build_bark_registry(publisher)
+        registry = build_bark_registry(DurableSecPublisher(factory, publisher))
         while True:
             worked = await dispatch_outbox_once(
                 factory,
@@ -182,6 +183,7 @@ async def run_bark_worker(
                 clock=clock,
                 claim_registered_only=True,
                 created_at_or_after=settings.activated_at,
+                claim_condition=notice_claim_condition(),
             )
             if worked:
                 delivered += 1

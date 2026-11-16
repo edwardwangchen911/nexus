@@ -30,6 +30,19 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "reconcile", help="Reconcile persisted research results into monitor coverage"
     )
+    durable = commands.add_parser("enable-sec-monitor-rule", help="Register durable SEC discovery")
+    durable.add_argument("--plan-id", type=UUID, required=True)
+    for action in (
+        "pause-sec-monitor-rule",
+        "resume-sec-monitor-rule",
+        "revoke-sec-monitor-rule",
+        "inspect-sec-monitor-rule",
+    ):
+        durable = commands.add_parser(action, help="Operate an existing durable SEC rule")
+        durable.add_argument("--rule-id", type=UUID, required=True)
+    durable = commands.add_parser("record-sec-discovery", help="Verify an archived SEC source")
+    durable.add_argument("--rule-id", type=UUID, required=True)
+    durable.add_argument("--capture-id", type=UUID, required=True)
     pending = commands.add_parser(
         "prepare-pending", help="Prepare one sealed batch without model I/O"
     )
@@ -439,6 +452,74 @@ async def _run(
                     "provider_requests": 0,
                     "execution_locked": True,
                     "reconciled_results": 0,
+                }
+            if args.action in {
+                "enable-sec-monitor-rule",
+                "pause-sec-monitor-rule",
+                "resume-sec-monitor-rule",
+                "revoke-sec-monitor-rule",
+                "inspect-sec-monitor-rule",
+                "record-sec-discovery",
+            }:
+                from nexus.monitoring.durable_sec_contracts import RuleState
+                from nexus.monitoring.durable_sec_storage import (
+                    change_state,
+                    enable_rule,
+                    record_discovery,
+                    rule_state,
+                )
+                from nexus.persistence.models.sec_monitor import SecMonitorRule
+
+                rule: SecMonitorRule | None
+                if args.action == "enable-sec-monitor-rule":
+                    rule = await enable_rule(
+                        session, account_id=settings.agent_paper_account_id, plan_id=args.plan_id
+                    )
+                else:
+                    rule = await session.get(SecMonitorRule, args.rule_id)
+                    if rule is None or rule.account_id != settings.agent_paper_account_id:
+                        raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+                    if args.action == "record-sec-discovery":
+                        from nexus.paper.host_probe_state import require_host_admitting
+
+                        await require_host_admitting(session, rule.account_id)
+                        check = await record_discovery(
+                            session,
+                            account_id=rule.account_id,
+                            rule_id=rule.id,
+                            capture_id=args.capture_id,
+                            scheduled_at=now.replace(
+                                minute=now.minute // 5 * 5, second=0, microsecond=0
+                            ),
+                        )
+                        return {
+                            "status": "observed",
+                            "check_id": str(check.id),
+                            "result": check.result,
+                            "coverage": check.coverage,
+                            "model_requests": 0,
+                            "provider_requests": 0,
+                            "execution_locked": True,
+                        }
+                    if args.action != "inspect-sec-monitor-rule":
+                        states: dict[str, RuleState] = {
+                            "pause-sec-monitor-rule": "paused",
+                            "resume-sec-monitor-rule": "active",
+                            "revoke-sec-monitor-rule": "revoked",
+                        }
+                        state = states[args.action]
+                        await change_state(
+                            session, account_id=rule.account_id, rule_id=rule.id, state=state
+                        )
+                return {
+                    "status": await rule_state(session, rule),
+                    "rule_id": str(rule.id),
+                    "effective_at": rule.effective_at.isoformat(),
+                    "expires_at": None,
+                    "research_authority_granted": False,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "execution_locked": True,
                 }
             if args.action in {
                 "enable-positive-chain-scope",

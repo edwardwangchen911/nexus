@@ -1,0 +1,408 @@
+"""Explicit durable discovery facts; research authority remains a separate gate."""
+
+import json
+from datetime import datetime
+from hashlib import sha256
+from typing import cast
+from uuid import UUID
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.domain.ids import new_uuid7
+from nexus.domain.time import require_utc
+from nexus.monitoring.disclosure_observations import _bound_proposal, _capture
+from nexus.monitoring.durable_sec_claims import audit_fact, claim_notice
+from nexus.monitoring.durable_sec_contracts import DurableSecPolicy, RuleState
+from nexus.monitoring.durable_sec_evaluation import evaluate_discovery
+from nexus.monitoring.sec_index_reader import read_monitor_index
+from nexus.monitoring.storage import lock_security
+from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
+from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.market import InstrumentAlias
+from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
+from nexus.persistence.models.runtime import OutboxEvent
+from nexus.persistence.models.sec_monitor import (
+    SecDiscoveryCheck,
+    SecDiscoveryEvent,
+    SecDiscoveryEventRevision,
+    SecMonitorRule,
+    SecMonitorRuleState,
+    SecNotificationClaim,
+)
+from nexus.research.sec_disclosure_index import SecIndexEntry
+from nexus.research.sec_exhibit_storage import configured_exhibit_store
+from nexus.research.sec_index_storage import SOURCE as INDEX_SOURCE
+
+
+async def _time(session: AsyncSession) -> datetime:
+    at = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
+    if not isinstance(at, datetime):
+        raise ValueError("SEC_DURABLE_CLOCK_UNAVAILABLE")
+    return require_utc(at)
+
+
+async def _lock(session: AsyncSession, rule: SecMonitorRule) -> None:
+    await lock_security(session, account_id=rule.account_id, instrument_id=rule.instrument_id)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+        {"key": f"sec-durable-rule:{rule.id}"},
+    )
+
+
+async def rule_state(session: AsyncSession, rule: SecMonitorRule) -> RuleState:
+    state = await session.scalar(
+        select(SecMonitorRuleState.state)
+        .where(SecMonitorRuleState.rule_id == rule.id)
+        .order_by(SecMonitorRuleState.sequence.desc())
+        .limit(1)
+    )
+    if state not in ("active", "paused", "revoked"):
+        raise ValueError("SEC_DURABLE_STATE_INVALID")
+    return cast(RuleState, state)
+
+
+async def enable_rule(session: AsyncSession, *, account_id: UUID, plan_id: UUID) -> SecMonitorRule:
+    plan = await session.get(MonitorPlan, plan_id)
+    if plan is None or plan.account_id != account_id or plan.kind != "disclosure":
+        raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+    await lock_security(session, account_id=account_id, instrument_id=plan.instrument_id)
+    existing = await session.scalar(
+        select(SecMonitorRule).where(
+            SecMonitorRule.account_id == account_id,
+            SecMonitorRule.instrument_id == plan.instrument_id,
+        )
+    )
+    if existing is not None:
+        if existing.anchor_plan_id != plan_id:
+            raise ValueError("SEC_DURABLE_SCOPE_ALREADY_BOUND")
+        await rule_state(session, existing)
+        return existing
+    latest = await session.scalar(
+        select(MonitorPlan.id)
+        .where(
+            MonitorPlan.account_id == account_id,
+            MonitorPlan.instrument_id == plan.instrument_id,
+            MonitorPlan.kind == "disclosure",
+        )
+        .order_by(MonitorPlan.generation.desc())
+        .limit(1)
+    )
+    if latest != plan_id:
+        raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+    now = await _time(session)
+    proposal = await _bound_proposal(session, plan, now)
+    _, baseline = await read_monitor_index(
+        session,
+        configured_exhibit_store(session),
+        snapshot_id=proposal.baseline_snapshot_id,
+        as_of=proposal.baseline_as_of,
+    )
+    if (baseline.instrument_id, baseline.issuer_cik) != (plan.instrument_id, proposal.issuer_cik):
+        raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+    # The historical research identity limits initial scope; its TTL is not extended.
+    now = await _time(session)
+    rule = SecMonitorRule(
+        id=new_uuid7(),
+        created_at=now,
+        account_id=account_id,
+        instrument_id=plan.instrument_id,
+        issuer_cik=proposal.issuer_cik,
+        identity_snapshot_id=baseline.identity_snapshot_id,
+        anchor_plan_id=plan.id,
+        effective_at=now,
+        forms=list(proposal.condition.forms),
+        policy_version="durable_sec_v1",
+    )
+    session.add(rule)
+    await session.flush()
+    await audit_fact(session, rule)
+    state = SecMonitorRuleState(
+        id=new_uuid7(),
+        created_at=now,
+        rule_id=rule.id,
+        sequence=0,
+        state="active",
+        effective_at=now,
+    )
+    session.add(state)
+    await session.flush()
+    await audit_fact(session, state)
+    # Reference old attempts exactly. This occupies identity; it does not imply delivery.
+    old = tuple(
+        await session.scalars(
+            select(MonitorTrigger).where(
+                MonitorTrigger.account_id == account_id,
+                MonitorTrigger.instrument_id == plan.instrument_id,
+                MonitorTrigger.kind == "disclosure",
+                MonitorTrigger.outbox_id.is_not(None),
+            )
+        )
+    )
+    for trigger in old:
+        if (
+            await session.scalar(
+                select(SecNotificationClaim.id).where(
+                    SecNotificationClaim.account_id == account_id,
+                    SecNotificationClaim.instrument_id == plan.instrument_id,
+                    SecNotificationClaim.event_key == trigger.event_key,
+                )
+            )
+            is not None
+        ):
+            continue
+        claim = SecNotificationClaim(
+            id=new_uuid7(),
+            created_at=now,
+            account_id=account_id,
+            instrument_id=plan.instrument_id,
+            event_key=trigger.event_key,
+            outbox_id=trigger.outbox_id,
+            legacy_trigger_id=trigger.id,
+        )
+        session.add(claim)
+        await session.flush()
+        await audit_fact(session, claim)
+    return rule
+
+
+async def change_state(
+    session: AsyncSession, *, account_id: UUID, rule_id: UUID, state: RuleState
+) -> SecMonitorRuleState:
+    rule = await session.get(SecMonitorRule, rule_id)
+    if (
+        rule is None
+        or rule.account_id != account_id
+        or state not in ("active", "paused", "revoked")
+    ):
+        raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+    await _lock(session, rule)
+    previous = await session.scalar(
+        select(SecMonitorRuleState)
+        .where(SecMonitorRuleState.rule_id == rule.id)
+        .order_by(SecMonitorRuleState.sequence.desc())
+        .limit(1)
+    )
+    if previous is None:
+        raise ValueError("SEC_DURABLE_STATE_INVALID")
+    if previous.state == state:
+        return previous
+    if previous.state == "revoked":
+        raise ValueError("SEC_DURABLE_RULE_REVOKED")
+    now = await _time(session)
+    current = SecMonitorRuleState(
+        id=new_uuid7(),
+        created_at=now,
+        rule_id=rule.id,
+        sequence=previous.sequence + 1,
+        state=state,
+        effective_at=now,
+    )
+    session.add(current)
+    await session.flush()
+    await audit_fact(session, current)
+    return current
+
+
+def _metadata(entry: SecIndexEntry) -> str:
+    return sha256(
+        json.dumps(entry.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+async def record_discovery(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    rule_id: UUID,
+    capture_id: UUID | None,
+    scheduled_at: datetime,
+) -> SecDiscoveryCheck:
+    rule = await session.get(SecMonitorRule, rule_id)
+    if rule is None or rule.account_id != account_id:
+        raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+    await _lock(session, rule)
+    if await rule_state(session, rule) != "active":
+        raise ValueError("SEC_DURABLE_RULE_INACTIVE")
+    old = await session.scalar(
+        select(SecDiscoveryCheck).where(
+            SecDiscoveryCheck.rule_id == rule.id, SecDiscoveryCheck.scheduled_at == scheduled_at
+        )
+    )
+    if old is not None:
+        return old
+    now = await _time(session)
+    if scheduled_at != now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0):
+        raise ValueError("SEC_DURABLE_BUCKET_UNAVAILABLE")
+    rows = tuple(
+        await session.scalars(
+            select(SecDiscoveryEvent).where(
+                SecDiscoveryEvent.account_id == account_id,
+                SecDiscoveryEvent.instrument_id == rule.instrument_id,
+            )
+        )
+    )
+    known = {v.event_key: SecIndexEntry.model_validate(v.entry) for v in rows}
+    legacy = tuple(
+        (
+            await session.execute(
+                select(MonitorTrigger.event_key, MonitorCheck.observation)
+                .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
+                .where(
+                    MonitorTrigger.account_id == account_id,
+                    MonitorTrigger.instrument_id == rule.instrument_id,
+                    MonitorTrigger.kind == "disclosure",
+                )
+            )
+        ).all()
+    )
+    for key, document in legacy:
+        if isinstance(document, dict) and isinstance(document.get("entry"), dict):
+            known[key] = SecIndexEntry.model_validate(document["entry"])
+    policy = DurableSecPolicy.model_validate(
+        dict(
+            account_id=account_id,
+            instrument_id=rule.instrument_id,
+            issuer_cik=rule.issuer_cik,
+            forms=rule.forms,
+            effective_at=rule.effective_at,
+        )
+    )
+    observation: dict[str, object]
+    result, coverage = "unknown", "unknown"
+    reason: str | None = "DURABLE_SEC_SOURCE_INVALID"
+    capture = None
+    index = None
+    try:
+        if capture_id is not None:
+            capture = await session.get(DataSnapshot, capture_id)
+            if capture is None or capture.source != INDEX_SOURCE:
+                raise ValueError("DURABLE_SEC_SOURCE_INVALID")
+            capture, index = await _capture(
+                session, configured_exhibit_store(session), snapshot_id=capture_id, as_of=now
+            )
+    except (OSError, ValueError):
+        index = None
+    if index is None or capture is None:
+        observation = {"result": result, "coverage": coverage, "reason": reason}
+    else:
+        decision = evaluate_discovery(
+            policy, index, capture.available_at, now, known, frozenset(key for key, _ in legacy)
+        )
+        observation = decision.model_dump(mode="json")
+        result, coverage = decision.result, decision.coverage
+        reason = decision.reason if result == "unknown" else None
+        if result == "false":
+            observation["coverage_proof"] = {
+                "capture_id": str(capture.id),
+                "capture_hash": capture.revision,
+                "from": rule.effective_at.isoformat(),
+                "to": index.received_at.isoformat(),
+            }
+        by_key = {v.event_key: v for v in rows}
+        for item in decision.events:
+            original = by_key.get(item.event_key)
+            if item.classification == "unknown" and original is not None:
+                metadata = _metadata(item.entry)
+                exists = await session.scalar(
+                    select(SecDiscoveryEventRevision.id).where(
+                        SecDiscoveryEventRevision.event_id == original.id,
+                        SecDiscoveryEventRevision.metadata_hash == metadata,
+                    )
+                )
+                if metadata != original.metadata_hash and exists is None:
+                    revision = SecDiscoveryEventRevision(
+                        id=new_uuid7(),
+                        created_at=now,
+                        event_id=original.id,
+                        capture_id=capture.id,
+                        entry=item.entry.model_dump(mode="json"),
+                        metadata_hash=metadata,
+                        observed_at=now,
+                    )
+                    session.add(revision)
+                    await session.flush()
+                    await audit_fact(session, revision)
+            if item.classification != "new":
+                continue
+            event = SecDiscoveryEvent(
+                id=new_uuid7(),
+                created_at=now,
+                account_id=account_id,
+                instrument_id=rule.instrument_id,
+                event_key=item.event_key,
+                rule_id=rule.id,
+                capture_id=capture.id,
+                entry=item.entry.model_dump(mode="json"),
+                metadata_hash=_metadata(item.entry),
+                first_seen_at=now,
+            )
+            session.add(event)
+            await session.flush()
+            await audit_fact(session, event)
+            outbox_id = new_uuid7()
+            if not await claim_notice(
+                session,
+                account_id=account_id,
+                instrument_id=rule.instrument_id,
+                event_key=event.event_key,
+                outbox_id=outbox_id,
+                legacy_trigger_id=None,
+                now=now,
+            ):
+                continue
+            symbols = tuple(
+                await session.scalars(
+                    select(InstrumentAlias.symbol)
+                    .where(
+                        InstrumentAlias.instrument_id == rule.instrument_id,
+                        InstrumentAlias.valid_from <= now.date(),
+                        (
+                            InstrumentAlias.valid_to.is_(None)
+                            | (InstrumentAlias.valid_to >= now.date())
+                        ),
+                    )
+                    .distinct()
+                )
+            )
+            notice = DurableSecNotification(
+                discovery_id=event.id,
+                instrument_id=rule.instrument_id,
+                rule_id=rule.id,
+                symbol=symbols[0] if len(symbols) == 1 else None,
+                event_key=event.event_key,
+                form=item.entry.form,
+                accepted_at=item.entry.accepted_at,
+                discovered_at=now,
+            )
+            session.add(
+                OutboxEvent(
+                    id=outbox_id,
+                    created_at=now,
+                    event_type=DURABLE_SEC_EVENT[0],
+                    aggregate_id=event.id,
+                    schema_version=DURABLE_SEC_EVENT[1],
+                    payload=notice.model_dump(mode="json"),
+                    status="queued",
+                    attempt_count=0,
+                    max_attempts=1,
+                    available_at=now,
+                )
+            )
+            await session.flush()
+    check = SecDiscoveryCheck(
+        id=new_uuid7(),
+        created_at=now,
+        rule_id=rule.id,
+        scheduled_at=scheduled_at,
+        checked_at=now,
+        capture_id=capture.id if capture is not None else None,
+        result=result,
+        coverage=coverage,
+        reason=reason,
+        observation=observation,
+    )
+    session.add(check)
+    await session.flush()
+    await audit_fact(session, check)
+    return check
