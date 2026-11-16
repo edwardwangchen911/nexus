@@ -86,3 +86,16 @@ def test_listed_request_count_requires_exact_separate_attempt_receipt(
         (tmp_path / receipt).write_text(json.dumps({"requests": extra}))
     assert _request_count(tmp_path, listed_history=True) == expected
     assert _request_count(tmp_path) == 2
+
+
+def test_reuse_budget_covers_default_host_preparation_and_scan():
+    from inspect import signature
+
+    from nexus.monitoring.host import PriceMonitorCoordinator
+    from nexus.ops.monitor_disclosure_refresh import REUSE_MAX_AGE_SECONDS, TOTAL_TIMEOUT_SECONDS
+
+    parameters = signature(PriceMonitorCoordinator).parameters
+    preparation = parameters["preparation_timeout_seconds"].default
+    scan = parameters["timeout_seconds"].default
+    assert TOTAL_TIMEOUT_SECONDS <= preparation
+    assert 0 < REUSE_MAX_AGE_SECONDS + preparation + scan <= 300

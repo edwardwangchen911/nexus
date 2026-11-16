@@ -660,3 +660,57 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
     finally:
         await client.aclose()
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age_seconds", [52, 53, 299])
+async def test_reuse_keeps_full_host_preparation_and_scan_freshness_budget(
+    migrated_database_url, monkeypatch, tmp_path, age_seconds
+):
+    from nexus.monitoring.disclosure_observations import read_disclosure_observation
+    from nexus.persistence.models.monitoring import MonitorPlan
+
+    factory, store, captured, pointer, calls, client, invoke = await setup(
+        migrated_database_url, monkeypatch, tmp_path
+    )
+    try:
+        async with factory() as session:
+            plan = await session.scalar(select(MonitorPlan).where(MonitorPlan.kind == "disclosure"))
+            original = await read_disclosure_observation(
+                session, plan=plan, now=captured["clock"][0]
+            )
+            assert original.received_at is not None
+        now = original.received_at + timedelta(seconds=age_seconds)
+        captured["clock"][0] = now
+        await _set_test_insert_clock(factory, now)
+        # This inclusive budget boundary is business time, independent of wall-clock test speed.
+        original_scope = refresh._scope
+
+        async def scope_at_business_time(*args, **kwargs):
+            _, instruments = await original_scope(*args, **kwargs)
+            return now, instruments
+
+        monkeypatch.setattr(refresh, "_scope", scope_at_business_time)
+        result = await invoke()
+        if age_seconds <= 52:
+            assert result["provider_requests"] == 0 and not calls
+        else:
+            assert result["provider_requests"] == 2 and len(calls) == 2, result
+            assert any(item["status"] == "refreshed" for item in result["items"])
+        async with factory() as session:
+            checked_at = now + timedelta(seconds=240 + 8)
+            observed = await read_disclosure_observation(session, plan=plan, now=checked_at)
+            assert observed.reason != "SEC_INDEX_STALE"
+            assert observed.received_at is not None
+            assert checked_at - observed.received_at <= timedelta(seconds=300)
+            audits = tuple(
+                await session.scalars(
+                    select(AuditEvent).where(AuditEvent.action.in_((refresh.CLAIM, refresh.RESULT)))
+                )
+            )
+            assert len(audits) == (0 if age_seconds <= 52 else 2)
+        assert (await invoke())["provider_requests"] == 0
+        assert len(calls) == (0 if age_seconds <= 52 else 2)
+    finally:
+        await client.aclose()
+        await factory.kw["bind"].dispose()

@@ -42,6 +42,9 @@ RESULT = "research.monitor.disclosure_refresh_result"
 SCHEMA = "monitor_disclosure_refresh_v1"
 FEED = "sec_disclosure_index"
 TOTAL_TIMEOUT_SECONDS = 90
+# SEC observation refresh runs before the remaining host preparation and scan.
+# Reserve their full 240s + 8s budgets within the unchanged 300s source window.
+REUSE_MAX_AGE_SECONDS = 300 - 240 - 8
 
 
 def _client() -> httpx.AsyncClient:
@@ -174,7 +177,9 @@ async def _claim(
             "SEC_RECENT_NO_NEW_TARGET_CONFIRMED",
         }
         and observation.received_at is not None
-        and timedelta(0) <= now - observation.received_at <= timedelta(seconds=300)
+        and timedelta(0)
+        <= now - observation.received_at
+        <= timedelta(seconds=REUSE_MAX_AGE_SECONDS)
     ):
         return None
     previous = await session.scalar(
