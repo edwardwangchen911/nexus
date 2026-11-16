@@ -225,7 +225,30 @@ async def _comparison_boundary(
     )
 
     observation: ForwardObservation | RecentPositiveObservation
-    if document.get("policy") == RECENT_POLICY:
+    from nexus.monitoring.recent_positive_chain import (
+        POLICY as CHAIN_POLICY,
+    )
+    from nexus.monitoring.recent_positive_chain import (
+        ChainPositiveObservation,
+        read_member,
+    )
+
+    if document.get("policy") == CHAIN_POLICY:
+        observation = ChainPositiveObservation.model_validate_json(json.dumps(document))
+        member = await read_member(session, plan, check.checked_at)
+        if member is None or (
+            member[0].id,
+            member[0].revision,
+            member[1].scope_snapshot_id,
+            member[1].scope_hash,
+        ) != (
+            observation.policy_snapshot_id,
+            observation.policy_hash,
+            observation.scope_snapshot_id,
+            observation.scope_hash,
+        ):
+            raise ValueError("SEC_POSITIVE_CHAIN_SCOPE_INVALID")
+    elif document.get("policy") == RECENT_POLICY:
         observation = RecentPositiveObservation.model_validate_json(json.dumps(document))
         selected = await read_policy(session, plan, check.checked_at)
         if selected is None or (selected[0].id, selected[0].revision) != (

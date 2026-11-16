@@ -281,9 +281,22 @@ async def enable_policy(
 async def read_recent_observation(
     session: AsyncSession, *, plan: MonitorPlan, now: datetime
 ) -> RecentPositiveObservation | None:
-    selected = await read_policy(session, plan, now)
+    selected: Any = await read_policy(session, plan, now)
+    observation_type: type[RecentPositiveObservation] = RecentPositiveObservation
+    extra_values: dict[str, Any] = {}
     if selected is None:
-        return None
+        from nexus.monitoring.recent_positive_chain import ChainPositiveObservation, read_member
+
+        membership = await read_member(session, plan, now)
+        if membership is None:
+            return None
+        member_row, member = membership
+        selected = member_row, member
+        observation_type = ChainPositiveObservation
+        extra_values = {
+            "scope_snapshot_id": member.scope_snapshot_id,
+            "scope_hash": member.scope_hash,
+        }
     policy_row, policy = selected
     origin = await read_origin(session, plan, now)
     if origin is None:
@@ -308,10 +321,11 @@ async def read_recent_observation(
         comparison_from=basis.effective_at,
         policy_snapshot_id=policy_row.id,
         policy_hash=policy_row.revision,
+        **extra_values,
     )
 
     def result(reason: str, added: tuple[SecIndexEntry, ...] = ()) -> RecentPositiveObservation:
-        return RecentPositiveObservation.model_validate(
+        return observation_type.model_validate(
             {
                 **values,
                 "result": "true" if added else "unknown",

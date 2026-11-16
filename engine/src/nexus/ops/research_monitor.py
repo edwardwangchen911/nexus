@@ -38,6 +38,16 @@ def parser() -> argparse.ArgumentParser:
         "enable-recent-positive-once", help="Opt this one authorized plan into seen additions only"
     )
     positive.add_argument("--plan-id", type=UUID, required=True)
+    for action in (
+        "enable-positive-chain-scope",
+        "ensure-positive-chain-member",
+        "revoke-positive-chain-scope",
+    ):
+        chain = commands.add_parser(
+            action, help="Explicit seven-day SEC comparison scope operation"
+        )
+        chain.add_argument("--plan-id", type=UUID, required=True)
+
     install = commands.add_parser("install", help="Install one original audited research proposal")
     install.add_argument("--kind", choices=("price", "disclosure"), default="price")
     install.add_argument("--output-id", type=UUID, required=True)
@@ -429,6 +439,43 @@ async def _run(
                     "provider_requests": 0,
                     "execution_locked": True,
                     "reconciled_results": 0,
+                }
+            if args.action in {
+                "enable-positive-chain-scope",
+                "ensure-positive-chain-member",
+                "revoke-positive-chain-scope",
+            }:
+                from nexus.monitoring.recent_positive_chain import (
+                    enable_scope,
+                    ensure_member,
+                    revoke_scope,
+                )
+
+                if args.action == "ensure-positive-chain-member":
+                    plan = await session.get(MonitorPlan, args.plan_id)
+                    if plan is None or plan.account_id != settings.agent_paper_account_id:
+                        raise ValueError("SEC_POSITIVE_CHAIN_SCOPE_INVALID")
+                    policy = await ensure_member(session, plan=plan, now=now)
+                else:
+                    operation = (
+                        enable_scope
+                        if args.action == "enable-positive-chain-scope"
+                        else revoke_scope
+                    )
+                    policy = await operation(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        plan_id=args.plan_id,
+                        now=now,
+                    )
+                return {
+                    "status": "recorded" if policy is not None else "not_applicable",
+                    "snapshot_id": str(policy.id) if policy is not None else None,
+                    "policy_hash": policy.revision if policy is not None else None,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
                 }
             if args.action == "enable-recent-positive-once":
                 from nexus.monitoring.recent_positive_policy import enable_policy
