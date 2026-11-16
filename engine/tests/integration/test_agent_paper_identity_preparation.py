@@ -110,7 +110,9 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
     )
     factory = session_factory(settings)
     store = S3ProviderEvidenceStore(settings, client=FakeS3Client())
-    monkeypatch.setattr(sec_exhibit_storage, "S3ProviderEvidenceStore", lambda actual, **kwargs: store)
+    monkeypatch.setattr(
+        sec_exhibit_storage, "S3ProviderEvidenceStore", lambda actual, **kwargs: store
+    )
     calendar_id = uuid4()
     try:
         for symbol in ("AAPL", "NVDA"):
