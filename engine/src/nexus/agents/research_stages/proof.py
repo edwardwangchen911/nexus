@@ -19,7 +19,7 @@ from nexus.agents.research_stages.protocol import (
     stage_evidence,
     usage_known,
 )
-from nexus.agents.research_stages.routes import owner, selected_route
+from nexus.agents.research_stages.routes import _selected_route_for_owner, owner
 from nexus.jobs.models import JOB_PRIORITIES, JobKeyV1, JobType, canonical_job_key, job_input_hash
 from nexus.jobs.repository import job_lease_consumed
 from nexus.monitoring import admission
@@ -105,7 +105,7 @@ async def read_terminal_proof(
         raise ProtocolRejected(invalid)
     if kind == "increment":
         await admission.require_increment_binding(session, run)
-    elif await selected_route(session, job.id) is None:
+    elif await _selected_route_for_owner(session, run, job, scope, kind) is None:
         raise ProtocolRejected(invalid)
     from nexus.agents.platform_stage_accounting import read_stage_accounting_model
 

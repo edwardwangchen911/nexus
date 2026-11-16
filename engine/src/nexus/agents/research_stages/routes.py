@@ -199,7 +199,7 @@ async def _register_business_scope(session: AsyncSession, scope: UUID, kind: str
     )
 
 
-async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, Any] | None:
+async def _selected_route_row(session: AsyncSession, job_id: UUID) -> Mapping[str, Any] | None:
     if await session.scalar(text("SELECT to_regclass('research_stage_route')")) is None:
         return None
     row = (
@@ -225,9 +225,14 @@ async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, An
         {"job": job_id},
     ):
         raise ProtocolRejected("PLATFORM_NATIVE_ROUTE_INVALID")
-    job = required(await session.get(Job, job_id))
-    run = required(await session.get(AgentResearchRunRecord, research_run_id(job)))
-    scope, kind = await owner(session, run, job)
+    return dict(row)
+
+
+def _bind_selected_route(
+    row: Mapping[str, Any], run: AgentResearchRunRecord, job: Job, scope: UUID, kind: str
+) -> Mapping[str, Any]:
+    if row["job_id"] != job.id or research_run_id(job) != run.id:
+        raise ProtocolRejected("STAGED_ROUTE_BINDING_INVALID")
     if (row["run_id"], row["scope_id"], row["kind"], row["version"]) != (
         run.id,
         scope,
@@ -240,6 +245,24 @@ async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, An
         # Preserve the original SDK and comparison route shape across 0113.
         del result["platform_binding"]
     return result
+
+
+async def _selected_route_for_owner(
+    session: AsyncSession, run: AgentResearchRunRecord, job: Job, scope: UUID, kind: str
+) -> Mapping[str, Any] | None:
+    """Reuse only this caller's just-validated owner; never retain a qualification."""
+    row = await _selected_route_row(session, job.id)
+    return None if row is None else _bind_selected_route(row, run, job, scope, kind)
+
+
+async def selected_route(session: AsyncSession, job_id: UUID) -> Mapping[str, Any] | None:
+    row = await _selected_route_row(session, job_id)
+    if row is None:
+        return None
+    job = required(await session.get(Job, job_id))
+    run = required(await session.get(AgentResearchRunRecord, research_run_id(job)))
+    scope, kind = await owner(session, run, job)
+    return _bind_selected_route(row, run, job, scope, kind)
 
 
 async def register_new_prepared_runs(

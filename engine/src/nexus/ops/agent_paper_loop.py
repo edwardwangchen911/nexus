@@ -2187,7 +2187,12 @@ def _emit_agent_paper_unknown_failure(
         }:
             payload["inspection_site"] = inspection_site
         if stage == "inspect" and inspection_site == "pending_work":
-            from nexus.ops.manual_paper_host import PENDING_WORK_PHASES
+            from nexus.ops.manual_paper_host import (
+                MANUAL_TRIGGER_CODES,
+                PENDING_WORK_KINDS,
+                PENDING_WORK_PHASES,
+            )
+            from nexus.ops.pending_probe import STAGES
 
             candidate: BaseException | None = error
             seen: set[int] = set()
@@ -2196,6 +2201,14 @@ def _emit_agent_paper_unknown_failure(
                 pending_phase = getattr(candidate, "_nexus_pending_work_phase", None)
                 if isinstance(pending_phase, str) and pending_phase in PENDING_WORK_PHASES:
                     payload["pending_work_phase"] = pending_phase
+                    for attribute, key, allowed in (
+                        ("_nexus_pending_work_kind", "pending_work_kind", PENDING_WORK_KINDS),
+                        ("_nexus_pending_work_code", "pending_work_code", MANUAL_TRIGGER_CODES),
+                        ("_nexus_pending_read_stage", "pending_read_stage", STAGES),
+                    ):
+                        value = getattr(candidate, attribute, None)
+                        if isinstance(value, str) and value in allowed:
+                            payload[key] = value
                     break
                 candidate = candidate.__cause__ or candidate.__context__
         if action is not None:

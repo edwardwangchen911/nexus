@@ -389,6 +389,9 @@ PENDING_WORK_PHASES = frozenset(
         "engine_dispose",
     }
 )
+PENDING_WORK_KINDS = MANUAL_TRIGGER_KINDS | frozenset(
+    {"connection_refused", "connection_reset", "os_error", "cancelled"}
+)
 
 
 def _mark_pending_failure(error: BaseException, phase: str) -> None:
@@ -396,6 +399,34 @@ def _mark_pending_failure(error: BaseException, phase: str) -> None:
         existing = getattr(error, "_nexus_pending_work_phase", None)
         if not isinstance(existing, str) or existing not in PENDING_WORK_PHASES:
             setattr(error, "_nexus_pending_work_phase", phase)
+            kind = (
+                "cancelled"
+                if isinstance(error, asyncio.CancelledError)
+                else "timeout"
+                if isinstance(error, TimeoutError)
+                else "database"
+                if isinstance(error, SQLAlchemyError)
+                else "connection_refused"
+                if isinstance(error, ConnectionRefusedError)
+                else "connection_reset"
+                if isinstance(error, ConnectionResetError)
+                else "os_error"
+                if isinstance(error, OSError)
+                else "name_error"
+                if isinstance(error, NameError)
+                else "attribute_error"
+                if isinstance(error, AttributeError)
+                else "validation"
+                if isinstance(error, ValueError)
+                else "unexpected_exception"
+            )
+            setattr(error, "_nexus_pending_work_kind", kind)
+            # Only a closed vocabulary crosses the public log boundary.
+            if isinstance(error, ValueError) and str(error) in MANUAL_TRIGGER_CODES:
+                setattr(error, "_nexus_pending_work_code", str(error))
+            current = trace.get()
+            if current is not None:
+                setattr(error, "_nexus_pending_read_stage", current.stage)
     except Exception:
         # Diagnostics must never replace the original failure or cancellation.
         return
