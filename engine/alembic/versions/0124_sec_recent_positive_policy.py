@@ -44,6 +44,9 @@ BEGIN
    RETURN NEW;
  END IF;
  IF NEW.source<>'nexus_sec_recent_positive_policy' THEN RETURN NEW; END IF;
+ IF current_setting('transaction_isolation') IS DISTINCT FROM 'read committed' THEN
+   RAISE EXCEPTION 'SEC_RECENT_POSITIVE_POLICY_INVALID' USING ERRCODE='23514';
+ END IF;
  -- Cast errors and malformed documents become one stable boundary rejection.
  BEGIN
    SELECT * INTO p FROM public.research_monitor_plans
@@ -81,6 +84,8 @@ BEGIN
      OR at_time IS NULL OR NOT isfinite(at_time)
      OR at_time<GREATEST(p.created_at,p.effective_at) OR at_time>=p.valid_until
      OR at_time<transaction_timestamp()
+     OR EXISTS(SELECT FROM public.research_monitor_checks c
+       WHERE c.plan_id=p.id AND c.checked_at>=at_time)
         OR at_time>clock_timestamp()
      OR NEW.created_at IS DISTINCT FROM at_time
      OR NEW.observed_at IS DISTINCT FROM at_time
@@ -201,6 +206,9 @@ DECLARE s public.data_snapshots; n integer;
 BEGIN
  IF TG_TABLE_NAME='data_snapshots' THEN
    IF NEW.source<>'nexus_sec_recent_positive_policy' THEN RETURN NEW; END IF;
+ IF current_setting('transaction_isolation') IS DISTINCT FROM 'read committed' THEN
+   RAISE EXCEPTION 'SEC_RECENT_POSITIVE_POLICY_INVALID' USING ERRCODE='23514';
+ END IF;
    s:=NEW;
  ELSE
    IF NEW.action<>'research.monitor.recent_positive_policy_enabled' THEN RETURN NEW; END IF;

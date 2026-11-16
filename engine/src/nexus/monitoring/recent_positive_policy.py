@@ -17,12 +17,12 @@ from nexus.monitoring.disclosure_inheritance import read_binding
 from nexus.monitoring.disclosure_observations import DisclosureObservation, _capture
 from nexus.monitoring.storage import lock_security
 from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.monitoring import MonitorPlan
+from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.research.sec_disclosure_index import SecDisclosureIndex, SecIndexEntry
 from nexus.research.sec_exhibit_storage import configured_exhibit_store
 from nexus.research.sec_index_storage import SOURCE as INDEX_SOURCE
-from nexus.research.sec_listed_history import ListedHistoryIndex
+from nexus.research.sec_listed_history import ListedHistoryIndex, SecMetadataEntry
 
 POLICY: Literal["sec_recent_positive_once_v1"] = "sec_recent_positive_once_v1"
 SOURCE = "nexus_sec_recent_positive_policy"
@@ -355,7 +355,9 @@ async def read_recent_observation(
     if not timedelta(0) <= now - current.received_at <= timedelta(seconds=300):
         return result("SEC_INDEX_STALE")
     try:
-        known = await all_c1_accessions(session, basis.capture_id, basis.capture_hash, row)
+        known = await all_c1_accessions(
+            session, basis.capture_id, basis.capture_hash, row, plan=plan, now=now
+        )
         added = tuple(
             entry for entry in seen_additions(first, current) if entry.accession_number not in known
         )
@@ -365,7 +367,13 @@ async def read_recent_observation(
 
 
 async def all_c1_accessions(
-    session: AsyncSession, first_id: UUID, first_hash: str, current_row: DataSnapshot
+    session: AsyncSession,
+    first_id: UUID,
+    first_hash: str,
+    current_row: DataSnapshot,
+    *,
+    plan: MonitorPlan,
+    now: datetime,
 ) -> set[str]:
     """Compare visible raw metadata for every form, not only parsed target entries.
 
@@ -398,9 +406,31 @@ async def all_c1_accessions(
             known[row[0]] = row
     document = _object(await _original(store, current.originals[2]))
     group = document["filings"]["recent"]
-    for row in zip(*(group[key] for key in _FIELDS), strict=True):
-        if row[0] in known and known[row[0]] != row:
+    current_rows = {row[0]: row for row in zip(*(group[key] for key in _FIELDS), strict=True)}
+    for accession, raw in current_rows.items():
+        if accession in known and known[accession] != raw:
             raise ValueError("SEC_INDEX_EVENT_CONFLICT")
+    keys = [f"sec:{current.index.issuer_cik}:{key}" for key in current_rows]
+    if keys:
+        observations = await session.scalars(
+            select(MonitorCheck.observation)
+            .join(MonitorTrigger, MonitorTrigger.check_id == MonitorCheck.id)
+            .where(
+                MonitorTrigger.account_id == plan.account_id,
+                MonitorTrigger.instrument_id == plan.instrument_id,
+                MonitorTrigger.kind == "disclosure",
+                MonitorTrigger.event_key.in_(keys),
+                MonitorTrigger.created_at <= now,
+                MonitorCheck.created_at <= now,
+                MonitorCheck.checked_at <= now,
+            )
+        )
+        for observed in observations:
+            if not isinstance(observed, dict):
+                raise ValueError("SEC_INDEX_EVENT_CONFLICT")
+            entry = SecMetadataEntry.model_validate(observed.get("entry"))
+            if not same_visible_metadata(entry, current_rows[entry.accession_number]):
+                raise ValueError("SEC_INDEX_EVENT_CONFLICT")
     return set(known)
 
 
@@ -419,3 +449,16 @@ async def _root_request(session: AsyncSession, plan: MonitorPlan) -> UUID:
     if not isinstance(root, UUID):
         raise ValueError("SEC_RECENT_POSITIVE_PLAN_NOT_AUTHORIZED")
     return root
+
+
+def same_visible_metadata(entry: SecMetadataEntry, raw: tuple[Any, ...]) -> bool:
+    """A previously dispatched accession remains bound to its original metadata."""
+    from nexus.research.sec_disclosure_index import _timestamp
+
+    return (
+        entry.accession_number == raw[0]
+        and entry.form == raw[1]
+        and entry.accepted_at == _timestamp(raw[2])
+        and entry.filed_at.date().isoformat() == raw[3]
+        and entry.primary_document == raw[4]
+    )

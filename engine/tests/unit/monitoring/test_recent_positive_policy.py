@@ -178,3 +178,25 @@ def test_policy_fields_and_positive_observation_fail_closed():
         document = {**opt.model_dump(), field: value}
         with pytest.raises(ValidationError):
             policy.RecentPositivePolicy.model_validate(document)
+
+
+def test_previously_triggered_accession_metadata_cannot_change():
+    _, _, _, first = indexes()
+    entry = first.entries[0]
+    raw = (
+        entry.accession_number,
+        entry.form,
+        entry.accepted_at.isoformat(),
+        entry.filed_at.date().isoformat(),
+        entry.primary_document,
+    )
+    assert policy.same_visible_metadata(entry, raw)
+    for index, changed in [
+        (1, "4"),
+        (2, (entry.accepted_at + timedelta(seconds=1)).isoformat()),
+        (3, "2000-01-01"),
+        (4, "changed.htm"),
+    ]:
+        values = list(raw)
+        values[index] = changed
+        assert not policy.same_visible_metadata(entry, tuple(values))
