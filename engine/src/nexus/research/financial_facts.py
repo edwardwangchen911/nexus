@@ -18,6 +18,17 @@ CANONICAL_SEC_FACTS = frozenset(
         "operating_income",
         "net_income",
         "operating_cash_flow",
+        "depreciation_depletion_amortization",
+        "share_based_compensation",
+        "deferred_income_tax_expense_benefit",
+        "investment_gain_loss",
+        "other_noncash_income_expense",
+        "cash_flow_change_accounts_receivable",
+        "cash_flow_change_inventories",
+        "cash_flow_change_accounts_payable",
+        "cash_flow_change_accrued_operating_liabilities",
+        "cash_flow_change_prepaid_other_assets",
+        "cash_flow_change_other_noncurrent_liabilities",
         "capital_expenditure",
         "total_assets",
         "total_liabilities",
@@ -110,9 +121,7 @@ def select_financial_fact(
     if visible[0].period_kind == "duration":
         _reject_overlapping_duration_periods(visible)
     latest_key = max((fact.period_end, fact.accepted_at) for fact in visible)
-    latest = [
-        fact for fact in visible if (fact.period_end, fact.accepted_at) == latest_key
-    ]
+    latest = [fact for fact in visible if (fact.period_end, fact.accepted_at) == latest_key]
     if len(latest) != 1:
         raise FinancialFactSelectionError("UNRESOLVED_ACCEPTANCE_TIE")
     return latest[0]

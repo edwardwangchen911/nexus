@@ -28,6 +28,21 @@ from .test_sec_local import (
 )
 
 
+@pytest.fixture(autouse=True)
+def synthetic_financial_context_model(monkeypatch):
+    # No model is called: isolate storage tests from official price expiry.
+    from nexus.ops import openai_local
+
+    configured = dict(openai_local._CONFIG)
+    configured.update(
+        model_id="synthetic-financial-context-model",
+        version="synthetic-financial-context-v1",
+        pricing_available_at="2020-01-01T00:00:00+00:00",
+        pricing_expires_at="2099-01-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(openai_local, "_CONFIG", configured)
+
+
 @pytest.mark.asyncio
 async def test_normal_sec_late_fact_is_excluded_from_old_exact_tools_and_http(
     migrated_database_url,

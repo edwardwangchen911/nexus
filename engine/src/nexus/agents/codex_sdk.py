@@ -56,7 +56,7 @@ from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.sdk_error_details import rpc_error_code
 from nexus.agents.sdk_stream_progress import SdkStreamObserver, observe_sdk_notifications
-from nexus.agents.tools import ReadOnlyToolRegistry
+from nexus.agents.tools import CASH_FLOW_COMPONENT_FIELDS, ReadOnlyToolRegistry
 from nexus.agents.trailing_valuation import derive_trailing_valuation
 from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim
@@ -1072,6 +1072,28 @@ class CodexCommittee:
                 ],
             },
         )
+        # Preserve the existing 50-row core selection and its aligned EPS periods.
+        # Components have a separate bounded selection and retain the raw SEC sign;
+        # they are not a computed reconciliation or a replacement accounting basis.
+        components = await self._tools.execute(
+            "get_financial_facts", {**scope, "fields": list(CASH_FLOW_COMPONENT_FIELDS)}
+        )
+        component_items = components.get("items")
+        if isinstance(component_items, list | tuple) and any(
+            isinstance(item, Mapping) and item.get("fact") in CASH_FLOW_COMPONENT_FIELDS
+            for item in component_items
+        ):
+            financial_facts = {
+                **financial_facts,
+                "cash_flow_components": {
+                    **components,
+                    "basis": (
+                        "As-disclosed SEC values retain their original signs, units and periods. "
+                        "A reported movement is not its signed cash impact. These selected "
+                        "components are not a complete or verified cash-flow reconciliation."
+                    ),
+                },
+            }
         result: dict[str, object] = {
             "security_snapshot": security,
             "filing_disclosures": await self._tools.execute(

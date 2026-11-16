@@ -492,10 +492,17 @@ async def _run_native_portfolio_http(
             assert checked > expiry
         else:
             assert expiry > checked
-            with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+            if case == "complete" or verified_readback:
+                # A known settled terminal job with the exact consumed lease is
+                # available before the retained lease's wall-clock expiry.
                 await require_manual_account_available(
                     session, account_id=host.agent_paper_account_id, now=checked, read_only=True
                 )
+            else:
+                with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+                    await require_manual_account_available(
+                        session, account_id=host.agent_paper_account_id, now=checked, read_only=True
+                    )
         after_leases = max(checked, expiry + timedelta(microseconds=1))
         if case in {
             "timeout",

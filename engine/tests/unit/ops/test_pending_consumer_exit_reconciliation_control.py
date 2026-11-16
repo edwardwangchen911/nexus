@@ -510,7 +510,7 @@ def test_concurrent_pending_close_produces_one_management_transition(tmp_path):
 
 def test_pending_0119_consumer_exit_cannot_grant_a_0120_recovery_target(tmp_path):
     old_schema = "0119_compact_budget_obligations"
-    new_schema = "0120_sol_formal_output_binding"
+    new_schema = "0121_sec_cash_flow_components"
     root, env, state_path, old_receipt, prior_proof, receipt = _ended_pending_consumer(
         tmp_path, target_schema=old_schema
     )

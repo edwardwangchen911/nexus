@@ -40,6 +40,7 @@ _PENDING_POLICIES = {
     "0118_compact_sol_profile": "pending_consumer_exit_0118_v1",
     "0119_compact_budget_obligations": "pending_consumer_exit_0119_v1",
     "0120_sol_formal_output_binding": "pending_consumer_exit_0120_v1",
+    "0121_sec_cash_flow_components": "pending_consumer_exit_0121_v1",
 }
 SAFE_CODES = frozenset(
     _PREFIX + suffix
