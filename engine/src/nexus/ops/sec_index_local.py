@@ -16,6 +16,7 @@ from sqlalchemy import func, select, text
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.openai_local import local_settings
 from nexus.ops.research_identity_local import collect_identity_sources
 from nexus.persistence.session import session_factory
 from nexus.research.sec_disclosure_index import SecDisclosureIndex
@@ -38,7 +39,7 @@ def _store(settings: EngineSettings, store: ExhibitStore | None) -> ExhibitStore
         "::1",
     }:
         raise ValueError("SEC_INDEX_LOCAL_STORE_REQUIRED")
-    return S3ProviderEvidenceStore(settings)
+    return S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
 
 
 def _read(path: Path, *, limit: int) -> bytes:
@@ -249,7 +250,7 @@ def main() -> None:
     try:
         args = parser.parse_args()
         environment = load_local_environment(args.repo_root, os.environ)
-        settings = EngineSettings.model_validate(environment)
+        settings = local_settings(args.repo_root, load_model_key=False, backend="codex_sdk")
         if args.action == "inspect":
             operation = inspect_index(
                 settings,

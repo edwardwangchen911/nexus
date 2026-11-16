@@ -6,6 +6,21 @@ from uuid import UUID
 
 import pytest
 from nexus.ops import sec_index_local as module
+from nexus.settings import EngineSettings
+
+
+@pytest.fixture(autouse=True)
+def local_data_settings(monkeypatch):
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://synthetic@127.0.0.1:55439/synthetic",
+        openai_api_key=None,
+    )
+
+    def load(root, **options):
+        assert options == {"load_model_key": False, "backend": "codex_sdk"}
+        return settings
+
+    monkeypatch.setattr(module, "local_settings", load)
 
 
 @pytest.mark.parametrize("action", ["collect", "import", "inspect"])
@@ -51,7 +66,10 @@ def test_normal_cli_routes_exact_arguments_without_starting_other_work(
 
 
 def test_normal_cli_never_exposes_unexpected_source_error(monkeypatch, capsys):
+    reached = []
+
     async def failed(*args, **kwargs):
+        reached.append(True)
         raise RuntimeError("sensitive upstream detail")
 
     monkeypatch.setattr(module, "inspect_index", failed)
@@ -59,6 +77,7 @@ def test_normal_cli_never_exposes_unexpected_source_error(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["sec-index", "inspect", "--snapshot-id", str(UUID(int=1))])
     with pytest.raises(SystemExit):
         module.main()
+    assert reached == [True]
     reply = json.loads(capsys.readouterr().out)
     assert reply == {
         "status": "unavailable",

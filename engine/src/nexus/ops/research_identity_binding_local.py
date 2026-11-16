@@ -3,14 +3,13 @@
 import argparse
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import NoReturn
 from uuid import UUID
 
 from sqlalchemy.engine import make_url
 
-from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.openai_local import local_settings
 from nexus.persistence.session import session_factory
 from nexus.research.current_identity_storage import import_identity_binding
 from nexus.research.sec_exhibit_storage import ExhibitStore, configured_exhibit_store
@@ -62,7 +61,7 @@ def main() -> None:
     parser.add_argument("--collection-dir", type=Path, required=True)
     try:
         args = parser.parse_args()
-        settings = EngineSettings.model_validate(load_local_environment(args.repo_root, os.environ))
+        settings = local_settings(args.repo_root, load_model_key=False, backend="codex_sdk")
         result = asyncio.run(
             register_identity(
                 settings,
