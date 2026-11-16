@@ -50,7 +50,13 @@ class TerminalProof:
 
 
 async def read_terminal_proof(
-    session: AsyncSession, *, run_id: UUID, now: datetime, close_empty_unknown: bool = False
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    now: datetime,
+    close_empty_unknown: bool = False,
+    expected_owner: tuple[UUID, str] | None = None,
+    expected_job_id: UUID | None = None,
 ) -> TerminalProof | None:
     """Same frozen membership for accounting, closeout, seal inspection and admission.
 
@@ -100,7 +106,11 @@ async def read_terminal_proof(
     if run is None or len(jobs) != 1 or jobs[0].id != member["job_id"]:
         raise ProtocolRejected(invalid)
     job = jobs[0]
+    if expected_job_id is not None and job.id != expected_job_id:
+        raise ProtocolRejected(invalid)
     scope, kind = await owner(session, run, job)
+    if expected_owner is not None and (scope, kind) != expected_owner:
+        raise ProtocolRejected(invalid)
     if scope != member["scope_id"]:
         raise ProtocolRejected(invalid)
     if kind == "increment":

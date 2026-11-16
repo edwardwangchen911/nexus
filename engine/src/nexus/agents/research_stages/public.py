@@ -269,17 +269,31 @@ async def _selected_member_settled(
     allow_unknown_usage: Any,
     close_empty_unknown: bool = False,
 ) -> Any:
+    from nexus.agents.research_stages.routes import VERSION, _selected_route_row
     from nexus.paper.research_failure import require_unused_research_member_closed
 
-    route = await selected_route(session, member.job_id)
+    # Resolve the original route facts first. Staged members validate their
+    # owner once in the canonical proof, with these caller constraints intact.
+    route = await _selected_route_row(session, member.job_id)
     if route is None:
         return
-    if route["kind"] != kind or route["scope_id"] != owner_id:
+    if (
+        route["kind"] != kind
+        or route["scope_id"] != owner_id
+        or route["run_id"] != member.run_id
+        or route["job_id"] != member.job_id
+        or route["version"] != VERSION
+    ):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     staged = await session.scalar(
         text("SELECT 1 FROM research_stage_member WHERE run_id=:run"), {"run": member.run_id}
     )
     if staged is None:
+        # No terminal proof follows this path: keep the full legacy route
+        # qualification before any unused/uncalled disposition.
+        route = await selected_route(session, member.job_id)
+        if route is None or route["kind"] != kind or route["scope_id"] != owner_id:
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
         job = await session.get(Job, member.job_id)
         if job.result_code == "AGENT_ABSTAINED":
             from nexus.paper.research_failure import require_claimed_uncalled_research_closed
@@ -303,6 +317,8 @@ async def _selected_member_settled(
             run_id=member.run_id,
             now=now,
             close_empty_unknown=close_empty_unknown and allow_unknown_usage,
+            expected_owner=(owner_id, kind),
+            expected_job_id=member.job_id,
         )
     except ProtocolRejected:
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN") from None
