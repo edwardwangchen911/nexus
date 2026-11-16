@@ -95,7 +95,7 @@ async def test_single_monitor_roundtrip_preserves_old_facts_and_permanent_root_f
                 {"id": root.id},
             )
             after_root = await facts(db)
-        with pytest.raises(DBAPIError, match="SINGLE_MONITOR_ONCE_DOWNGRADE_FORBIDDEN"):
+        with pytest.raises(DBAPIError, match="SINGLE_MONITOR_INCREMENT_DOWNGRADE_FORBIDDEN"):
             await asyncio.to_thread(command.downgrade, config, "0121_sec_cash_flow_components")
         async with factory() as db:
             assert (
