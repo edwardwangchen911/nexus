@@ -248,6 +248,12 @@ def parser() -> argparse.ArgumentParser:
         "--admission-policy", choices=("daily-single", "shared-budget"), default="daily-single"
     )
     single_intent.add_argument("--instrument-id", type=UUID, required=True)
+    monitor_intent = commands.add_parser("inspect-single-monitor-sol-intent")
+    monitor_intent.add_argument("--instrument-id", type=UUID, required=True)
+    monitor_start = commands.add_parser("start-single-monitor-sol")
+    monitor_start.add_argument("--instrument-id", type=UUID, required=True)
+    monitor_start.add_argument("--idempotency-key", required=True)
+    monitor_start.add_argument("--expected-intent-hash", required=True)
     for action in ("register-formal-intent", "read-formal-intent", "cancel-formal-intent"):
         commands.add_parser(action).add_argument("--idempotency-key", required=True)
     start = commands.add_parser("start")
@@ -406,7 +412,7 @@ async def run(
                 return await intent_command(
                     session, settings, action=args.action, key=args.idempotency_key
                 )
-        if args.action == "inspect-single-sol-intent":
+        if args.action in {"inspect-single-sol-intent", "inspect-single-monitor-sol-intent"}:
             from nexus.paper.single_sol_research import single_sol_authority
 
             async with factory.begin() as session:
@@ -417,10 +423,14 @@ async def run(
                     session,
                     settings,
                     instrument_id=args.instrument_id,
-                    shared_budget=args.admission_policy == "shared-budget",
+                    shared_budget=args.action
+                    in {"inspect-single-monitor-sol-intent", "start-single-monitor-sol"}
+                    or args.admission_policy == "shared-budget",
+                    monitoring=args.action
+                    in {"inspect-single-monitor-sol-intent", "start-single-monitor-sol"},
                 )
                 return SingleSolOffer(binding=binding, intent_hash=binding.intent_hash)
-        if args.action == "start-single-sol":
+        if args.action in {"start-single-sol", "start-single-monitor-sol"}:
             from nexus.paper.single_sol_research import start_single_sol
 
             async with factory.begin() as session:
@@ -430,7 +440,11 @@ async def run(
                     instrument_id=args.instrument_id,
                     idempotency_key=args.idempotency_key,
                     expected_intent_hash=args.expected_intent_hash,
-                    shared_budget=args.admission_policy == "shared-budget",
+                    shared_budget=args.action
+                    in {"inspect-single-monitor-sol-intent", "start-single-monitor-sol"}
+                    or args.admission_policy == "shared-budget",
+                    monitoring=args.action
+                    in {"inspect-single-monitor-sol-intent", "start-single-monitor-sol"},
                 )
         if args.action in {
             "check-formal-admission",

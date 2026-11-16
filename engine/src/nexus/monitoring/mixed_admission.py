@@ -242,6 +242,12 @@ async def _admit_batch(
         )
     ):
         raise ValueError("MONITOR_SOURCE_INVALID")
+    from nexus.monitoring.single_monitor_limit import require_single_monitor_increment_unused
+
+    for material_parent in materials.parents:
+        await require_single_monitor_increment_unused(
+            session, parent_run_id=UUID(str(material_parent["run_id"]))
+        )
     projection = await load_paper_projection(
         session, account_id=account_id, as_of=now, derived_snapshots_known_at=now
     )

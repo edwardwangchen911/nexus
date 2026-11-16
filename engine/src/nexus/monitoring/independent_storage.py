@@ -66,7 +66,7 @@ async def freeze_independent_snapshot(
 ) -> DataSnapshot:
     invalid = "INDEPENDENT_MONITOR_CONTEXT_INVALID"
     require_research_only_snapshot(base)
-    if request.contract_version != CONTRACT_VERSION or request.mode != MODE:
+    if request.contract_version not in {CONTRACT_VERSION, 6} or request.mode != MODE:
         raise ValueError(invalid)
     batch = await load_agent_paper_candidate_batch(session, batch_id=request.candidate_batch_id)
     instrument_id = UUID(base.provider_object_id)
@@ -78,6 +78,11 @@ async def freeze_independent_snapshot(
         or base.observed_at < request.requested_at
     ):
         raise ValueError(invalid)
+    if request.contract_version == 6:
+        from nexus.paper.single_sol_owner import binding_for
+
+        if binding_for(request).instrument_id != instrument_id:
+            raise ValueError(invalid)
     await lock_security(session, account_id=request.account_id, instrument_id=instrument_id)
     context = IndependentMonitorContext(
         request_id=request.id,
@@ -195,7 +200,7 @@ async def read_independent_context(
 
     if (
         request is None
-        or request.contract_version != CONTRACT_VERSION
+        or request.contract_version not in {CONTRACT_VERSION, 6}
         or request.mode != MODE
         or request.request_hash != context.request_hash
         or request.account_id != context.account_id
@@ -207,7 +212,7 @@ async def read_independent_context(
             account_id=request.account_id,
             batch_id=request.candidate_batch_id,
             mode=MODE,
-            contract_version=CONTRACT_VERSION,
+            contract_version=request.contract_version,
             research_profile=request.research_profile,
         )
         or batch is None
@@ -220,6 +225,14 @@ async def read_independent_context(
         or base.created_at > as_of
     ):
         return None
+    if request.contract_version == 6:
+        from nexus.paper.single_sol_owner import binding_for
+
+        try:
+            if binding_for(request).instrument_id != instrument_id:
+                return None
+        except ValueError:
+            return None
     try:
         require_research_only_snapshot(base)
     except ValueError:

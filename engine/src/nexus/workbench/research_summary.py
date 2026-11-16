@@ -526,6 +526,7 @@ async def research_candidates(
             ("research_and_monitor", 3),
             ("research_only", 4),
             ("research_only", 5),
+            ("research_and_monitor", 6),
         }
         or request.requested_at > read_at
     ):

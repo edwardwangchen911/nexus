@@ -217,7 +217,7 @@ def install_sol_http(
 
     monkeypatch.setattr(platform_native, "native_http_client", client)
     monkeypatch.setattr(
-        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+        "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_, **__: store
     )
     monkeypatch.setattr(
         "nexus.monitoring.disclosure_context.configured_exhibit_store", lambda s: store
