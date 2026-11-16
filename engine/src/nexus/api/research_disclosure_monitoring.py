@@ -216,7 +216,25 @@ async def _comparison_boundary(
     document = dict(check.observation)
     if "entry" in document:
         document["added"] = [document.pop("entry")]
-    observation = ForwardObservation.model_validate_json(json.dumps(document))
+    from nexus.monitoring.recent_positive_policy import (
+        POLICY as RECENT_POLICY,
+    )
+    from nexus.monitoring.recent_positive_policy import (
+        RecentPositiveObservation,
+        read_policy,
+    )
+
+    observation: ForwardObservation | RecentPositiveObservation
+    if document.get("policy") == RECENT_POLICY:
+        observation = RecentPositiveObservation.model_validate_json(json.dumps(document))
+        selected = await read_policy(session, plan, check.checked_at)
+        if selected is None or (selected[0].id, selected[0].revision) != (
+            observation.policy_snapshot_id,
+            observation.policy_hash,
+        ):
+            raise ValueError("SEC_RECENT_POSITIVE_POLICY_INVALID")
+    else:
+        observation = ForwardObservation.model_validate_json(json.dumps(document))
     binding = await read_binding(session, plan, check.checked_at)
     if binding is None:
         raise ValueError("SEC_INDEX_FORWARD_ORIGIN_INVALID")
