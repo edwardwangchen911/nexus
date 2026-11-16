@@ -7,8 +7,6 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from unit.monitoring.test_filing_content import source
-
 from nexus.monitoring import (
     batch_inputs,
     disclosure_observations,
@@ -16,6 +14,7 @@ from nexus.monitoring import (
 )
 from nexus.monitoring.filing_archive import FilingArchive, VerifiedFilingContent
 from nexus.monitoring.recent_positive_chain import ChainPositiveObservation
+from unit.monitoring.test_filing_content import source
 
 
 async def saved_chain_batch(monkeypatch):
