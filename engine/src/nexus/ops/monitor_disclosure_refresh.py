@@ -154,7 +154,14 @@ async def _claim(
         return {"status": "unknown", "reason": observation.reason}
     # Successor custody keeps the original comparison route even when the new
     # research baseline is a complete legacy capture. It is not a new origin.
-    listed_history = isinstance(observation, ForwardObservation) or not baseline.history_complete
+    from nexus.monitoring.recent_positive_policy import RecentPositiveObservation
+
+    recent_positive = isinstance(observation, RecentPositiveObservation)
+    listed_history = (
+        False
+        if recent_positive
+        else isinstance(observation, ForwardObservation) or not baseline.history_complete
+    )
     if (
         (not listed_history or isinstance(observation, ForwardObservation))
         and observation.current_snapshot_id is not None
@@ -164,6 +171,7 @@ async def _claim(
             "SEC_INDEX_COVERAGE_UNAVAILABLE",
             "SEC_INDEX_EVENT_CONFLICT",
             "SEC_INDEX_FORWARD_BASELINE_ESTABLISHED",
+            "SEC_RECENT_NO_NEW_TARGET_CONFIRMED",
         }
         and observation.received_at is not None
         and timedelta(0) <= now - observation.received_at <= timedelta(seconds=300)
@@ -203,6 +211,9 @@ async def _claim(
         "issuer_cik": baseline.issuer_cik,
         "feed": FEED,
         "listed_history": listed_history,
+        "observation_policy": (
+            observation.policy if isinstance(observation, RecentPositiveObservation) else None
+        ),
         "scheduled_at": scheduled.isoformat(),
         "archive_dir": str(archive),
     }

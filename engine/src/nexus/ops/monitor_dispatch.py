@@ -207,6 +207,7 @@ async def inspect_monitor_queue(
                         monitor_trigger_id=group[0].id,
                         monitor_trigger_status="pending",
                         monitor_batch_id=sealed.id,
+                        monitor_materials_status=state,
                     )
                 if trigger.kind == "price":
                     return replace(
@@ -225,6 +226,7 @@ async def dispatch_configured_once(
     repo_root: Path | None = None,
     sec_contact: str | None = None,
     environment: dict[str, str] | None = None,
+    prepare_materials_only: bool = False,
 ) -> dict[str, object]:
     """Persist a bounded eligibility check, then consume only the original native Job.
 
@@ -282,6 +284,10 @@ async def dispatch_configured_once(
                     "model_requests": 0,
                     "provider_requests": 0,
                 }
+            if prepare_materials_only and (
+                trigger.batch_id is None or trigger.research_run_id is not None
+            ):
+                return {"status": "deferred", "execution_locked": True}
             if trigger.research_run_id is not None:
                 original = await session.get(AgentResearchRunRecord, trigger.research_run_id)
                 if original is None:
@@ -351,7 +357,7 @@ async def dispatch_configured_once(
                         _sec_contact=sec_contact,
                     ),
                 )
-                if prepared["status"] != "prepared":
+                if prepared["status"] != "prepared" or prepare_materials_only:
                     return {**prepared, "trigger_id": str(trigger.id)}
                 from nexus.ops.monitor_market_prepare import prepare_batch_market_inputs
 
@@ -456,6 +462,7 @@ async def dispatch_host_once(
     repo_root: Path,
     env_file: Path | None = None,
     prepared_market_open_at: datetime | None = None,
+    prepare_materials_only: bool = False,
 ) -> dict[str, object]:
     from nexus.agents.research_maintenance import require_research_open
 
@@ -502,16 +509,19 @@ async def dispatch_host_once(
     normal = await inspect_manual_close(current, account_id=account_id, snapshot=normal)
     normal = await inspect_manual_queue(current, account_id=account_id, snapshot=normal)
     selected = await inspect_monitor_queue(current, account_id=account_id, snapshot=normal)
-    if (
-        selected.monitor_trigger_id != trigger_id
-        or choose_loop_action(selected, prepared_market_open_at=prepared_market_open_at)
-        != AgentPaperLoopAction.RUN_MONITOR_INCREMENT
+    if selected.monitor_trigger_id != trigger_id or choose_loop_action(
+        selected, prepared_market_open_at=prepared_market_open_at
+    ) != (
+        AgentPaperLoopAction.PREPARE_MONITOR_MATERIALS
+        if prepare_materials_only
+        else AgentPaperLoopAction.RUN_MONITOR_INCREMENT
     ):
         return {"status": "deferred", "execution_locked": True}
     if (
         selected.monitor_batch_id is not None
         and selected.monitor_trigger_status == "pending"
         and evaluation is not None
+        and not prepare_materials_only
     ):
         from nexus.monitoring.host import BATCH_PREPARATION_HEADROOM_SECONDS
 
@@ -531,7 +541,39 @@ async def dispatch_host_once(
         repo_root=repo_root,
         sec_contact=private_context.get("SEC_CONTACT"),
         environment=private_context,
+        prepare_materials_only=prepare_materials_only,
     )
+
+
+async def confirm_monitor_materials_shutdown(
+    settings: EngineSettings, *, account_id: UUID, trigger_id: UUID, batch_id: UUID
+) -> bool:
+    """Confirm only this exact collection action; no market or child proof is claimed."""
+    if settings.agent_paper_account_id != account_id:
+        return False
+    from nexus.ops.agent_paper_once import _validate_local_database
+    from nexus.ops.monitor_batch_prepare import confirm_batch_preparation
+
+    _validate_local_database(settings.database_url)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout='5s'"))
+            trigger = await session.get(MonitorTrigger, trigger_id)
+            if (
+                trigger is None
+                or trigger.account_id != account_id
+                or trigger.batch_id != batch_id
+                or trigger.research_run_id is not None
+                or trigger.status not in {"pending", "blocked"}
+            ):
+                return False
+            return await confirm_batch_preparation(
+                settings, account_id=account_id, batch_id=batch_id
+            )
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 async def confirm_monitor_shutdown(

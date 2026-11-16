@@ -34,6 +34,10 @@ def parser() -> argparse.ArgumentParser:
         "prepare-pending", help="Prepare one sealed batch without model I/O"
     )
     pending.add_argument("--batch-id", type=UUID, required=True)
+    positive = commands.add_parser(
+        "enable-recent-positive-once", help="Opt this one authorized plan into seen additions only"
+    )
+    positive.add_argument("--plan-id", type=UUID, required=True)
     install = commands.add_parser("install", help="Install one original audited research proposal")
     install.add_argument("--kind", choices=("price", "disclosure"), default="price")
     install.add_argument("--output-id", type=UUID, required=True)
@@ -425,6 +429,24 @@ async def _run(
                     "provider_requests": 0,
                     "execution_locked": True,
                     "reconciled_results": 0,
+                }
+            if args.action == "enable-recent-positive-once":
+                from nexus.monitoring.recent_positive_policy import enable_policy
+
+                policy = await enable_policy(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    plan_id=args.plan_id,
+                    now=now,
+                )
+                return {
+                    "status": "enabled",
+                    "snapshot_id": str(policy.id),
+                    "policy_hash": policy.revision,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
                 }
             if args.action == "prepare-batch":
                 from nexus.monitoring.batch_inputs import prepare_batch_inputs

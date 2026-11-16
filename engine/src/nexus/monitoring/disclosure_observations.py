@@ -161,6 +161,11 @@ async def read_disclosure_observation(
     from nexus.monitoring.disclosure_forward import read_forward_observation
 
     try:
+        from nexus.monitoring.recent_positive_policy import read_recent_observation
+
+        recent = await read_recent_observation(session, plan=plan, now=now)
+        if recent is not None:
+            return recent
         forward = await read_forward_observation(session, plan=plan, now=now)
         if forward is not None:
             return forward
