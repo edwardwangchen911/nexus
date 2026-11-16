@@ -264,6 +264,7 @@ async def read_monitoring_view(
             "MONITOR_DAILY_LIMIT_REACHED": "budget",
             "MONITOR_ACCOUNT_OCCUPIED": "account_occupied",
             "MONITOR_INPUTS_UNAVAILABLE": "inputs",
+            "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED": "one_time_limit",
             "MONITOR_PENDING_OVERFLOW": "overflow",
         }
         blocked = (

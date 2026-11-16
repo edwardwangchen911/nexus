@@ -2076,7 +2076,7 @@ export interface components {
             start_session: string;
         };
         /** @enum {string} */
-        BlockedReason: "budget" | "account_occupied" | "inputs" | "overflow" | "unknown";
+        BlockedReason: "budget" | "account_occupied" | "inputs" | "overflow" | "one_time_limit" | "unknown";
         /** BriefDisagreementSummary */
         BriefDisagreementSummary: {
             /**

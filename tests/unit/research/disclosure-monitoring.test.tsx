@@ -129,3 +129,11 @@ it("shows the forward comparison boundary without clearing the earlier history g
   expect(screen.getByText(/未命中仅适用于该起点之后/)).toBeVisible();
   expect(screen.getByText(/原冻结基线至该起点的历史覆盖仍未知/)).toBeVisible();
 });
+
+it("explains a consumed one-time increment without calling it missing evidence", () => {
+  render(panel({ triggers: [disclosureTrigger({ status: "blocked", blocked_reason: "one_time_limit", run_id: null, usage_status: "not_started", event_review: "not_performed" })] }));
+  openEvents();
+  expect(screen.getByText("本次仅允许一笔增量研究，名额已使用。")).toBeVisible();
+  expect(screen.queryByText("研究输入尚不满足要求。")).not.toBeInTheDocument();
+  expect(screen.getByText("尚未进行事件复核")).toBeVisible();
+});

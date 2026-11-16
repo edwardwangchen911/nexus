@@ -189,6 +189,7 @@ async def mark_trigger_blocked(
         "MONITOR_ACCOUNT_OCCUPIED",
         "MONITOR_UNKNOWN_USAGE",
         "MONITOR_INPUTS_UNAVAILABLE",
+        "SINGLE_MONITOR_INCREMENT_ONCE_CONSUMED",
     }:
         raise ValueError("MONITOR_BLOCK_REASON_INVALID")
     trigger = await session.get(MonitorTrigger, trigger_id)

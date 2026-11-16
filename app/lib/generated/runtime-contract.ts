@@ -2227,6 +2227,7 @@ export const runtimeContractSchemas = {
       "account_occupied",
       "inputs",
       "overflow",
+      "one_time_limit",
       "unknown"
     ],
     "type": "string"

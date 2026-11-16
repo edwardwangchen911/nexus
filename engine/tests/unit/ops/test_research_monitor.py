@@ -51,7 +51,7 @@ async def test_scan_uses_post_reconciliation_clock_without_moving_original_bucke
     before = datetime.fromisoformat(f"2026-11-09T{before_time}").replace(tzinfo=UTC)
     after = before + timedelta(seconds=advance)
     account, batch_id, instrument, calendar = (UUID(int=n) for n in (1, 2, 3, 4))
-    clocks = iter((before, after))
+    clocks = iter((before, before, after))
 
     async def scalar(statement):
         if "clock_timestamp()" in str(statement):
@@ -72,6 +72,14 @@ async def test_scan_uses_post_reconciliation_clock_without_moving_original_bucke
         def __call__(self):
             return opened()
 
+    Factory.begin = staticmethod(opened)
+
+    @asynccontextmanager
+    async def turn(_settings):
+        yield
+
+    monkeypatch.setattr("nexus.paper.account_transaction_turn.account_transaction_turn", turn)
+    monkeypatch.setattr("nexus.paper.host_probe_state.require_host_admitting", AsyncMock())
     factory = Factory()
     monkeypatch.setattr(research_monitor, "session_factory", lambda _: factory)
     batch = SimpleNamespace(account_id=account, created_at=before, instrument_ids=(instrument,))
