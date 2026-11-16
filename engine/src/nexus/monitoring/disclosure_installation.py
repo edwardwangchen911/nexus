@@ -88,6 +88,9 @@ async def _install_mixed_or_legacy_disclosure(
         from nexus.monitoring.disclosure_forward import read_origin
 
         await read_origin(session, existing, await plan_recorded_at(session, requested_at=now))
+        from nexus.monitoring.recent_positive_chain import ensure_member
+
+        await ensure_member(session, plan=existing, now=now)
         return existing
     prior = await session.scalar(
         select(MonitorPlan)
@@ -147,6 +150,9 @@ async def _install_mixed_or_legacy_disclosure(
             "proposal_hash": proposal.content_hash,
         },
     )
+    from nexus.monitoring.recent_positive_chain import ensure_member
+
+    await ensure_member(session, plan=plan, now=now)
     return plan
 
 
