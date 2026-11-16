@@ -74,10 +74,12 @@ def member_hash(run: AgentResearchRunRecord, job: Job) -> str:
 def manifest_hash(row: ManualPaperRequest, at: datetime, hashes: list[str]) -> str:
     return job_input_hash(
         {
-            "contract": "independent_monitor_research_v1"
+            "contract": "single_monitor_sol_once_v1"
+            if row.contract_version == 6
+            else "independent_monitor_research_v1"
             if row.contract_version == 3
             else "single_sol_research_v1"
-            if row.contract_version in {4, 5}
+            if row.contract_version in {4, 5, 6}
             else "research_only_v2",
             "request_id": str(row.id),
             "request_hash": row.request_hash,
@@ -106,13 +108,14 @@ async def read_research_manifest(
     )
     batch = await load_agent_paper_candidate_batch(session, batch_id=row.candidate_batch_id)
     if (
-        row.contract_version not in {2, 3, 4, 5}
+        row.contract_version not in {2, 3, 4, 5, 6}
         or row.mode
         != {
             2: "research_only",
             3: "research_and_monitor",
             4: "research_only",
             5: "research_only",
+            6: "research_and_monitor",
         }.get(row.contract_version)
         or batch is None
         or batch.batch_hash != row.batch_hash
@@ -121,7 +124,7 @@ async def read_research_manifest(
         or tuple(member.instrument_id for member in members)
         != (
             (binding_for(row).instrument_id,)
-            if row.contract_version in {4, 5}
+            if row.contract_version in {4, 5, 6}
             else batch.instrument_ids
         )
         or any(member.instrument_id not in batch.instrument_ids for member in members)
@@ -151,7 +154,7 @@ async def read_research_manifest(
             or snapshot.payload.get("purpose")
             != (
                 "independent_monitor_research_v1"
-                if row.contract_version == 3
+                if row.contract_version in {3, 6}
                 else "research_only_v2"
             )
             or job.payload != {"run_id": str(run.id)}
@@ -206,10 +209,10 @@ async def _prepare_research_request(
     if (
         row is None
         or row.account_id != settings.agent_paper_account_id
-        or row.contract_version not in {2, 3, 4, 5}
+        or row.contract_version not in {2, 3, 4, 5, 6}
     ):
         raise ValueError("MANUAL_REQUEST_INVALID")
-    if row.contract_version in {4, 5}:
+    if row.contract_version in {4, 5, 6}:
         from nexus.agents.budget import ResearchAccountingBusy
         from nexus.paper.target_service import try_lock_portfolio_account
 
@@ -217,7 +220,7 @@ async def _prepare_research_request(
             raise ResearchAccountingBusy()
     else:
         await lock_portfolio_account(session, row.account_id)
-    if row.contract_version in {3, 4, 5}:
+    if row.contract_version in {3, 4, 5, 6}:
         from nexus.paper.independent_unknown_acceptance import require_independent_execution_open
 
         await require_independent_execution_open(session, request_id=row.id)
@@ -227,7 +230,7 @@ async def _prepare_research_request(
     from nexus.agents.research_maintenance import require_research_open
 
     require_research_open()
-    if row.contract_version in {4, 5}:
+    if row.contract_version in {4, 5, 6}:
         from nexus.monitoring.host import (
             BATCH_PREPARATION_HEADROOM_SECONDS,
             INCREMENT_ACTION_HEADROOM_SECONDS,
@@ -287,7 +290,7 @@ async def _prepare_members(
         or settings.agent_paper_formal_model_config_id != row.model_config_id
     ):
         raise ValueError("MANUAL_CONFIGURATION_UNAVAILABLE")
-    if row.contract_version in {4, 5}:
+    if row.contract_version in {4, 5, 6}:
         from nexus.paper.single_sol_research import recheck_single_sol
 
         await recheck_single_sol(session, settings, row)
@@ -302,7 +305,7 @@ async def _prepare_members(
         platform_credential = credential_for_preparation(settings)
     selected_ids = (
         (binding_for(row).instrument_id,)
-        if row.contract_version in {4, 5}
+        if row.contract_version in {4, 5, 6}
         else batch.instrument_ids
     )
     if any(instrument_id not in batch.instrument_ids for instrument_id in selected_ids):
@@ -318,7 +321,7 @@ async def _prepare_members(
         )
         if snapshot is None:
             raise ValueError("RESEARCH_SNAPSHOT_MISSING")
-        if row.contract_version == 3:
+        if row.contract_version in {3, 6}:
             from nexus.monitoring.independent_storage import freeze_independent_snapshot
 
             snapshot = await freeze_independent_snapshot(session, request=row, base=snapshot)
@@ -333,6 +336,7 @@ async def _prepare_members(
                 3: "independent-monitor-research-v1",
                 4: "single-sol-research-v1",
                 5: "budgeted-single-sol-research-v1",
+                6: "single-monitor-sol-v1",
             }[row.contract_version],
             idempotency_key=f"{research_identity(row.contract_version)[1]}:{row.id}:{instrument_id}",
             request_hash=job_input_hash(request.model_dump(mode="json")),
@@ -344,7 +348,7 @@ async def _prepare_members(
             job_type=JobType.AGENT_PAPER_RESEARCH,
             formal_stage_capacity=True,
             research_only=row.contract_version in {2, 4, 5},
-            independent_monitor=row.contract_version == 3,
+            independent_monitor=row.contract_version in {3, 6},
         )
         run = await session.get(AgentResearchRunRecord, admission.run_id)
         job = await session.scalar(
@@ -389,11 +393,11 @@ async def _prepare_members(
             instrument_id=binding.instrument_id,
             calendar_authority_id=binding.calendar_id,
         )
-    elif row.contract_version == 5:
+    elif row.contract_version in {5, 6}:
         from nexus.paper.budgeted_single_sol import freeze_or_reuse_protection
 
         await freeze_or_reuse_protection(session, settings, row=row, run_id=native[0][0].id)
-    if row.contract_version in {3, 4, 5}:
+    if row.contract_version in {3, 4, 5, 6}:
         from nexus.agents.research_stages.routes import register_new_prepared_runs
 
         if platform_credential is not None:
@@ -596,7 +600,7 @@ async def require_research_profile(
         or set(profile)
         != {"runtime_mode", "daily_limit_usd", "orchestrator_id", "prompt_hashes"}
         | ({"execution_policy"} if parallel else set())
-        | ({"single_sol"} if row.contract_version in {4, 5} else set())
+        | ({"single_sol"} if row.contract_version in {4, 5, 6} else set())
         | (
             {"historical_exception"}
             if isinstance(profile, dict) and "historical_exception" in profile
@@ -611,8 +615,8 @@ async def require_research_profile(
         or profile["runtime_mode"] != settings.agent_runtime_mode.value
         or profile["runtime_mode"] != ("responses" if platform else "codex_sdk")
         or platform
-        and row.contract_version not in {3, 4, 5}
-        or row.contract_version in {4, 5}
+        and row.contract_version not in {3, 4, 5, 6}
+        or row.contract_version in {4, 5, 6}
         and (not platform or parallel)
         or profile["daily_limit_usd"] != format(settings.agent_daily_budget_usd.normalize(), "f")
     ):
@@ -631,7 +635,7 @@ async def require_research_profile(
         or base is None
         or not (
             prompts_valid(prompts)
-            if row.contract_version == 3
+            if row.contract_version in {3, 6}
             else research_only_prompts_valid(prompts)
         )
         or {role: p.content_hash for role, p in prompts.items()} != profile["prompt_hashes"]
@@ -639,7 +643,7 @@ async def require_research_profile(
             prompts[role].content
             != base[role].content
             + "\n\n"
-            + (INSTRUCTIONS if row.contract_version == 3 else RESEARCH_ONLY_INSTRUCTIONS)
+            + (INSTRUCTIONS if row.contract_version in {3, 6} else RESEARCH_ONLY_INSTRUCTIONS)
             for role in prompts
         )
     ):

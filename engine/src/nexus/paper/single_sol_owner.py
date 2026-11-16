@@ -17,9 +17,9 @@ class SingleSolBinding(BaseModel):
     budget_day: date
     calendar_id: UUID
     deadline: datetime
-    history_policy: Literal["single_sol_original_acceptances_v1"] = (
-        "single_sol_original_acceptances_v1"
-    )
+    history_policy: Literal[
+        "single_sol_original_acceptances_v1", "single_monitor_original_acceptances_once_v1"
+    ] = "single_sol_original_acceptances_v1"
     preparation_proof: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
     scheduled_proof: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
 
@@ -41,23 +41,45 @@ class BudgetedSingleSolBinding(SingleSolBinding):
         )
 
 
+class SingleMonitorSolBinding(BudgetedSingleSolBinding):
+    authorization_scope: Literal["single_monitor_root_20261116_once_v1"]
+
+    @property
+    def intent_hash(self) -> str:
+        return job_input_hash(
+            {"contract": "single_monitor_sol_intent_v1", **self.model_dump(mode="json")}
+        )
+
+
 class SingleSolOffer(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    binding: BudgetedSingleSolBinding | SingleSolBinding
+    binding: SingleMonitorSolBinding | BudgetedSingleSolBinding | SingleSolBinding
 
     intent_hash: str
 
 
 def binding_for(row: ManualPaperRequest) -> SingleSolBinding:
     if (
-        row.contract_version not in {4, 5}
-        or row.mode != "research_only"
+        row.contract_version not in {4, 5, 6}
+        or row.mode != ("research_and_monitor" if row.contract_version == 6 else "research_only")
         or row.research_profile is None
     ):
         raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
     try:
-        model = BudgetedSingleSolBinding if row.contract_version == 5 else SingleSolBinding
+        model = (
+            SingleMonitorSolBinding
+            if row.contract_version == 6
+            else BudgetedSingleSolBinding
+            if row.contract_version == 5
+            else SingleSolBinding
+        )
         binding = model.model_validate(row.research_profile["single_sol"])
+        if binding.history_policy != (
+            "single_monitor_original_acceptances_once_v1"
+            if row.contract_version == 6
+            else "single_sol_original_acceptances_v1"
+        ):
+            raise ValueError
         if binding.deadline.utcoffset() is None or binding.deadline.date() != binding.budget_day:
             raise ValueError
         return binding
@@ -66,6 +88,8 @@ def binding_for(row: ManualPaperRequest) -> SingleSolBinding:
 
 
 def research_identity(version: int) -> tuple[str, str]:
+    if version == 6:
+        return "local-single-monitor-sol-v1", "single-monitor-sol"
     if version == 5:
         return "local-budgeted-single-sol-v1", "budgeted-single-sol"
     if version == 4:

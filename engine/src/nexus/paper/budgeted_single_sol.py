@@ -14,7 +14,7 @@ from nexus.paper.single_sol_budget import (
     require_single_sol_capacity,
 )
 from nexus.paper.single_sol_obligations import original_slot
-from nexus.paper.single_sol_owner import BudgetedSingleSolBinding, binding_for
+from nexus.paper.single_sol_owner import BudgetedSingleSolBinding, binding_for, research_identity
 from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.settings import EngineSettings
@@ -68,7 +68,7 @@ async def freeze_or_reuse_protection(
 ) -> None:
     """The new owner and reservation must be born together; never adopt an old reserve."""
     binding = binding_for(row)
-    if row.contract_version != 5 or not isinstance(binding, BudgetedSingleSolBinding):
+    if row.contract_version not in {5, 6} or not isinstance(binding, BudgetedSingleSolBinding):
         raise ValueError("SINGLE_SOL_REQUEST_BINDING_INVALID")
     current = await protection_context_hash(
         session, settings, day=binding.budget_day, calendar_id=binding.calendar_id
@@ -82,14 +82,14 @@ async def freeze_or_reuse_protection(
             run_id=run_id,
             instrument_id=binding.instrument_id,
             calendar_authority_id=binding.calendar_id,
-            source_actor="local-budgeted-single-sol-v1",
+            source_actor=research_identity(row.contract_version)[0],
         )
     owned = await session.scalar(
         text("""SELECT 1 FROM agent_research_runs r
         JOIN agent_daily_budget_reservations b ON b.run_id=r.id
         JOIN agent_model_configs m ON m.id=r.model_config_id
-        WHERE r.id=:run AND r.actor_id='local-budgeted-single-sol-v1'
-        AND r.idempotency_key='budgeted-single-sol:'||CAST(CAST(:request AS uuid) AS text)||':'||
+        WHERE r.id=:run AND r.actor_id=:actor
+        AND r.idempotency_key=:prefix||':'||CAST(CAST(:request AS uuid) AS text)||':'||
                 CAST(CAST(:instrument AS uuid) AS text)
         AND r.instrument_id=:instrument AND r.model_config_id=:model AND r.status='prepared'
         AND r.model_hash=m.config_hash AND r.pricing_version=m.version
@@ -98,6 +98,8 @@ async def freeze_or_reuse_protection(
         AND pg_xact_status(b.xmin::text::xid8)='in progress'"""),
         dict(
             run=run_id,
+            actor=research_identity(row.contract_version)[0],
+            prefix=research_identity(row.contract_version)[1],
             request=row.id,
             instrument=binding.instrument_id,
             model=row.model_config_id,
