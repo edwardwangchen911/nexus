@@ -43,6 +43,16 @@ def parser() -> argparse.ArgumentParser:
     durable = commands.add_parser("record-sec-discovery", help="Verify an archived SEC source")
     durable.add_argument("--rule-id", type=UUID, required=True)
     durable.add_argument("--capture-id", type=UUID, required=True)
+    bridge = commands.add_parser(
+        "prepare-sec-event-research",
+        help="Bind durable events to qualified research without a notice or job",
+    )
+    bridge.add_argument("--rule-id", type=UUID, required=True)
+    for action in ("import-durable-sec-index", "collect-durable-sec-index"):
+        source = commands.add_parser(action, help="Archive verified durable SEC originals")
+        source.add_argument("--rule-id", type=UUID, required=True)
+        source.add_argument("--identity-snapshot-id", type=UUID, required=True)
+        source.add_argument("--archive-dir", type=Path, required=True)
     pending = commands.add_parser(
         "prepare-pending", help="Prepare one sealed batch without model I/O"
     )
@@ -233,6 +243,18 @@ async def refresh_configured_observations(
                 environment=environment,
                 repo_root=repo_root,
             )
+            if source == "disclosure" and results[source].get("status") in {
+                "refreshed",
+                "unchanged",
+            }:
+                from nexus.monitoring.durable_sec_host import prepare_registered_research
+
+                results[source]["research_bridge"] = await prepare_registered_research(
+                    settings,
+                    account_id=settings.agent_paper_account_id,
+                    calendar_authority_id=calendar_authority_id,
+                    scheduled_at=bucket,
+                )
         except Exception:
             results[source] = {
                 "status": "unknown",
@@ -365,6 +387,57 @@ async def _collect_content_with_scope(
     )
 
 
+async def _durable_index_with_scope(
+    settings: EngineSettings, args: argparse.Namespace
+) -> dict[str, object]:
+    from nexus.monitoring.durable_sec_storage import rule_state
+    from nexus.ops.durable_sec_index_local import collect_durable_index, import_durable_index
+    from nexus.persistence.models.sec_monitor import SecMonitorRule
+    from nexus.research.sec_exhibit_storage import _read_identity, configured_exhibit_store
+
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key,0))"),
+                {"key": SCHEMA_ADMISSION_LOCK_KEY},
+            )
+            if (
+                await session.scalar(text("SELECT version_num FROM alembic_version"))
+                != CURRENT_MIGRATION_HEAD
+            ):
+                raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
+            rule = await session.get(SecMonitorRule, args.rule_id)
+            if (
+                rule is None
+                or rule.account_id != settings.agent_paper_account_id
+                or await rule_state(session, rule) != "active"
+            ):
+                raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+            now = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
+            store = configured_exhibit_store(session)
+            identity = await _read_identity(
+                session, store, snapshot_id=args.identity_snapshot_id, as_of=now
+            )
+            if (identity.instrument_id, identity.identity.cik) != (
+                rule.instrument_id,
+                rule.issuer_cik,
+            ):
+                raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+        if args.action == "collect-durable-sec-index":
+            return await collect_durable_index(
+                settings,
+                identity_snapshot_id=args.identity_snapshot_id,
+                archive_dir=args.archive_dir,
+                contact=getattr(args, "_sec_contact", None) or "",
+            )
+        return await import_durable_index(
+            settings, identity_snapshot_id=args.identity_snapshot_id, archive_dir=args.archive_dir
+        )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, object]:
     from nexus.paper.account_transaction_turn import account_transaction_turn
 
@@ -403,6 +476,8 @@ async def _run(
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action in {"import-durable-sec-index", "collect-durable-sec-index"}:
+        return await _durable_index_with_scope(settings, args)
     if args.action == "observe":
         return await refresh_configured_observations(
             settings,
@@ -452,6 +527,22 @@ async def _run(
                     "provider_requests": 0,
                     "execution_locked": True,
                     "reconciled_results": 0,
+                }
+            if args.action == "prepare-sec-event-research":
+                from nexus.monitoring.durable_sec_research import prepare_durable_sec_research_batch
+                from nexus.paper.host_probe_state import require_host_admitting
+
+                await require_host_admitting(session, settings.agent_paper_account_id)
+                bridge_batch = await prepare_durable_sec_research_batch(
+                    session, account_id=settings.agent_paper_account_id, rule_id=args.rule_id
+                )
+                return {
+                    "status": "empty" if bridge_batch is None else "sealed",
+                    "batch_id": None if bridge_batch is None else str(bridge_batch.id),
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
                 }
             if args.action in {
                 "enable-sec-monitor-rule",
@@ -1092,7 +1183,7 @@ async def run_configured(
     settings = _FileEngineSettings.model_validate(environment)
     if args.action == "observe":
         args = argparse.Namespace(**vars(args), _observation_environment=dict(environment))
-    if args.action in {"collect-content", "prepare-pending"}:
+    if args.action in {"collect-content", "prepare-pending", "collect-durable-sec-index"}:
         args = argparse.Namespace(**vars(args), _sec_contact=environment.get("SEC_CONTACT"))
 
     if args.action in {"admit", "admit-batch"}:

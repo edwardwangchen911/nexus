@@ -10,9 +10,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
+from nexus.monitoring.sec_index_reader import read_monitor_index
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
+from nexus.research.durable_sec_index_storage import SOURCE as DURABLE_SOURCE
+from nexus.research.durable_sec_index_storage import DurableIndexCapture
 from nexus.research.sec_exhibit_storage import configured_exhibit_store
-from nexus.research.sec_index_storage import SOURCE, IndexCapture, read_index_capture
+from nexus.research.sec_index_storage import SOURCE, IndexCapture
 
 
 class FrozenDisclosureBaseline(BaseModel):
@@ -69,14 +72,18 @@ class DisclosureMonitoringContext(BaseModel):
 async def _exact_baseline(
     session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime
 ) -> FrozenDisclosureBaseline:
-    row, index = await read_index_capture(
+    row, index = await read_monitor_index(
         session, configured_exhibit_store(session), snapshot_id=snapshot_id, as_of=as_of
     )
     if index.instrument_id != instrument_id:
         raise ValueError("SEC_BASELINE_INVALID")
     # The shared reader verifies hashes, original receipts, issuer mapping and
     # local custody. Include original observation time in this T0 boundary too.
-    capture = IndexCapture.model_validate(row.payload)
+    capture = (
+        DurableIndexCapture.model_validate(row.payload)
+        if row.source == DURABLE_SOURCE
+        else IndexCapture.model_validate(row.payload)
+    )
     for binding in capture.originals:
         artifact = await session.get(DataArtifact, binding.artifact_id)
         if (
@@ -107,7 +114,7 @@ async def freeze_disclosure_baseline(
     candidate = await session.scalar(
         select(DataSnapshot)
         .where(
-            DataSnapshot.source == SOURCE,
+            DataSnapshot.source.in_((SOURCE, DURABLE_SOURCE)),
             or_(
                 DataSnapshot.provider_object_id.startswith(f"{instrument_id}:"),
                 DataSnapshot.payload["index"]["instrument_id"].astext == str(instrument_id),

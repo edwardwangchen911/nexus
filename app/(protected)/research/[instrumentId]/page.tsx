@@ -1,5 +1,7 @@
 "use client";
 
+import { DurableSecDiscovery } from "../../../components/durable-sec-discovery";
+
 import { RefreshCw, ScanSearch } from "lucide-react";
 import { useParams, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -155,6 +157,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
+        {research.durable_disclosure ? <DurableSecDiscovery discovery={research.durable_disclosure} /> : null}
         {([["价格监控", research.monitoring, research.monitoring_applicability?.price],
           ["SEC 公告监控", research.disclosure_monitoring, research.monitoring_applicability?.disclosure]] as const).map(([label, view, applicability]) =>
           view ? null : <p key={label} className="research-page__gate">{label} · {applicability === "not_applicable"

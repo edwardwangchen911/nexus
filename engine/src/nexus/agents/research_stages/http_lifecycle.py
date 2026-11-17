@@ -306,6 +306,8 @@ async def invoke_http_stage(
     # repeated cancellation cannot cancel its original bounded cleanup again.
     started = False
 
+    from nexus.monitoring.durable_sec_permission import SecRequestFence
+
     async def transport() -> HttpRequestObservation:
         nonlocal started
         started = True
@@ -317,6 +319,11 @@ async def invoke_http_stage(
             pre_send=qualify_platform if platform_requested else None,
             before_send=before_send,
             on_terminal=terminal,
+            request_fence=(
+                SecRequestFence(protocol.factory, ticket.run_id)
+                if getattr(protocol, "factory", None) is not None
+                else None
+            ),
         )
 
     transport_task = asyncio.create_task(transport())

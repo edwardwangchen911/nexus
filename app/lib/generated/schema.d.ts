@@ -2798,6 +2798,102 @@ export interface components {
              */
             state: "unlocked" | "locked" | "recovery_eligible" | "unknown";
         };
+        /** DurableSecCheckView */
+        DurableSecCheckView: {
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /**
+             * Coverage
+             * @enum {string}
+             */
+            coverage: "complete" | "partial" | "unknown";
+            /** Interval End */
+            interval_end: string | null;
+            /** Interval Start */
+            interval_start: string | null;
+            /** Reason */
+            reason: "evidence_unverified" | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "true" | "false" | "unknown";
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+        };
+        /** DurableSecEventView */
+        DurableSecEventView: {
+            /**
+             * Accepted At
+             * Format: date-time
+             */
+            accepted_at: string;
+            /** Event Key */
+            event_key: string;
+            /**
+             * First Seen At
+             * Format: date-time
+             */
+            first_seen_at: string;
+            /**
+             * Form
+             * @enum {string}
+             */
+            form: "8-K" | "8-K/A";
+            /**
+             * Metadata Status
+             * @enum {string}
+             */
+            metadata_status: "recorded" | "conflict";
+        };
+        /** DurableSecView */
+        DurableSecView: {
+            /** Effective At */
+            effective_at: string | null;
+            /**
+             * Event Count
+             * @default 0
+             */
+            event_count: number;
+            /**
+             * Events
+             * @default []
+             */
+            events: components["schemas"]["DurableSecEventView"][];
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Forms
+             * @default []
+             */
+            forms: ("8-K" | "8-K/A")[];
+            latest_check: components["schemas"]["DurableSecCheckView"] | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Rule Id
+             * Format: uuid
+             */
+            rule_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "active" | "paused" | "revoked" | "unknown";
+        };
         /**
          * EconomicComparisonResponse
          * @description Explain comparison evidence without granting ranking or execution permission.
@@ -7657,6 +7753,7 @@ export interface components {
             /** Disagreement */
             disagreement?: string | null;
             disclosure_monitoring?: components["schemas"]["ResearchDisclosureMonitoringView"] | null;
+            durable_disclosure?: components["schemas"]["DurableSecView"] | null;
             /** Evidence */
             evidence: components["schemas"]["EvidenceRef"][];
             failed_stage_input?: components["schemas"]["StageInputIdentity"] | null;

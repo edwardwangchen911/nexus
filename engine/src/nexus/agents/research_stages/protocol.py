@@ -416,6 +416,9 @@ class StagedProtocol:
                         raise ProtocolRejected(code) from error
                     raise
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
+            from nexus.monitoring.durable_sec_permission import require_new_send
+
+            await require_new_send(session, run.id)
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
             budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
             if route is not None and route["kind"] == "comparison":

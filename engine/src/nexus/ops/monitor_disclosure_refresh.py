@@ -125,6 +125,13 @@ async def _claim(
     if instrument_id not in instruments:
         return None
     await lock_security(session, account_id=account_id, instrument_id=instrument_id)
+    from nexus.monitoring.durable_sec_host import claim_refresh, registered_rule
+
+    rule = await registered_rule(session, account_id, instrument_id)
+    if rule is not None:
+        return await claim_refresh(
+            session, rule=rule, now=now, scheduled=scheduled, repo_root=repo_root, contact=contact
+        )
     plan = await session.scalar(
         select(MonitorPlan)
         .where(
@@ -337,14 +344,25 @@ async def refresh_disclosure_observations(
                 result_ready = False
                 try:
                     async with _client() as client:
-                        collected = await collect_index(
-                            settings,
-                            identity_snapshot_id=UUID(str(claim["identity_snapshot_id"])),
-                            archive_dir=archive,
-                            contact=contact or "",
-                            client=client,
-                            listed_history=claim.get("listed_history") is True,
-                        )
+                        if claim.get("durable_sec") is True:
+                            from nexus.ops.durable_sec_index_local import collect_durable_index
+
+                            collected = await collect_durable_index(
+                                settings,
+                                identity_snapshot_id=UUID(str(claim["identity_snapshot_id"])),
+                                archive_dir=archive,
+                                contact=contact or "",
+                                client=client,
+                            )
+                        else:
+                            collected = await collect_index(
+                                settings,
+                                identity_snapshot_id=UUID(str(claim["identity_snapshot_id"])),
+                                archive_dir=archive,
+                                contact=contact or "",
+                                client=client,
+                                listed_history=claim.get("listed_history") is True,
+                            )
                     async with (
                         account_transaction_turn(settings),
                         factory() as session,
@@ -355,13 +373,28 @@ async def refresh_disclosure_observations(
                             raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
                         from nexus.research.sec_listed_storage import read_listed_capture
 
-                        reader = read_listed_capture if claim.get("listed_history") else _capture
-                        row, index = await reader(
-                            session,
-                            configured_exhibit_store(session),
-                            snapshot_id=UUID(str(collected["snapshot_id"])),
-                            as_of=now,
-                        )
+                        if claim.get("durable_sec") is True:
+                            from nexus.research.durable_sec_index_storage import (
+                                read_durable_index_capture,
+                            )
+
+                            row, durable_capture = await read_durable_index_capture(
+                                session,
+                                configured_exhibit_store(session),
+                                snapshot_id=UUID(str(collected["snapshot_id"])),
+                                as_of=now,
+                            )
+                            index = durable_capture.index
+                        else:
+                            reader = (
+                                read_listed_capture if claim.get("listed_history") else _capture
+                            )
+                            row, index = await reader(
+                                session,
+                                configured_exhibit_store(session),
+                                snapshot_id=UUID(str(collected["snapshot_id"])),
+                                as_of=now,
+                            )
                         if (index.instrument_id, index.issuer_cik, index.identity_snapshot_id) != (
                             instrument,
                             claim["issuer_cik"],

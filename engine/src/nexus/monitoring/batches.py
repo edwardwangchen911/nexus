@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import TypedDict
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
@@ -240,10 +240,17 @@ async def scan_stock_batch(
     if not scheduled <= now < scheduled + timedelta(minutes=5):
         raise ValueError("MONITOR_TICK_TIME_INVALID")
     await lock_security(session, account_id=account_id, instrument_id=instrument_id)
+    from nexus.monitoring.durable_sec_host import registered_rule
+
+    durable_rule = await registered_rule(session, account_id, instrument_id)
     plans = tuple(
         await session.scalars(
             select(MonitorPlan)
-            .where(MonitorPlan.account_id == account_id, MonitorPlan.instrument_id == instrument_id)
+            .where(
+                MonitorPlan.account_id == account_id,
+                MonitorPlan.instrument_id == instrument_id,
+                MonitorPlan.kind == "price" if durable_rule is not None else true(),
+            )
             .distinct(MonitorPlan.kind)
             .order_by(MonitorPlan.kind, MonitorPlan.generation.desc())
         )

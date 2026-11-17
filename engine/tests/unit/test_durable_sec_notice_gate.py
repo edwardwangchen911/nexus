@@ -67,6 +67,8 @@ def test_filter_is_correlated_to_the_selected_outbox():
     assert "sec_monitor_rule_states.sequence DESC" in sql
     assert "sec_monitor_rule_states.state" in sql
     assert "legacy_trigger_id IS NULL" in sql
+    assert "sec_discovery_event_revisions.event_id = outbox_events.aggregate_id" in sql
+    assert "NOT (EXISTS" in sql
 
 
 @pytest.mark.asyncio

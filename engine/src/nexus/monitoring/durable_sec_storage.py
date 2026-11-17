@@ -14,7 +14,7 @@ from nexus.domain.time import require_utc
 from nexus.monitoring.disclosure_observations import _bound_proposal, _capture
 from nexus.monitoring.durable_sec_claims import audit_fact, claim_notice
 from nexus.monitoring.durable_sec_contracts import DurableSecPolicy, RuleState
-from nexus.monitoring.durable_sec_evaluation import evaluate_discovery
+from nexus.monitoring.durable_sec_evaluation import evaluate_discovery, stable_event_key
 from nexus.monitoring.sec_index_reader import read_monitor_index
 from nexus.monitoring.storage import lock_security
 from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
@@ -29,6 +29,13 @@ from nexus.persistence.models.sec_monitor import (
     SecMonitorRule,
     SecMonitorRuleState,
     SecNotificationClaim,
+)
+from nexus.research.durable_sec_index import SecMetadataFact
+from nexus.research.durable_sec_index_storage import (
+    SOURCE as DURABLE_SOURCE,
+)
+from nexus.research.durable_sec_index_storage import (
+    read_durable_index_capture,
 )
 from nexus.research.sec_disclosure_index import SecIndexEntry
 from nexus.research.sec_exhibit_storage import configured_exhibit_store
@@ -204,7 +211,7 @@ async def change_state(
     return current
 
 
-def _metadata(entry: SecIndexEntry) -> str:
+def _metadata(entry: SecIndexEntry | SecMetadataFact) -> str:
     return sha256(
         json.dumps(entry.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -273,14 +280,23 @@ async def record_discovery(
     reason: str | None = "DURABLE_SEC_SOURCE_INVALID"
     capture = None
     index = None
+    evidence = None
     try:
         if capture_id is not None:
             capture = await session.get(DataSnapshot, capture_id)
-            if capture is None or capture.source != INDEX_SOURCE:
+            if capture is None:
                 raise ValueError("DURABLE_SEC_SOURCE_INVALID")
-            capture, index = await _capture(
-                session, configured_exhibit_store(session), snapshot_id=capture_id, as_of=now
-            )
+            if capture.source == DURABLE_SOURCE:
+                capture, evidence = await read_durable_index_capture(
+                    session, configured_exhibit_store(session), snapshot_id=capture_id, as_of=now
+                )
+                index = evidence.index
+            elif capture.source == INDEX_SOURCE:
+                capture, index = await _capture(
+                    session, configured_exhibit_store(session), snapshot_id=capture_id, as_of=now
+                )
+            else:
+                raise ValueError("DURABLE_SEC_SOURCE_INVALID")
     except (OSError, ValueError):
         index = None
     if index is None or capture is None:
@@ -300,29 +316,46 @@ async def record_discovery(
                 "to": index.received_at.isoformat(),
             }
         by_key = {v.event_key: v for v in rows}
-        for item in decision.events:
-            original = by_key.get(item.event_key)
-            if item.classification == "unknown" and original is not None:
-                metadata = _metadata(item.entry)
-                exists = await session.scalar(
-                    select(SecDiscoveryEventRevision.id).where(
-                        SecDiscoveryEventRevision.event_id == original.id,
-                        SecDiscoveryEventRevision.metadata_hash == metadata,
-                    )
+        # Generic metadata preserves conflicts even when the form changed out of
+        # scope. Invalid rows remain explicit unknowns; they never erase originals.
+        facts = evidence.metadata_entries if evidence is not None else index.entries
+        conflicts = []
+        if evidence is not None:
+            observation["row_issues"] = [v.model_dump(mode="json") for v in evidence.issues]
+        for fact in facts:
+            key = stable_event_key(rule.issuer_cik, fact.accession_number)
+            original = by_key.get(key)
+            metadata = _metadata(fact)
+            if original is None or metadata == original.metadata_hash:
+                continue
+            conflicts.append(key)
+            exists = await session.scalar(
+                select(SecDiscoveryEventRevision.id).where(
+                    SecDiscoveryEventRevision.event_id == original.id,
+                    SecDiscoveryEventRevision.metadata_hash == metadata,
                 )
-                if metadata != original.metadata_hash and exists is None:
-                    revision = SecDiscoveryEventRevision(
-                        id=new_uuid7(),
-                        created_at=now,
-                        event_id=original.id,
-                        capture_id=capture.id,
-                        entry=item.entry.model_dump(mode="json"),
-                        metadata_hash=metadata,
-                        observed_at=now,
-                    )
-                    session.add(revision)
-                    await session.flush()
-                    await audit_fact(session, revision)
+            )
+            if exists is None:
+                revision = SecDiscoveryEventRevision(
+                    id=new_uuid7(),
+                    created_at=now,
+                    event_id=original.id,
+                    capture_id=capture.id,
+                    entry=fact.model_dump(mode="json"),
+                    metadata_hash=metadata,
+                    observed_at=now,
+                )
+                session.add(revision)
+                await session.flush()
+                await audit_fact(session, revision)
+        if conflicts:
+            observation["metadata_conflicts"] = conflicts
+            coverage = "partial"
+            if result == "false":
+                result, reason = "unknown", "DURABLE_SEC_EVENT_CONFLICT"
+                observation.pop("coverage_proof", None)
+            observation.update(result=result, coverage=coverage, reason=reason)
+        for item in decision.events:
             if item.classification != "new":
                 continue
             event = SecDiscoveryEvent(

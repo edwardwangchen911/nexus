@@ -66,3 +66,91 @@ def test_shared_identity_or_hash_damage_rejects_entire_source(damage):
         args["issuer_cik"] = "0000654321"
     with pytest.raises(ValueError):
         build_durable_index(raw, receipt, **args, now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC))
+
+
+@pytest.mark.parametrize("accepted", ["2026-01-01T15:00Z", "2026-01-01"])
+def test_truncated_timestamp_cannot_classify_activation_boundary(accepted):
+    raw, receipt = originals()
+    document = json.loads(raw)
+    document["filings"]["recent"]["acceptanceDateTime"][1] = accepted
+    raw = json.dumps(document).encode()
+    proof = json.loads(receipt)
+    proof.update(sha256=sha256(raw).hexdigest(), byte_length=len(raw))
+    result = build_durable_index(
+        raw, json.dumps(proof).encode(), **arguments(), now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC)
+    )
+    assert result.index.entries == ()
+    assert len(result.issues) == 2
+    assert not result.index.history_complete
+
+
+def test_duplicate_bad_accession_does_not_suppress_independent_other_key():
+    raw, receipt = originals()
+    document = json.loads(raw)
+    recent = document["filings"]["recent"]
+    for key in ("accessionNumber", "form", "acceptanceDateTime", "filingDate", "primaryDocument"):
+        recent[key].append(recent[key][0])
+    raw = json.dumps(document).encode()
+    proof = json.loads(receipt)
+    proof.update(sha256=sha256(raw).hexdigest(), byte_length=len(raw))
+    result = build_durable_index(
+        raw, json.dumps(proof).encode(), **arguments(), now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC)
+    )
+    assert [v.accession_number for v in result.index.entries] == ["0000123456-26-000002"]
+    assert not result.index.history_complete
+
+
+def test_generic_non_target_metadata_is_retained_for_conflict_readback():
+    raw, receipt = originals()
+    document = json.loads(raw)
+    recent = document["filings"]["recent"]
+    recent["acceptanceDateTime"][0] = "2026-01-01T14:00:00Z"
+    recent["form"][0] = "10-K"
+    raw = json.dumps(document).encode()
+    proof = json.loads(receipt)
+    proof.update(sha256=sha256(raw).hexdigest(), byte_length=len(raw))
+    result = build_durable_index(
+        raw, json.dumps(proof).encode(), **arguments(), now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC)
+    )
+    assert len(result.metadata_entries) == 2
+    assert result.metadata_entries[0].form == "10-K"
+    assert len(result.index.entries) == 1
+    assert not result.index.history_complete
+
+
+def test_legitimate_non_target_relative_path_is_metadata_not_filing_permission():
+    raw, receipt = originals()
+    document = json.loads(raw)
+    recent = document["filings"]["recent"]
+    recent["acceptanceDateTime"][0] = "2026-01-01T14:00:00Z"
+    recent["form"][0] = "4"
+    recent["primaryDocument"][0] = "xslF345X05/form4.xml"
+    raw = json.dumps(document).encode()
+    proof = json.loads(receipt)
+    proof.update(sha256=sha256(raw).hexdigest(), byte_length=len(raw))
+    result = build_durable_index(
+        raw, json.dumps(proof).encode(), **arguments(), now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC)
+    )
+    assert result.metadata_entries[0].primary_document == "xslF345X05/form4.xml"
+    assert len(result.index.entries) == 1 and result.index.entries[0].form == "8-K"
+    assert result.issues == ()
+
+
+@pytest.mark.parametrize(
+    "primary",
+    ["../old.htm", "xsl/../old.htm", "xsl//old.htm", "/old.htm", "https://www.sec.gov/old.htm"],
+)
+def test_unsafe_non_target_path_stays_local_unknown(primary):
+    raw, receipt = originals()
+    document = json.loads(raw)
+    recent = document["filings"]["recent"]
+    recent["acceptanceDateTime"][0] = "2026-01-01T14:00:00Z"
+    recent["form"][0] = "4"
+    recent["primaryDocument"][0] = primary
+    raw = json.dumps(document).encode()
+    proof = json.loads(receipt)
+    proof.update(sha256=sha256(raw).hexdigest(), byte_length=len(raw))
+    result = build_durable_index(
+        raw, json.dumps(proof).encode(), **arguments(), now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC)
+    )
+    assert len(result.issues) == 1 and len(result.index.entries) == 1

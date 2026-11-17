@@ -68,6 +68,29 @@ async def scan_account(
         # Lock in instrument order, then reload: installation may have advanced
         # the generation after the bounded scope query and before this lock.
         await lock_security(session, account_id=account_id, instrument_id=selected.instrument_id)
+        from nexus.monitoring.durable_sec_host import registered_rule, scan_registered
+
+        durable_rule = await registered_rule(session, account_id, selected.instrument_id)
+        if durable_rule is not None:
+            checked, notices = await scan_registered(session, durable_rule, now)
+            counts["discoveries"] = counts.get("discoveries", 0) + notices
+            counts["notifications"] = counts.get("notifications", 0) + notices
+            if checked is not None:
+                counts["checks"] += 1
+                counts[checked.result] += 1
+            else:
+                counts["inactive"] = counts.get("inactive", 0) + 1
+            price = await session.scalar(
+                select(MonitorPlan.id)
+                .where(
+                    MonitorPlan.account_id == account_id,
+                    MonitorPlan.instrument_id == selected.instrument_id,
+                    MonitorPlan.kind == "price",
+                )
+                .limit(1)
+            )
+            if price is None:
+                continue
         disclosure_plan = await session.scalar(
             select(MonitorPlan.id)
             .where(

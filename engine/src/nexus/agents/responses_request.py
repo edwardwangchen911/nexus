@@ -78,6 +78,7 @@ async def send_response_stage(
     pre_send: Callable[[], Awaitable[None]] | None = None,
     before_send: Callable[[], None] | None = None,
     on_terminal: Callable[[dict[str, Any], ResponsesStreamFacts], None] | None = None,
+    request_fence: Any = None,
 ) -> HttpRequestObservation:
     """Consume an exclusively owned client and one already-authorized request.
 
@@ -111,12 +112,25 @@ async def send_response_stage(
         from nexus.agents.model_io_guard import require_offline_http_transport
 
         require_offline_http_transport(client, url=request.url)
-        if before_send is not None:
-            before_send()
         if loop.time() >= work_deadline:
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
-        owner.send_started = True
-        owner.response = await client.send(request, stream=True, follow_redirects=False, auth=None)
+        if request_fence is not None:
+            await request_fence.acquire(request)
+        try:
+            # No new send window after asynchronous permission checks.
+            if owner.abandoned or loop.time() >= work_deadline:
+                raise TimeoutError("RESPONSES_WORK_DEADLINE")
+            if before_send is not None:
+                before_send()
+            if owner.abandoned or loop.time() >= work_deadline:
+                raise TimeoutError("RESPONSES_WORK_DEADLINE")
+            owner.send_started = True
+            owner.response = await client.send(
+                request, stream=True, follow_redirects=False, auth=None
+            )
+        finally:
+            if request_fence is not None:
+                await request_fence.release()
         if owner.abandoned:
             await owner.close_response()
         return None

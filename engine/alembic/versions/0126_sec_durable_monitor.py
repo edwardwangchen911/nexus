@@ -204,7 +204,10 @@ BEGIN
     OR (v->>'result'='false' AND (v->>'coverage'<>'complete' OR NOT (v->'observation' ? 'coverage_proof')))
    THEN RAISE EXCEPTION 'SEC_DURABLE_CHECK_INVALID' USING ERRCODE='23514'; END IF;
    IF v->>'result'<>'unknown' THEN
-    SELECT * INTO s FROM public.data_snapshots WHERE id=(v->>'capture_id')::uuid AND source='sec_disclosure_index';
+    SELECT * INTO s FROM public.data_snapshots WHERE id=(v->>'capture_id')::uuid AND (
+      source='sec_disclosure_index' OR
+      (source='sec_durable_disclosure_index' AND schema_version='sec_durable_index_v1'
+       AND payload->>'schema_version'='sec_durable_index_v1'));
     IF s.id IS NULL OR s.payload#>>'{index,received_at}' IS NULL
      OR s.revision IS DISTINCT FROM encode(sha256(convert_to(public.sec_positive_chain_canonical(s.payload),'UTF8')),'hex')
      OR s.payload#>>'{index,instrument_id}' IS DISTINCT FROM i::text OR s.payload#>>'{index,issuer_cik}' IS DISTINCT FROM r.issuer_cik
@@ -213,6 +216,7 @@ BEGIN
     THEN RAISE EXCEPTION 'SEC_DURABLE_CHECK_INVALID' USING ERRCODE='23514'; END IF;
     IF v->>'result'='false' AND (
       (s.payload#>>'{index,history_complete}') IS DISTINCT FROM 'true'
+      OR (s.source='sec_durable_disclosure_index' AND s.payload->'issues' IS DISTINCT FROM '[]'::jsonb)
       OR (s.payload#>>'{index,coverage_start_at}') IS NULL OR (s.payload#>>'{index,coverage_start_at}')::timestamptz>r.effective_at
       OR v#>>'{observation,coverage_proof,capture_id}' IS DISTINCT FROM s.id::text
       OR v#>>'{observation,coverage_proof,capture_hash}' IS DISTINCT FROM s.revision
@@ -222,7 +226,10 @@ BEGIN
    END IF;
   ELSIF TG_TABLE_NAME IN ('sec_discovery_events','sec_discovery_event_revisions') THEN
    entry:=v->'entry';at_time:=coalesce((v->>'first_seen_at')::timestamptz,(v->>'observed_at')::timestamptz);
-   SELECT * INTO s FROM public.data_snapshots WHERE id=(v->>'capture_id')::uuid AND source='sec_disclosure_index';
+   SELECT * INTO s FROM public.data_snapshots WHERE id=(v->>'capture_id')::uuid AND (
+      source='sec_disclosure_index' OR
+      (source='sec_durable_disclosure_index' AND schema_version='sec_durable_index_v1'
+       AND payload->>'schema_version'='sec_durable_index_v1'));
    IF TG_TABLE_NAME='sec_discovery_events' THEN
     IF (v->>'account_id',v->>'instrument_id') IS DISTINCT FROM (a::text,i::text) OR v->>'event_key' IS DISTINCT FROM 'sec:'||r.issuer_cik||':'||(entry->>'accession_number') THEN RAISE EXCEPTION 'SEC_DURABLE_EVENT_INVALID' USING ERRCODE='23514'; END IF;
    ELSE
@@ -232,7 +239,11 @@ BEGIN
    IF s.id IS NULL OR s.payload#>>'{index,received_at}' IS NULL
      OR s.revision IS DISTINCT FROM encode(sha256(convert_to(public.sec_positive_chain_canonical(s.payload),'UTF8')),'hex')
      OR s.payload#>>'{index,instrument_id}' IS DISTINCT FROM i::text OR s.payload#>>'{index,issuer_cik}' IS DISTINCT FROM r.issuer_cik
-    OR NOT EXISTS(SELECT FROM jsonb_array_elements(s.payload#>'{index,entries}') x WHERE x=entry)
+    OR NOT EXISTS(SELECT FROM jsonb_array_elements(
+       CASE WHEN TG_TABLE_NAME='sec_discovery_event_revisions'
+                 AND s.source='sec_durable_disclosure_index'
+            THEN s.payload->'metadata_entries' ELSE s.payload#>'{index,entries}' END
+       ) x WHERE x=entry)
     OR accepted IS NULL OR accepted>at_time
     OR (TG_TABLE_NAME='sec_discovery_events' AND
         (NOT (r.forms ? (entry->>'form')) OR accepted<=r.effective_at))

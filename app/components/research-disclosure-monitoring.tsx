@@ -25,7 +25,7 @@ export function ResearchDisclosureMonitoring({ monitoring, instrumentId }: { mon
   return (
     <section className="decision-card" aria-label="SEC 披露监控记录">
       <header className="decision-card__heading">
-        <div><p className="eyebrow">研究之后 · 只读监控记录</p><h2>SEC 披露监控</h2></div>
+        <div><p className="eyebrow">研究之后 · 只读监控记录</p><h2>SEC 研究监控条件</h2></div>
         <Badge>{stateLabels[monitoring.state]}</Badge>
       </header>
       <p>读取时点：<time className="numeric-data" dateTime={monitoring.observed_at}>{formatDisplayTime(monitoring.observed_at)}</time>。冻结研究内容保持原样。</p>

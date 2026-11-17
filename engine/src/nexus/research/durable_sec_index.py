@@ -10,7 +10,7 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 from nexus.research.sec_disclosure_index import (
     MAX_ENTRIES,
@@ -33,8 +33,17 @@ class SecMetadataFact(BaseModel):
     accepted_at: AwareDatetime
     filed_at: AwareDatetime
     primary_document: str = Field(
-        min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
     )
+
+    @field_validator("primary_document")
+    @classmethod
+    def relative_document(cls, value: str) -> str:
+        # Metadata for non-target SEC forms may use xsl/... paths. Preserve
+        # those exact facts without granting a filing fetch or HTML-reader right.
+        if any(part in ("", ".", "..") for part in value.split("/")):
+            raise ValueError("SEC_DURABLE_ROW_INVALID")
+        return value
 
 
 class SecRowIssue(BaseModel):
@@ -90,6 +99,14 @@ def build_durable_index(
             else None
         )
         try:
+            accepted_raw = recent["acceptanceDateTime"][number]
+            # Require second precision; a truncated minute/day cannot establish
+            # which side of the rule's activation boundary a disclosure belongs to.
+            if not isinstance(accepted_raw, str) or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+                accepted_raw,
+            ):
+                raise ValueError("SEC_DURABLE_ROW_INVALID")
             fact = SecMetadataFact(
                 accession_number=accession,
                 form=recent["form"][number],

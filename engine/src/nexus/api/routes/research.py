@@ -32,6 +32,7 @@ from nexus.agents.persistence import (
 from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfolio_context
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
+from nexus.api.durable_sec import read_durable_sec_view
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.monitoring_applicability import read_applicability
 from nexus.api.price_check_windows import read_run_price_windows
@@ -447,6 +448,7 @@ async def _hydrate_response(
                     if _declares_disclosure_monitoring(run)
                     else None
                 ),
+                "durable_disclosure": await read_durable_sec_view(session, run, now=reader.read_at),
                 "stage_trace": await read_stage_trace(session, run),
                 "inputs": await read_research_inputs(
                     session,

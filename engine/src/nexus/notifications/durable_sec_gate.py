@@ -10,6 +10,7 @@ from nexus.outbox.models import OutboxMessage, Publisher
 from nexus.persistence.models.monitoring import MonitorTrigger
 from nexus.persistence.models.runtime import OutboxEvent
 from nexus.persistence.models.sec_monitor import (
+    SecDiscoveryEventRevision,
     SecMonitorRule,
     SecMonitorRuleState,
     SecNotificationClaim,
@@ -70,6 +71,11 @@ def notice_claim_condition() -> ColumnElement[bool]:
             == OutboxEvent.payload["instrument_id"].astext,
             SecNotificationClaim.legacy_trigger_id.is_(None),
             latest == "active",
+            ~exists(
+                select(SecDiscoveryEventRevision.id)
+                .where(SecDiscoveryEventRevision.event_id == OutboxEvent.aggregate_id)
+                .correlate(OutboxEvent)
+            ),
         )
         .correlate(OutboxEvent)
     )

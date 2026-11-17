@@ -22,8 +22,8 @@
 
 ## 顺序与交付
 
-- [ ] 1. 取得并本地核实标记 R1 的完整独立评审；把正新增/迟到旧、FK 桥接、通知唯一身份、全路径日限和暂停竞态定稿于合同。
-- [ ] 2. 先写纯规则失败回归，再实现 `monitoring/durable_sec_contracts.py` 与明确的原件分类函数；覆盖 partial/complete、旧公告、边界、冲突、过期、恢复和不可变规则状态。
+- [x] 1. 取得并本地核实标记 R1 的完整独立评审；把正新增/迟到旧、FK 桥接、通知唯一身份、全路径日限和暂停竞态定稿于合同。
+- [x] 2. 先写纯规则失败回归，再实现 `monitoring/durable_sec_contracts.py` 与明确的原件分类函数；覆盖 partial/complete、旧公告、边界、冲突、过期、恢复和不可变规则状态。
 - [ ] 3. 追加必要的规则、检查、稳定事件/修订、唯一通知/研究桥接、纽约日占用与审计强绑定；SQL commit 负例、并发、历史不变和有事实拒绝降级。
 - [ ] 4. 正常 CLI 登记/暂停/恢复/撤销；现有宿主采集与扫描接入基础规则，研究过期仍发现，未登记的旧路径行为保持。无临时环境注入、无页面写入。
 - [ ] 5. 原单股/混合自动准入全部接入证券交易日日限，继续原永久 once 和 U+A+H 保护；正常未来授权及逐事件日研消费桥接，unknown 不重试。
@@ -38,3 +38,15 @@
 ## 07:36 接续
 
 R1 已完整返回并核实，已进入实际实现；97 项聚焦单测及分组正常 PG 通过。新原文 parser 尚未接入归档和正常 reader，P1-2 开放。宿主/研究 typed 桥接、连续两代、页面和部署未完成，不得缩小整目标或启用半成品。详细证据及续接入口见主阶段记录顶部与私有 durable-sec-20261116T2251。
+
+## 2026-11-17 12:40 接续（候选，未部署）
+
+新原文保存/导入/采集/四原件重建已接通独立 source/schema，不改变旧 reader。坏行局部 unknown；同键改非目标表单仍保留 metadata conflict。真实两份官方原件只读验证揭示合法 Form4 的 xsl 相对路径，现只保留通用 metadata，不扩正文或采集权限。原件身份/hash/完整覆盖保护保留。
+
+已实现宿主基础发现与研究 TTL 分离、preparation 阶段桥接已保存事件、正常 research-only typed batch（不二次通知）、新来源作为下一代基线、独立 API/页面与生成客户端。实际普通 independent 历史合格来源→新 rule→新原文→事件→batch COMMIT→正常正文 import/prepare 已有正常 PG 正例；不等于增量三阶段或结算。7 项集成 PG、106 聚焦 unit、24 源 Mypy、25 前端/BFF及 typecheck/generatedcheck 通过；后续安全增量另有定向验证，精确版本见私有记录。
+
+新发送权限只在授权和传输边界检查，HTTP headers complete 释放 security/rule fence，避免带锁进入 observe/verify/预算；SDK 缺此能力明确拒绝。真实 loopback+PG 的 headers/握手取消锁释放 2 项通过，正常 current gate active/paused 已验证。历史回执、费用、清理和结算不加新的权限阻断。
+
+R2 已完整返回：本候选不得正式登记/自动派发。已补 binding 反向关联、独立 capture 双 schema、锁后与慢读取后重验、issuer 绑定；仍须真实反例/并发验证和 R2 定向复核。当前明确开放：日限与 SEC 启停耦合（无 SEC rule 的 price/mixed 及跨会话旧材料）、旧 legacy 通知稳定键冲突拦截、混合冻结包坏 X/好 Y/Z 的安全重新冻结、旧 once 全父链中间错误映射反例、未绑定基础事件 daily frozen context/逐事件消费、两合法会话连续两代付费增量+结算/清理/正常接替、发布镜像/兼容回滚/正式登记/真实页面与新版本心跳。
+
+3780 对象新备份与正常离线恢复已验证；正式 R/main/live 仍 da579187/schema0125，原宿主4个连续新鲜admitting心跳，旧 unknown 2.12192、原 dead-letter/attempt1 不变。无新正式规则/研究/通知/费用；未实现或使用 v7。全部证据 .secrets/durable-sec-20261117T0407。不得将局部材料链或测试当作完整目标/部署完成；不等待 CI，不绕保护，不重发旧号。

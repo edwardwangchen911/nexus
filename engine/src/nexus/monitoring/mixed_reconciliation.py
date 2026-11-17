@@ -219,6 +219,9 @@ async def reconcile_mixed_run(
                     )
                 )
     await session.flush()
+    from nexus.monitoring.durable_sec_research import mirror_consumption_receipts
+
+    await mirror_consumption_receipts(session, run_id=run.id)
     await append_audit_event(
         session,
         actor_id="research-monitor",

@@ -19,6 +19,7 @@ from nexus.persistence.models import (
     research,
     runtime,
     sec_monitor,
+    sec_research,
     shadow,
 )
 
@@ -41,5 +42,6 @@ __all__ = [
     "research",
     "runtime",
     "sec_monitor",
+    "sec_research",
     "shadow",
 ]
