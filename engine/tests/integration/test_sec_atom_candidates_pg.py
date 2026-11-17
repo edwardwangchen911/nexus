@@ -29,7 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "pause_during_read,cross_bucket",
-    [(False, False), (True, False), (False, True), (False, "commit"), (False, "clock_skew")],
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+        (False, "commit"),
+        (False, "clock_skew"),
+        (False, "parse_invalid"),
+    ],
 )
 async def test_normal_candidate_entry_custody_once_and_no_effects(
     migrated_database_url, monkeypatch, tmp_path, pause_during_read, cross_bucket
@@ -132,7 +139,9 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                     )
             at = (captured["clock"][0] - timedelta(seconds=1)).isoformat()
             xml = f"""<feed xmlns="http://www.w3.org/2005/Atom"><company-info><cik>{rule.issuer_cik}</cik></company-info><updated>{at}</updated><entry><content><accession-number>0001193125-26-000099</accession-number><filing-type>8-K</filing-type><filing-date>{captured["clock"][0].date()}</filing-date><filing-href>https://www.sec.gov/Archives/edgar/data/{int(rule.issuer_cik)}/000119312526000099/0001193125-26-000099-index.htm</filing-href></content><updated>{at}</updated></entry></feed>"""
-            return httpx.Response(200, content=xml.encode())
+            return httpx.Response(
+                200, content=xml.encode("utf-16" if cross_bucket == "parse_invalid" else "utf-8")
+            )
 
         monkeypatch.setattr(
             atom, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(request))
@@ -189,8 +198,11 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                 )
             return
         result = await research_monitor.run(settings, args)
-        if cross_bucket == "clock_skew":
+        if cross_bucket in ("clock_skew", "parse_invalid"):
             assert result["items"][0]["status"] == "unknown" and len(calls) == 1
+            assert list(
+                (tmp_path / ".secrets/research-monitor-collections").glob("atom-*/feed.xml")
+            )
             assert all("candidate_hints" not in x for x in result["items"])
             async with factory() as db:
                 assert (
