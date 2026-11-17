@@ -13,8 +13,9 @@ from sqlalchemy.exc import DBAPIError
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capture_kind", ["v1", "listed_v2"])
 async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, capture_kind
 ):
     factory, settings, store, captured, pointer = await installed(
         migrated_database_url, monkeypatch, tmp_path, kinds=()
@@ -39,6 +40,36 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
             received=at,
             imported_at=at,
         )
+        if capture_kind == "listed_v2":
+            import json
+            import shutil
+            from hashlib import sha256
+
+            from nexus.ops.sec_index_local import import_index
+
+            archive = tmp_path / "foundation-fresh"
+            path = archive / "AAPL-submissions.json"
+            value = json.loads(path.read_bytes())
+            value["filings"]["files"] = []
+            path.write_text(json.dumps(value))
+            receipt = archive / "AAPL-submissions-receipt.json"
+            proof = json.loads(receipt.read_bytes())
+            proof.update(
+                sha256=sha256(path.read_bytes()).hexdigest(), byte_length=path.stat().st_size
+            )
+            receipt.write_text(json.dumps(proof))
+            shutil.copyfile(path, archive / "AAPL-submissions-close.json")
+            shutil.copyfile(receipt, archive / "AAPL-submissions-close-receipt.json")
+            (archive / "history-manifest.json").write_text(
+                json.dumps({"schema": "sec_listed_history_archive_v2", "files": []})
+            )
+            fresh = await import_index(
+                settings,
+                identity_snapshot_id=captured["identity"].snapshot_id,
+                archive_dir=archive,
+                store=store,
+                listed_history=True,
+            )
         async with factory.begin() as db:
             await enable_scope(
                 db,

@@ -24,6 +24,7 @@ from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.sec_monitor import SecMonitorRule, SecMonitorRuleState
 from nexus.research.sec_exhibit_storage import configured_exhibit_store
+from nexus.research.sec_listed_history import ListedHistoryIndex
 
 SOURCE = "nexus_sec_foundation_scope"
 SCHEMA = "sec_foundation_scope_v1"
@@ -120,7 +121,10 @@ async def enable_foundation(
     latest = await session.get(DataSnapshot, latest_id)
     assert identity is not None and latest is not None
     now = await _time(session)
-    if not timedelta(0) <= now - index.received_at <= timedelta(seconds=300):
+    freshness_at = (
+        index.coverage_received_at if isinstance(index, ListedHistoryIndex) else index.received_at
+    )
+    if not timedelta(0) <= now - freshness_at <= timedelta(seconds=300):
         raise ValueError("SEC_FOUNDATION_SOURCE_STALE")
     rule.created_at = rule.effective_at = now
     payload = dict(

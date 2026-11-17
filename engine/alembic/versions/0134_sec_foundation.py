@@ -55,14 +55,18 @@ BEGIN
   ident.created_at,ident.available_at,ident.received_at,ident.observed_at,
   latest.created_at,latest.available_at,latest.received_at,latest.observed_at)>at_time
  OR NOT ((cap.source='sec_disclosure_index' AND cap.schema_version='sec_disclosure_index_v1')
-  OR (cap.source='sec_durable_disclosure_index' AND cap.schema_version='sec_durable_index_v1'))
+  OR (cap.source='sec_durable_disclosure_index' AND cap.schema_version='sec_durable_index_v1')
+  OR (cap.source='sec_disclosure_listed_index' AND cap.schema_version='sec_disclosure_index_v2'))
  OR cap.payload->>'schema_version' IS DISTINCT FROM cap.schema_version
  OR cap.revision IS DISTINCT FROM encode(sha256(convert_to(public.sec_positive_chain_canonical(cap.payload),'UTF8')),'hex')
  OR cap.payload#>>'{index,instrument_id}' IS DISTINCT FROM i::text
  OR cap.payload#>>'{index,issuer_cik}' IS DISTINCT FROM v->>'issuer_cik'
  OR cap.payload#>>'{index,identity_snapshot_id}' IS DISTINCT FROM ident.id::text
  OR cap.payload#>>'{index,received_at}' IS NULL
- OR at_time-(cap.payload#>>'{index,received_at}')::timestamptz NOT BETWEEN interval '0 seconds' AND interval '300 seconds'
+ OR (cap.source='sec_disclosure_listed_index' AND cap.payload#>>'{index,coverage_received_at}' IS NULL)
+ OR at_time-(CASE WHEN cap.source='sec_disclosure_listed_index'
+  THEN cap.payload#>>'{index,coverage_received_at}' ELSE cap.payload#>>'{index,received_at}' END)::timestamptz
+  NOT BETWEEN interval '0 seconds' AND interval '300 seconds'
  OR ident.payload->>'instrument_id' IS DISTINCT FROM i::text
  OR latest.payload->>'instrument_id' IS DISTINCT FROM i::text
  OR ident.payload#>>'{identity,cik}' IS DISTINCT FROM v->>'issuer_cik'
