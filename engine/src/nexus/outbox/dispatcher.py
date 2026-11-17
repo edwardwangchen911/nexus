@@ -14,7 +14,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure
-from nexus.outbox.models import OutboxMessage
+from nexus.outbox.models import OutboxDeliveryIdentity, OutboxMessage
 from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
 
@@ -303,6 +303,9 @@ async def dispatch_outbox_once(
         aggregate_id=claim.aggregate_id,
         schema_version=claim.schema_version,
         payload=claim.payload,
+        delivery=OutboxDeliveryIdentity(
+            claim.attempt_no, claim.worker_id, claim.lease_token, claim.expires_at
+        ),
     )
     try:
         await spec.publisher(message)

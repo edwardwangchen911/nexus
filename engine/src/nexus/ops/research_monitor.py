@@ -30,6 +30,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "reconcile", help="Reconcile persisted research results into monitor coverage"
     )
+    commands.add_parser(
+        "enable-auto-increment-limit",
+        help="Register stock-session limits without research permission",
+    )
     durable = commands.add_parser("enable-sec-monitor-rule", help="Register durable SEC discovery")
     durable.add_argument("--plan-id", type=UUID, required=True)
     for action in (
@@ -527,6 +531,27 @@ async def _run(
                     "provider_requests": 0,
                     "execution_locked": True,
                     "reconciled_results": 0,
+                }
+            if args.action == "enable-auto-increment-limit":
+                from nexus.monitoring.auto_increment_policy import (
+                    enable_scope as enable_auto_increment_scope,
+                )
+
+                if settings.agent_paper_candidate_batch_id is None:
+                    raise ValueError("AUTO_INCREMENT_SCOPE_INVALID")
+                frequency_scope = await enable_auto_increment_scope(
+                    session,
+                    account_id=settings.agent_paper_account_id,
+                    candidate_batch_id=settings.agent_paper_candidate_batch_id,
+                )
+                return {
+                    "status": "registered",
+                    "snapshot_id": str(frequency_scope.id),
+                    "max_per_stock_session": 1,
+                    "research_authority_granted": False,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "execution_locked": True,
                 }
             if args.action == "prepare-sec-event-research":
                 from nexus.monitoring.durable_sec_research import prepare_durable_sec_research_batch

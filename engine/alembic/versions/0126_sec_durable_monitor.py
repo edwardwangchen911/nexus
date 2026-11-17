@@ -151,6 +151,7 @@ SELECT CASE WHEN t='sec_auto_increment_day_claims' THEN (v->>'account_id')||':'|
     r"""CREATE UNIQUE INDEX uq_sec_durable_fact_audit ON public.audit_events((payload->>'table'),(payload->>'row_id')) WHERE action='research.monitor.durable_fact'""",
     r"""CREATE FUNCTION public.sec_durable_active(rule uuid) RETURNS boolean LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $$
 SELECT coalesce((SELECT state='active' FROM public.sec_monitor_rule_states WHERE rule_id=rule ORDER BY sequence DESC LIMIT 1),false) $$""",
+    "CREATE FUNCTION public.sec_auto_increment_scoped(scope_account uuid,scope_instrument uuid) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$\nDECLARE policy_row public.data_snapshots; candidate_row public.agent_paper_candidate_batches;\nBEGIN\n SELECT * INTO policy_row FROM public.data_snapshots WHERE source='nexus_auto_increment_policy' AND provider_object_id=scope_account::text;\n IF policy_row.id IS NULL THEN\n  RETURN EXISTS(SELECT FROM public.sec_monitor_rules WHERE account_id=scope_account);\n END IF;\n SELECT * INTO candidate_row FROM public.agent_paper_candidate_batches WHERE id=(policy_row.payload->>'candidate_batch_id')::uuid;\n IF policy_row.schema_version<>'auto_increment_scope_v1' OR policy_row.payload->>'schema_version' IS DISTINCT FROM 'auto_increment_scope_v1'\n OR policy_row.payload->>'account_id' IS DISTINCT FROM scope_account::text OR candidate_row.account_id IS DISTINCT FROM scope_account\n OR policy_row.payload->>'candidate_hash' IS DISTINCT FROM candidate_row.batch_hash\n OR policy_row.payload->'instrument_ids' IS DISTINCT FROM to_jsonb(candidate_row.candidate_instrument_ids)\n OR policy_row.payload->'max_per_session' IS DISTINCT FROM '1'::jsonb OR policy_row.payload->>'session_timezone' IS DISTINCT FROM 'America/New_York'\n OR policy_row.revision IS DISTINCT FROM encode(sha256(convert_to(public.sec_positive_chain_canonical(policy_row.payload),'UTF8')),'hex')\n OR NOT EXISTS(SELECT FROM public.audit_events a WHERE a.action='research.monitor.auto_increment_scope' AND a.actor_id='research-monitor' AND a.schema_version='auto_increment_scope_v1' AND a.occurred_at=policy_row.created_at AND a.payload=jsonb_build_object('snapshot_id',policy_row.id::text,'scope_hash',policy_row.revision))\n THEN RAISE EXCEPTION 'AUTO_INCREMENT_SCOPE_INVALID' USING ERRCODE='23514'; END IF;\n IF NOT (policy_row.payload->'instrument_ids' ? scope_instrument::text) THEN RAISE EXCEPTION 'AUTO_INCREMENT_SCOPE_EXCEEDED' USING ERRCODE='23514'; END IF;\n RETURN true;\nEND $$",
     r"""CREATE FUNCTION public.sec_durable_guard() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
 DECLARE v jsonb:=to_jsonb(NEW); r public.sec_monitor_rules; ev public.sec_discovery_events;
  p public.research_monitor_plans; s public.data_snapshots; prev public.sec_monitor_rule_states;
@@ -159,7 +160,7 @@ BEGIN
  IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'SEC_DURABLE_IMMUTABLE' USING ERRCODE='23514'; END IF;
  IF current_setting('transaction_isolation')<>'read committed' THEN RAISE EXCEPTION 'SEC_DURABLE_INVALID' USING ERRCODE='23514'; END IF;
  BEGIN
- IF TG_TABLE_NAME='sec_monitor_rules' THEN
+ IF TG_TABLE_NAME IN ('sec_monitor_rules','sec_auto_increment_day_claims') THEN
   a:=(v->>'account_id')::uuid;i:=(v->>'instrument_id')::uuid;
  ELSE
   IF TG_TABLE_NAME IN ('sec_monitor_rule_states','sec_discovery_checks','sec_discovery_events') THEN
@@ -174,7 +175,7 @@ BEGIN
   a:=r.account_id;i:=r.instrument_id;
  END IF;
  PERFORM pg_advisory_xact_lock(hashtextextended('research-monitor:'||a::text||':'||i::text,0));
- IF TG_TABLE_NAME<>'sec_monitor_rules' THEN PERFORM pg_advisory_xact_lock(hashtextextended('sec-durable-rule:'||r.id::text,0)); END IF;
+ IF TG_TABLE_NAME NOT IN ('sec_monitor_rules','sec_auto_increment_day_claims') THEN PERFORM pg_advisory_xact_lock(hashtextextended('sec-durable-rule:'||r.id::text,0)); END IF;
  IF (v->>'created_at')::timestamptz>clock_timestamp() OR (v->>'created_at') IS NULL THEN RAISE EXCEPTION 'SEC_DURABLE_INVALID' USING ERRCODE='23514'; END IF;
  IF TG_TABLE_NAME='sec_monitor_rules' THEN
   SELECT * INTO p FROM public.research_monitor_plans WHERE id=(v->>'anchor_plan_id')::uuid AND kind='disclosure' AND account_id=a AND instrument_id=i;
@@ -195,7 +196,7 @@ BEGIN
    OR (v->>'effective_at')::timestamptz<r.effective_at
   THEN RAISE EXCEPTION 'SEC_DURABLE_STATE_INVALID' USING ERRCODE='23514'; END IF;
  ELSE
-  IF TG_TABLE_NAME IN ('sec_discovery_checks','sec_discovery_events','sec_discovery_event_revisions','sec_notification_claims','sec_auto_increment_day_claims')
+  IF TG_TABLE_NAME IN ('sec_discovery_checks','sec_discovery_events','sec_discovery_event_revisions','sec_notification_claims')
    AND NOT public.sec_durable_active(r.id) THEN RAISE EXCEPTION 'SEC_DURABLE_RULE_INACTIVE' USING ERRCODE='23514'; END IF;
   IF TG_TABLE_NAME='sec_discovery_checks' THEN
    IF (v->>'scheduled_at')::timestamptz<>date_trunc('hour',(v->>'scheduled_at')::timestamptz)+floor(extract(minute from (v->>'scheduled_at')::timestamptz)/5)*interval '5 minutes'
@@ -262,6 +263,7 @@ BEGIN
     THEN RAISE EXCEPTION 'SEC_NOTIFICATION_EVENT_UNPROVEN' USING ERRCODE='23514'; END IF;
    END IF;
   ELSIF TG_TABLE_NAME='sec_auto_increment_day_claims' THEN
+   IF NOT public.sec_auto_increment_scoped(a,i) OR (v->>'created_at')::timestamptz<transaction_timestamp() THEN RAISE EXCEPTION 'SEC_AUTO_INCREMENT_SCOPE_INVALID' USING ERRCODE='23514'; END IF;
    PERFORM pg_advisory_xact_lock(hashtextextended('sec-session:'||a::text||':'||i::text||':'||(v->>'session_date'),0));
    IF EXISTS(SELECT FROM public.research_monitor_increments x WHERE x.account_id=a AND x.instrument_id=i AND (x.session_date=(v->>'session_date')::date OR (x.research_as_of AT TIME ZONE 'America/New_York')::date=(v->>'session_date')::date))
     OR EXISTS(SELECT FROM public.sec_auto_increment_day_claims x WHERE x.account_id=a AND x.instrument_id=i AND x.session_date=(v->>'session_date')::date)
@@ -275,11 +277,11 @@ END $$""",
 DECLARE r public.sec_monitor_rules; c public.sec_auto_increment_day_claims;
 BEGIN
  SELECT * INTO r FROM public.sec_monitor_rules WHERE account_id=NEW.account_id AND instrument_id=NEW.instrument_id;
- IF r.id IS NULL THEN RETURN NEW; END IF;
+ IF NOT public.sec_auto_increment_scoped(NEW.account_id,NEW.instrument_id) THEN RETURN NEW; END IF;
  PERFORM pg_advisory_xact_lock(hashtextextended('research-monitor:'||NEW.account_id::text||':'||NEW.instrument_id::text,0));
- PERFORM pg_advisory_xact_lock(hashtextextended('sec-durable-rule:'||r.id::text,0));
+ IF r.id IS NOT NULL THEN PERFORM pg_advisory_xact_lock(hashtextextended('sec-durable-rule:'||r.id::text,0)); END IF;
  PERFORM pg_advisory_xact_lock(hashtextextended('sec-session:'||NEW.account_id::text||':'||NEW.instrument_id::text||':'||NEW.session_date::text,0));
- IF NOT public.sec_durable_active(r.id) THEN RAISE EXCEPTION 'SEC_DURABLE_RULE_INACTIVE' USING ERRCODE='23514'; END IF;
+ IF r.id IS NOT NULL AND NOT public.sec_durable_active(r.id) AND EXISTS(SELECT FROM public.research_monitor_triggers source_trigger WHERE source_trigger.kind='disclosure' AND (source_trigger.id=NEW.trigger_id OR (NEW.batch_id IS NOT NULL AND source_trigger.batch_id=NEW.batch_id))) THEN RAISE EXCEPTION 'SEC_DURABLE_RULE_INACTIVE' USING ERRCODE='23514'; END IF;
  IF EXISTS(SELECT FROM public.research_monitor_increments i WHERE i.account_id=NEW.account_id AND i.instrument_id=NEW.instrument_id AND i.session_date=NEW.session_date)
  THEN RAISE EXCEPTION 'SEC_AUTO_INCREMENT_DAY_USED' USING ERRCODE='23514'; END IF;
  SELECT * INTO c FROM public.sec_auto_increment_day_claims WHERE account_id=NEW.account_id AND instrument_id=NEW.instrument_id AND session_date=NEW.session_date;
@@ -290,6 +292,9 @@ BEGIN
    AND s.payload#>>'{monitor_context,authority,decision_session}'=cs.session::text
    AND (cs.market_open_at AT TIME ZONE 'America/New_York')::date=cs.session
    AND cs.market_open_at<=NEW.research_as_of AND NEW.research_as_of<cs.market_close_at
+   AND cs.market_open_at<=c.created_at AND c.created_at<cs.market_close_at
+   AND cs.market_open_at<=clock_timestamp() AND clock_timestamp()<cs.market_close_at
+   AND (clock_timestamp() AT TIME ZONE 'America/New_York')::date=NEW.session_date
    AND GREATEST(a.created_at,a.published_at,cs.created_at)<=NEW.research_as_of)
  THEN RAISE EXCEPTION 'SEC_AUTO_INCREMENT_SESSION_INVALID' USING ERRCODE='23514'; END IF;
  RETURN NEW;
@@ -383,6 +388,7 @@ DOWNGRADE_SQL = (
     r"""DROP FUNCTION public.sec_durable_legacy_notice_guard()""",
     r"""DROP FUNCTION public.sec_durable_increment_guard()""",
     r"""DROP FUNCTION public.sec_durable_guard()""",
+    "DROP FUNCTION public.sec_auto_increment_scoped(uuid,uuid)",
     r"""DROP FUNCTION public.sec_durable_active(uuid)""",
     r"""DROP FUNCTION public.sec_durable_row_id(text,jsonb)""",
     r"""DROP INDEX public.uq_sec_durable_fact_audit""",

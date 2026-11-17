@@ -2852,6 +2852,27 @@ export interface components {
              */
             metadata_status: "recorded" | "conflict";
         };
+        /** DurableSecPendingItem */
+        DurableSecPendingItem: {
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            event_id: string;
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Rationale */
+            rationale: string;
+            /** Status */
+            status: string;
+        };
+        /** DurableSecPendingProposal */
+        DurableSecPendingProposal: {
+            /** Context Hash */
+            context_hash: string;
+            /** Items */
+            items: components["schemas"]["DurableSecPendingItem"][];
+        };
         /** DurableSecView */
         DurableSecView: {
             /** Effective At */
@@ -7505,6 +7526,7 @@ export interface components {
             disclosure_proposal?: components["schemas"]["DisclosureMonitoringProposal"] | null;
             /** Display Symbol */
             display_symbol: string;
+            durable_sec_pending_proposal?: components["schemas"]["DurableSecPendingProposal"] | null;
             /** Entry Conditions */
             entry_conditions: components["schemas"]["ResearchCondition"][];
             /**

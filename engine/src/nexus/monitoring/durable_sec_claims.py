@@ -4,7 +4,7 @@ from datetime import datetime, time, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import false, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
@@ -193,6 +193,41 @@ async def claim_notice(
     return True
 
 
+async def _admission_time(session: AsyncSession) -> datetime:
+    at = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(at, datetime):
+        raise ValueError("DURABLE_SEC_CLOCK_UNAVAILABLE")
+    return require_utc(at)
+
+
+async def _increment_scope(session: AsyncSession, account: UUID, instrument: UUID) -> bool:
+    result = await session.scalar(
+        text("SELECT sec_auto_increment_scoped(:account,:instrument)"),
+        {"account": account, "instrument": instrument},
+    )
+    if type(result) is not bool:
+        raise ValueError("DURABLE_SEC_SCOPE_INVALID")
+    return result
+
+
+async def _depends_on_sec(session: AsyncSession, member: MonitorIncrement) -> bool:
+    return bool(
+        await session.scalar(
+            select(MonitorTrigger.id)
+            .where(
+                MonitorTrigger.kind == "disclosure",
+                or_(
+                    MonitorTrigger.id == member.trigger_id,
+                    (MonitorTrigger.batch_id == member.batch_id)
+                    if member.batch_id is not None
+                    else false(),
+                ),
+            )
+            .limit(1)
+        )
+    )
+
+
 async def claim_increment_day(
     session: AsyncSession,
     member: MonitorIncrement,
@@ -201,39 +236,48 @@ async def claim_increment_day(
     now: datetime,
 ) -> SecAutoIncrementDayClaim | None:
     now = require_utc(now)
-    rule, active = await _rule_state(session, member.account_id, member.instrument_id, now)
-    if rule is None:
-        return None
-    if not active:
-        raise ValueError("DURABLE_SEC_RULE_INACTIVE")
-    calendar = await load_agent_paper_service_calendar_authority(
-        session,
-        now=member.research_as_of,
-        expected_calendar_authority_id=calendar_authority_id,
-    )
-    ny = ZoneInfo("America/New_York")
-    day = require_utc(member.research_as_of).astimezone(ny).date()
-    if (
-        member.id is None
-        or member.research_as_of > now
-        or calendar.session != day
-        or member.session_date != day
-        or not calendar.market_open_at <= member.research_as_of < calendar.market_close_at
-    ):
-        raise ValueError("DURABLE_SEC_SESSION_INVALID")
-    old = await session.get(
+    await lock_security(session, account_id=member.account_id, instrument_id=member.instrument_id)
+    original = await session.get(
         SecAutoIncrementDayClaim,
-        (member.account_id, member.instrument_id, day),
+        (member.account_id, member.instrument_id, member.session_date),
         populate_existing=True,
     )
-    if old is not None:
-        if (old.increment_id, old.run_id, old.calendar_authority_id) == (
+    if original is not None:
+        if (original.increment_id, original.run_id, original.calendar_authority_id) == (
             member.id,
             member.run_id,
             calendar_authority_id,
         ):
-            return old
+            return original
         raise ValueError("DURABLE_SEC_DAY_ALREADY_CLAIMED")
+    if not await _increment_scope(session, member.account_id, member.instrument_id):
+        return None
+    checked_at = await _admission_time(session)
+    if checked_at < now:
+        raise ValueError("DURABLE_SEC_CLOCK_UNAVAILABLE")
+    if await _depends_on_sec(session, member):
+        rule, active = await _rule_state(
+            session, member.account_id, member.instrument_id, checked_at
+        )
+        if rule is not None and not active:
+            raise ValueError("DURABLE_SEC_RULE_INACTIVE")
+    calendar = await load_agent_paper_service_calendar_authority(
+        session,
+        now=checked_at,
+        expected_calendar_authority_id=calendar_authority_id,
+    )
+    ny = ZoneInfo("America/New_York")
+    day = checked_at.astimezone(ny).date()
+    if (
+        member.id is None
+        or member.research_as_of > checked_at
+        or calendar.session != day
+        or member.session_date != day
+        or require_utc(member.research_as_of).astimezone(ny).date() != day
+        or not calendar.market_open_at <= checked_at < calendar.market_close_at
+        or not calendar.market_open_at <= member.research_as_of < calendar.market_close_at
+    ):
+        raise ValueError("DURABLE_SEC_SESSION_INVALID")
     start = datetime.combine(day, time.min, tzinfo=ny)
     end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=ny)
     prior = await session.scalar(
@@ -258,7 +302,7 @@ async def claim_increment_day(
         calendar_authority_id=calendar_authority_id,
         increment_id=member.id,
         run_id=member.run_id,
-        created_at=now,
+        created_at=checked_at,
     )
     session.add(row)
     await audit_fact(session, row)

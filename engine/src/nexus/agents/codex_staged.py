@@ -79,6 +79,14 @@ from nexus.monitoring.disclosure_contracts import (
     baseline_fields,
     disclosure_from_inputs,
 )
+from nexus.monitoring.durable_sec_daily_contracts import (
+    DurableSecPendingItem,
+    DurableSecPendingProposal,
+    DurableSecPendingReview,
+    pending_from_inputs,
+    pending_identity,
+    validate_durable_sec_pending_proposal,
+)
 from nexus.monitoring.mixed_contracts import (
     MixedEventItem,
     MixedEventProposal,
@@ -194,11 +202,27 @@ class _MonitoringCritiqueBatch(_CritiqueBatch):
     roles: tuple[_MonitoringCritiqueRole, ...] = Field(min_length=2, max_length=2)
 
 
+class _DurableSecEventItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    event_id: UUID
+    status: Literal["addressed", "unresolved"]
+    rationale: str = Field(min_length=1, max_length=160)
+    citations: tuple[int, ...] = Field(min_length=1, max_length=3)
+
+
+class _DurableSecPendingProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    context_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    items: tuple[_DurableSecEventItem, ...] = Field(min_length=1, max_length=32)
+
+
 class _DailyResearchRole(_MonitoringResearchRole):
+    durable_sec_pending_proposal: _DurableSecPendingProposal | None = None
     daily_pending_proposal: _DailyPendingProposal | None
 
 
 class _DailyCritiqueRole(_MonitoringCritiqueRole):
+    durable_sec_pending_review: _DailyPendingReview | None = None
     daily_pending_review: _DailyPendingReview | None
 
 
@@ -323,6 +347,24 @@ def _daily_proposal_wire(
     }
 
 
+def _sec_pending_wire(
+    value: DurableSecPendingProposal, evidence: tuple[EvidenceRef, ...]
+) -> dict[str, object]:
+    return {
+        "context_hash": value.context_hash,
+        "items": [
+            {
+                "event_id": str(item.event_id),
+                "status": item.status,
+                "rationale": item.rationale,
+                "citations": [evidence.index(ref) for ref in item.evidence_refs],
+            }
+            for item in value.items
+        ],
+        "content_hash": value.content_hash,
+    }
+
+
 def _monitoring_refs(
     indexes: tuple[int, ...], evidence: tuple[EvidenceRef, ...]
 ) -> tuple[EvidenceRef, ...]:
@@ -408,6 +450,7 @@ class _MonitoringAssessmentBatch(_AssessmentBatch):
 
 
 class _DailyAssessmentBatch(_MonitoringAssessmentBatch):
+    durable_sec_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     daily_pending_adoption_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
 
 
@@ -1042,6 +1085,42 @@ class StagedCodexCommittee(CodexCommittee):
                     if (output := self._outputs.get(role)) is not None
                     and output.daily_pending_review is not None
                 }
+        if daily:
+            sec_context = pending_from_inputs(frozen_inputs)
+            payload["durable_sec_pending_context_hash"] = (
+                None if sec_context is None else pending_identity(sec_context)[0]
+            )
+            sec_origin = self._outputs.get("orchestrator")
+            sec_proposal = None if sec_origin is None else sec_origin.durable_sec_pending_proposal
+            if stage != "research":
+                payload["durable_sec_pending_proposal"] = (
+                    None if sec_proposal is None else _sec_pending_wire(sec_proposal, evidence_refs)
+                )
+            if stage == "synthesis":
+                sec_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+                payload["durable_sec_pending_reviews"] = {
+                    role: _monitoring_wire(row.durable_sec_pending_review, evidence_refs)
+                    for role in sec_reviewers
+                    if (row := self._outputs.get(role)) is not None
+                    and row.durable_sec_pending_review is not None
+                }
+            payload["instructions"] = cast(str, payload["instructions"]) + (
+                " Foundation SEC events are a separate frozen pending_durable_sec bundle. "
+                "Event event_id is never a trigger_id. Review every event and its complet"
+                "e declared filing text. "
+                "Only orchestrator proposes durable_sec_pending_proposal, exactly one ite"
+                "m per event_id; "
+                "unsupported effects remain unresolved. Bear and evidence_audit independe"
+                "ntly accept the "
+                "exact proposal hash; portfolio returns durable_sec_pending_adoption_hash"
+                " only after both "
+                "accept and audit supports. Preserve the existing daily_pending trigger r"
+                "eview separately. "
+                "Missing/gap bundle means all three durable_sec_pending fields null; a co"
+                "mpleted daily study "
+                "or newer plan never consumes events. Budget, output/profile and executio"
+                "n limits remain unchanged."
+            )
         if mixed:
             context_refs = tuple(
                 ref for ref in evidence_refs if ref.source == "nexus_monitor_increment_v2"
@@ -1609,6 +1688,11 @@ class StagedCodexCommittee(CodexCommittee):
                         if isinstance(parsed, _DisclosureAssessmentBatch)
                         else None
                     ),
+                    durable_sec_pending_adoption_hash=(
+                        parsed.durable_sec_pending_adoption_hash
+                        if isinstance(parsed, _DailyAssessmentBatch)
+                        else None
+                    ),
                     daily_pending_adoption_hash=(
                         parsed.daily_pending_adoption_hash
                         if isinstance(parsed, _DailyAssessmentBatch)
@@ -1670,6 +1754,8 @@ class StagedCodexCommittee(CodexCommittee):
             review = None
             disclosure_proposal = None
             disclosure_review = None
+            sec_proposal = None
+            sec_review = None
             daily_proposal = None
             daily_review = None
             mixed_proposal = None
@@ -1717,6 +1803,38 @@ class StagedCodexCommittee(CodexCommittee):
                 ):
                     self.failure_reason = "model_stage_output_invalid"
                     raise ValueError("MIXED_EVENT_REVIEW_INVALID")
+            if (
+                isinstance(item, _DailyResearchRole)
+                and item.durable_sec_pending_proposal is not None
+            ):
+                proposed_sec = item.durable_sec_pending_proposal
+                sec_proposal = DurableSecPendingProposal(
+                    context_hash=proposed_sec.context_hash,
+                    items=tuple(
+                        DurableSecPendingItem(
+                            **member.model_dump(exclude={"citations"}),
+                            evidence_refs=_monitoring_refs(member.citations, evidence_refs),
+                        )
+                        for member in proposed_sec.items
+                    ),
+                )
+                sec_hash, event_ids = pending_identity(pending_from_inputs(self._frozen_inputs))
+                validate_durable_sec_pending_proposal(
+                    sec_proposal,
+                    context_hash=sec_hash,
+                    event_ids=event_ids,
+                    evidence_refs=evidence_refs,
+                )
+            if isinstance(item, _DailyCritiqueRole) and item.durable_sec_pending_review is not None:
+                sec_origin = self._outputs.get("orchestrator")
+                if sec_origin is None or sec_origin.durable_sec_pending_proposal is None:
+                    raise ValueError("DURABLE_SEC_PENDING_REVIEW_WITHOUT_PROPOSAL")
+                sec_review = DurableSecPendingReview(
+                    **item.durable_sec_pending_review.model_dump(exclude={"citations"}),
+                    evidence_refs=_monitoring_refs(
+                        item.durable_sec_pending_review.citations, evidence_refs
+                    ),
+                )
             if isinstance(item, _DailyResearchRole) and item.daily_pending_proposal is not None:
                 daily_value = item.daily_pending_proposal
                 daily_proposal = DailyPendingProposal(
@@ -1808,6 +1926,8 @@ class StagedCodexCommittee(CodexCommittee):
                     reviewed_claim_ids=item.reviewed_claim_ids,
                     mixed_event_proposal=mixed_proposal,
                     mixed_event_review=mixed_review,
+                    durable_sec_pending_proposal=sec_proposal,
+                    durable_sec_pending_review=sec_review,
                     daily_pending_proposal=daily_proposal,
                     daily_pending_review=daily_review,
                     disclosure_proposal=disclosure_proposal,

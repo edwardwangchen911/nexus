@@ -102,6 +102,13 @@ async def inspect_batch_preparation(session: AsyncSession, batch_id: UUID) -> st
     batch = await session.get(MonitorObservationBatch, batch_id)
     if batch is None:
         return "blocked"
+    if batch.routing_version == "durable_research_v2":
+        from nexus.monitoring.durable_sec_refreeze import require_current_batch
+
+        try:
+            await require_current_batch(session, batch.id)
+        except ValueError:
+            return "blocked"
     unfinished, latest = await _history(session, batch)
     if unfinished or latest is not None and latest.get("status") == "unknown":
         return "unknown"
@@ -217,6 +224,10 @@ async def _record(
 async def _eligible(
     session: AsyncSession, settings: EngineSettings, batch: MonitorObservationBatch, now: datetime
 ) -> tuple[MonitorTrigger, ...]:
+    if batch.routing_version == "durable_research_v2":
+        from nexus.monitoring.durable_sec_refreeze import require_current_batch
+
+        await require_current_batch(session, batch.id)
     await require_manual_account_available(session, account_id=batch.account_id, now=now)
     candidate, _ = await validate_agent_paper_candidate_batch(
         session,

@@ -4054,6 +4054,69 @@ export const runtimeContractSchemas = {
     "title": "DurableSecEventView",
     "type": "object"
   },
+  "DurableSecPendingItem": {
+    "additionalProperties": false,
+    "properties": {
+      "event_id": {
+        "format": "uuid",
+        "title": "Event Id",
+        "type": "string"
+      },
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 3,
+        "minItems": 1,
+        "title": "Evidence Refs",
+        "type": "array"
+      },
+      "rationale": {
+        "maxLength": 160,
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "status": {
+        "pattern": "^(addressed|unresolved)$",
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "event_id",
+      "status",
+      "rationale",
+      "evidence_refs"
+    ],
+    "title": "DurableSecPendingItem",
+    "type": "object"
+  },
+  "DurableSecPendingProposal": {
+    "additionalProperties": false,
+    "properties": {
+      "context_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Context Hash",
+        "type": "string"
+      },
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/DurableSecPendingItem"
+        },
+        "maxItems": 32,
+        "minItems": 1,
+        "title": "Items",
+        "type": "array"
+      }
+    },
+    "required": [
+      "context_hash",
+      "items"
+    ],
+    "title": "DurableSecPendingProposal",
+    "type": "object"
+  },
   "DurableSecView": {
     "additionalProperties": false,
     "properties": {
@@ -14842,6 +14905,16 @@ export const runtimeContractSchemas = {
         "pattern": "^[A-Z0-9.\\-]+$",
         "title": "Display Symbol",
         "type": "string"
+      },
+      "durable_sec_pending_proposal": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DurableSecPendingProposal"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "entry_conditions": {
         "items": {

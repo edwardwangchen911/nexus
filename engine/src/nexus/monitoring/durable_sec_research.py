@@ -130,11 +130,13 @@ async def read_binding_observation(
     entry = verify_event_evidence(event, capture, now=binding.bound_at)
     if current_eligibility:
         from nexus.monitoring.durable_sec_host import current_identity, latest_capture
+        from nexus.monitoring.durable_sec_refreeze import require_current_batch
 
         rule = await session.get(SecMonitorRule, event.rule_id)
         if rule is None:
             raise ValueError(INVALID)
         await _lock(session, rule)
+        await require_current_batch(session, binding.batch_id)
         checked_now = await _time(session)
         if (
             await rule_state(session, rule) != "active"
@@ -236,6 +238,9 @@ async def prepare_durable_sec_research_batch(
     row, capture = await read_durable_index_capture(
         session, configured_exhibit_store(session), snapshot_id=latest.id, as_of=now
     )
+    # 0132 owns the addressed-only unbound daily receipt and mutual-exclusion guard.
+    from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
+
     events = tuple(
         await session.scalars(
             select(SecDiscoveryEvent)
@@ -252,46 +257,87 @@ async def prepare_durable_sec_research_batch(
                         SecEventConsumptionReceipt.event_id == SecDiscoveryEvent.id
                     )
                 ),
+                ~exists(
+                    select(SecDurableDailyEventReceipt.id).where(
+                        SecDurableDailyEventReceipt.event_id == SecDiscoveryEvent.id
+                    )
+                ),
             )
             .order_by(SecDiscoveryEvent.first_seen_at, SecDiscoveryEvent.id)
         )
     )
-    selected = []
-    existing_batches: set[UUID] = set()
-    for event in events:
-        prior = tuple(
-            await session.scalars(
-                select(SecEventResearchBinding).where(SecEventResearchBinding.event_id == event.id)
+    from nexus.monitoring.durable_sec_refreeze import batch_unsubmitted
+    from nexus.persistence.models.sec_refreeze import SecResearchBatchSupersession
+
+    # Shared receipt/identity freshness is not a per-event defect or an empty queue.
+    if (capture.index.instrument_id, capture.index.issuer_cik) != (
+        rule.instrument_id,
+        rule.issuer_cik,
+    ) or not timedelta(0) <= now - capture.index.received_at <= timedelta(seconds=300):
+        raise ValueError(INVALID)
+    superseded = set(
+        await session.scalars(
+            select(SecResearchBatchSupersession.old_batch_id)
+            .join(
+                MonitorObservationBatch,
+                MonitorObservationBatch.id == SecResearchBatchSupersession.old_batch_id,
+            )
+            .where(
+                MonitorObservationBatch.account_id == account_id,
+                MonitorObservationBatch.instrument_id == rule.instrument_id,
             )
         )
+    )
+    prior_rows = tuple(
+        await session.scalars(
+            select(SecEventResearchBinding).where(
+                SecEventResearchBinding.account_id == account_id,
+                SecEventResearchBinding.instrument_id == rule.instrument_id,
+            )
+        )
+    )
+    pending_batches: set[UUID] = set()
+    unsubmitted_by_batch: dict[UUID, bool] = {}
+    unsafe_events: set[UUID] = set()
+    for previous in prior_rows:
+        if previous.batch_id in superseded:
+            continue
+        if previous.batch_id not in unsubmitted_by_batch:
+            unsubmitted_by_batch[previous.batch_id] = await batch_unsubmitted(
+                session, previous.batch_id
+            )
+        if unsubmitted_by_batch[previous.batch_id]:
+            pending_batches.add(previous.batch_id)
+        else:
+            unsafe_events.add(previous.event_id)
+    selected = []
+    for event in events:
+        prior = [binding for binding in prior_rows if binding.event_id == event.id]
+        if event.id in unsafe_events:
+            continue
         submitted = False
-        for old_binding in prior:
+        for binding in prior:
             if (
                 await session.scalar(
-                    select(MonitorIncrement.id).where(
-                        MonitorIncrement.batch_id == old_binding.batch_id
-                    )
+                    select(MonitorIncrement.id).where(MonitorIncrement.batch_id == binding.batch_id)
                 )
                 is not None
             ):
                 submitted = True
         if submitted:
             continue
-        same = next((b for b in prior if b.plan_id == plan.id), None)
-        if same is not None:
-            existing_batches.add(same.batch_id)
-            continue
         try:
             entry = verify_event_evidence(event, capture, now=now)
         except ValueError:
             continue
         selected.append((event, entry))
-    if existing_batches:
-        if len(existing_batches) != 1:
-            raise ValueError("DURABLE_SEC_PENDING_BATCH_CONFLICT")
-        if selected:
-            raise ValueError("DURABLE_SEC_PENDING_EVENTS_DEFERRED")
-        return await session.get(MonitorObservationBatch, next(iter(existing_batches)))
+    if len(pending_batches) == 1:
+        candidate_id = next(iter(pending_batches))
+        old_bindings = [binding for binding in prior_rows if binding.batch_id == candidate_id]
+        if {binding.event_id for binding in old_bindings} == {
+            event.id for event, _ in selected
+        } and all(binding.plan_id == plan.id for binding in old_bindings):
+            return await session.get(MonitorObservationBatch, candidate_id)
     if not selected:
         return None
     if len(selected) > 32:
@@ -413,6 +459,13 @@ async def prepare_durable_sec_research_batch(
     )
     session.add(batch)
     await session.flush()
+    from nexus.monitoring.durable_sec_refreeze import append_supersession
+
+    superseded_at = await _time(session)
+    for old_batch_id in sorted(pending_batches, key=str):
+        await append_supersession(
+            session, old_batch_id=old_batch_id, new_batch_id=batch.id, now=superseded_at
+        )
     return batch
 
 

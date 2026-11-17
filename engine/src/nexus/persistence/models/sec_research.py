@@ -13,7 +13,7 @@ from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 class SecEventResearchBinding(ImmutableCreatedAt, Base):
     __tablename__ = "sec_event_research_bindings"
     __table_args__ = (
-        UniqueConstraint("event_id", "plan_id"),
+        UniqueConstraint("event_id", "batch_id"),
         UniqueConstraint("check_id"),
         UniqueConstraint("trigger_id"),
     )

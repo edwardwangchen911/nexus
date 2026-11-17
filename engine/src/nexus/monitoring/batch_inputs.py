@@ -84,6 +84,10 @@ async def _inputs(
         raise MaterialGap("MONITOR_PENDING_OVERFLOW")
     if max(batch.created_at, batch.sealed_at, batch.checked_at) > now:
         raise MaterialGap("MONITOR_BATCH_NOT_VISIBLE")
+    if current_eligibility and batch.routing_version == "durable_research_v2":
+        from nexus.monitoring.durable_sec_refreeze import require_current_batch
+
+        await require_current_batch(session, batch.id)
     members: list[dict[str, object]] = []
     parents = {}
     qualified_sources: dict[UUID, QualifiedSource] = {}

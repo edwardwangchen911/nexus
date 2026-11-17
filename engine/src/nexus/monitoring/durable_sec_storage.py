@@ -22,6 +22,7 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
 from nexus.persistence.models.runtime import OutboxEvent
+from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryCheck,
     SecDiscoveryEvent,
@@ -253,7 +254,7 @@ async def record_discovery(
     legacy = tuple(
         (
             await session.execute(
-                select(MonitorTrigger.event_key, MonitorCheck.observation)
+                select(MonitorTrigger.event_key, MonitorCheck.observation, MonitorTrigger.id)
                 .join(MonitorCheck, MonitorCheck.id == MonitorTrigger.check_id)
                 .where(
                     MonitorTrigger.account_id == account_id,
@@ -263,7 +264,7 @@ async def record_discovery(
             )
         ).all()
     )
-    for key, document in legacy:
+    for key, document, _trigger_id in legacy:
         if isinstance(document, dict) and isinstance(document.get("entry"), dict):
             known[key] = SecIndexEntry.model_validate(document["entry"])
     policy = DurableSecPolicy.model_validate(
@@ -303,7 +304,7 @@ async def record_discovery(
         observation = {"result": result, "coverage": coverage, "reason": reason}
     else:
         decision = evaluate_discovery(
-            policy, index, capture.available_at, now, known, frozenset(key for key, _ in legacy)
+            policy, index, capture.available_at, now, known, frozenset(key for key, _, _ in legacy)
         )
         observation = decision.model_dump(mode="json")
         result, coverage = decision.result, decision.coverage
@@ -316,6 +317,7 @@ async def record_discovery(
                 "to": index.received_at.isoformat(),
             }
         by_key = {v.event_key: v for v in rows}
+        legacy_by_key = {key: (document, trigger_id) for key, document, trigger_id in legacy}
         # Generic metadata preserves conflicts even when the form changed out of
         # scope. Invalid rows remain explicit unknowns; they never erase originals.
         facts = evidence.metadata_entries if evidence is not None else index.entries
@@ -326,9 +328,34 @@ async def record_discovery(
             key = stable_event_key(rule.issuer_cik, fact.accession_number)
             original = by_key.get(key)
             metadata = _metadata(fact)
-            if original is None or metadata == original.metadata_hash:
+            legacy_original = legacy_by_key.get(key)
+            old_entry = (
+                original.entry
+                if original is not None
+                else (legacy_original[0].get("entry") if legacy_original is not None else None)
+            )
+            if not isinstance(old_entry, dict) or metadata == _metadata(
+                SecIndexEntry.model_validate(old_entry)
+            ):
                 continue
+            from nexus.monitoring.sec_key_conflicts import record_key_conflict
+
+            await record_key_conflict(
+                session,
+                rule=rule,
+                capture_id=capture.id,
+                event_key=key,
+                original_event_id=original.id if original is not None else None,
+                legacy_trigger_id=legacy_original[1]
+                if original is None and legacy_original is not None
+                else None,
+                entry=fact.model_dump(mode="json"),
+                metadata_hash=metadata,
+                now=now,
+            )
             conflicts.append(key)
+            if original is None:
+                continue
             exists = await session.scalar(
                 select(SecDiscoveryEventRevision.id).where(
                     SecDiscoveryEventRevision.event_id == original.id,
@@ -348,6 +375,14 @@ async def record_discovery(
                 session.add(revision)
                 await session.flush()
                 await audit_fact(session, revision)
+        # A later exact-looking row does not erase an already established conflict.
+        prior_conflicts = await session.scalars(
+            select(SecDisclosureKeyConflict.event_key).where(
+                SecDisclosureKeyConflict.account_id == account_id,
+                SecDisclosureKeyConflict.instrument_id == rule.instrument_id,
+            )
+        )
+        conflicts = sorted(set(conflicts) | set(prior_conflicts))
         if conflicts:
             observation["metadata_conflicts"] = conflicts
             coverage = "partial"

@@ -169,6 +169,7 @@ async def test_queued_binding_revision_blocks_new_eligibility_but_keeps_history(
             "bound_at": NOW,
             "capture_id": UUID(int=9),
             "capture_hash": "d" * 64,
+            "batch_id": UUID(int=19),
         }
     )
     capture = SimpleNamespace(
@@ -190,7 +191,7 @@ async def test_queued_binding_revision_blocks_new_eligibility_but_keeps_history(
     monkeypatch.setattr(bridge, "_time", AsyncMock(return_value=NOW))
     monkeypatch.setattr(bridge, "rule_state", AsyncMock(return_value="active"))
     active = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[binding, UUID(int=10)]),
+        scalar=AsyncMock(side_effect=[binding, None, UUID(int=10)]),
         get=AsyncMock(side_effect=[event, SimpleNamespace(id=event.rule_id)]),
     )
     with pytest.raises(ValueError, match="DURABLE_SEC_RESEARCH_EVIDENCE_INVALID"):

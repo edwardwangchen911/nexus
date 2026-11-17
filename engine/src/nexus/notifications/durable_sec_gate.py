@@ -8,8 +8,10 @@ from nexus.monitoring.storage import lock_security
 from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
 from nexus.outbox.models import OutboxMessage, Publisher
 from nexus.persistence.models.monitoring import MonitorTrigger
-from nexus.persistence.models.runtime import OutboxEvent
+from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
+from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
 from nexus.persistence.models.sec_monitor import (
+    SecDiscoveryEvent,
     SecDiscoveryEventRevision,
     SecMonitorRule,
     SecMonitorRuleState,
@@ -79,7 +81,68 @@ def notice_claim_condition() -> ColumnElement[bool]:
         )
         .correlate(OutboxEvent)
     )
-    return and_(~blocked, or_(and_(durable, exact), and_(~durable, or_(claimed, ~legacy_scope))))
+    conflicted_claim = exists(
+        select(SecNotificationClaim.id)
+        .join(
+            SecDisclosureKeyConflict,
+            and_(
+                SecDisclosureKeyConflict.account_id == SecNotificationClaim.account_id,
+                SecDisclosureKeyConflict.instrument_id == SecNotificationClaim.instrument_id,
+                SecDisclosureKeyConflict.event_key == SecNotificationClaim.event_key,
+            ),
+        )
+        .where(SecNotificationClaim.outbox_id == OutboxEvent.id)
+        .correlate(OutboxEvent)
+    )
+    conflicted_legacy = exists(
+        select(MonitorTrigger.id)
+        .join(
+            SecDisclosureKeyConflict,
+            and_(
+                SecDisclosureKeyConflict.account_id == MonitorTrigger.account_id,
+                SecDisclosureKeyConflict.instrument_id == MonitorTrigger.instrument_id,
+                SecDisclosureKeyConflict.event_key == MonitorTrigger.event_key,
+            ),
+        )
+        .where(MonitorTrigger.outbox_id == OutboxEvent.id, MonitorTrigger.kind == "disclosure")
+        .correlate(OutboxEvent)
+    )
+    legacy_revision = exists(
+        select(MonitorTrigger.id)
+        .join(
+            SecDiscoveryEvent,
+            and_(
+                SecDiscoveryEvent.account_id == MonitorTrigger.account_id,
+                SecDiscoveryEvent.instrument_id == MonitorTrigger.instrument_id,
+                SecDiscoveryEvent.event_key == MonitorTrigger.event_key,
+            ),
+        )
+        .join(SecDiscoveryEventRevision, SecDiscoveryEventRevision.event_id == SecDiscoveryEvent.id)
+        .where(MonitorTrigger.outbox_id == OutboxEvent.id, MonitorTrigger.kind == "disclosure")
+        .correlate(OutboxEvent)
+    )
+    claim_revision = exists(
+        select(SecNotificationClaim.id)
+        .join(
+            SecDiscoveryEvent,
+            and_(
+                SecDiscoveryEvent.account_id == SecNotificationClaim.account_id,
+                SecDiscoveryEvent.instrument_id == SecNotificationClaim.instrument_id,
+                SecDiscoveryEvent.event_key == SecNotificationClaim.event_key,
+            ),
+        )
+        .join(SecDiscoveryEventRevision, SecDiscoveryEventRevision.event_id == SecDiscoveryEvent.id)
+        .where(SecNotificationClaim.outbox_id == OutboxEvent.id)
+        .correlate(OutboxEvent)
+    )
+    return and_(
+        ~blocked,
+        ~conflicted_claim,
+        ~conflicted_legacy,
+        ~legacy_revision,
+        ~claim_revision,
+        or_(and_(durable, exact), and_(~durable, or_(claimed, ~legacy_scope))),
+    )
 
 
 class DurableSecPublisher:
@@ -107,6 +170,7 @@ class DurableSecPublisher:
             )
             scopes = {(r.account_id, r.instrument_id) for r in claims}
             scopes.update((r.account_id, r.instrument_id) for r in triggers)
+            protected = (message.event_type, message.schema_version) == DURABLE_SEC_EVENT
             for account_id, instrument_id in sorted(scopes, key=lambda pair: tuple(map(str, pair))):
                 await lock_security(session, account_id=account_id, instrument_id=instrument_id)
                 rule = await session.scalar(
@@ -116,18 +180,35 @@ class DurableSecPublisher:
                     )
                 )
                 if rule is not None:
+                    protected = True
                     await session.execute(
                         text("SELECT pg_advisory_xact_lock(hashtextextended(:scope,0))"),
                         {"scope": f"sec-durable-rule:{rule.id}"},
                     )
+            if protected and message.delivery is None:
+                raise ValueError("DURABLE_SEC_NOTICE_NOT_ACTIVE")
+            query = select(OutboxEvent)
+            if message.delivery is not None:
+                delivery = message.delivery
+                query = query.join(
+                    OutboxDeliveryAttempt, OutboxDeliveryAttempt.outbox_event_id == OutboxEvent.id
+                ).where(
+                    OutboxEvent.attempt_count == delivery.attempt_no,
+                    OutboxEvent.available_at == delivery.expires_at,
+                    OutboxDeliveryAttempt.attempt_no == delivery.attempt_no,
+                    OutboxDeliveryAttempt.worker_id == delivery.worker_id,
+                    OutboxDeliveryAttempt.lease_token == delivery.lease_token,
+                    OutboxDeliveryAttempt.outcome == "delivering",
+                    OutboxDeliveryAttempt.finished_at.is_(None),
+                )
             row = await session.scalar(
-                select(OutboxEvent)
-                .where(
+                query.where(
                     OutboxEvent.id == message.event_id,
                     OutboxEvent.status == "delivering",
                     OutboxEvent.available_at > text("pg_catalog.clock_timestamp()"),
                     notice_claim_condition(),
                 )
+                .with_for_update(of=OutboxEvent)
                 .execution_options(populate_existing=True)
             )
             if row is None or (

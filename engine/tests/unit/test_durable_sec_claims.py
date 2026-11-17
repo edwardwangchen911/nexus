@@ -51,6 +51,8 @@ def member():
 @pytest.mark.asyncio
 async def test_no_rule_preserves_old_notice_and_day_contract(monkeypatch):
     monkeypatch.setattr(claims, "_rule_state", AsyncMock(return_value=(None, False)))
+    monkeypatch.setattr(claims, "_increment_scope", AsyncMock(return_value=False))
+    monkeypatch.setattr(claims, "lock_security", AsyncMock())
     s = session()
     assert await notice(s)
     assert (
@@ -62,8 +64,12 @@ async def test_no_rule_preserves_old_notice_and_day_contract(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_inactive_rule_blocks_effects(monkeypatch):
+async def test_inactive_rule_blocks_sec_dependent_effects(monkeypatch):
     monkeypatch.setattr(claims, "_rule_state", AsyncMock(return_value=(object(), False)))
+    monkeypatch.setattr(claims, "_increment_scope", AsyncMock(return_value=True))
+    monkeypatch.setattr(claims, "_admission_time", AsyncMock(return_value=NOW))
+    monkeypatch.setattr(claims, "_depends_on_sec", AsyncMock(return_value=True))
+    monkeypatch.setattr(claims, "lock_security", AsyncMock())
     s = session()
     assert not await notice(s)
     with pytest.raises(ValueError, match="DURABLE_SEC_RULE_INACTIVE"):
@@ -107,6 +113,10 @@ async def test_new_notice_is_audited_before_return(monkeypatch):
 
 
 def day_setup(monkeypatch):
+    monkeypatch.setattr(claims, "_increment_scope", AsyncMock(return_value=True))
+    monkeypatch.setattr(claims, "_admission_time", AsyncMock(return_value=NOW))
+    monkeypatch.setattr(claims, "_depends_on_sec", AsyncMock(return_value=False))
+    monkeypatch.setattr(claims, "lock_security", AsyncMock())
     monkeypatch.setattr(claims, "_rule_state", AsyncMock(return_value=(object(), True)))
     calendar = SimpleNamespace(
         session=NOW.date(),
@@ -214,4 +224,65 @@ async def test_unproven_or_conflicted_durable_event_cannot_notice(monkeypatch, c
         else [None, None, None]
     )
     assert not await notice(s)
+    s.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sec_rule", [None, "paused"])
+async def test_independent_session_scope_limits_price_without_active_sec(monkeypatch, sec_rule):
+    day_setup(monkeypatch)
+    monkeypatch.setattr(
+        claims,
+        "_rule_state",
+        AsyncMock(return_value=(None if sec_rule is None else object(), False)),
+    )
+    monkeypatch.setattr(claims, "_increment_scope", AsyncMock(return_value=True), raising=False)
+    monkeypatch.setattr(claims, "_admission_time", AsyncMock(return_value=NOW), raising=False)
+    monkeypatch.setattr(claims, "_depends_on_sec", AsyncMock(return_value=False), raising=False)
+    monkeypatch.setattr(claims, "lock_security", AsyncMock())
+    s = session()
+    s.scalar.return_value = None
+    row = await claims.claim_increment_day(s, member(), calendar_authority_id=CALENDAR, now=NOW)
+    assert row is not None and row.session_date == NOW.date()
+
+
+@pytest.mark.asyncio
+async def test_new_claim_cannot_charge_yesterdays_session_from_stale_input(monkeypatch):
+    calendar, _ = day_setup(monkeypatch)
+    yesterday = NOW - timedelta(days=1)
+    calendar.session = yesterday.date()
+    calendar.market_open_at = yesterday - timedelta(minutes=30)
+    calendar.market_close_at = yesterday + timedelta(hours=6)
+    monkeypatch.setattr(claims, "_increment_scope", AsyncMock(return_value=True), raising=False)
+    monkeypatch.setattr(claims, "_admission_time", AsyncMock(return_value=NOW), raising=False)
+    monkeypatch.setattr(claims, "_depends_on_sec", AsyncMock(return_value=False), raising=False)
+    monkeypatch.setattr(claims, "lock_security", AsyncMock())
+    item = member()
+    item.research_as_of, item.session_date = yesterday, yesterday.date()
+    s = session()
+    s.scalar.return_value = None
+    with pytest.raises(ValueError, match="DURABLE_SEC_SESSION_INVALID"):
+        await claims.claim_increment_day(s, item, calendar_authority_id=CALENDAR, now=NOW)
+    s.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_original_submitted_claim_reads_original_session_after_day_rollover(monkeypatch):
+    day_setup(monkeypatch)
+    monkeypatch.setattr(claims, "_admission_time", AsyncMock(return_value=NOW + timedelta(days=1)))
+    s = session()
+    item = member()
+    saved = SecAutoIncrementDayClaim(
+        account_id=ACCOUNT,
+        instrument_id=INSTRUMENT,
+        session_date=NOW.date(),
+        increment_id=item.id,
+        run_id=item.run_id,
+        calendar_authority_id=CALENDAR,
+    )
+    s.get.return_value = saved
+    result = await claims.claim_increment_day(
+        s, item, calendar_authority_id=CALENDAR, now=NOW + timedelta(days=1)
+    )
+    assert result is saved
     s.add.assert_not_called()

@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.monitoring.daily_consumption import daily_receipt, not_daily_covered
+from nexus.monitoring.durable_sec_refreeze import not_superseded_pending
 from nexus.monitoring.mixed_readback import not_mixed_consumed
 from nexus.ops.agent_paper_loop import (
     AgentPaperLoopAction,
@@ -145,6 +146,7 @@ async def inspect_monitor_queue(
                         MonitorTrigger.instrument_id.in_(batch.instrument_ids),
                         MonitorTrigger.status.in_(("pending", "blocked")),
                         MonitorTrigger.research_run_id.is_(None),
+                        not_superseded_pending(),
                         unchecked(snapshot.now),
                         not_daily_covered(),
                         not_mixed_consumed(),

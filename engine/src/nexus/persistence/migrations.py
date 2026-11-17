@@ -1,6 +1,6 @@
 """Code-side database compatibility authority."""
 
-CURRENT_MIGRATION_HEAD = "0128_sec_durable_baseline"
+CURRENT_MIGRATION_HEAD = "0132_sec_daily_pending"
 SCHEMA_ADMISSION_LOCK_KEY = "nexus:intraday-schema-admission:v1"
 CURRENT_GENERAL_WORKER_PROCESS_VERSION = "nexus-engine-phase3-intraday"
 CURRENT_BROKER_WORKER_PROCESS_VERSION = "nexus-broker-phase3a"
