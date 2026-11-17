@@ -418,7 +418,15 @@ class StagedProtocol:
             run = required(await session.get(AgentResearchRunRecord, member["run_id"]))
             from nexus.monitoring.durable_sec_permission import require_new_send
 
-            await require_new_send(session, run.id)
+            try:
+                await require_new_send(session, run.id)
+            except ValueError as error:
+                if str(error) in {
+                    "SEC_RESEARCH_PERMISSION_INVALID",
+                    "SEC_RESEARCH_PERMISSION_BUSY",
+                }:
+                    raise ProtocolRejected(str(error)) from None
+                raise
             model = required(await session.get(AgentModelConfigRecord, run.model_config_id))
             budget = await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
             if route is not None and route["kind"] == "comparison":

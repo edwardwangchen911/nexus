@@ -115,6 +115,7 @@ async def send_response_stage(
         if loop.time() >= work_deadline:
             raise TimeoutError("RESPONSES_WORK_DEADLINE")
         if request_fence is not None:
+            request_fence.work_deadline = work_deadline
             await request_fence.acquire(request)
         try:
             # No new send window after asynchronous permission checks.

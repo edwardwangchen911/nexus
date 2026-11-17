@@ -1,9 +1,11 @@
 """New-send permission only; never used by observation, usage verification or cleanup."""
 
+from asyncio import get_running_loop
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -26,13 +28,36 @@ async def durable_batch(session: AsyncSession, run_id: UUID) -> UUID | None:
     return value
 
 
-async def require_new_send(session: AsyncSession, run_id: UUID) -> bool:
-    batch_id = await durable_batch(session, run_id)
-    if batch_id is None:
-        return False
-    await session.execute(
-        text("SELECT public.sec_research_require_current_batch(:batch)"), {"batch": batch_id}
+async def has_sec_dependencies(session: AsyncSession, run_id: UUID) -> bool:
+    present = await session.scalar(
+        text("SELECT to_regclass('public.sec_monitor_rules') IS NOT NULL")
     )
+    if not present:
+        return False
+    result = await session.scalar(
+        text("SELECT public.sec_research_run_has_dependencies(:run)"), {"run": run_id}
+    )
+    if type(result) is not bool:
+        raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
+    return result
+
+
+async def require_new_send(session: AsyncSession, run_id: UUID) -> bool:
+    if not await has_sec_dependencies(session, run_id):
+        return False
+    try:
+        await session.execute(
+            text("SELECT public.sec_research_require_send_run(:run)"), {"run": run_id}
+        )
+    except DBAPIError as error:
+        code = getattr(error.orig, "sqlstate", None)
+        if code in {"23514", "55P03"}:
+            raise ValueError(
+                "SEC_RESEARCH_PERMISSION_BUSY"
+                if code == "55P03"
+                else "SEC_RESEARCH_PERMISSION_INVALID"
+            ) from None
+        raise
     return True
 
 
@@ -42,6 +67,7 @@ class SecRequestFence:
     def __init__(self, factory: Any, run_id: UUID):
         self.factory, self.run_id = factory, run_id
         self.session: AsyncSession | None = None
+        self.work_deadline: float | None = None
 
     async def acquire(self, request: Any) -> None:
         session = self.factory()
@@ -55,6 +81,16 @@ class SecRequestFence:
             original = request.extensions.get("trace")
 
             async def traced(name: str, info: dict[str, Any]) -> None:
+                # Revalidate at the transport boundary, after pool/TLS waits.
+                if name in {
+                    "http11.send_request_headers.started",
+                    "http2.send_request_headers.started",
+                }:
+                    if self.session is None:
+                        raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
+                    self._require_deadline()
+                    await require_new_send(self.session, self.run_id)
+                    self._require_deadline()
                 # Headers complete is an irreversible send, never a delivery or usage proof.
                 try:
                     if original is not None:
@@ -72,6 +108,10 @@ class SecRequestFence:
         except BaseException:
             await self.release()
             raise
+
+    def _require_deadline(self) -> None:
+        if self.work_deadline is not None and get_running_loop().time() >= self.work_deadline:
+            raise TimeoutError("RESPONSES_WORK_DEADLINE")
 
     async def release(self) -> None:
         session, self.session = self.session, None

@@ -333,10 +333,10 @@ async def execute_staged_claim(
                 ).encode()
             )
         if not native:
-            from nexus.monitoring.durable_sec_permission import durable_batch
+            from nexus.monitoring.durable_sec_permission import has_sec_dependencies
 
             async with factory.begin() as permission:
-                if await durable_batch(permission, run_id) is not None:
+                if await has_sec_dependencies(permission, run_id):
                     raise ProtocolRejected("DURABLE_SEC_SDK_FENCE_UNSUPPORTED")
         failure_phase = "authorization"
         try:
