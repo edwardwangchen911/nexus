@@ -162,6 +162,10 @@ async def persist_index_archive(
     capture_key = f"{identity.instrument_id}:{sha256(submissions[1]).hexdigest()}"
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+        {"key": f"sec-index-current:{identity.instrument_id}"},
+    )
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
         {"key": f"sec-index:{capture_key}"},
     )
     originals = []

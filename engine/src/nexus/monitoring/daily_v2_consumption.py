@@ -149,4 +149,8 @@ async def record_daily_event_consumption(
             },
         )
         recorded += 1
+    await session.flush()
+    from nexus.monitoring.durable_sec_research import mirror_consumption_receipts
+
+    await mirror_consumption_receipts(session, run_id=qualified.run.id)
     return recorded

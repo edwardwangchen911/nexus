@@ -9,11 +9,12 @@ from uuid import UUID
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure
-from nexus.outbox.models import OutboxMessage
+from nexus.outbox.models import OutboxDeliveryIdentity, OutboxMessage
 from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
 
@@ -102,12 +103,15 @@ async def _claim(
     lease_seconds: int,
     event_keys: Sequence[tuple[str, str]] | None,
     created_at_or_after: datetime | None,
+    claim_condition: ColumnElement[bool] | None = None,
 ) -> _ClaimedOutbox | None:
     conditions = [
         OutboxEvent.status == "queued",
         OutboxEvent.available_at <= now,
         OutboxEvent.attempt_count < OutboxEvent.max_attempts,
     ]
+    if claim_condition is not None:
+        conditions.append(claim_condition)
     if event_keys is not None:
         if not event_keys:
             return None
@@ -257,6 +261,7 @@ async def dispatch_outbox_once(
     claim_registered_only: bool = False,
     raise_publisher_errors: bool = False,
     created_at_or_after: datetime | None = None,
+    claim_condition: ColumnElement[bool] | None = None,
 ) -> bool:
     """Dispatch at most one event and durably record its delivery attempt."""
     worker_id = _worker_id(worker_id)
@@ -277,6 +282,7 @@ async def dispatch_outbox_once(
             lease_seconds=lease_seconds,
             event_keys=(tuple(sorted(registry.keys)) if claim_registered_only else None),
             created_at_or_after=created_at_or_after,
+            claim_condition=claim_condition,
         )
     if claim is None:
         return False
@@ -297,6 +303,9 @@ async def dispatch_outbox_once(
         aggregate_id=claim.aggregate_id,
         schema_version=claim.schema_version,
         payload=claim.payload,
+        delivery=OutboxDeliveryIdentity(
+            claim.attempt_no, claim.worker_id, claim.lease_token, claim.expires_at
+        ),
     )
     try:
         await spec.publisher(message)

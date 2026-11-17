@@ -146,7 +146,7 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
             "instrument_id",
             "event_key",
             unique=True,
-            postgresql_where=text("kind='disclosure'"),
+            postgresql_where=text("kind='disclosure' AND durable_binding_id IS NULL"),
         ),
         ForeignKeyConstraint(
             ["check_id", "account_id", "instrument_id", "kind", "event_key"],
@@ -177,6 +177,12 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
             deferrable=True,
             initially="DEFERRED",
         ),
+        CheckConstraint(
+            "(durable_binding_id IS NULL AND outbox_id IS NOT NULL) OR "
+            "(durable_binding_id IS NOT NULL AND outbox_id IS NULL AND batch_id IS NOT NULL "
+            "AND kind='disclosure')",
+            name="research_notice_routing",
+        ),
         UniqueConstraint("check_id"),
         CheckConstraint(
             "(kind='price' AND event_key='' AND episode IS NOT NULL "
@@ -205,7 +211,11 @@ class MonitorTrigger(ImmutableCreatedAt, Base):
     batch_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("research_monitor_batches.id", deferrable=True, initially="DEFERRED"), index=True
     )
-    outbox_id: Mapped[UUID] = mapped_column(
+    durable_binding_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sec_event_research_bindings.id", deferrable=True, initially="DEFERRED"),
+        unique=True,
+    )
+    outbox_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("outbox_events.id", deferrable=True, initially="DEFERRED")
     )
 
@@ -343,6 +353,9 @@ class MonitorObservationBatch(ImmutableCreatedAt, Base):
     plan_ids: Mapped[list[str]] = mapped_column(JSONB)
     check_ids: Mapped[list[str]] = mapped_column(JSONB)
     trigger_ids: Mapped[list[str]] = mapped_column(JSONB)
+    routing_version: Mapped[str] = mapped_column(
+        String(32), default="legacy_v1", server_default="legacy_v1"
+    )
     outbox_id: Mapped[UUID | None] = mapped_column(ForeignKey("outbox_events.id"), unique=True)
 
 

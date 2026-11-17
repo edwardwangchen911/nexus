@@ -132,7 +132,7 @@ async def reader_source(
                         collection_dir=target,
                     )
             monkeypatch.setattr(
-                "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_: store
+                "nexus.research.sec_exhibit_storage.S3ProviderEvidenceStore", lambda *_, **__: store
             )
         if independent:
             from nexus.monitoring.disclosure_context import _exact_baseline

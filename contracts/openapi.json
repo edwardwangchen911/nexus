@@ -4267,6 +4267,286 @@
         "title": "DrawdownLockSummary",
         "type": "object"
       },
+      "DurableSecCheckView": {
+        "additionalProperties": false,
+        "properties": {
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "coverage": {
+            "enum": [
+              "complete",
+              "partial",
+              "unknown"
+            ],
+            "title": "Coverage",
+            "type": "string"
+          },
+          "interval_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval End"
+          },
+          "interval_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Start"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "const": "evidence_unverified",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "result": {
+            "enum": [
+              "true",
+              "false",
+              "unknown"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "scheduled_at": {
+            "format": "date-time",
+            "title": "Scheduled At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scheduled_at",
+          "checked_at",
+          "result",
+          "coverage",
+          "interval_start",
+          "interval_end",
+          "reason"
+        ],
+        "title": "DurableSecCheckView",
+        "type": "object"
+      },
+      "DurableSecEventView": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_at": {
+            "format": "date-time",
+            "title": "Accepted At",
+            "type": "string"
+          },
+          "event_key": {
+            "title": "Event Key",
+            "type": "string"
+          },
+          "first_seen_at": {
+            "format": "date-time",
+            "title": "First Seen At",
+            "type": "string"
+          },
+          "form": {
+            "enum": [
+              "8-K",
+              "8-K/A"
+            ],
+            "title": "Form",
+            "type": "string"
+          },
+          "metadata_status": {
+            "enum": [
+              "recorded",
+              "conflict"
+            ],
+            "title": "Metadata Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_key",
+          "form",
+          "accepted_at",
+          "first_seen_at",
+          "metadata_status"
+        ],
+        "title": "DurableSecEventView",
+        "type": "object"
+      },
+      "DurableSecPendingItem": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceRef"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "rationale": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "status": {
+            "pattern": "^(addressed|unresolved)$",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "status",
+          "rationale",
+          "evidence_refs"
+        ],
+        "title": "DurableSecPendingItem",
+        "type": "object"
+      },
+      "DurableSecPendingProposal": {
+        "additionalProperties": false,
+        "properties": {
+          "context_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Context Hash",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DurableSecPendingItem"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "context_hash",
+          "items"
+        ],
+        "title": "DurableSecPendingProposal",
+        "type": "object"
+      },
+      "DurableSecView": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective At"
+          },
+          "event_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Event Count",
+            "type": "integer"
+          },
+          "events": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DurableSecEventView"
+            },
+            "maxItems": 5,
+            "title": "Events",
+            "type": "array"
+          },
+          "execution_locked": {
+            "const": true,
+            "default": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "forms": {
+            "default": [],
+            "items": {
+              "enum": [
+                "8-K",
+                "8-K/A"
+              ],
+              "type": "string"
+            },
+            "title": "Forms",
+            "type": "array"
+          },
+          "latest_check": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableSecCheckView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "rule_id": {
+            "format": "uuid",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "paused",
+              "revoked",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "rule_id",
+          "state",
+          "effective_at",
+          "forms",
+          "latest_check",
+          "event_count",
+          "events",
+          "execution_locked"
+        ],
+        "title": "DurableSecView",
+        "type": "object"
+      },
       "EconomicComparisonResponse": {
         "additionalProperties": false,
         "description": "Explain comparison evidence without granting ranking or execution permission.",
@@ -15929,6 +16209,16 @@
             "title": "Display Symbol",
             "type": "string"
           },
+          "durable_sec_pending_proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableSecPendingProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "entry_conditions": {
             "items": {
               "$ref": "#/components/schemas/ResearchCondition"
@@ -16584,6 +16874,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ResearchDisclosureMonitoringView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "durable_disclosure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableSecView"
               },
               {
                 "type": "null"

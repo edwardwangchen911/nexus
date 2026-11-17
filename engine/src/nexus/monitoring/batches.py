@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import TypedDict
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
@@ -109,7 +109,7 @@ async def _report(
 
 
 async def _latest_disclosure_source_id(
-    session: AsyncSession, plan: MonitorPlan, now: datetime
+    session: AsyncSession, plan: MonitorPlan, now: datetime, *, exclude_run_id: UUID | None = None
 ) -> UUID | None:
     from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS
 
@@ -123,6 +123,7 @@ async def _latest_disclosure_source_id(
         )
         .outerjoin(MonitorIncrement, MonitorIncrement.run_id == AgentResearchRunRecord.id)
         .where(
+            (AgentResearchRunRecord.id != exclude_run_id) if exclude_run_id else true(),
             or_(
                 AgentPaperCycleRecord.account_id == plan.account_id,
                 MonitorIncrement.account_id == plan.account_id,
@@ -147,10 +148,10 @@ async def _latest_disclosure_source_id(
 
 
 async def disclosure_source_current(
-    session: AsyncSession, plan: MonitorPlan, now: datetime
+    session: AsyncSession, plan: MonitorPlan, now: datetime, *, exclude_run_id: UUID | None = None
 ) -> bool:
     """An unreconciled newer daily result cannot leave an old SEC plan silently active."""
-    latest = await _latest_disclosure_source_id(session, plan, now)
+    latest = await _latest_disclosure_source_id(session, plan, now, exclude_run_id=exclude_run_id)
     if latest == plan.source_run_id:
         return True
     from nexus.persistence.models.monitoring import MonitorCoverageReceipt
@@ -240,10 +241,17 @@ async def scan_stock_batch(
     if not scheduled <= now < scheduled + timedelta(minutes=5):
         raise ValueError("MONITOR_TICK_TIME_INVALID")
     await lock_security(session, account_id=account_id, instrument_id=instrument_id)
+    from nexus.monitoring.durable_sec_host import registered_rule
+
+    durable_rule = await registered_rule(session, account_id, instrument_id)
     plans = tuple(
         await session.scalars(
             select(MonitorPlan)
-            .where(MonitorPlan.account_id == account_id, MonitorPlan.instrument_id == instrument_id)
+            .where(
+                MonitorPlan.account_id == account_id,
+                MonitorPlan.instrument_id == instrument_id,
+                MonitorPlan.kind == "price" if durable_rule is not None else true(),
+            )
             .distinct(MonitorPlan.kind)
             .order_by(MonitorPlan.kind, MonitorPlan.generation.desc())
         )
@@ -379,8 +387,22 @@ async def scan_stock_batch(
                 if checked.plan_id != sec.id:
                     raise ValueError("MONITOR_DISCLOSURE_IDENTITY_CONFLICT")
                 checks.append(checked)
+                from nexus.monitoring.durable_sec_claims import claim_notice
+
+                trigger_id = new_uuid7()
+                if not await claim_notice(
+                    session,
+                    account_id=account_id,
+                    instrument_id=instrument_id,
+                    event_key=event_key,
+                    outbox_id=outbox_id,
+                    legacy_trigger_id=trigger_id,
+                    now=now,
+                ):
+                    continue
                 session.add(
                     MonitorTrigger(
+                        id=trigger_id,
                         account_id=account_id,
                         instrument_id=instrument_id,
                         kind="disclosure",

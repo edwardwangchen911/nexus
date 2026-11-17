@@ -258,7 +258,10 @@ async def freeze_daily_events(
     if cycle is None or cycle.decision_time != as_of:
         raise ValueError("DAILY_EVENT_CONTEXT_INVALID")
     await lock_security(session, account_id=cycle.account_id, instrument_id=instrument_id)
+    from nexus.monitoring.durable_sec_refreeze import not_superseded_pending
+
     predicates = (
+        not_superseded_pending(),
         MonitorTrigger.account_id == cycle.account_id,
         MonitorTrigger.instrument_id == instrument_id,
         MonitorTrigger.created_at <= as_of,

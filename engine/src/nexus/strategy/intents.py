@@ -1,6 +1,6 @@
-# ruff: noqa: E501
 """Strict research intent contract; it deliberately has no order or weight fields."""
 
+# ruff: noqa: E501
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal, cast
@@ -23,6 +23,7 @@ from nexus.domain.time import require_utc
 from nexus.monitoring.contracts import PriceMonitoringProposal
 from nexus.monitoring.daily_contracts import DailyPendingProposal
 from nexus.monitoring.disclosure_contracts import DisclosureMonitoringProposal
+from nexus.monitoring.durable_sec_daily_contracts import DurableSecPendingProposal
 
 _UNSAFE_TEXT = (
     "http://",
@@ -205,6 +206,7 @@ class RoleVote(_IntentModel):
 
 class ResearchIntent(_IntentModel):
     disclosure_proposal: DisclosureMonitoringProposal | None = None
+    durable_sec_pending_proposal: DurableSecPendingProposal | None = None
     daily_pending_proposal: DailyPendingProposal | None = None
     monitoring_proposal: PriceMonitoringProposal | None = None
     synthesis_assessment: SynthesisAssessment | None = None
@@ -218,6 +220,8 @@ class ResearchIntent(_IntentModel):
         payload = cast(dict[str, object], handler(self))
         if self.disclosure_proposal is None:
             payload.pop("disclosure_proposal", None)
+        if self.durable_sec_pending_proposal is None:
+            payload.pop("durable_sec_pending_proposal", None)
         if self.daily_pending_proposal is None:
             payload.pop("daily_pending_proposal", None)
         if self.monitoring_proposal is None:
@@ -273,6 +277,15 @@ class ResearchIntent(_IntentModel):
                 )
             ):
                 raise ValueError("DISCLOSURE_PROPOSAL_BINDING_INVALID")
+        sec = self.durable_sec_pending_proposal
+        if sec is not None:
+            _assert_safe(sec.model_dump(mode="json"))
+            if any(
+                ref not in self.evidence_refs or ref.available_at > self.decision_time
+                for item in sec.items
+                for ref in item.evidence_refs
+            ):
+                raise ValueError("DURABLE_SEC_PENDING_EVIDENCE_INVALID")
         daily = self.daily_pending_proposal
         if daily is not None:
             _assert_safe(daily.model_dump(mode="json"))

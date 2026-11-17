@@ -320,6 +320,33 @@ async def _reconcile_candidates(
                 or snapshot.payload.get("independent_monitor_context")
             )
         )
+        if (
+            isinstance(paper, dict)
+            and paper.get("pending_durable_sec") is not None
+            and run.status == "completed"
+        ):
+            from nexus.monitoring.durable_sec_daily import record_durable_sec_daily_consumption
+            from nexus.monitoring.source_qualification import load_qualified_source
+
+            try:
+                async with session.begin_nested():
+                    if await _native_finished(session, run, now):
+                        sec_terminal = await session.scalar(
+                            select(AgentResearchOutputRecord).where(
+                                AgentResearchOutputRecord.run_id == run.id,
+                                AgentResearchOutputRecord.role.is_(None),
+                                AgentResearchOutputRecord.status == "completed",
+                            )
+                        )
+                        if sec_terminal is not None:
+                            sec_qualified = await load_qualified_source(
+                                session, account_id=account_id, output_id=sec_terminal.id, now=now
+                            )
+                            await record_durable_sec_daily_consumption(
+                                session, qualified=sec_qualified, account_id=account_id, now=now
+                            )
+            except ValueError:
+                counts["unverified"] += 1
         if isinstance(paper, dict) and paper.get("pending_monitoring_v2") is not None:
             from nexus.monitoring.daily_v2_reconciliation import (
                 DailyEventReplacementRejected,

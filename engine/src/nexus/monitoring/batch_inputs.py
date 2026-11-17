@@ -84,6 +84,10 @@ async def _inputs(
         raise MaterialGap("MONITOR_PENDING_OVERFLOW")
     if max(batch.created_at, batch.sealed_at, batch.checked_at) > now:
         raise MaterialGap("MONITOR_BATCH_NOT_VISIBLE")
+    if current_eligibility and batch.routing_version == "durable_research_v2":
+        from nexus.monitoring.durable_sec_refreeze import require_current_batch
+
+        await require_current_batch(session, batch.id)
     members: list[dict[str, object]] = []
     parents = {}
     qualified_sources: dict[UUID, QualifiedSource] = {}
@@ -220,25 +224,41 @@ async def _inputs(
         except ValueError:
             raise MaterialGap("SEC_MONITOR_DOCUMENT_FORMAT_UNSUPPORTED") from None
         entry = SecIndexEntry.model_validate(metadata.model_dump())
-        observation = await read_disclosure_observation(session, plan=plan, now=check.checked_at)
-        if (
-            observation.result != "true"
-            or entry.model_dump() not in [item.model_dump() for item in observation.added]
-            or trigger.event_key != f"sec:{observation.issuer_cik}:{entry.accession_number}"
-            or {
-                **{k: v for k, v in observation.model_dump(mode="json").items() if k != "added"},
-                "entry": entry.model_dump(mode="json"),
-            }
-            != check.observation
-        ):
-            raise MaterialGap("MONITOR_CONTEXT_INVALID")
+        if check.observation.get("policy") == "durable_sec_research_binding_v1":
+            from nexus.monitoring.durable_sec_research import read_binding_observation
+
+            saved = await read_binding_observation(
+                session, check=check, plan=plan, current_eligibility=current_eligibility, now=now
+            )
+            if saved != check.observation or trigger.event_key != saved["event_key"]:
+                raise MaterialGap("MONITOR_CONTEXT_INVALID")
+            issuer_cik = trigger.event_key.split(":")[1]
+        else:
+            observation = await read_disclosure_observation(
+                session, plan=plan, now=check.checked_at
+            )
+            if (
+                observation.result != "true"
+                or entry.model_dump() not in [item.model_dump() for item in observation.added]
+                or trigger.event_key != f"sec:{observation.issuer_cik}:{entry.accession_number}"
+                or {
+                    **{
+                        k: v for k, v in observation.model_dump(mode="json").items() if k != "added"
+                    },
+                    "entry": entry.model_dump(mode="json"),
+                }
+                != check.observation
+            ):
+                raise MaterialGap("MONITOR_CONTEXT_INVALID")
+            if observation.issuer_cik is None:
+                raise MaterialGap("MONITOR_CONTEXT_INVALID")
+            issuer_cik = observation.issuer_cik
         candidates = tuple(
             await session.scalars(
                 select(DataSnapshot)
                 .where(
                     DataSnapshot.source == FILING_SOURCE,
-                    DataSnapshot.provider_object_id
-                    == f"{observation.issuer_cik}:{entry.accession_number}",
+                    DataSnapshot.provider_object_id == f"{issuer_cik}:{entry.accession_number}",
                     DataSnapshot.created_at <= now,
                     DataSnapshot.available_at <= now,
                     DataSnapshot.received_at <= now,
@@ -258,7 +278,7 @@ async def _inputs(
             if (
                 content is None
                 or content.archive.instrument_id != batch.instrument_id
-                or content.archive.issuer_cik != observation.issuer_cik
+                or content.archive.issuer_cik != issuer_cik
                 or content.archive.entry != entry
             ):
                 raise MaterialGap("MONITOR_CONTENT_INVALID")

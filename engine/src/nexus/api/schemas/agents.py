@@ -7,6 +7,7 @@ from uuid import UUID
 
 from nexus.agents.committee import AgentRole, StageInputIdentity
 from nexus.agents.portfolio_context import PortfolioResearchContext
+from nexus.api.schemas.durable_sec import DurableSecView
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.api.schemas.research_monitoring import (
     MonitoringApplicability,
@@ -125,6 +126,7 @@ class ResearchRunResponse(_StrictAgentSchema):
     monitoring_applicability: MonitoringApplicability | None = None
     monitoring: ResearchMonitoringView | None = None
     disclosure_monitoring: ResearchDisclosureMonitoringView | None = None
+    durable_disclosure: DurableSecView | None = None
     inputs: "ResearchInputsSummary | None" = None
 
 
@@ -455,8 +457,10 @@ class ResearchInputPriceTrend(_StrictAgentSchema):
     @model_validator(mode="after")
     def scope_consistency(self) -> "ResearchInputPriceTrend":
         if self.liquidity_observation is not None and not (
-            self.query_start <= self.liquidity_observation.window_start
-            <= self.liquidity_observation.window_end == self.query_end
+            self.query_start
+            <= self.liquidity_observation.window_start
+            <= self.liquidity_observation.window_end
+            == self.query_end
         ):
             raise ValueError("TREND_LIQUIDITY_WINDOW_INVALID")
         if self.identity_asof > self.received_at.date() or self.revision != self.content_hash:

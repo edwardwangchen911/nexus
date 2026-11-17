@@ -23,6 +23,10 @@ from nexus.monitoring.disclosure_contracts import (
     DisclosureMonitoringProposal,
     DisclosureMonitoringReview,
 )
+from nexus.monitoring.durable_sec_daily_contracts import (
+    DurableSecPendingProposal,
+    DurableSecPendingReview,
+)
 from nexus.monitoring.mixed_contracts import MixedEventProposal, MixedEventReview
 from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
@@ -337,6 +341,9 @@ class CommitteeRoleOutput(BaseModel):
     mixed_event_proposal: MixedEventProposal | None = None
     mixed_event_review: MixedEventReview | None = None
     mixed_event_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    durable_sec_pending_proposal: DurableSecPendingProposal | None = None
+    durable_sec_pending_review: DurableSecPendingReview | None = None
+    durable_sec_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     daily_pending_proposal: DailyPendingProposal | None = None
     daily_pending_review: DailyPendingReview | None = None
     daily_pending_adoption_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -350,7 +357,13 @@ class CommitteeRoleOutput(BaseModel):
     @model_validator(mode="after")
     def _monitoring_role(self) -> "CommitteeRoleOutput":
         if (
-            self.mixed_event_proposal is not None
+            self.durable_sec_pending_proposal is not None
+            and self.role != "orchestrator"
+            or self.durable_sec_pending_review is not None
+            and self.role not in {"bear", "evidence_audit"}
+            or self.durable_sec_pending_adoption_hash is not None
+            and self.role != "portfolio"
+            or self.mixed_event_proposal is not None
             and self.role != "market_state"
             or self.mixed_event_review is not None
             and self.role not in {"bear", "evidence_audit"}
@@ -379,6 +392,8 @@ class CommitteeRoleOutput(BaseModel):
         for item in (
             *(self.mixed_event_proposal.items if self.mixed_event_proposal else ()),
             self.mixed_event_review,
+            *(self.durable_sec_pending_proposal.items if self.durable_sec_pending_proposal else ()),
+            self.durable_sec_pending_review,
             *(self.daily_pending_proposal.items if self.daily_pending_proposal else ()),
             self.daily_pending_review,
             self.disclosure_proposal,
@@ -406,6 +421,9 @@ class CommitteeRoleOutput(BaseModel):
             "monitoring_proposal",
             "monitoring_review",
             "monitoring_adoption_hash",
+            "durable_sec_pending_proposal",
+            "durable_sec_pending_review",
+            "durable_sec_pending_adoption_hash",
             "daily_pending_proposal",
             "daily_pending_review",
             "daily_pending_adoption_hash",

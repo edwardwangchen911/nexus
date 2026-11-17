@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from pydantic import ValidationError
 
 from nexus.notifications.diagnostic import DIAGNOSTIC_EVENT, DiagnosticNotification
+from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
 from nexus.notifications.research_monitor import (
     RESEARCH_MONITOR_EVENT,
     ResearchPriceTriggerNotification,
@@ -41,6 +42,7 @@ BARK_EVENT_SCHEMAS: tuple[tuple[str, str], ...] = (
     ("paper.execution.cancelled", "paper_execution_v1"),
     RESEARCH_MONITOR_EVENT,
     RESEARCH_MONITOR_BATCH_EVENT,
+    DURABLE_SEC_EVENT,
     DIAGNOSTIC_EVENT,
 )
 
@@ -105,6 +107,25 @@ def map_bark_notification(
     read_only_url: str | None,
 ) -> dict[str, str]:
     """Render one validated frozen notification without later data lookups."""
+    if (message.event_type, message.schema_version) == DURABLE_SEC_EVENT:
+        try:
+            notice = DurableSecNotification.model_validate(message.payload)
+        except (ValueError, TypeError, ValidationError):
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID") from None
+        if notice.discovery_id != message.aggregate_id:
+            raise BarkPublishError("BARK_NOTIFICATION_INVALID")
+        title, body = notice.render()
+        result = {
+            "title": title,
+            "body": body,
+            "group": "NEXUS",
+            "id": f"sec-discovery:{notice.discovery_id}",
+            "message_id": str(message.event_id),
+        }
+        if read_only_url is not None:
+            validate_bark_read_only_url(read_only_url)
+            result["url"] = read_only_url
+        return result
     if (message.event_type, message.schema_version) == DIAGNOSTIC_EVENT:
         try:
             diagnostic = DiagnosticNotification.model_validate(message.payload)
@@ -384,6 +405,7 @@ class BarkPublisher:
         if (message.event_type, message.schema_version) not in {
             RESEARCH_MONITOR_EVENT,
             RESEARCH_MONITOR_BATCH_EVENT,
+            DURABLE_SEC_EVENT,
             DIAGNOSTIC_EVENT,
         }:
             if (

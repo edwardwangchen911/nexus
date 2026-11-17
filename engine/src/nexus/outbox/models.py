@@ -5,10 +5,19 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 _NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,254}$")
 _SCHEMA = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
+
+@dataclass(frozen=True)
+class OutboxDeliveryIdentity:
+    attempt_no: int
+    worker_id: str
+    lease_token: UUID
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -18,6 +27,7 @@ class OutboxMessage:
     aggregate_id: UUID
     schema_version: str
     payload: Mapping[str, object]
+    delivery: OutboxDeliveryIdentity | None = None
 
 
 Publisher = Callable[[OutboxMessage], Awaitable[None]]

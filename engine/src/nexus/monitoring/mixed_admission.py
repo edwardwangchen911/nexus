@@ -329,7 +329,11 @@ async def _admit_batch(
     )
     if job is None:
         raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
+    from nexus.domain.ids import new_uuid7
+    from nexus.monitoring.durable_sec_claims import claim_increment_day
+
     member = MonitorIncrement(
+        id=new_uuid7(),
         account_id=account_id,
         instrument_id=trigger.instrument_id,
         batch_id=batch_id,
@@ -346,6 +350,7 @@ async def _admit_batch(
         manifest_hash="0" * 64,
     )
     member.manifest_hash = increment_manifest_hash(member, admitted.run, job)
+    await claim_increment_day(session, member, calendar_authority_id=calendar_authority_id, now=now)
     session.add(member)
     for item in triggers:
         item.status, item.reason, item.research_run_id = "admitted", None, admitted.run.id

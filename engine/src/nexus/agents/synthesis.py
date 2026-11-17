@@ -362,7 +362,39 @@ def synthesize_intent(
             )
         except ValueError:
             daily_pending_proposal = None
+    durable_sec_pending_proposal = None
+    from nexus.monitoring.durable_sec_daily_contracts import (
+        compile_durable_sec_pending_proposal,
+        pending_identity,
+    )
+
+    sec_proposal = by_role["orchestrator"].durable_sec_pending_proposal
+    if (
+        prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS
+        and sec_proposal is not None
+    ):
+        try:
+            paper = (snapshot.payload or {}).get("agent_paper_context")
+            context = None if not isinstance(paper, dict) else paper.get("pending_durable_sec")
+            sec_hash, event_ids = pending_identity(context)
+            sec_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+            durable_sec_pending_proposal = compile_durable_sec_pending_proposal(
+                sec_proposal,
+                {
+                    str(role): sec_review
+                    for role in sec_reviewers
+                    if (sec_review := by_role[role].durable_sec_pending_review) is not None
+                },
+                context_hash=sec_hash,
+                event_ids=event_ids,
+                evidence_refs=evidence_refs,
+                audit_vote=by_role["evidence_audit"].vote,
+                adoption_hash=by_role["portfolio"].durable_sec_pending_adoption_hash,
+            )
+        except ValueError:
+            durable_sec_pending_proposal = None
     return ResearchIntent(
+        durable_sec_pending_proposal=durable_sec_pending_proposal,
         disclosure_proposal=disclosure_proposal,
         daily_pending_proposal=daily_pending_proposal,
         monitoring_proposal=monitoring_proposal,

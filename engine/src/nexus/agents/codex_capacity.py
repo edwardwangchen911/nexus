@@ -298,6 +298,55 @@ def _monitoring_capacity_view(
                 view._outputs[reviewer] = view._outputs[reviewer].model_copy(
                     update={"daily_pending_review": daily_review}
                 )
+    if committee._prompts["portfolio"].version in DAILY_PENDING_SCOPE_PROMPT_VERSIONS:
+        from nexus.monitoring.durable_sec_daily_contracts import (
+            DurableSecPendingItem,
+            DurableSecPendingProposal,
+            DurableSecPendingReview,
+            pending_from_inputs,
+            pending_identity,
+        )
+
+        sec_context = pending_from_inputs(inputs)
+        if sec_context is not None:
+            sec_hash, event_ids = pending_identity(sec_context)
+            sec_proposal = DurableSecPendingProposal(
+                context_hash=sec_hash,
+                items=tuple(
+                    DurableSecPendingItem(
+                        event_id=event_id,
+                        status="unresolved",
+                        rationale=widest_text * 160,
+                        evidence_refs=(widest_reference,) * 3,
+                    )
+                    for event_id in event_ids
+                ),
+            )
+            if "orchestrator" not in view._outputs:
+                view._outputs["orchestrator"] = CommitteeRoleOutput(
+                    role="orchestrator",
+                    vote="support",
+                    claims=(
+                        ResearchClaim(text="capacity boundary", evidence_refs=(evidence[-1],)),
+                    ),
+                    prompt_hash=committee._prompts["orchestrator"].content_hash,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+            view._outputs["orchestrator"] = view._outputs["orchestrator"].model_copy(
+                update={"durable_sec_pending_proposal": sec_proposal}
+            )
+            sec_review = DurableSecPendingReview(
+                proposal_hash=sec_proposal.content_hash,
+                decision="accepted",
+                rationale=widest_text * 500,
+                evidence_refs=(widest_reference,) * 4,
+            )
+            sec_reviewers: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+            for reviewer in sec_reviewers:
+                view._outputs[reviewer] = view._outputs[reviewer].model_copy(
+                    update={"durable_sec_pending_review": sec_review}
+                )
     if committee._prompts["portfolio"].version in DISCLOSURE_SCOPE_PROMPT_VERSIONS:
         from nexus.monitoring.contracts import DisclosureReviewCondition
         from nexus.monitoring.disclosure_contracts import (

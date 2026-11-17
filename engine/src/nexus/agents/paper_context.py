@@ -32,6 +32,7 @@ from nexus.monitoring.disclosure_context import (
     freeze_disclosure_baseline,
     validate_disclosure_baseline,
 )
+from nexus.monitoring.durable_sec_daily import DurableSecPendingContext, DurableSecPendingGap
 from nexus.paper.agent_cycle_models import CandidateManifestEntry
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -109,6 +110,8 @@ class AgentPaperResearchContext(BaseModel):
     pending_monitoring_gap: DailyMonitorGap | None = None
     pending_monitoring_v2: DailyEventContext | None = None
     pending_monitoring_v2_gap: DailyEventGap | None = None
+    pending_durable_sec: DurableSecPendingContext | None = None
+    pending_durable_sec_gap: DurableSecPendingGap | None = None
     disclosure_monitoring: DisclosureMonitoringContext | None = None
 
     @field_validator("disclosure_monitoring", mode="before")
@@ -136,12 +139,23 @@ class AgentPaperResearchContext(BaseModel):
             )
         ):
             raise ValueError("DAILY_MONITOR_GAP_INVALID")
+        if self.pending_durable_sec is not None and self.pending_durable_sec_gap is not None:
+            raise ValueError("DURABLE_SEC_PENDING_CONTEXT_INVALID")
+        if (
+            self.pending_durable_sec_gap is not None
+            and self.pending_durable_sec_gap.observed_at != self.decision_time
+        ):
+            raise ValueError("DURABLE_SEC_PENDING_CONTEXT_INVALID")
         return self
 
     @model_serializer(mode="wrap")
     # Retain the closed serialization schema as well as historical payload bytes.
     def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         value = cast(dict[str, object], handler(self))
+        if self.pending_durable_sec is None:
+            value.pop("pending_durable_sec", None)
+        if self.pending_durable_sec_gap is None:
+            value.pop("pending_durable_sec_gap", None)
         if self.disclosure_monitoring is None:
             value.pop("disclosure_monitoring", None)
         if self.pending_monitoring is None:
@@ -299,7 +313,18 @@ async def prepare_agent_paper_research_snapshot(
         if disclosure_scope
         else None
     )
+    from nexus.monitoring.durable_sec_daily import freeze_durable_sec_pending
+
+    pending_sec, pending_sec_gap = await freeze_durable_sec_pending(
+        session,
+        cycle_id=cycle_id,
+        instrument_id=candidate.instrument_id,
+        as_of=decision_time,
+        omit_bundle=omit_monitor_event_bundle,
+    )
     context = AgentPaperResearchContext(
+        pending_durable_sec=pending_sec,
+        pending_durable_sec_gap=pending_sec_gap,
         disclosure_monitoring=disclosure,
         pending_monitoring=pending,
         pending_monitoring_gap=pending_gap,
@@ -456,6 +481,17 @@ async def _read_agent_paper_research_context(
         return None
     if context.instrument_id != instrument_id or context.decision_time != as_of:
         return None
+    if context.pending_durable_sec is not None:
+        from nexus.monitoring.durable_sec_daily import validate_durable_sec_pending
+
+        pending_sec = context.pending_durable_sec
+        if (
+            pending_sec.cycle_id != context.cycle_id
+            or pending_sec.instrument_id != instrument_id
+            or pending_sec.decision_time != as_of
+            or not await validate_durable_sec_pending(session, pending_sec)
+        ):
+            return None
     if context.disclosure_monitoring is not None:
         disclosure = context.disclosure_monitoring
         if (

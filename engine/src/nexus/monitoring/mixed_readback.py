@@ -100,6 +100,7 @@ async def unadmitted_stock_count(
 ) -> int:
     """The automatic capacity boundary covers the whole unresolved admission pool."""
     from nexus.monitoring.daily_consumption import not_daily_covered
+    from nexus.monitoring.durable_sec_refreeze import not_superseded_pending
 
     count = await session.scalar(
         select(func.count())
@@ -109,6 +110,7 @@ async def unadmitted_stock_count(
             MonitorTrigger.instrument_id == instrument_id,
             MonitorTrigger.status.in_(("pending", "blocked")),
             MonitorTrigger.research_run_id.is_(None),
+            not_superseded_pending(),
             not_daily_covered(),
             not_mixed_consumed(),
         )
