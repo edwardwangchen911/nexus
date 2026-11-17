@@ -196,9 +196,11 @@ async def refresh_host_observations(
 
 
 def _candidate_deadline(preparation: float, bucket: float, now: float) -> float | None:
+    from nexus.ops.sec_atom_candidates import REQUEST_TIMEOUT_SECONDS
+
     # Existing providers each own 90s; price closeout 5s. Preserve a further
     # 25s for the existing bridge/account turn and 8s for the separate scan.
-    deadline = min(now + 3, preparation - 210, bucket - 218)
+    deadline = min(now + REQUEST_TIMEOUT_SECONDS, preparation - 210, bucket - 218)
     return deadline if deadline > now else None
 
 

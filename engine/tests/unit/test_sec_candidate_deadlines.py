@@ -7,7 +7,7 @@ import pytest
 def test_optional_time_preserves_original_preparation_and_scan():
     from nexus.ops.research_monitor import _candidate_deadline
 
-    assert _candidate_deadline(340, 400, 100) == 103
+    assert _candidate_deadline(340, 400, 100) == 110
     assert _candidate_deadline(309, 400, 100) is None
     assert _candidate_deadline(340, 317, 100) is None
     assert _candidate_deadline(311, 400, 100) == 101
