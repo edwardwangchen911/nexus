@@ -116,6 +116,11 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--index-snapshot-id", type=UUID, required=True)
     collect.add_argument("--accession", required=True)
     collect.add_argument("--archive-dir", type=Path, required=True)
+    originals = commands.add_parser(
+        "inspect-content-originals",
+        help="Verify saved originals without granting research qualification",
+    )
+    originals.add_argument("--snapshot-id", type=UUID, required=True)
     preparation = commands.add_parser(
         "prepare-batch",
         help="Freeze parent theses and verified SEC content without admitting research",
@@ -620,6 +625,33 @@ async def _run(
                     "provider_requests": 0,
                     "execution_locked": True,
                     "reconciled_results": 0,
+                }
+            if args.action == "inspect-content-originals":
+                from nexus.monitoring.filing_originals import read_originals
+                from nexus.persistence.models.sec_monitor import SecMonitorRule
+
+                document = await read_originals(session, snapshot_id=args.snapshot_id, as_of=now)
+                if (
+                    await session.scalar(
+                        select(SecMonitorRule.id).where(
+                            SecMonitorRule.account_id == settings.agent_paper_account_id,
+                            SecMonitorRule.instrument_id == document.instrument_id,
+                            SecMonitorRule.issuer_cik == document.issuer_cik,
+                        )
+                    )
+                    is None
+                ):
+                    raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+                return {
+                    "status": "verified_unqualified",
+                    "snapshot_id": str(args.snapshot_id),
+                    "declarations": document.declarations,
+                    "research_qualified": False,
+                    "nontext_content_status": "uninterpreted",
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
                 }
             if args.action == "enable-auto-increment-limit":
                 from nexus.monitoring.auto_increment_policy import (

@@ -35,7 +35,16 @@ def documents(entry, *, invalid_text=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["8-K", "8-K/A", "failed_document", "absent_entry", "import_failure", "transport_v2"]
+    "mode",
+    [
+        "8-K",
+        "8-K/A",
+        "failed_document",
+        "absent_entry",
+        "import_failure",
+        "transport_v2",
+        "graphic",
+    ],
 )
 async def test_normal_collector_binds_exact_index_and_preserves_failed_originals(
     migrated_database_url, tmp_path, monkeypatch, mode
@@ -57,7 +66,7 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
     recent = metadata["filings"]["recent"]
     raw_inventory, bodies = documents(recent, invalid_text=mode == "import_failure")
     accession = recent["accessionNumber"][0]
-    if mode == "transport_v2":
+    if mode in {"transport_v2", "graphic"}:
         from helpers.current_identity import CIK
 
         members = []
@@ -77,6 +86,13 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
             bodies[name] = body.replace(
                 b"</body>", b'<script type="text/javascript" src="/delivery/path"></script></body>'
             )
+        if mode == "graphic":
+            graphic = b"\xff\xd8financial-figure-not-qualified\xff\xd9"
+            rows.append(
+                '<tr><td>8</td><td>Figure</td><td><a href="logo.jpg">logo.jpg</a></td>'
+                f"<td>GRAPHIC</td><td>{len(graphic)}</td></tr>"
+            )
+            bodies["logo.jpg"] = graphic
         raw_inventory = (
             '<table summary="Document Format Files">' + "".join(rows) + "</table>"
         ).encode()
@@ -128,8 +144,10 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
                 await collect_filing_content(settings, **kwargs)
         else:
             result = await collect_filing_content(settings, **kwargs)
-            assert result["status"] == "created"
-            assert result["provider_requests"] == (4 if mode == "transport_v2" else 3)
+            assert result["status"] == ("archived_unqualified" if mode == "graphic" else "created")
+            assert result["provider_requests"] == (
+                5 if mode == "graphic" else 4 if mode == "transport_v2" else 3
+            )
             assert result["model_requests"] == 0 and result["job_created"] is False
         assert not client.is_closed
     factory = session_factory(settings)
@@ -150,6 +168,59 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
                     )
                     == 0
                 )
+            elif mode == "graphic":
+                from nexus.persistence.models.agents import (
+                    AgentDailyBudgetReservationRecord,
+                    AgentResearchRunRecord,
+                )
+                from nexus.persistence.models.monitoring import MonitorIncrement
+                from nexus.persistence.models.runtime import OutboxEvent
+
+                for model in (
+                    AgentResearchRunRecord,
+                    AgentDailyBudgetReservationRecord,
+                    MonitorIncrement,
+                    OutboxEvent,
+                ):
+                    assert await session.scalar(select(func.count()).select_from(model)) == 0
+                from nexus.monitoring.filing_originals import (
+                    SOURCE as UNQUALIFIED,
+                )
+                from nexus.monitoring.filing_originals import (
+                    import_originals,
+                    read_originals,
+                )
+
+                assert snapshots == []
+                saved = (
+                    await session.scalars(
+                        select(DataSnapshot).where(DataSnapshot.source == UNQUALIFIED)
+                    )
+                ).one()
+                now = await session.scalar(select(func.clock_timestamp()))
+                packet = await read_originals(session, snapshot_id=saved.id, as_of=now)
+                assert packet.research_qualified is False
+                assert packet.declarations[-1]["sequence"] == 8
+                assert packet.declarations[-1]["submission_relation"] == "unverified"
+                assert await read_filing_content(session, snapshot_id=saved.id, as_of=now) is None
+                assert (
+                    await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 0
+                )
+                again = await import_originals(
+                    session,
+                    index_snapshot_id=UUID(first["snapshot_id"]),
+                    accession=accession,
+                    archive_dir=archive,
+                    now=now,
+                )
+                assert again.id == saved.id
+                binding = packet.originals["logo.jpg"][0]
+                key = binding.uri.removeprefix("s3://synthetic/")
+                previous = store.objects[key]
+                store.objects[key] = previous + b"tampered"
+                with pytest.raises(ValueError):
+                    await read_originals(session, snapshot_id=saved.id, as_of=now)
+                store.objects[key] = previous
             else:
                 assert len(snapshots) == 1
                 now = await session.scalar(select(func.clock_timestamp()))
