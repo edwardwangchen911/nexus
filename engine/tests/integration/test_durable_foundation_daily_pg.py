@@ -6,7 +6,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -39,7 +39,8 @@ from nexus.persistence.models.sec_research import (
 from nexus.research.durable_sec_index_storage import persist_durable_index_archive
 from nexus.settings import AgentRuntimeMode
 from pydantic import SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
@@ -251,6 +252,34 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                     == f"sec:{rule.issuer_cik}:{entry['accession_number']}",
                 )
             )
+        if resolution == "addressed":
+            # Rejected before FK/audit completion; no fake receipt is persisted.
+            insert_attempt = text("""INSERT INTO sec_durable_daily_event_receipts
+                (id,event_id,cycle_id,run_id,output_id,snapshot_id,context_hash,
+                 proposal_hash,review_hash,created_at,observed_at)
+                SELECT :id,:event,:scope,:scope,:scope,:scope,
+                 repeat('a',64),repeat('a',64),repeat('a',64),
+                 clock_timestamp()-CAST(:lag AS interval),clock_timestamp()-CAST(:lag AS interval)
+            """)
+            for isolation, lag, code in (
+                ("REPEATABLE READ", timedelta(0), "SEC_DAILY_ISOLATION_INVALID"),
+                ("READ COMMITTED", timedelta(days=1), "SEC_DAILY_TIME_INVALID"),
+            ):
+                async with factory.kw["bind"].connect() as connection:
+                    connection = await connection.execution_options(isolation_level=isolation)
+                    async with connection.begin():
+                        with pytest.raises(DBAPIError) as rejected:
+                            await connection.execute(
+                                insert_attempt,
+                                {
+                                    "id": uuid4(),
+                                    "event": event.id,
+                                    "scope": uuid4(),
+                                    "lag": lag,
+                                },
+                            )
+                        assert rejected.value.orig.sqlstate == "23514"
+                        assert code in str(rejected.value)
         monkeypatch.setattr(filing, "AT", day - timedelta(seconds=8))
         imported = await run(
             settings,

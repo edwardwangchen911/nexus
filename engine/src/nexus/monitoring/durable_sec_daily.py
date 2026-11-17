@@ -5,13 +5,14 @@ from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import exists, select, text
+from sqlalchemy import exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.monitoring.filing_archive import SOURCE as FILING_SOURCE
 from nexus.monitoring.filing_archive import VerifiedFilingContent, read_filing_content
 from nexus.monitoring.mixed_contracts import canonical_hash
 from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
 from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryEvent,
@@ -169,7 +170,15 @@ async def freeze_durable_sec_pending(
                     .where(SecDiscoveryEventRevision.event_id == event.id)
                     .limit(1)
                 )
-                if conflict:
+                if conflict or await session.scalar(
+                    select(SecDisclosureKeyConflict.id)
+                    .where(
+                        SecDisclosureKeyConflict.account_id == event.account_id,
+                        SecDisclosureKeyConflict.instrument_id == event.instrument_id,
+                        SecDisclosureKeyConflict.event_key == event.event_key,
+                    )
+                    .limit(1)
+                ):
                     issues.append(
                         PendingSecIssue(
                             event_id=event.id,
@@ -289,22 +298,27 @@ async def validate_durable_sec_pending(
             return False
     for item in context.events:
         event = await session.get(SecDiscoveryEvent, item.event_id)
-        if event is None or (
-            event.account_id,
-            event.instrument_id,
-            event.rule_id,
-            event.event_key,
-            event.metadata_hash,
-            event.entry,
-            event.first_seen_at,
-        ) != (
-            context.account_id,
-            context.instrument_id,
-            item.rule_id,
-            item.event_key,
-            item.metadata_hash,
-            item.entry,
-            item.first_seen_at,
+        if (
+            event is None
+            or event.first_seen_at > context.decision_time
+            or (
+                event.account_id,
+                event.instrument_id,
+                event.rule_id,
+                event.event_key,
+                event.metadata_hash,
+                event.entry,
+                event.first_seen_at,
+            )
+            != (
+                context.account_id,
+                context.instrument_id,
+                item.rule_id,
+                item.event_key,
+                item.metadata_hash,
+                item.entry,
+                item.first_seen_at,
+            )
         ):
             return False
         try:
@@ -314,11 +328,25 @@ async def validate_durable_sec_pending(
                 snapshot_id=item.capture_id,
                 as_of=context.decision_time,
             )
-            verify_event_evidence(event, capture, now=context.decision_time)
+            entry = verify_event_evidence(event, capture, now=context.decision_time)
+            rule = await session.get(SecMonitorRule, event.rule_id)
+            if (
+                rule is None
+                or (rule.account_id, rule.instrument_id) != (event.account_id, event.instrument_id)
+                or capture.index.issuer_cik != rule.issuer_cik
+            ):
+                return False
             content = await read_filing_content(
                 session, snapshot_id=item.content.snapshot_id, as_of=context.decision_time
             )
-            if row.revision != item.capture_hash or content != item.content:
+            if (
+                row.revision != item.capture_hash
+                or content != item.content
+                or content is None
+                or content.archive.instrument_id != event.instrument_id
+                or content.archive.issuer_cik != rule.issuer_cik
+                or content.archive.entry != entry
+            ):
                 return False
         except ValueError:
             return False
@@ -373,10 +401,22 @@ async def record_durable_sec_daily_consumption(
         if rule is None:
             raise ValueError("DURABLE_SEC_DAILY_CONSUMPTION_INVALID")
         await _lock(session, rule)
-        if await rule_state(session, rule) != "active" or await session.scalar(
-            select(SecDiscoveryEventRevision.id)
-            .where(SecDiscoveryEventRevision.event_id == event.id)
-            .limit(1)
+        if (
+            await rule_state(session, rule) != "active"
+            or await session.scalar(
+                select(SecDiscoveryEventRevision.id)
+                .where(SecDiscoveryEventRevision.event_id == event.id)
+                .limit(1)
+            )
+            or await session.scalar(
+                select(SecDisclosureKeyConflict.id)
+                .where(
+                    SecDisclosureKeyConflict.account_id == event.account_id,
+                    SecDisclosureKeyConflict.instrument_id == event.instrument_id,
+                    SecDisclosureKeyConflict.event_key == event.event_key,
+                )
+                .limit(1)
+            )
         ):
             continue
         old = await session.scalar(
@@ -394,9 +434,12 @@ async def record_durable_sec_daily_consumption(
             .limit(1)
         ):
             raise ValueError("DURABLE_SEC_ALREADY_BOUND")
+        fact_at = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(fact_at, datetime):
+            raise ValueError("DURABLE_SEC_DAILY_CONSUMPTION_INVALID")
         row = SecDurableDailyEventReceipt(
             id=new_uuid7(),
-            created_at=now,
+            created_at=fact_at,
             event_id=event.id,
             cycle_id=paper.cycle_id,
             run_id=qualified.run.id,
@@ -405,7 +448,7 @@ async def record_durable_sec_daily_consumption(
             context_hash=context.content_hash,
             proposal_hash=proposal.content_hash,
             review_hash=canonical_hash({k: v.model_dump(mode="json") for k, v in reviews.items()}),
-            observed_at=now,
+            observed_at=fact_at,
         )
         session.add(row)
         await session.flush()
@@ -421,7 +464,7 @@ async def record_durable_sec_daily_consumption(
             actor_id="research-monitor",
             action="research.monitor.sec_daily_consumed",
             schema_version="durable_sec_pending_v1",
-            occurred_at=now,
+            occurred_at=fact_at,
             payload={"row_id": str(row.id), "binding": binding},
         )
         count += 1

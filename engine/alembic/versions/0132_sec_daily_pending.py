@@ -24,13 +24,20 @@ UPGRADE_SQL = (
     """CREATE FUNCTION public.sec_daily_exclusive() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
 DECLARE e public.sec_discovery_events; eid uuid;
 BEGIN
+ IF current_setting('transaction_isolation')<>'read committed' THEN
+  RAISE EXCEPTION 'SEC_DAILY_ISOLATION_INVALID' USING ERRCODE='23514';
+ END IF;
  eid:=NEW.event_id;
  SELECT * INTO e FROM public.sec_discovery_events WHERE id=eid;
  IF e.id IS NULL THEN RAISE EXCEPTION 'SEC_DAILY_INVALID' USING ERRCODE='23514'; END IF;
  PERFORM pg_advisory_xact_lock(hashtextextended('research-monitor:'||e.account_id::text||':'||e.instrument_id::text,0));
  PERFORM pg_advisory_xact_lock(hashtextextended('sec-durable-rule:'||e.rule_id::text,0));
  IF TG_TABLE_NAME='sec_durable_daily_event_receipts' THEN
+  IF NEW.created_at<transaction_timestamp() OR NEW.created_at>clock_timestamp() THEN
+   RAISE EXCEPTION 'SEC_DAILY_TIME_INVALID' USING ERRCODE='23514';
+  END IF;
   IF NOT public.sec_durable_active(e.rule_id) OR EXISTS(SELECT FROM public.sec_discovery_event_revisions WHERE event_id=e.id)
+   OR EXISTS(SELECT FROM public.sec_disclosure_key_conflicts k WHERE (k.account_id,k.instrument_id,k.event_key)=(e.account_id,e.instrument_id,e.event_key))
    OR EXISTS(SELECT FROM public.sec_event_research_bindings WHERE event_id=e.id)
    OR EXISTS(SELECT FROM public.sec_event_consumption_receipts WHERE event_id=e.id)
   THEN RAISE EXCEPTION 'SEC_DAILY_NOT_ELIGIBLE' USING ERRCODE='23514'; END IF;
@@ -85,8 +92,13 @@ BEGIN
  SELECT x INTO item FROM jsonb_array_elements(proposal->'items') x WHERE x->>'event_id'=e.id::text;
  IF item->>'status' IS DISTINCT FROM 'addressed' OR frozen->>'rule_id' IS DISTINCT FROM e.rule_id::text OR frozen->>'event_key' IS DISTINCT FROM e.event_key OR frozen->>'metadata_hash' IS DISTINCT FROM e.metadata_hash OR frozen->'entry' IS DISTINCT FROM e.entry
  OR (frozen->>'first_seen_at')::timestamptz IS DISTINCT FROM e.first_seen_at
+ OR e.first_seen_at>r.decision_time
+ OR NOT public.sec_durable_active(e.rule_id)
+ OR EXISTS(SELECT FROM public.sec_discovery_event_revisions WHERE event_id=e.id)
+ OR EXISTS(SELECT FROM public.sec_disclosure_key_conflicts k WHERE (k.account_id,k.instrument_id,k.event_key)=(e.account_id,e.instrument_id,e.event_key))
+ OR NOT EXISTS(SELECT FROM public.sec_monitor_rules rule WHERE rule.id=e.rule_id AND (rule.account_id,rule.instrument_id)=(e.account_id,e.instrument_id) AND e.event_key='sec:'||rule.issuer_cik||':'||(e.entry->>'accession_number'))
  OR NOT EXISTS(SELECT FROM public.data_snapshots cap WHERE cap.id::text=frozen->>'capture_id' AND cap.source='sec_durable_disclosure_index' AND cap.schema_version='sec_durable_index_v1' AND cap.payload->>'schema_version'='sec_durable_index_v1' AND cap.revision=frozen->>'capture_hash' AND cap.revision=encode(sha256(convert_to(public.sec_positive_chain_canonical(cap.payload),'UTF8')),'hex') AND cap.payload#>>'{index,instrument_id}'=e.instrument_id::text AND cap.payload#>>'{index,issuer_cik}'=(SELECT issuer_cik FROM public.sec_monitor_rules WHERE id=e.rule_id) AND NOT EXISTS(SELECT FROM jsonb_array_elements(cap.payload->'issues') iss WHERE iss->>'accession_number'=e.entry->>'accession_number') AND EXISTS(SELECT FROM jsonb_array_elements(cap.payload#>'{index,entries}') x WHERE x=e.entry) AND greatest(cap.created_at,cap.observed_at,cap.received_at,cap.available_at)<=r.decision_time AND r.decision_time-(cap.payload#>>'{index,received_at}')::timestamptz BETWEEN interval '0 seconds' AND interval '300 seconds')
- OR NOT EXISTS(SELECT FROM public.data_snapshots fc WHERE fc.id::text=frozen#>>'{content,snapshot_id}' AND fc.source='nexus_sec_monitor_filing' AND fc.revision=frozen#>>'{content,canonical_hash}' AND fc.payload=frozen#>'{content,archive}' AND fc.payload->'entry'=e.entry AND greatest(fc.created_at,fc.observed_at,fc.received_at,fc.available_at)<=r.decision_time)
+ OR NOT EXISTS(SELECT FROM public.data_snapshots fc WHERE fc.id::text=frozen#>>'{content,snapshot_id}' AND fc.source='nexus_sec_monitor_filing' AND fc.revision=frozen#>>'{content,canonical_hash}' AND fc.payload=frozen#>'{content,archive}' AND fc.payload->'entry'=e.entry AND fc.payload->>'instrument_id'=e.instrument_id::text AND fc.payload->>'issuer_cik'=(SELECT issuer_cik FROM public.sec_monitor_rules WHERE id=e.rule_id) AND greatest(fc.created_at,fc.observed_at,fc.received_at,fc.available_at)<=r.decision_time)
  THEN RAISE EXCEPTION 'SEC_DAILY_EVENT_INVALID' USING ERRCODE='23514'; END IF;
  SELECT jsonb_object_agg(role,payload) INTO roles FROM public.agent_research_outputs WHERE run_id=r.id AND role IS NOT NULL;
  IF (SELECT count(*) FROM public.agent_research_outputs WHERE run_id=r.id AND role IS NOT NULL)<>8

@@ -1,6 +1,6 @@
 """Revalidate the current SEC originals immediately before a protected new send."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -73,6 +73,7 @@ async def verify_send_inputs(session: AsyncSession, run_id: UUID) -> None:
         ):
             raise ValueError("SEC_RESEARCH_PERMISSION_BUSY")
     verified: dict[UUID, UUID] = {}
+    received: list[datetime] = []
     for instrument in instruments:
         at = await session.scalar(select(text("clock_timestamp()")))
         if not isinstance(at, datetime):
@@ -93,6 +94,7 @@ async def verify_send_inputs(session: AsyncSession, run_id: UUID) -> None:
                     session, store, snapshot_id=snapshot_id, as_of=at
                 )
                 issues = ()
+            received.append(index.received_at)
             # Validate the frozen entries against this very capture, rather than
             # relying on a different capture selected by an earlier SQL reader.
             for scope in scopes:
@@ -125,6 +127,7 @@ async def verify_send_inputs(session: AsyncSession, run_id: UUID) -> None:
     for instrument, snapshot_id in verified.items():
         if await session.scalar(_LATEST, {"instrument": str(instrument), "at": at}) != snapshot_id:
             raise ValueError(INVALID)
+    plans: list[MonitorPlan] = []
     for scope in scopes:
         if scope["plan_id"] is not None:
             plan = await session.get(MonitorPlan, scope["plan_id"])
@@ -132,3 +135,13 @@ async def verify_send_inputs(session: AsyncSession, run_id: UUID) -> None:
                 session, plan, at, exclude_run_id=run_id
             ):
                 raise ValueError(INVALID)
+            plans.append(plan)
+    # The last source query can itself wait. Nothing asynchronous follows this
+    # final clock check before the transport also checks its work deadline.
+    at = await session.scalar(select(text("clock_timestamp()")))
+    if (
+        not isinstance(at, datetime)
+        or any(not timedelta(0) <= at - value <= timedelta(seconds=300) for value in received)
+        or any(not plan.effective_at <= at < plan.valid_until for plan in plans)
+    ):
+        raise ValueError(INVALID)

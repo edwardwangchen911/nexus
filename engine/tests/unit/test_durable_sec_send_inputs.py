@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -12,8 +12,9 @@ from nexus.research.sec_listed_history import SecMetadataEntry
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listed", [False, True])
 @pytest.mark.parametrize("copies", [1, 2])
+@pytest.mark.parametrize("end_late", [False, True])
 async def test_current_html_metadata_matches_across_versioned_reader_models(
-    monkeypatch, listed, copies
+    monkeypatch, listed, copies, end_late
 ):
     instrument, snapshot = UUID(int=1), UUID(int=2)
     at = datetime(2026, 11, 12, 15, tzinfo=UTC)
@@ -33,17 +34,29 @@ async def test_current_html_metadata_matches_across_versioned_reader_models(
         entry=entry.model_dump(mode="json"),
     )
     index = SimpleNamespace(
-        instrument_id=instrument, issuer_cik="0000123456", entries=(current,) * copies
+        instrument_id=instrument,
+        issuer_cik="0000123456",
+        received_at=at,
+        entries=(current,) * copies,
     )
     rows = SimpleNamespace(mappings=lambda: [scope])
     session = SimpleNamespace(
         execute=AsyncMock(side_effect=[rows, None]),
-        scalar=AsyncMock(side_effect=[True, at, snapshot, at, snapshot]),
+        scalar=AsyncMock(
+            side_effect=[
+                True,
+                at,
+                snapshot,
+                at,
+                snapshot,
+                at + timedelta(seconds=301) if end_late else at,
+            ]
+        ),
         get=AsyncMock(return_value=SimpleNamespace(source="sec_disclosure_listed_index")),
     )
     monkeypatch.setattr(inputs, "configured_exhibit_store", lambda session: object())
     monkeypatch.setattr(inputs, "read_monitor_index", AsyncMock(return_value=(object(), index)))
-    if copies == 1:
+    if copies == 1 and not end_late:
         await inputs.verify_send_inputs(session, UUID(int=4))
     else:
         with pytest.raises(ValueError, match="SEC_RESEARCH_PERMISSION_INVALID"):
