@@ -8,6 +8,12 @@ from nexus.api.schemas.research_monitoring import MonitoringViewModel
 from pydantic import Field
 
 
+class DurableSecCoverageDetails(MonitoringViewModel):
+    unread_history_files: int | None = Field(default=None, ge=0, le=10000, strict=True)
+    invalid_rows: int = Field(ge=0, le=10000, strict=True)
+    coverage_start_known: bool = Field(strict=True)
+
+
 class DurableSecCheckView(MonitoringViewModel):
     scheduled_at: datetime
     checked_at: datetime
@@ -15,7 +21,20 @@ class DurableSecCheckView(MonitoringViewModel):
     coverage: Literal["complete", "partial", "unknown"]
     interval_start: datetime | None = None
     interval_end: datetime | None = None
-    reason: Literal["evidence_unverified"] | None = None
+    reason: (
+        Literal[
+            "evidence_unverified",
+            "coverage_incomplete",
+            "coverage_conflict",
+            "source_stale",
+            "source_invalid",
+            "time_invalid",
+            "history_invalid",
+            "rule_inactive",
+        ]
+        | None
+    ) = None
+    coverage_details: DurableSecCoverageDetails | None = None
 
 
 class DurableSecEventView(MonitoringViewModel):

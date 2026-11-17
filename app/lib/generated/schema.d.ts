@@ -2810,12 +2810,13 @@ export interface components {
              * @enum {string}
              */
             coverage: "complete" | "partial" | "unknown";
+            coverage_details: components["schemas"]["DurableSecCoverageDetails"] | null;
             /** Interval End */
             interval_end: string | null;
             /** Interval Start */
             interval_start: string | null;
             /** Reason */
-            reason: "evidence_unverified" | null;
+            reason: ("evidence_unverified" | "coverage_incomplete" | "coverage_conflict" | "source_stale" | "source_invalid" | "time_invalid" | "history_invalid" | "rule_inactive") | null;
             /**
              * Result
              * @enum {string}
@@ -2826,6 +2827,15 @@ export interface components {
              * Format: date-time
              */
             scheduled_at: string;
+        };
+        /** DurableSecCoverageDetails */
+        DurableSecCoverageDetails: {
+            /** Coverage Start Known */
+            coverage_start_known: boolean;
+            /** Invalid Rows */
+            invalid_rows: number;
+            /** Unread History Files */
+            unread_history_files: number | null;
         };
         /** DurableSecEventView */
         DurableSecEventView: {

@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
-from nexus.research.durable_sec_index import DurableIndexEvidence, build_durable_index
+from nexus.research.durable_sec_index import (
+    DurableIndexEvidence,
+    build_durable_index,
+    coverage_details,
+)
 from nexus.research.identity_sources import (
     directory_binding,
     directory_binding_from_raw,
@@ -142,6 +146,7 @@ async def read_durable_index_capture(
     *,
     snapshot_id: UUID,
     as_of: datetime,
+    coverage_details_out: dict[str, object] | None = None,
 ) -> tuple[DataSnapshot, DurableIndexCapture]:
     as_of = require_utc(as_of)
     row = await session.get(DataSnapshot, snapshot_id)
@@ -237,4 +242,8 @@ async def read_durable_index_capture(
         )
     ):
         raise ValueError("SEC_INDEX_CAPTURE_INVALID")
+    if coverage_details_out is not None:
+        # Publish diagnostics only after the exact originals and stored capture
+        # have passed every existing check. No additional storage reads.
+        coverage_details_out.update(coverage_details(originals[2], rebuilt))
     return row, capture

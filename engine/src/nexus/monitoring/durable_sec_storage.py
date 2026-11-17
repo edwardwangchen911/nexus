@@ -282,6 +282,7 @@ async def record_discovery(
     capture = None
     index = None
     evidence = None
+    source_details: dict[str, object] = {}
     try:
         if capture_id is not None:
             capture = await session.get(DataSnapshot, capture_id)
@@ -289,7 +290,11 @@ async def record_discovery(
                 raise ValueError("DURABLE_SEC_SOURCE_INVALID")
             if capture.source == DURABLE_SOURCE:
                 capture, evidence = await read_durable_index_capture(
-                    session, configured_exhibit_store(session), snapshot_id=capture_id, as_of=now
+                    session,
+                    configured_exhibit_store(session),
+                    snapshot_id=capture_id,
+                    as_of=now,
+                    coverage_details_out=source_details,
                 )
                 index = evidence.index
             elif capture.source == INDEX_SOURCE:
@@ -307,6 +312,8 @@ async def record_discovery(
             policy, index, capture.available_at, now, known, frozenset(key for key, _, _ in legacy)
         )
         observation = decision.model_dump(mode="json")
+        if source_details:
+            observation["coverage_details"] = source_details
         result, coverage = decision.result, decision.coverage
         reason = decision.reason if result == "unknown" else None
         if result == "false":

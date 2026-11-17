@@ -3947,6 +3947,16 @@ export const runtimeContractSchemas = {
         "title": "Coverage",
         "type": "string"
       },
+      "coverage_details": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DurableSecCoverageDetails"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "interval_end": {
         "anyOf": [
           {
@@ -3974,7 +3984,16 @@ export const runtimeContractSchemas = {
       "reason": {
         "anyOf": [
           {
-            "const": "evidence_unverified",
+            "enum": [
+              "evidence_unverified",
+              "coverage_incomplete",
+              "coverage_conflict",
+              "source_stale",
+              "source_invalid",
+              "time_invalid",
+              "history_invalid",
+              "rule_inactive"
+            ],
             "type": "string"
           },
           {
@@ -4005,9 +4024,45 @@ export const runtimeContractSchemas = {
       "coverage",
       "interval_start",
       "interval_end",
-      "reason"
+      "reason",
+      "coverage_details"
     ],
     "title": "DurableSecCheckView",
+    "type": "object"
+  },
+  "DurableSecCoverageDetails": {
+    "additionalProperties": false,
+    "properties": {
+      "coverage_start_known": {
+        "title": "Coverage Start Known",
+        "type": "boolean"
+      },
+      "invalid_rows": {
+        "maximum": 10000,
+        "minimum": 0,
+        "title": "Invalid Rows",
+        "type": "integer"
+      },
+      "unread_history_files": {
+        "anyOf": [
+          {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Unread History Files"
+      }
+    },
+    "required": [
+      "unread_history_files",
+      "invalid_rows",
+      "coverage_start_known"
+    ],
+    "title": "DurableSecCoverageDetails",
     "type": "object"
   },
   "DurableSecEventView": {

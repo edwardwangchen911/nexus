@@ -105,6 +105,15 @@ async def test_bad_historical_row_preserves_new_event_normal_chain(
             )
             assert (check.result, check.coverage) == ("true", "partial")
             assert len(check.observation["row_issues"]) == 1
+            assert check.observation["coverage_details"]["invalid_rows"] == 1
+            assert check.observation["coverage_details"]["unread_history_files"] == len(
+                document["filings"]["files"]
+            )
+            from nexus.api.durable_sec import project_check
+
+            view = project_check(check, check.checked_at)
+            assert view.coverage_details.invalid_rows == 1
+            assert view.result == "true" and view.coverage == "partial" and view.reason is None
             check_id = check.id
         async with factory() as session, session.begin():
             check2 = await durable.record_discovery(

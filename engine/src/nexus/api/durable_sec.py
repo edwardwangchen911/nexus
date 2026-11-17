@@ -60,6 +60,17 @@ def project_check(row: SecDiscoveryCheck, now: datetime) -> DurableSecCheckView:
             raise ValueError("DURABLE_SEC_VIEW_INVALID")
     if row.result == "false" and (start is None or end is None):
         raise ValueError("DURABLE_SEC_VIEW_INVALID")
+    details = observation.get("coverage_details")
+    if (
+        row.coverage == "complete"
+        and isinstance(details, dict)
+        and (
+            details.get("unread_history_files") != 0
+            or details.get("invalid_rows") != 0
+            or details.get("coverage_start_known") is not True
+        )
+    ):
+        raise ValueError("DURABLE_SEC_VIEW_INVALID")
     return DurableSecCheckView.model_validate(
         {
             "scheduled_at": row.scheduled_at,
@@ -68,7 +79,18 @@ def project_check(row: SecDiscoveryCheck, now: datetime) -> DurableSecCheckView:
             "coverage": row.coverage,
             "interval_start": start,
             "interval_end": end,
-            "reason": "evidence_unverified" if row.result == "unknown" else None,
+            "reason": {
+                "DURABLE_SEC_COVERAGE_INCOMPLETE": "coverage_incomplete",
+                "DURABLE_SEC_COVERAGE_CONFLICT": "coverage_conflict",
+                "DURABLE_SEC_SOURCE_STALE": "source_stale",
+                "DURABLE_SEC_SOURCE_INVALID": "source_invalid",
+                "DURABLE_SEC_TIME_INVALID": "time_invalid",
+                "DURABLE_SEC_HISTORY_INVALID": "history_invalid",
+                "DURABLE_SEC_RULE_INACTIVE": "rule_inactive",
+            }.get(row.reason or "", "evidence_unverified")
+            if row.result == "unknown"
+            else None,
+            "coverage_details": details,
         }
     )
 
