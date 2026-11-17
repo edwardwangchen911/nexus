@@ -3,6 +3,7 @@
 from asyncio import CancelledError, Task, create_task, get_running_loop, shield, timeout
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from contextvars import ContextVar
 from datetime import datetime
 from math import isfinite
 
@@ -21,6 +22,11 @@ INCREMENT_ACTION_HEADROOM_SECONDS = (
 # One exact filing (60s), one bounded market preparation (300s), short
 # transactions and durable closeout (60s). Worker/model deadlines stay unchanged.
 BATCH_PREPARATION_HEADROOM_SECONDS = 420
+
+
+preparation_deadline: ContextVar[float | None] = ContextVar(
+    "monitor_preparation_deadline", default=None
+)
 
 
 class PriceMonitorCoordinator:
@@ -105,13 +111,17 @@ class PriceMonitorCoordinator:
             await self._run_scan_owned(bucket, stack)
 
     async def _run_scan_owned(self, bucket: datetime, stack: AsyncExitStack) -> None:
-        preparation_deadline = get_running_loop().time() + self._preparation_timeout_seconds
+        deadline_at = get_running_loop().time() + self._preparation_timeout_seconds
         phase = "observations" if self._prepare is not None else "scan"
         try:
             if self._prepare is not None:
                 try:
                     async with timeout(self._preparation_timeout_seconds):
-                        prepared = await self._prepare(bucket)
+                        token = preparation_deadline.set(deadline_at)
+                        try:
+                            prepared = await self._prepare(bucket)
+                        finally:
+                            preparation_deadline.reset(token)
                     if isinstance(prepared, dict) and prepared.get("status") in {
                         "partial",
                         "unknown",
@@ -125,7 +135,7 @@ class PriceMonitorCoordinator:
                     self._last_diagnostic = "MONITOR_OBSERVATIONS_FAILED"
             if self._scan_turn is not None:
                 phase = "observations"
-                remaining = preparation_deadline - get_running_loop().time()
+                remaining = deadline_at - get_running_loop().time()
                 try:
                     async with timeout(max(0.0, remaining)):
                         await stack.enter_async_context(self._scan_turn())

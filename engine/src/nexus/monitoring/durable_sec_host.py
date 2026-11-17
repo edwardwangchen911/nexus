@@ -111,6 +111,7 @@ async def claim_refresh(
     scheduled: datetime,
     repo_root: Path,
     contact: str | None,
+    candidate_keys: tuple[str, ...] = (),
 ) -> dict[str, object] | None:
     from nexus.ops.monitor_batch_prepare import _archive_root
     from nexus.ops.monitor_disclosure_refresh import (
@@ -135,12 +136,17 @@ async def claim_refresh(
                 session, configured_exhibit_store(session), snapshot_id=latest.id, as_of=now
             )
             index = capture.index
-            if (index.instrument_id, index.issuer_cik, index.identity_snapshot_id) == (
-                rule.instrument_id,
-                rule.issuer_cik,
-                identity_id,
-            ) and timedelta(0) <= now - index.received_at <= timedelta(
-                seconds=REUSE_MAX_AGE_SECONDS
+            if (
+                (index.instrument_id, index.issuer_cik, index.identity_snapshot_id)
+                == (
+                    rule.instrument_id,
+                    rule.issuer_cik,
+                    identity_id,
+                )
+                and timedelta(0)
+                <= now - index.received_at
+                <= timedelta(seconds=REUSE_MAX_AGE_SECONDS)
+                and not set(candidate_keys).difference(e.accession_number for e in index.entries)
             ):
                 return None
         except (ValueError, OSError):
