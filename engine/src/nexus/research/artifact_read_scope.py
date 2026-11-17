@@ -2,7 +2,7 @@
 
 The schema's diagnostic-authority trigger forbids DataArtifact UPDATE/DELETE,
 and its digest is unique. Callers still check every binding, time and original.
-Pending ORM writes and existing identity-map objects retain the original query.
+Pending ORM writes and changed or expired mapped objects retain the original query.
 """
 
 from collections.abc import Iterator
@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import SessionTransaction
 
@@ -90,8 +90,23 @@ async def read_artifact(
         and not (session.new or session.dirty or session.deleted)
     )
     if reusable and isinstance(scope, _Scope) and (row := scope.rows.get(digest)) is not None:
-        if session.identity_key(DataArtifact, row.id) not in session.identity_map:
+        existing = session.identity_map.get(session.identity_key(DataArtifact, row.id))
+        if existing is None:
             return row
+        if isinstance(existing, DataArtifact):
+            state = inspect(existing)
+            if (
+                state.persistent
+                and state.session is session.sync_session
+                and not state.modified
+                and not state.unloaded
+                and not state.expired_attributes
+                and all(
+                    getattr(existing, field.name) == getattr(row, field.name)
+                    for field in fields(ArtifactRegistration)
+                )
+            ):
+                return existing
     record = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
     if (
         reusable

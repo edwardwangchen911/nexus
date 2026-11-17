@@ -31,8 +31,9 @@ from nexus.market.current_identity_storage import (
     _read_artifact,
 )
 from nexus.market.scope import US_EQUITY_EXCHANGES
-from nexus.persistence.models.data import DataArtifact, DataSnapshot
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.research.artifact_read_scope import read_artifact
 
 SOURCE = "current_listing_revision"
 SCHEMA = "current_listing_revision_v1"
@@ -249,9 +250,7 @@ async def read_listing_revision(
             raise ValueError
         contents = []
         for binding in proof.artifacts:
-            artifact = await session.scalar(
-                select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
-            )
+            artifact = await read_artifact(session, binding.sha256)
             if artifact is None or _binding(artifact) != binding:
                 raise ValueError
             contents.append(await _read_artifact(store, binding))
