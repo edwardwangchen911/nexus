@@ -89,6 +89,15 @@ def parser() -> argparse.ArgumentParser:
         "observe", help="Refresh this current observation bucket without research"
     )
     observe.add_argument("--calendar-authority-id", type=UUID, required=True)
+    candidates = commands.add_parser(
+        "observe-sec-candidates",
+        help="Archive official hints without granting research or negative coverage",
+    )
+    candidates.add_argument("--calendar-authority-id", type=UUID, required=True)
+    candidates = commands.add_parser(
+        "inspect-sec-candidates", help="Verify one saved official hint observation"
+    )
+    candidates.add_argument("--snapshot-id", type=UUID, required=True)
     content = commands.add_parser(
         "import-content", help="Import exact SEC filing inventory and every declared text original"
     )
@@ -234,9 +243,34 @@ async def refresh_configured_observations(
     # before source capture; the subsequent scan keeps its eight-second bound
     # and still checks for results that completed after this transaction.
     reconciled = await run(settings, argparse.Namespace(action="reconcile"))
+    from nexus.ops.sec_atom_candidates import refresh_candidates
+
+    # Optional discovery hints never qualify an event or replace capture B.
+    # An unseen hint can defeat the brief reuse window, never the bucket once gate.
+    try:
+        async with asyncio.timeout(3):
+            candidates = await refresh_candidates(
+                settings,
+                calendar_authority_id=calendar_authority_id,
+                scheduled_at=bucket,
+                environment=environment,
+                repo_root=repo_root,
+            )
+    except Exception:
+        candidates = {
+            "status": "unknown",
+            "provider_requests": None,
+            "model_requests": 0,
+            "negative_conclusion_authorized": False,
+        }
     from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
     from nexus.ops.monitor_price_refresh import refresh_price_observations
 
+    candidate_hints = {}
+    candidate_items = candidates.get("items", [])
+    for item in candidate_items if isinstance(candidate_items, list) else []:
+        if isinstance(item, dict) and item.get("instrument_id") and item.get("candidate_hints"):
+            candidate_hints[UUID(str(item["instrument_id"]))] = tuple(item["candidate_hints"])
     results: dict[str, dict[str, object]] = {}
     # SEC first; the final L1 capture keeps quotes fresh for the independent scan.
     for source, refresh in (
@@ -251,6 +285,7 @@ async def refresh_configured_observations(
                 scheduled_at=bucket,
                 environment=environment,
                 repo_root=repo_root,
+                **({"candidate_hints": candidate_hints} if source == "disclosure" else {}),
             )
             if source == "disclosure" and results[source].get("status") in {
                 "refreshed",
@@ -272,6 +307,7 @@ async def refresh_configured_observations(
                 "model_requests": 0,
             }
     request_counts = [value.get("provider_requests") for value in results.values()]
+    request_counts.append(candidates.get("provider_requests"))
     known_requests = all(type(value) is int and value >= 0 for value in request_counts)
     ready_statuses = {
         "refreshed",
@@ -292,6 +328,7 @@ async def refresh_configured_observations(
         "status": status,
         "scheduled_at": bucket.isoformat(),
         "reconciliation": reconciled,
+        "official_candidates": candidates,
         "sources": results,
         "provider_requests": sum(value for value in request_counts if isinstance(value, int))
         if known_requests
@@ -486,6 +523,19 @@ async def _run(
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action == "observe-sec-candidates":
+        from nexus.ops.sec_atom_candidates import refresh_candidates
+
+        return await refresh_candidates(
+            settings,
+            calendar_authority_id=args.calendar_authority_id,
+            environment=getattr(args, "_observation_environment", {}),
+            repo_root=getattr(args, "repo_root", Path.cwd()),
+        )
+    if args.action == "inspect-sec-candidates":
+        from nexus.ops.sec_atom_candidates import inspect_snapshot
+
+        return await inspect_snapshot(settings, args.snapshot_id)
     if args.action in {"import-durable-sec-index", "collect-durable-sec-index"}:
         return await _durable_index_with_scope(settings, args)
     if args.action == "observe":
@@ -1212,7 +1262,7 @@ async def run_configured(
     environment: dict[str, str], args: argparse.Namespace
 ) -> dict[str, object]:
     settings = _FileEngineSettings.model_validate(environment)
-    if args.action == "observe":
+    if args.action in {"observe", "observe-sec-candidates"}:
         args = argparse.Namespace(**vars(args), _observation_environment=dict(environment))
     if args.action in {"collect-content", "prepare-pending", "collect-durable-sec-index"}:
         args = argparse.Namespace(**vars(args), _sec_contact=environment.get("SEC_CONTACT"))

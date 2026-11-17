@@ -117,6 +117,7 @@ async def _claim(
     scheduled: datetime,
     repo_root: Path,
     contact: str | None,
+    candidate_keys: tuple[str, ...] = (),
 ) -> dict[str, object] | None:
     now, instruments = await _scope(session, settings, account_id, calendar_id, scheduled)
     from nexus.paper.host_probe_state import require_host_admitting
@@ -130,7 +131,13 @@ async def _claim(
     rule = await registered_rule(session, account_id, instrument_id)
     if rule is not None:
         return await claim_refresh(
-            session, rule=rule, now=now, scheduled=scheduled, repo_root=repo_root, contact=contact
+            session,
+            rule=rule,
+            now=now,
+            scheduled=scheduled,
+            repo_root=repo_root,
+            contact=contact,
+            candidate_keys=candidate_keys,
         )
     plan = await session.scalar(
         select(MonitorPlan)
@@ -274,6 +281,7 @@ async def refresh_disclosure_observations(
     scheduled_at: datetime,
     environment: dict[str, str],
     repo_root: Path,
+    candidate_hints: dict[UUID, tuple[str, ...]] | None = None,
 ) -> dict[str, object]:
     """Refresh exact installed issuers once; failures never authorize research or execution."""
     if (
@@ -330,6 +338,7 @@ async def refresh_disclosure_observations(
                             scheduled=scheduled_at,
                             repo_root=repo_root,
                             contact=contact,
+                            candidate_keys=(candidate_hints or {}).get(instrument, ()),
                         )
                 except ValueError:
                     items.append({"status": "unknown", "reason": "SEC_BASELINE_SCOPE_UNAVAILABLE"})
