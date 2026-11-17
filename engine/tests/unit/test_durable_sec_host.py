@@ -112,11 +112,12 @@ async def test_registered_reuse_reserves_full_prep_budget(monkeypatch, tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("active", [False, True])
-async def test_normal_scan_expired_anchor_uses_durable_only(monkeypatch, active):
+@pytest.mark.parametrize("has_plan", [False, True])
+async def test_normal_scan_expired_anchor_uses_durable_only(monkeypatch, active, has_plan):
     selected = SimpleNamespace(instrument_id=INSTRUMENT, valid_until=NOW - timedelta(days=1))
     session = SimpleNamespace(
         get=AsyncMock(return_value=SimpleNamespace(capability="simulation_write_internal")),
-        scalars=AsyncMock(return_value=[selected]),
+        scalars=AsyncMock(side_effect=[[selected] if has_plan else [], [INSTRUMENT]]),
         scalar=AsyncMock(return_value=None),
     )
     monkeypatch.setattr(
@@ -143,3 +144,28 @@ async def test_normal_scan_expired_anchor_uses_durable_only(monkeypatch, active)
     assert report["checks"] == int(active) and report["notifications"] == int(active)
     assert report["expired"] == 0
     scan.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_registered_and_plan_scope_union_still_limits_five_before_lock(monkeypatch):
+    plans = [SimpleNamespace(instrument_id=UUID(int=20 + i)) for i in range(5)]
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(capability="simulation_write_internal")),
+        scalars=AsyncMock(side_effect=[plans, [UUID(int=99)]]),
+    )
+    monkeypatch.setattr(
+        scanning,
+        "load_agent_paper_service_calendar_authority",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                market_open_at=NOW - timedelta(hours=1), market_close_at=NOW + timedelta(hours=1)
+            )
+        ),
+    )
+    lock = AsyncMock()
+    monkeypatch.setattr(scanning, "lock_security", lock)
+    with pytest.raises(ValueError, match="MONITOR_SCOPE_EXCEEDED"):
+        await scanning.scan_account(
+            session, account_id=ACCOUNT, calendar_authority_id=UUID(int=5), now=NOW
+        )
+    lock.assert_not_awaited()
