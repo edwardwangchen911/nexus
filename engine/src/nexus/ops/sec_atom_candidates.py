@@ -41,6 +41,7 @@ from nexus.settings import EngineSettings
 
 SOURCE = "sec_official_atom_candidates"
 SCHEMA = "sec_atom_candidates_v1"
+REQUEST_TIMEOUT_SECONDS = 10
 CLAIM = "research.monitor.sec_atom_candidates_claimed"
 log = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ async def refresh_candidates(
                 fence = _SendDeadline(send_deadline, permit)
                 async with (
                     asyncio.timeout_at(send_deadline),
-                    asyncio.timeout(10),
+                    asyncio.timeout(REQUEST_TIMEOUT_SECONDS),
                     _client() as client,
                 ):
                     client.event_hooks["request"].append(fence.attach)
@@ -220,7 +221,9 @@ async def refresh_candidates(
                         provider_name="sec",
                         origin=AllowedOrigin("https", "www.sec.gov"),
                         policy=HttpRequestPolicy(
-                            deadline_seconds=10, max_attempts=1, max_response_bytes=MAX_BYTES
+                            deadline_seconds=REQUEST_TIMEOUT_SECONDS,
+                            max_attempts=1,
+                            max_response_bytes=MAX_BYTES,
                         ),
                         client=client,
                     )

@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
         (False, "commit"),
         (False, "clock_skew"),
         (False, "parse_invalid"),
+        (False, "host_latency"),
     ],
 )
 async def test_normal_candidate_entry_custody_once_and_no_effects(
@@ -130,6 +131,8 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
         calls = []
 
         async def request(req):
+            if cross_bucket == "host_latency":
+                await asyncio.sleep(4)
             calls.append(str(req.url))
             assert req.url.host == "www.sec.gov" and req.url.params["CIK"] == rule.issuer_cik
             if pause_during_read:
@@ -196,6 +199,41 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                     )
                     == 1
                 )
+            return
+        if cross_bucket == "host_latency":
+            observed = await research_monitor.refresh_configured_observations(
+                settings,
+                calendar_authority_id=CALENDAR_ID,
+                scheduled_at=atom._bucket(captured["clock"][0]),
+                environment=args._observation_environment,
+                repo_root=tmp_path,
+            )
+            candidate = observed["official_candidates"]
+            assert candidate["items"] and candidate["items"][0].get("snapshot_id"), candidate
+            assert len(calls) == 1
+            verified = await research_monitor.run(
+                settings,
+                argparse.Namespace(
+                    action="inspect-sec-candidates",
+                    snapshot_id=UUID(candidate["items"][0]["snapshot_id"]),
+                ),
+            )
+            assert (
+                verified["status"] == "verified"
+                and verified["negative_conclusion_authorized"] is False
+            )
+            async with factory() as db:
+                after = [
+                    await db.scalar(text(f"SELECT count(*) FROM {t}"))
+                    for t in (
+                        "agent_research_runs",
+                        "jobs",
+                        "outbox_events",
+                        "agent_daily_budget_reservations",
+                        "sec_discovery_events",
+                    )
+                ]
+                assert after == counts
             return
         result = await research_monitor.run(settings, args)
         if cross_bucket in ("clock_skew", "parse_invalid"):
