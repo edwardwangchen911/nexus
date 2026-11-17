@@ -113,6 +113,7 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
             sec_only=sec_primary is True,
             independent=True,
         )
+    factory.kw.setdefault("info", {})["sec_exhibit_store"] = store
     monkeypatch.setattr(durable, "configured_exhibit_store", lambda session: store)
     async with factory() as session:
         later = await session.scalar(select(func.max(JobLease.expires_at))) + timedelta(seconds=1)

@@ -109,7 +109,7 @@ async def _report(
 
 
 async def _latest_disclosure_source_id(
-    session: AsyncSession, plan: MonitorPlan, now: datetime
+    session: AsyncSession, plan: MonitorPlan, now: datetime, *, exclude_run_id: UUID | None = None
 ) -> UUID | None:
     from nexus.agents.committee import MONITORING_SCOPE_PROMPT_VERSIONS
 
@@ -123,6 +123,7 @@ async def _latest_disclosure_source_id(
         )
         .outerjoin(MonitorIncrement, MonitorIncrement.run_id == AgentResearchRunRecord.id)
         .where(
+            (AgentResearchRunRecord.id != exclude_run_id) if exclude_run_id else true(),
             or_(
                 AgentPaperCycleRecord.account_id == plan.account_id,
                 MonitorIncrement.account_id == plan.account_id,
@@ -147,10 +148,10 @@ async def _latest_disclosure_source_id(
 
 
 async def disclosure_source_current(
-    session: AsyncSession, plan: MonitorPlan, now: datetime
+    session: AsyncSession, plan: MonitorPlan, now: datetime, *, exclude_run_id: UUID | None = None
 ) -> bool:
     """An unreconciled newer daily result cannot leave an old SEC plan silently active."""
-    latest = await _latest_disclosure_source_id(session, plan, now)
+    latest = await _latest_disclosure_source_id(session, plan, now, exclude_run_id=exclude_run_id)
     if latest == plan.source_run_id:
         return True
     from nexus.persistence.models.monitoring import MonitorCoverageReceipt

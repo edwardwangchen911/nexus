@@ -8,6 +8,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.monitoring.durable_sec_send_inputs import verify_send_inputs
+
 
 async def durable_batch(session: AsyncSession, run_id: UUID) -> UUID | None:
     present = await session.scalar(
@@ -49,6 +51,7 @@ async def require_new_send(session: AsyncSession, run_id: UUID) -> bool:
         await session.execute(
             text("SELECT public.sec_research_require_send_run(:run)"), {"run": run_id}
         )
+        await verify_send_inputs(session, run_id)
     except DBAPIError as error:
         code = getattr(error.orig, "sqlstate", None)
         if code in {"23514", "55P03"}:

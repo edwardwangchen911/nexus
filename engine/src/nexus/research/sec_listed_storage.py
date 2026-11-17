@@ -90,6 +90,10 @@ async def persist_listed_archive(
         raise ValueError("SEC_INDEX_HISTORY_LIMIT")
     key = capture_key(identity.instrument_id, raw_originals)
     await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+        {"key": f"sec-index-current:{identity.instrument_id}"},
+    )
+    await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"), {"key": f"sec-index:{key}"}
     )
     originals = []

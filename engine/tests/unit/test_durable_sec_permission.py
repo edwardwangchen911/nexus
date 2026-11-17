@@ -53,9 +53,21 @@ async def test_legacy_sec_dependency_is_not_skipped_by_new_routing_probe(monkeyp
     monkeypatch.setattr(
         permission, "has_sec_dependencies", AsyncMock(return_value=True), raising=False
     )
+    monkeypatch.setattr(permission, "verify_send_inputs", AsyncMock(), raising=False)
     session = SimpleNamespace(execute=AsyncMock())
     assert await permission.require_new_send(session, UUID(int=1)) is True
     session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_current_capture_raw_custody_is_required_after_sql_gate(monkeypatch):
+    monkeypatch.setattr(permission, "has_sec_dependencies", AsyncMock(return_value=True))
+    raw = AsyncMock(side_effect=ValueError("SEC_RESEARCH_PERMISSION_INVALID"))
+    monkeypatch.setattr(permission, "verify_send_inputs", raw, raising=False)
+    session = SimpleNamespace(execute=AsyncMock())
+    with pytest.raises(ValueError, match="SEC_RESEARCH_PERMISSION_INVALID"):
+        await permission.require_new_send(session, UUID(int=1))
+    raw.assert_awaited_once_with(session, UUID(int=1))
 
 
 @pytest.mark.asyncio
