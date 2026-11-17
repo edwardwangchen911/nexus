@@ -15,8 +15,9 @@ from sqlalchemy import func, select
 
 from nexus.monitoring.filing_archive import import_filing_content
 from nexus.monitoring.filing_content import (
+    MAX_ARCHIVE_BYTES,
     MAX_DOCUMENTS,
-    document_inventory,
+    archival_document_inventory,
     filing_root,
     require_html_entry,
 )
@@ -125,6 +126,7 @@ async def _collect_documents(
     owned = http_client is None
     client = http_client or httpx.AsyncClient(follow_redirects=False, timeout=30)
     requests = 0
+    total_bytes = 0
     stage = "inventory"
     try:
         fixed = _Exact200Client(
@@ -136,11 +138,14 @@ async def _collect_documents(
         _private_directory(archive_dir)
 
         async def get(name: str) -> bytes:
-            nonlocal requests
+            nonlocal requests, total_bytes
             if requests >= MAX_DOCUMENTS + 1:
                 raise ValueError("SEC_MONITOR_CONTENT_CAPACITY")
             requests += 1
             raw = await fixed.get_bytes(parts + (name,), (), (("User-Agent", f"NEXUS {contact}"),))
+            total_bytes += len(raw)
+            if total_bytes > MAX_ARCHIVE_BYTES:
+                raise ValueError("SEC_MONITOR_CONTENT_CAPACITY")
             received = datetime.now(UTC)
             if contact.encode() in raw:
                 raise ValueError("SEC_MONITOR_COLLECTION_CONTACT_REFLECTION")
@@ -164,11 +169,15 @@ async def _collect_documents(
             async with asyncio.timeout(60):
                 require_html_entry(entry)
                 inventory = await get(entry.accession_number + "-index.html")
-                rows = document_inventory(inventory, entry=entry, issuer_cik=issuer_cik)
+                rows = archival_document_inventory(inventory, entry=entry, issuer_cik=issuer_cik)
                 stage = "documents"
-                needs_submission = False
-                for name, _, size in rows:
+                needs_submission = any(kind == "GRAPHIC" for _, kind, _ in rows)
+                for name, kind, size in rows:
                     raw = await get(name)
+                    if kind == "GRAPHIC" and (
+                        len(raw) != size or not 0 < size <= MAX_ARCHIVE_BYTES
+                    ):
+                        raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
                     if len(raw) != size:
                         needs_submission = True
                 if needs_submission:
@@ -226,24 +235,58 @@ async def collect_filing_content(
                 now = await session.scalar(select(func.clock_timestamp()))
                 if not isinstance(now, datetime):
                     raise ValueError("SEC_MONITOR_CLOCK_UNAVAILABLE")
-                verified, created = await import_filing_content(
-                    session,
-                    index_snapshot_id=index_snapshot_id,
-                    accession=accession,
-                    archive_dir=archive_dir,
-                    now=now,
+                inventory = (archive_dir / (accession + "-index.html")).read_bytes()
+                rows = archival_document_inventory(
+                    inventory, entry=matches[0], issuer_cik=index.issuer_cik
                 )
-            result: dict[str, object] = {
-                "status": "created" if created else "existing",
-                "snapshot_id": str(verified.snapshot_id),
-                "evidence_ref_id": str(verified.evidence_ref_id),
-                "canonical_hash": verified.canonical_hash,
-                "provider_requests": requests,
-                "model_requests": 0,
-                "job_created": False,
-                "execution_locked": True,
-                "impact_review": "not_performed",
-            }
+                if any(kind == "GRAPHIC" for _, kind, _ in rows):
+                    from nexus.monitoring.filing_originals import import_originals, read_originals
+
+                    snapshot = await import_originals(
+                        session,
+                        index_snapshot_id=index_snapshot_id,
+                        accession=accession,
+                        archive_dir=archive_dir,
+                        now=now,
+                    )
+                    document = await read_originals(
+                        session, snapshot_id=snapshot.id, as_of=snapshot.available_at
+                    )
+                    result = {
+                        "status": "archived_unqualified",
+                        "snapshot_id": str(snapshot.id),
+                        "canonical_hash": snapshot.revision,
+                        "declarations": document.declarations,
+                        "research_qualified": False,
+                        "nontext_content_status": "uninterpreted",
+                        "provider_requests": requests,
+                        "model_requests": 0,
+                        "job_created": False,
+                        "execution_locked": True,
+                    }
+                    # Return only after the context manager commits original custody.
+                    verified = None
+                    created = False
+                else:
+                    verified, created = await import_filing_content(
+                        session,
+                        index_snapshot_id=index_snapshot_id,
+                        accession=accession,
+                        archive_dir=archive_dir,
+                        now=now,
+                    )
+            if verified is not None:
+                result = {
+                    "status": "created" if created else "existing",
+                    "snapshot_id": str(verified.snapshot_id),
+                    "evidence_ref_id": str(verified.evidence_ref_id),
+                    "canonical_hash": verified.canonical_hash,
+                    "provider_requests": requests,
+                    "model_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
+                    "impact_review": "not_performed",
+                }
         except asyncio.CancelledError as error:
             _failure(archive_dir, error=error, requests=requests, stage="import")
             raise

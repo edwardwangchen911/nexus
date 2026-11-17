@@ -102,6 +102,19 @@ class _Inventory(HTMLParser):
 def document_inventory(
     raw: bytes, *, entry: SecIndexEntry, issuer_cik: str
 ) -> tuple[tuple[str, str, int], ...]:
+    return _document_inventory(raw, entry=entry, issuer_cik=issuer_cik, archive_graphics=False)
+
+
+def archival_document_inventory(
+    raw: bytes, *, entry: SecIndexEntry, issuer_cik: str
+) -> tuple[tuple[str, str, int], ...]:
+    """Original custody only. This never relaxes the research-content reader."""
+    return _document_inventory(raw, entry=entry, issuer_cik=issuer_cik, archive_graphics=True)
+
+
+def _document_inventory(
+    raw: bytes, *, entry: SecIndexEntry, issuer_cik: str, archive_graphics: bool
+) -> tuple[tuple[str, str, int], ...]:
     require_html_entry(entry)
     if not re.fullmatch(r"[0-9]{10}", issuer_cik) or not int(issuer_cik):
         raise ValueError("SEC_MONITOR_IDENTITY_INVALID")
@@ -148,7 +161,9 @@ def document_inventory(
         inline = links[0].startswith("/ix?doc=")
         if row[2][0] != filename and not (inline and row[2][0] == filename + " iXBRL"):
             raise ValueError("SEC_MONITOR_INVENTORY_INVALID")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(?:html?|txt)", filename):
+        graphic = archive_graphics and kind == "GRAPHIC"
+        suffix = r"(?:jpe?g|png|gif|webp)" if graphic else r"(?:html?|txt)"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\." + suffix, filename):
             raise ValueError("SEC_MONITOR_ATTACHMENT_UNSUPPORTED")
         href = links[0]
         if href.startswith("/ix?doc="):
@@ -159,7 +174,9 @@ def document_inventory(
         ):
             raise ValueError("SEC_MONITOR_INVENTORY_IDENTITY_INVALID")
         if (filename == entry.primary_document and kind != entry.form) or (
-            filename != entry.primary_document and not re.fullmatch(r"EX-[0-9]+(?:\.[0-9]+)?", kind)
+            filename != entry.primary_document
+            and not graphic
+            and not re.fullmatch(r"EX-[0-9]+(?:\.[0-9]+)?", kind)
         ):
             raise ValueError("SEC_MONITOR_INVENTORY_IDENTITY_INVALID")
         sequences.append(int(row[0][0]))

@@ -273,3 +273,47 @@ async def test_cancellation_keeps_completed_capture_and_propagates_without_retry
     assert len(calls) == 2
     assert (path / (ACCESSION + "-index.html")).read_bytes() == inventory()
     assert json.loads((path / "result.json").read_bytes())["provider_requests"] == 2
+
+
+@pytest.mark.asyncio
+async def test_graphic_declaration_does_not_abort_other_original_collection(tmp_path):
+    from nexus.ops.monitor_content_local import _collect_documents
+
+    graphic = b"\xff\xd8uninterpreted-financial-chart\xff\xd9"
+    raw_inventory = inventory().replace(
+        b"</table>",
+        (
+            '<tr><td>8</td><td>Figure</td><td><a href="logo.jpg">logo.jpg</a></td>'
+            f"<td>GRAPHIC</td><td>{len(graphic)}</td></tr></table>"
+        ).encode(),
+    )
+    bodies = {**BODIES, "logo.jpg": graphic, ACCESSION + ".txt": b"original aggregate submission"}
+    calls = []
+
+    def respond(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            content=raw_inventory
+            if request.url.path.endswith("-index.html")
+            else bodies[request.url.path.rsplit("/", 1)[-1]],
+        )
+
+    path = destination(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        count = await _collect_documents(
+            entry=ENTRY,
+            issuer_cik=CIK,
+            archive_dir=path,
+            contact="test@example.invalid",
+            http_client=client,
+        )
+    assert count == 5
+    assert (path / "logo.jpg").read_bytes() == graphic
+    assert (path / (ACCESSION + ".txt")).read_bytes() == bodies[ACCESSION + ".txt"]
+    assert len(calls) == len(set(calls)) == 5
+    # The normal research-content parser must still reject this inventory.
+    from nexus.monitoring.filing_content import document_inventory
+
+    with pytest.raises(ValueError, match="SEC_MONITOR_ATTACHMENT_UNSUPPORTED"):
+        document_inventory(raw_inventory, entry=ENTRY, issuer_cik=CIK)
