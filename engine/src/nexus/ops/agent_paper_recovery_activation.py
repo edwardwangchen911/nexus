@@ -82,7 +82,9 @@ class RecoveryActivation:
         self.receipt_path = self.directory / f"recovery-activation-{attempt_id}.json"
         self.receipt: dict[str, object] | None = None
 
-    def _validate(self, effective: EngineSettings) -> None:
+    def _validate(
+        self, effective: EngineSettings, *, readiness: dict[str, object] | None = None
+    ) -> None:
         value = _read(self.directory / "recovery.json")
         attempt = value.get("attempt")
         if (
@@ -116,6 +118,9 @@ class RecoveryActivation:
             helper = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(helper)
             helper.validate_pending_activation(self.root, value, attempt)
+            helper.validate_activation_scope(
+                self.root, value, attempt, manual_host_scope(effective), readiness
+            )
 
     def _save(
         self,
@@ -239,7 +244,7 @@ class RecoveryActivation:
                 # manager, which can hold its lock while dispatching this child.
                 with _service_control_lock(self.root):
                     stage, started = "identity_recheck", monotonic_ns()
-                    self._validate(effective)
+                    self._validate(effective, readiness=result)
                     stage, started = "activation_receipt", monotonic_ns()
                     self._save("activated", "READY")
                     stage, started = "control_unlock", monotonic_ns()

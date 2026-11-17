@@ -14,6 +14,7 @@ from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 _PREFIX = "AGENT_PAPER_EXIT_RECONCILIATION_"
+_DURABLE_SEC_POLICY = "sec_durable_0125_to_0133_v1"
 # Exact reviewed edges only. Historical proofs keep their original policy;
 # neither numeric order nor migration ancestry confers a transitive permission.
 _CROSS_SCHEMA_POLICIES = {
@@ -22,6 +23,9 @@ _CROSS_SCHEMA_POLICIES = {
         "0105_comparison_preclaim",
         "0106_platform_qualification",
     ): "comparison_preclaim_0105_to_0106_v1",
+    # Reviewed 0126–0133 preserve the original 0125 business facts. This
+    # ordinary-exit edge does not authorize pending consumers or transitivity.
+    ("0125_sec_positive_chain", "0133_sec_send_scope"): _DURABLE_SEC_POLICY,
 }
 _PENDING_POLICIES = {
     "0105_comparison_preclaim": "pending_consumer_exit_0105_v1",
@@ -158,16 +162,21 @@ def _target(evidence):
         if not pending
         else None
     )
+    expected = {"schema": target_schema, "revision": revision, "policy": policy}
+    if policy == _DURABLE_SEC_POLICY:
+        config_hash = capture["producer"].get("config_hash")
+        scope_hash = observed.get("scope_hash")
+        if any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in (config_hash, scope_hash)
+        ):
+            _reject("PROOF_INVALID")
+        expected.update(config_hash=config_hash, scope_hash=scope_hash)
     if (
         policy is None
         or not isinstance(revision, str)
         or re.fullmatch(r"[0-9a-f]{40}", revision) is None
-        or target
-        != {
-            "schema": target_schema,
-            "revision": revision,
-            "policy": policy,
-        }
+        or target != expected
         or observed.get("migration_head") != target_schema
         or observed.get("status") != "ready"
         or observed.get("blocking_codes") != []
@@ -561,6 +570,11 @@ def publish_exit(
             "revision": capture["reconciliation_revision"],
             "policy": policy,
         }
+        if policy == _DURABLE_SEC_POLICY:
+            recovery_target.update(
+                config_hash=capture["producer"]["config_hash"],
+                scope_hash=readiness.get("scope_hash"),
+            )
     if capture_exit(service, recovery, root, env_file, project) != capture:
         _reject("BINDING_CHANGED")
     attempt_id = capture["producer"]["active_attempt"]["id"]
@@ -807,6 +821,24 @@ def validate_pending_activation(root, state, attempt):
             _reject("BINDING_CHANGED")
         if current.returncode != 0 or current.stdout.strip() != target["revision"]:
             _reject("BINDING_CHANGED")
+
+
+def validate_activation_scope(root, state, attempt, scope_hash, checked=None):
+    """Current execution only; historical receipt/retirement readers stay unchanged."""
+    target = _validate_consumption_binding(root, state, attempt)
+    if target is None or target.get("policy") != _DURABLE_SEC_POLICY:
+        return
+    if scope_hash != target["scope_hash"]:
+        _reject("BINDING_CHANGED")
+    if checked is not None and (
+        checked.get("scope_hash") != target["scope_hash"]
+        or checked.get("migration_head") != target["schema"]
+        or checked.get("status") != "ready"
+        or checked.get("blocking_codes") != []
+        or checked.get("execution_locked") is not True
+        or checked.get("external_requests") != 0
+    ):
+        _reject("BINDING_CHANGED")
 
 
 def _validate_original(root, state, pointer):
