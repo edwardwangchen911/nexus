@@ -192,6 +192,21 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
         if cross_bucket == "clock_skew":
             assert result["items"][0]["status"] == "unknown" and len(calls) == 1
             assert all("candidate_hints" not in x for x in result["items"])
+            async with factory() as db:
+                assert (
+                    await db.scalar(
+                        text("SELECT count(*) FROM audit_events WHERE action=:action"),
+                        {"action": atom.CLAIM},
+                    )
+                    == 1
+                )
+                assert (
+                    await db.scalar(
+                        text("SELECT count(*) FROM data_snapshots WHERE source=:source"),
+                        {"source": atom.SOURCE},
+                    )
+                    == 0
+                )
             return
         assert result["negative_conclusion_authorized"] is False
         assert len(calls) == 1
@@ -303,6 +318,7 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
             # This verifies adverse optional work cannot evict the valid B/scan;
             # it does not repeat event discovery or enter next-bucket research preparation.
             base_bucket = atom._bucket(captured["clock"][0])
+            original_check = None
             for number, mode in enumerate(("slow", "busy", "late"), start=1):
                 captured["clock"][0] = base_bucket + timedelta(
                     seconds=240 if mode == "late" else number * 30
@@ -374,12 +390,33 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                             <= captured["clock"][0] - current_b.index.received_at
                             <= timedelta(seconds=300)
                         )
-                    assert scanned[0]["status"] != "missed_bucket", scanned
+                    assert scanned[0]["status"] == "scanned", scanned
                     assert bool(entered) == (mode != "late")
                     assert prepared[0]["official_candidates"]["status"] == (
                         "skipped" if mode == "late" else "unknown"
                     )
                     async with factory() as db:
+                        check_id = await db.scalar(
+                            text(
+                                "SELECT id FROM sec_discovery_checks "
+                                "WHERE rule_id=:rule AND scheduled_at=:bucket"
+                            ),
+                            {"rule": rule.id, "bucket": bucket},
+                        )
+                        if original_check is None:
+                            original_check = check_id
+                        assert check_id == original_check and check_id is not None
+                        if mode == "late":
+                            assert (
+                                await db.scalar(
+                                    text(
+                                        "SELECT count(*) FROM audit_events WHERE action=:action "
+                                        "AND payload->>'rule_id'=:rule"
+                                    ),
+                                    {"action": atom.CLAIM, "rule": str(rule.id)},
+                                )
+                                == 1
+                            )
                         assert (
                             await db.scalar(
                                 text(
