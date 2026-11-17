@@ -68,6 +68,16 @@ describe.each(routes)("$kind exact as-of identity through both response boundari
     expect((await response.json()).error.code).toBe("INTERNAL_ERROR");
   });
 
+  it.each([false, true])("preserves long admitted fractional precision with mismatched=%s", async (mismatched) => {
+    const requested = `${second}.${"0".repeat(12_000)}1Z`;
+    const returned = `${second}.${"0".repeat(12_000)}${mismatched ? "2" : "1"}000Z`;
+    vi.stubGlobal("fetch", async () => Response.json(envelope(kind, returned, requested)));
+
+    const response = await get(new Request(`https://nexus.test/api/v1/instruments/${instrumentId}/${kind}?as_of=${encodeURIComponent(requested)}`));
+
+    expect(response.status).toBe(mismatched ? 500 : 200);
+  });
+
   it.each(["?as_of=2026-02-30T20%3A00%3A00Z", "?as_of=2026-08-24T20%3A00%3A00%2B00%3A00", `?as_of=${second}Z&as_of=${second}Z`])("rejects invalid or repeated query before transport: %s", async (query) => {
     const upstream = vi.fn();
     vi.stubGlobal("fetch", upstream);

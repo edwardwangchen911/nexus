@@ -1785,7 +1785,9 @@ function comparableUtcInstant(value: unknown): string | null {
   if (typeof value !== "string" || !isUtcIso(value)) return null;
   const [seconds, fraction = ""] = value.slice(0, -1).split(".");
   // Fixed-width UTC seconds and a decimal suffix sort exactly, at any precision.
-  return `${seconds}.${fraction.replace(/0+$/, "")}`;
+  let end = fraction.length;
+  while (end > 0 && fraction[end - 1] === "0") end -= 1;
+  return `${seconds}.${fraction.slice(0, end)}`;
 }
 
 function researchAdmissionValid(data: Record<string, unknown>): boolean {
