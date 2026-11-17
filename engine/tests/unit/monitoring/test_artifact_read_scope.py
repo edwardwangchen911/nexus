@@ -8,6 +8,9 @@ from uuid import uuid4
 import pytest
 from nexus.persistence.models.data import DataArtifact
 from nexus.research.artifact_read_scope import artifact_read_scope, read_artifact
+from sqlalchemy import inspect
+from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy.orm import make_transient_to_detached
 
 
 class Session:
@@ -78,6 +81,53 @@ async def test_session_state_always_uses_original_query_and_autoflush(state):
             getattr(session, state).add(session.row)
         assert await read_artifact(session, "a" * 64) is session.row
         assert session.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_clean_persistent_identity_reuses_same_original_model():
+    session = Session()
+    orm = OrmSession()
+    make_transient_to_detached(session.row)
+    orm.add(session.row)
+    session.sync_session = orm
+    session.identity_map = orm.identity_map
+    session.identity_key = lambda model, identity: orm.identity_key(model, identity)
+    try:
+        assert inspect(session.row).persistent and not inspect(session.row).modified
+        with artifact_read_scope(session):
+            first = await read_artifact(session, "a" * 64)
+            assert await read_artifact(session, "a" * 64) is first
+            assert session.calls == 1
+        with artifact_read_scope(session):
+            assert await read_artifact(session, "a" * 64) is first
+            assert session.calls == 2
+    finally:
+        orm.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["modified", "committed_difference"])
+async def test_changed_persistent_model_retains_original_query(change):
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    session = Session()
+    orm = OrmSession()
+    make_transient_to_detached(session.row)
+    orm.add(session.row)
+    session.sync_session = orm
+    session.identity_map = orm.identity_map
+    session.identity_key = lambda model, identity: orm.identity_key(model, identity)
+    try:
+        with artifact_read_scope(session):
+            await read_artifact(session, "a" * 64)
+            if change == "modified":
+                session.row.uri = "s3://bucket/raw/changed?versionId=two"
+            else:
+                set_committed_value(session.row, "uri", "s3://bucket/raw/changed?versionId=two")
+            assert await read_artifact(session, "a" * 64) is session.row
+            assert session.calls == 2
+    finally:
+        orm.close()
 
 
 @pytest.mark.asyncio
