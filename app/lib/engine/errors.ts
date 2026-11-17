@@ -1770,19 +1770,22 @@ function responseIdentityValid(data: unknown, meta: Record<string, unknown>, req
   if (!requestUrl) return true;
   try {
     const url = new URL(requestUrl);
-    if (/^\/(?:api|internal)\/v1\/instruments\/[^/]+\/research-admission$/.test(url.pathname)) {
+    if (/^\/(?:api|internal)\/v1\/instruments\/[^/]+\/research(?:-admission)?$/.test(url.pathname)) {
       const values = url.searchParams.getAll("as_of");
-      return values.length === 1 && isUtcIso(values[0]) && meta.as_of === values[0]
-        && isPlain(data) && data.decision_time === values[0];
-    }
-    if (/^\/(?:api|internal)\/v1\/instruments\/[^/]+\/research$/.test(url.pathname)) {
-      const values = url.searchParams.getAll("as_of");
-      return values.length === 1 && isUtcIso(values[0]) && meta.as_of === values[0]
-        && isPlain(data) && typeof data.decision_time === "string"
-        && Date.parse(data.decision_time) <= Date.parse(values[0]);
+      const requested = values.length === 1 ? comparableUtcInstant(values[0]) : null;
+      const decision = isPlain(data) ? comparableUtcInstant(data.decision_time) : null;
+      return requested !== null && comparableUtcInstant(meta.as_of) === requested && decision !== null
+        && (url.pathname.endsWith("/research-admission") ? decision === requested : decision <= requested);
     }
     return true;
   } catch { return false; }
+}
+
+function comparableUtcInstant(value: unknown): string | null {
+  if (typeof value !== "string" || !isUtcIso(value)) return null;
+  const [seconds, fraction = ""] = value.slice(0, -1).split(".");
+  // Fixed-width UTC seconds and a decimal suffix sort exactly, at any precision.
+  return `${seconds}.${fraction.replace(/0+$/, "")}`;
 }
 
 function researchAdmissionValid(data: Record<string, unknown>): boolean {
