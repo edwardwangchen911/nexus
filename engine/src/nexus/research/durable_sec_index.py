@@ -61,6 +61,18 @@ class DurableIndexEvidence(BaseModel):
     raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+def coverage_details(raw: bytes, evidence: DurableIndexEvidence) -> dict[str, object]:
+    """Explain this verified capture only; never infer completeness or eligibility."""
+    if sha256(raw).hexdigest() != evidence.raw_content_hash:
+        raise ValueError("SEC_DURABLE_SOURCE_INVALID")
+    files = _object(raw).get("filings", {}).get("files")
+    return {
+        "unread_history_files": len(files) if isinstance(files, list) else None,
+        "invalid_rows": len(evidence.issues),
+        "coverage_start_known": evidence.index.coverage_start_at is not None,
+    }
+
+
 def build_durable_index(
     raw: bytes,
     receipt: bytes,

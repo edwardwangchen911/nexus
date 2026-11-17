@@ -9,11 +9,18 @@ const at = "2026-11-17T03:00:00Z";
 const view: components["schemas"]["DurableSecView"] = {
   observed_at: at, rule_id: "00000000-0000-4000-8000-000000000001", state: "active",
   effective_at: "2026-11-17T00:00:00Z", forms: ["8-K", "8-K/A"], execution_locked: true,
-  latest_check: { scheduled_at: at, checked_at: at, result: "true", coverage: "partial", interval_start: "2026-11-17T00:00:00Z", interval_end: at, reason: null },
+  latest_check: { scheduled_at: at, checked_at: at, result: "true", coverage: "partial", interval_start: "2026-11-17T00:00:00Z", interval_end: at, reason: null, coverage_details: null },
   event_count: 1, events: [{ event_key: "sec:0000123456:0000123456-26-000099", form: "8-K",
     accepted_at: "2026-11-17T01:00:00Z", first_seen_at: at, metadata_status: "recorded" }],
 };
 describe("durable SEC discovery facts", () => {
+  it("explains unread history separately from bad rows without inventing a negative", () => {
+    render(<DurableSecDiscovery discovery={{ ...view, latest_check: { ...view.latest_check!, result: "unknown", reason: "coverage_incomplete", coverage_details: { unread_history_files: 1, invalid_rows: 0, coverage_start_known: true } } }} />);
+    expect(screen.getByText(/另有 1 份历史分片未纳入本次核验/)).toBeVisible();
+    expect(screen.getByText(/已核验原件没有发现坏行/)).toBeVisible();
+    expect(screen.getByText(/独立可证的新增仍会单独核验/)).toBeVisible();
+    expect(screen.queryByText(/完整覆盖区间未发现新公告/)).not.toBeInTheDocument();
+  });
   it("mounts active discovery beside an expired research plan without granting admission", () => {
     render(<ResearchPanel state="partial" admission={null} submitting={false} notice={null} replay={true} onRefresh={vi.fn()} onRun={vi.fn()}
       research={researchData({ durable_disclosure: view, disclosure_monitoring: disclosureMonitoring({ state: "expired" }) })} />);

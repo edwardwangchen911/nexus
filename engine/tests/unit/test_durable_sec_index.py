@@ -43,6 +43,25 @@ def arguments():
     )
 
 
+def test_coverage_diagnostics_do_not_change_source_or_grant_complete_history():
+    from nexus.research import durable_sec_index
+
+    raw, receipt = originals()
+    evidence = build_durable_index(
+        raw, receipt, **arguments(), now=datetime(2026, 1, 1, 15, 2, tzinfo=UTC)
+    )
+    before = evidence.model_dump_json()
+    assert durable_sec_index.coverage_details(raw, evidence) == {
+        "unread_history_files": 1,
+        "invalid_rows": 1,
+        "coverage_start_known": True,
+    }
+    assert evidence.model_dump_json() == before
+    assert not evidence.index.history_complete
+    with pytest.raises(ValueError, match="SEC_DURABLE_SOURCE_INVALID"):
+        durable_sec_index.coverage_details(raw + b" ", evidence)
+
+
 def test_local_bad_row_and_history_dates_preserve_independent_entry():
     raw, receipt = originals()
     with pytest.raises(ValueError):

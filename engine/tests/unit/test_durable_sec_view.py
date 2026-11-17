@@ -9,6 +9,32 @@ from nexus.persistence.models.sec_monitor import SecDiscoveryCheck, SecDiscovery
 NOW = datetime(2026, 11, 17, 4, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("DURABLE_SEC_COVERAGE_INCOMPLETE", "coverage_incomplete"),
+        ("DURABLE_SEC_COVERAGE_CONFLICT", "coverage_conflict"),
+        ("DURABLE_SEC_SOURCE_STALE", "source_stale"),
+        ("untrusted detail must not escape", "evidence_unverified"),
+    ],
+)
+def test_saved_unknown_reason_is_preserved_as_a_safe_category(code, expected):
+    details = {"unread_history_files": 1, "invalid_rows": 0, "coverage_start_known": True}
+    row = SecDiscoveryCheck(
+        scheduled_at=NOW,
+        checked_at=NOW,
+        created_at=NOW,
+        result="unknown",
+        coverage="partial",
+        reason=code,
+        observation={"coverage_details": details},
+    )
+    view = project_check(row, NOW)
+    assert view.reason == expected
+    assert view.coverage_details.model_dump() == details
+    assert (view.result, view.coverage) == ("unknown", "partial")
+
+
 def test_partial_positive_is_not_recast_as_complete_or_unknown():
     row = SecDiscoveryCheck(
         scheduled_at=NOW,
@@ -20,6 +46,26 @@ def test_partial_positive_is_not_recast_as_complete_or_unknown():
     )
     view = project_check(row, NOW)
     assert (view.result, view.coverage, view.reason) == ("true", "partial", None)
+
+
+def test_unread_history_details_cannot_be_presented_as_complete_coverage():
+    row = SecDiscoveryCheck(
+        scheduled_at=NOW,
+        checked_at=NOW,
+        created_at=NOW,
+        result="true",
+        coverage="complete",
+        reason=None,
+        observation={
+            "coverage_details": {
+                "unread_history_files": 1,
+                "invalid_rows": 0,
+                "coverage_start_known": True,
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="DURABLE_SEC_VIEW_INVALID"):
+        project_check(row, NOW)
 
 
 @pytest.mark.parametrize(
