@@ -1,15 +1,21 @@
 """No-plan foundation registration through the normal entry and immutable SQL gates."""
 
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from helpers.database_clock import is_fixture_clock_read
 from helpers.disclosure_observations import append_capture
+from helpers.durable_test_clock import DisposableClock
+from helpers.paper_batch import CALENDAR_ID
+from integration.test_candidate_multistock_path import AT
 from integration.test_monitor_batches_pg import installed
 from nexus.monitoring.auto_increment_policy import enable_scope
 from nexus.ops.research_monitor import parser, run
 from nexus.persistence.models.sec_monitor import SecMonitorRule
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @pytest.mark.asyncio
@@ -18,7 +24,7 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
     migrated_database_url, monkeypatch, tmp_path, capture_kind
 ):
     factory, settings, store, captured, pointer = await installed(
-        migrated_database_url, monkeypatch, tmp_path, kinds=()
+        DisposableClock.uncached_url(migrated_database_url), monkeypatch, tmp_path, kinds=()
     )
     monkeypatch.setattr(
         "nexus.monitoring.sec_foundation.configured_exhibit_store", lambda db: store
@@ -26,6 +32,37 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
     monkeypatch.setattr(
         "nexus.monitoring.durable_sec_host.configured_exhibit_store", lambda db: store
     )
+    normal_scalar = AsyncSession.scalar
+
+    async def synchronized_clock(session, statement, *args, **kwargs):
+        if is_fixture_clock_read(statement):
+            return captured["clock"][0]
+        return await normal_scalar(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", synchronized_clock)
+    controller = DisposableClock(migrated_database_url)
+    async with factory.begin() as db:
+        logical = AT + timedelta(days=7, hours=1)
+        await controller.set(db, logical, running=False)
+    await factory.kw["bind"].dispose()
+    captured["clock"][0] = logical
+    from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
+
+    next_day = logical + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    async with factory.begin() as db:
+        for day in (logical, next_day):
+            db.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=CALENDAR_ID,
+                    session=day.date(),
+                    decision_at=day.replace(hour=21, minute=0),
+                    market_open_at=day.replace(hour=13, minute=30),
+                    market_close_at=day.replace(hour=20, minute=0),
+                    created_at=logical - timedelta(seconds=1),
+                )
+            )
     try:
         async with factory() as db:
             at = await db.scalar(text("SELECT clock_timestamp()"))
@@ -153,7 +190,6 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
         # discovery/notice path, while absent research qualification still refuses.
         import json
         import shutil
-        from datetime import timedelta
         from hashlib import sha256
 
         from nexus.monitoring.durable_sec_storage import record_discovery
@@ -164,7 +200,9 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
         )
         archive = tmp_path / "null-anchor-positive"
         shutil.copytree(tmp_path / "foundation-fresh", archive)
-        async with factory() as db:
+        captured["clock"][0] = logical + timedelta(minutes=1)
+        async with factory.begin() as db:
+            await controller.set(db, captured["clock"][0], running=False)
             received = await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
         assert received > rule.effective_at
         path = archive / "AAPL-submissions.json"
@@ -194,15 +232,47 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
             archive_dir=archive,
             store=store,
         )
+        from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
+        from nexus.persistence.models.agents import AgentResearchRunRecord
+
+        async with factory() as db:
+            original_run = await db.get(AgentResearchRunRecord, pointer.source_run_id)
+        observation_settings = settings.model_copy(
+            update={
+                "agent_paper_cycle_enabled": True,
+                "agent_paper_formal_model_config_id": original_run.model_config_id,
+            }
+        )
+        observed = await refresh_disclosure_observations(
+            observation_settings,
+            account_id=pointer.account_id,
+            calendar_authority_id=CALENDAR_ID,
+            scheduled_at=received.replace(minute=received.minute // 5 * 5, second=0, microsecond=0),
+            environment={"SEC_CONTACT": "test@example.invalid"},
+            repo_root=tmp_path,
+        )
+        assert observed["status"] == "unchanged" and observed["provider_requests"] == 0
+        from nexus.monitoring.scanning import scan_account
+        from nexus.persistence.models.sec_monitor import SecDiscoveryCheck
+        from sqlalchemy import select
+
         async with factory.begin() as db:
-            check = await record_discovery(
+            now = await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
+            report = await scan_account(
                 db,
                 account_id=rule.account_id,
-                rule_id=rule.id,
-                capture_id=UUID(imported["snapshot_id"]),
-                scheduled_at=received.replace(
-                    minute=received.minute // 5 * 5, second=0, microsecond=0
-                ),
+                calendar_authority_id=CALENDAR_ID,
+                now=now,
+                instrument_ids=(rule.instrument_id,),
+            )
+            assert (
+                report["status"] == "scanned"
+                and report["checks"] == 1
+                and report["notifications"] == 1
+            )
+            assert report["coverage_gap"] == 1, "base discovery cannot invent an investment plan"
+            check = await db.scalar(
+                select(SecDiscoveryCheck).where(SecDiscoveryCheck.rule_id == rule.id)
             )
             assert (check.result, check.coverage) == ("true", "partial")
             assert await db.scalar(text("SELECT count(*) FROM sec_discovery_events")) == 1
@@ -287,6 +357,21 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
         )
         assert paused["status"] == "paused"
         assert (await run(settings, args))["status"] == "paused"
+        async with factory.begin() as db:
+            now = await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
+            stopped = await scan_account(
+                db,
+                account_id=rule.account_id,
+                calendar_authority_id=CALENDAR_ID,
+                now=now,
+                instrument_ids=(rule.instrument_id,),
+            )
+            assert (
+                stopped["checks"] == 0
+                and stopped["notifications"] == 0
+                and stopped["inactive"] == 1
+            )
+
         # A NULL anchor without the exact origin remains rejected by SQL.
         async with factory.begin() as db:
             with pytest.raises(DBAPIError):

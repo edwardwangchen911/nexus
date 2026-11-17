@@ -1,4 +1,4 @@
-"""One bounded, current market-session scan of installed plans; no provider or model."""
+"""Bounded current-session scan of research plans and independent discovery rules."""
 
 from datetime import datetime
 from uuid import UUID
@@ -12,6 +12,7 @@ from nexus.monitoring.storage import lock_security, record_check
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 from nexus.persistence.models.monitoring import MonitorPlan
 from nexus.persistence.models.paper import PaperAccountRecord
+from nexus.persistence.models.sec_monitor import SecMonitorRule
 
 
 async def scan_account(
@@ -59,18 +60,32 @@ async def scan_account(
             .limit(6)
         )
     )
-    if len(plans) > 5:
+    registered_instruments = tuple(
+        await session.scalars(
+            select(SecMonitorRule.instrument_id)
+            .where(
+                SecMonitorRule.account_id == account_id,
+                true()
+                if instrument_ids is None
+                else SecMonitorRule.instrument_id.in_(instrument_ids),
+            )
+            .order_by(SecMonitorRule.instrument_id)
+            .limit(6)
+        )
+    )
+    targets = sorted({plan.instrument_id for plan in plans} | set(registered_instruments), key=str)
+    if len(targets) > 5:
         raise ValueError("MONITOR_SCOPE_EXCEEDED")
     if instrument_ids is not None:
         counts["coverage_gap"] = len(set(instrument_ids) - {plan.instrument_id for plan in plans})
     scheduled = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
-    for selected in plans:
+    for instrument_id in targets:
         # Lock in instrument order, then reload: installation may have advanced
         # the generation after the bounded scope query and before this lock.
-        await lock_security(session, account_id=account_id, instrument_id=selected.instrument_id)
+        await lock_security(session, account_id=account_id, instrument_id=instrument_id)
         from nexus.monitoring.durable_sec_host import registered_rule, scan_registered
 
-        durable_rule = await registered_rule(session, account_id, selected.instrument_id)
+        durable_rule = await registered_rule(session, account_id, instrument_id)
         if durable_rule is not None:
             checked, notices = await scan_registered(session, durable_rule, now)
             counts["discoveries"] = counts.get("discoveries", 0) + notices
@@ -84,7 +99,7 @@ async def scan_account(
                 select(MonitorPlan.id)
                 .where(
                     MonitorPlan.account_id == account_id,
-                    MonitorPlan.instrument_id == selected.instrument_id,
+                    MonitorPlan.instrument_id == instrument_id,
                     MonitorPlan.kind == "price",
                 )
                 .limit(1)
@@ -96,7 +111,7 @@ async def scan_account(
             .where(
                 MonitorPlan.kind == "disclosure",
                 MonitorPlan.account_id == account_id,
-                MonitorPlan.instrument_id == selected.instrument_id,
+                MonitorPlan.instrument_id == instrument_id,
             )
             .limit(1)
         )
@@ -104,7 +119,7 @@ async def scan_account(
             from nexus.monitoring.batches import scan_stock_batch
 
             batch = await scan_stock_batch(
-                session, account_id=account_id, instrument_id=selected.instrument_id, now=now
+                session, account_id=account_id, instrument_id=instrument_id, now=now
             )
             counts["checks"] += batch["checks"]
             counts["true"] += batch["true"]
@@ -119,7 +134,7 @@ async def scan_account(
             .where(
                 MonitorPlan.kind == "price",
                 MonitorPlan.account_id == account_id,
-                MonitorPlan.instrument_id == selected.instrument_id,
+                MonitorPlan.instrument_id == instrument_id,
             )
             .order_by(MonitorPlan.generation.desc())
             .limit(1)
