@@ -36,6 +36,12 @@ def parser() -> argparse.ArgumentParser:
     )
     durable = commands.add_parser("enable-sec-monitor-rule", help="Register durable SEC discovery")
     durable.add_argument("--plan-id", type=UUID, required=True)
+    foundation = commands.add_parser(
+        "enable-sec-foundation",
+        help="Register existing-scope SEC discovery without research authority",
+    )
+    for option in ("instrument-id", "identity-snapshot-id", "capture-id"):
+        foundation.add_argument("--" + option, type=UUID, required=True)
     for action in (
         "pause-sec-monitor-rule",
         "resume-sec-monitor-rule",
@@ -654,6 +660,7 @@ async def _run(
                 }
             if args.action in {
                 "enable-sec-monitor-rule",
+                "enable-sec-foundation",
                 "pause-sec-monitor-rule",
                 "resume-sec-monitor-rule",
                 "revoke-sec-monitor-rule",
@@ -670,7 +677,18 @@ async def _run(
                 from nexus.persistence.models.sec_monitor import SecMonitorRule
 
                 rule: SecMonitorRule | None
-                if args.action == "enable-sec-monitor-rule":
+                if args.action == "enable-sec-foundation":
+                    from nexus.monitoring.sec_foundation import enable_foundation
+
+                    rule = await enable_foundation(
+                        session,
+                        account_id=settings.agent_paper_account_id,
+                        candidate_batch_id=settings.agent_paper_candidate_batch_id,
+                        instrument_id=args.instrument_id,
+                        identity_snapshot_id=args.identity_snapshot_id,
+                        capture_id=args.capture_id,
+                    )
+                elif args.action == "enable-sec-monitor-rule":
                     rule = await enable_rule(
                         session, account_id=settings.agent_paper_account_id, plan_id=args.plan_id
                     )

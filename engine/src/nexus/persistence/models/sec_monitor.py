@@ -23,7 +23,7 @@ class SecMonitorRule(ImmutableCreatedAt, Base):
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.id"))
     issuer_cik: Mapped[str] = mapped_column(String(10))
     identity_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
-    anchor_plan_id: Mapped[UUID] = mapped_column(ForeignKey("research_monitor_plans.id"))
+    anchor_plan_id: Mapped[UUID | None] = mapped_column(ForeignKey("research_monitor_plans.id"))
     effective_at: Mapped[datetime] = mapped_column(UTCDateTime())
     forms: Mapped[list[str]] = mapped_column(JSONB)
     policy_version: Mapped[str] = mapped_column(String(32), default="durable_sec_v1")

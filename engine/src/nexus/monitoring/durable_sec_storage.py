@@ -136,12 +136,20 @@ async def enable_rule(session: AsyncSession, *, account_id: UUID, plan_id: UUID)
     session.add(state)
     await session.flush()
     await audit_fact(session, state)
+    await import_legacy_notice_claims(session, rule, now)
+    return rule
+
+
+async def import_legacy_notice_claims(
+    session: AsyncSession, rule: SecMonitorRule, now: datetime
+) -> None:
+    account_id = rule.account_id
     # Reference old attempts exactly. This occupies identity; it does not imply delivery.
     old = tuple(
         await session.scalars(
             select(MonitorTrigger).where(
                 MonitorTrigger.account_id == account_id,
-                MonitorTrigger.instrument_id == plan.instrument_id,
+                MonitorTrigger.instrument_id == rule.instrument_id,
                 MonitorTrigger.kind == "disclosure",
                 MonitorTrigger.outbox_id.is_not(None),
             )
@@ -152,7 +160,7 @@ async def enable_rule(session: AsyncSession, *, account_id: UUID, plan_id: UUID)
             await session.scalar(
                 select(SecNotificationClaim.id).where(
                     SecNotificationClaim.account_id == account_id,
-                    SecNotificationClaim.instrument_id == plan.instrument_id,
+                    SecNotificationClaim.instrument_id == rule.instrument_id,
                     SecNotificationClaim.event_key == trigger.event_key,
                 )
             )
@@ -163,7 +171,7 @@ async def enable_rule(session: AsyncSession, *, account_id: UUID, plan_id: UUID)
             id=new_uuid7(),
             created_at=now,
             account_id=account_id,
-            instrument_id=plan.instrument_id,
+            instrument_id=rule.instrument_id,
             event_key=trigger.event_key,
             outbox_id=trigger.outbox_id,
             legacy_trigger_id=trigger.id,
@@ -171,7 +179,6 @@ async def enable_rule(session: AsyncSession, *, account_id: UUID, plan_id: UUID)
         session.add(claim)
         await session.flush()
         await audit_fact(session, claim)
-    return rule
 
 
 async def change_state(
