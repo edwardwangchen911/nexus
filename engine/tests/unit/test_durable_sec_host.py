@@ -82,6 +82,7 @@ async def test_registered_reuse_reserves_full_prep_budget(monkeypatch, tmp_path,
         issuer_cik=rule().issuer_cik,
         identity_snapshot_id=IDENTITY,
         received_at=NOW - timedelta(seconds=age),
+        entries=(),
     )
     monkeypatch.setattr(
         reader,

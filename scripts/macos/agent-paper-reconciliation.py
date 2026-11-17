@@ -15,6 +15,8 @@ from uuid import UUID
 
 _PREFIX = "AGENT_PAPER_EXIT_RECONCILIATION_"
 _DURABLE_SEC_POLICY = "sec_durable_0125_to_0133_v1"
+_FOUNDATION_POLICY = "sec_foundation_0133_to_0134_v1"
+_SCOPE_BOUND_POLICIES = frozenset({_DURABLE_SEC_POLICY, _FOUNDATION_POLICY})
 # Exact reviewed edges only. Historical proofs keep their original policy;
 # neither numeric order nor migration ancestry confers a transitive permission.
 _CROSS_SCHEMA_POLICIES = {
@@ -26,6 +28,7 @@ _CROSS_SCHEMA_POLICIES = {
     # Reviewed 0126–0133 preserve the original 0125 business facts. This
     # ordinary-exit edge does not authorize pending consumers or transitivity.
     ("0125_sec_positive_chain", "0133_sec_send_scope"): _DURABLE_SEC_POLICY,
+    ("0133_sec_send_scope", "0134_sec_foundation"): _FOUNDATION_POLICY,
 }
 _PENDING_POLICIES = {
     "0105_comparison_preclaim": "pending_consumer_exit_0105_v1",
@@ -163,7 +166,7 @@ def _target(evidence):
         else None
     )
     expected = {"schema": target_schema, "revision": revision, "policy": policy}
-    if policy == _DURABLE_SEC_POLICY:
+    if policy in _SCOPE_BOUND_POLICIES:
         config_hash = capture["producer"].get("config_hash")
         scope_hash = observed.get("scope_hash")
         if any(
@@ -570,7 +573,7 @@ def publish_exit(
             "revision": capture["reconciliation_revision"],
             "policy": policy,
         }
-        if policy == _DURABLE_SEC_POLICY:
+        if policy in _SCOPE_BOUND_POLICIES:
             recovery_target.update(
                 config_hash=capture["producer"]["config_hash"],
                 scope_hash=readiness.get("scope_hash"),
@@ -826,7 +829,7 @@ def validate_pending_activation(root, state, attempt):
 def validate_activation_scope(root, state, attempt, scope_hash, checked=None):
     """Current execution only; historical receipt/retirement readers stay unchanged."""
     target = _validate_consumption_binding(root, state, attempt)
-    if target is None or target.get("policy") != _DURABLE_SEC_POLICY:
+    if target is None or target.get("policy") not in _SCOPE_BOUND_POLICIES:
         return
     if scope_hash != target["scope_hash"]:
         _reject("BINDING_CHANGED")
