@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -195,6 +195,13 @@ async def refresh_host_observations(
     )
 
 
+def _candidate_deadline(preparation: float, bucket: float, now: float) -> float | None:
+    # Existing providers each own 90s; price closeout 5s. Preserve a further
+    # 25s for the existing bridge/account turn and 8s for the separate scan.
+    deadline = min(now + 3, preparation - 210, bucket - 218)
+    return deadline if deadline > now else None
+
+
 async def refresh_configured_observations(
     settings: EngineSettings,
     *,
@@ -204,8 +211,11 @@ async def refresh_configured_observations(
     scheduled_at: datetime | None = None,
 ) -> dict[str, object]:
     from nexus.domain.time import require_utc
+    from nexus.monitoring.host import preparation_deadline
     from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
 
+    loop = asyncio.get_running_loop()
+    preparation = preparation_deadline.get() or (loop.time() + 240)
     fixed: dict[str, object] = {"model_requests": 0, "job_created": False, "execution_locked": True}
     if (
         not settings.agent_paper_cycle_enabled
@@ -224,6 +234,7 @@ async def refresh_configured_observations(
                 != CURRENT_MIGRATION_HEAD
             ):
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
+            sampled = loop.time()
             now = await session.scalar(select(func.clock_timestamp()))
             if not isinstance(now, datetime):
                 raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
@@ -247,15 +258,29 @@ async def refresh_configured_observations(
 
     # Optional discovery hints never qualify an event or replace capture B.
     # An unseen hint can defeat the brief reuse window, never the bucket once gate.
+    optional_deadline = _candidate_deadline(
+        preparation,
+        sampled
+        + (min(bucket + timedelta(minutes=5), calendar.market_close_at) - now).total_seconds(),
+        loop.time(),
+    )
     try:
-        async with asyncio.timeout(3):
-            candidates = await refresh_candidates(
-                settings,
-                calendar_authority_id=calendar_authority_id,
-                scheduled_at=bucket,
-                environment=environment,
-                repo_root=repo_root,
-            )
+        if optional_deadline is None:
+            candidates = {
+                "status": "skipped",
+                "reason": "MONITOR_PRIMARY_TIME_RESERVED",
+                "provider_requests": 0,
+                "items": [],
+            }
+        else:
+            async with asyncio.timeout_at(optional_deadline):
+                candidates = await refresh_candidates(
+                    settings,
+                    calendar_authority_id=calendar_authority_id,
+                    scheduled_at=bucket,
+                    environment=environment,
+                    repo_root=repo_root,
+                )
     except Exception:
         candidates = {
             "status": "unknown",

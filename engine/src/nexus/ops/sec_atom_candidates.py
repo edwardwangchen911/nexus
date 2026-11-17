@@ -6,12 +6,15 @@ can only precede the unchanged primary SEC capture/eligibility path.
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 
@@ -37,6 +40,43 @@ from nexus.settings import EngineSettings
 SOURCE = "sec_official_atom_candidates"
 SCHEMA = "sec_atom_candidates_v1"
 CLAIM = "research.monitor.sec_atom_candidates_claimed"
+
+
+class _SendDeadline:
+    """Guard again after pool/TLS/original trace callbacks, before real headers."""
+
+    def __init__(self, deadline: float, permit: Callable[[], Awaitable[None]]):
+        self.deadline, self.permit = deadline, permit
+
+    def require_time(self) -> None:
+        if asyncio.get_running_loop().time() >= self.deadline:
+            raise TimeoutError("SEC_ATOM_BUCKET_EXPIRED")
+
+    async def attach(self, request: httpx.Request) -> None:
+        self.require_time()
+        await self.permit()
+        self.require_time()
+        original = request.extensions.get("trace")
+
+        async def traced(name: str, info: dict[str, Any]) -> None:
+            if original is not None:
+                await original(name, info)
+            if name in {
+                "http11.send_request_headers.started",
+                "http2.send_request_headers.started",
+            }:
+                self.require_time()
+                await self.permit()
+                self.require_time()
+
+        request.extensions["trace"] = traced
+
+
+def _quarantine(repo_root: Path, operation: str, raw: bytes, receipt: bytes) -> None:
+    archive = _archive_root(repo_root) / ("atom-" + operation)
+    archive.mkdir(mode=0o700)
+    write_private(archive / "feed.xml", raw)
+    write_private(archive / "receipt.json", receipt)
 
 
 async def refresh_candidates(
@@ -100,8 +140,12 @@ async def refresh_candidates(
                 if prior is not None:
                     continue
                 identity_id = await current_identity(session, rule, now)
+                sampled = asyncio.get_running_loop().time()
                 now, instruments = await _scope(
                     session, settings, account_id, calendar_authority_id, scheduled_at
+                )
+                send_deadline = (
+                    sampled + (scheduled_at + timedelta(minutes=5) - now).total_seconds()
                 )
                 if rule.instrument_id not in instruments:
                     continue
@@ -128,7 +172,22 @@ async def refresh_candidates(
                 url = source_url(rule.issuer_cik)
                 parts = urlsplit(url)
                 requests += 1
-                async with asyncio.timeout(10), _client() as client:
+
+                async def permit() -> None:
+                    async with factory() as read, read.begin():
+                        await read.execute(text("SET TRANSACTION READ ONLY"))
+                        await read.execute(text("SET LOCAL statement_timeout='2s'"))
+                        at = await read.scalar(select(func.clock_timestamp()))
+                        if not isinstance(at, datetime) or _bucket(at) != scheduled_at:
+                            raise ValueError("SEC_ATOM_BUCKET_EXPIRED")
+
+                fence = _SendDeadline(send_deadline, permit)
+                async with (
+                    asyncio.timeout_at(send_deadline),
+                    asyncio.timeout(10),
+                    _client() as client,
+                ):
+                    client.event_hooks["request"].append(fence.attach)
                     transport = _Exact200Client(
                         provider_name="sec",
                         origin=AllowedOrigin("https", "www.sec.gov"),
@@ -157,10 +216,9 @@ async def refresh_candidates(
                     },
                     sort_keys=True,
                 ).encode()
-                archive = _archive_root(repo_root) / ("atom-" + str(claim["operation_id"]))
-                archive.mkdir(mode=0o700)
-                write_private(archive / "feed.xml", raw)
-                write_private(archive / "receipt.json", receipt)
+                await asyncio.to_thread(
+                    _quarantine, repo_root, str(claim["operation_id"]), raw, receipt
+                )
                 async with (
                     account_transaction_turn(settings),
                     factory() as session,

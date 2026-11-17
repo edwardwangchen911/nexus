@@ -88,3 +88,26 @@ ready 还要求在研究快照原 cutoff 严格重验其冻结引用、归属和
 同级 `YYYYMMDD-import-failure.json`，其后不重复导入。连接或提交结果未知时不冒充成功。
 成功后通过正常宿主快照生产者冻结未来快照，随后以严格读回核对整批是否 ready。
 此步骤不调用模型，不创建周期、订单或成交，不替代 10:00 入口独立准入和自然周期验收。
+
+## SEC 公司 Atom 候选
+
+已有正式 SEC 监控规则的宿主可读取对应发行人的官方 Atom，保存原文、回执和不可变候选快照。
+它不证明完整区间、接受时间或未命中；即使空结果或没有下一页，也保持无负结论权限。
+`source_updated_at` 仅是来源更新时间。候选缺于当前正式 B 时，可以取消短时缓存复用，
+随后仍须取得原五分钟桶的 B 采集身份、正常 GET 和原件核验；不能将 Atom 行伪装为 B。
+
+正常入口（不会创建模型任务或通知）：
+
+```sh
+.venv/bin/python -m nexus.ops.research_monitor --repo-root "$PWD" \
+  observe-sec-candidates --calendar-authority-id '<existing-calendar-uuid>'
+.venv/bin/python -m nexus.ops.research_monitor --repo-root "$PWD" \
+  inspect-sec-candidates --snapshot-id '<existing-candidate-snapshot-uuid>'
+```
+
+宿主仅使用原准备时限与当前桶扣除原刷新、桥接和扫描预留后的余量，最多三秒；余量不足即跳过。
+同规则同桶在外呼前持久领取，失败、超时或提交结果不明都不重发。提交、连接池或 TLS 等待后，
+真正请求头发送前再次核验原桶截止。私有隔离原件可能在取消后写完，但不继续数据库写入或外呼。
+只有原件、身份、回执操作/桶、时间顺序、hash 和审计全部核验，且提交确认，才返回可用候选。
+已保存候选不承诺在进程中断后自动续接；只读检查使用原快照编号，不重发来源请求。
+原研究与通知资格、旧 once、预算、未知费用预留和历史 SEC 矛盾证据均不改变；无迁移。

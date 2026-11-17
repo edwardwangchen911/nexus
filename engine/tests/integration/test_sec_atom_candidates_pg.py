@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import traceback
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -27,7 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "pause_during_read,cross_bucket", [(False, False), (True, False), (False, True)]
+    "pause_during_read,cross_bucket",
+    [(False, False), (True, False), (False, True), (False, "commit"), (False, "clock_skew")],
 )
 async def test_normal_candidate_entry_custody_once_and_no_effects(
     migrated_database_url, monkeypatch, tmp_path, pause_during_read, cross_bucket
@@ -91,7 +93,10 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
         class Clock(datetime, metaclass=ClockMeta):
             @classmethod
             def now(cls, tz=None):
-                return captured["clock"][0].astimezone(tz)
+                return (
+                    captured["clock"][0]
+                    - timedelta(seconds=1 if cross_bucket == "clock_skew" else 0)
+                ).astimezone(tz)
 
         monkeypatch.setattr(atom, "datetime", Clock)
         from nexus.ops import durable_sec_index_local as local_index
@@ -138,7 +143,7 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
             calendar_authority_id=CALENDAR_ID,
             _observation_environment={"SEC_CONTACT": "Synthetic test test@example.invalid"},
         )
-        if cross_bucket:
+        if cross_bucket is True:
             normal_identity = atom.current_identity
 
             async def late_identity(*args, **kwargs):
@@ -161,7 +166,33 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                     == 0
                 )
             return
+        if cross_bucket == "commit":
+
+            @asynccontextmanager
+            async def entered_late():
+                captured["clock"][0] += timedelta(minutes=5)
+                async with factory() as db, db.begin():
+                    await controller.set(db, captured["clock"][0], running=False)
+                async with httpx.AsyncClient(transport=httpx.MockTransport(request)) as opened:
+                    yield opened
+
+            monkeypatch.setattr(atom, "_client", entered_late)
+            result = await research_monitor.run(settings, args)
+            assert result["items"][0]["status"] == "unknown" and calls == []
+            async with factory() as db:
+                assert (
+                    await db.scalar(
+                        text("SELECT count(*) FROM audit_events WHERE action=:action"),
+                        {"action": atom.CLAIM},
+                    )
+                    == 1
+                )
+            return
         result = await research_monitor.run(settings, args)
+        if cross_bucket == "clock_skew":
+            assert result["items"][0]["status"] == "unknown" and len(calls) == 1
+            assert all("candidate_hints" not in x for x in result["items"])
+            return
         assert result["negative_conclusion_authorized"] is False
         assert len(calls) == 1
         if pause_during_read:
@@ -235,39 +266,133 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                 settings, **kwargs, candidate_hints={rule.instrument_id: ("0001193125-26-000100",)}
             )
             assert held["items"] == [{"status": "already_claimed"}]
-            from nexus.ops import monitor_disclosure_refresh, monitor_price_refresh
+            from nexus.monitoring import durable_sec_host
+            from nexus.monitoring.host import PriceMonitorCoordinator
+            from nexus.ops import monitor_disclosure_refresh
 
-            cancelled = asyncio.Event()
-            primary_calls = []
+            errors = []
 
-            async def slow_optional(*args, **kwargs):
+            async def diagnostic_refresh(*args, **kw):
                 try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
+                    return await refresh_disclosure_observations(*args, **kw)
+                except Exception as error:
+                    errors.append(
+                        ("refresh", type(error).__name__, str(error), traceback.format_exc())
+                    )
+                    raise
 
-            async def primary(settings, **kwargs):
-                primary_calls.append(kwargs)
-                return {"status": "blocked", "provider_requests": 0}
+            original_bridge = durable_sec_host.prepare_registered_research
 
-            async def no_reconcile(*args, **kwargs):
-                return {"recorded": 0}
+            async def diagnostic_bridge(*args, **kw):
+                try:
+                    return await original_bridge(*args, **kw)
+                except Exception as error:
+                    errors.append(
+                        ("bridge", type(error).__name__, str(error), traceback.format_exc())
+                    )
+                    raise
 
-            monkeypatch.setattr(atom, "refresh_candidates", slow_optional)
             monkeypatch.setattr(
-                monitor_disclosure_refresh, "refresh_disclosure_observations", primary
+                monitor_disclosure_refresh, "refresh_disclosure_observations", diagnostic_refresh
             )
-            monkeypatch.setattr(monitor_price_refresh, "refresh_price_observations", primary)
-            monkeypatch.setattr(research_monitor, "run", no_reconcile)
-            observed = await research_monitor.refresh_configured_observations(
-                settings,
-                calendar_authority_id=CALENDAR_ID,
-                scheduled_at=kwargs["scheduled_at"],
-                environment=kwargs["environment"],
-                repo_root=tmp_path,
-            )
-            assert cancelled.is_set() and len(primary_calls) == 2
-            assert observed["official_candidates"]["status"] == "unknown"
+            monkeypatch.setattr(durable_sec_host, "prepare_registered_research", diagnostic_bridge)
+
+            factory.kw.setdefault("info", {})["sec_exhibit_store"] = store
+            normal_optional = atom.refresh_candidates
+            # These three normal re-entries share the current once identity.
+            # This verifies adverse optional work cannot evict the valid B/scan;
+            # it does not repeat event discovery or enter next-bucket research preparation.
+            base_bucket = atom._bucket(captured["clock"][0])
+            for number, mode in enumerate(("slow", "busy", "late"), start=1):
+                captured["clock"][0] = base_bucket + timedelta(
+                    seconds=240 if mode == "late" else number * 30
+                )
+                await _set_test_insert_clock(factory, captured["clock"][0])
+                async with factory() as clock_db, clock_db.begin():
+                    await controller.set(clock_db, captured["clock"][0], running=False)
+                bucket = atom._bucket(captured["clock"][0])
+                prepared, scanned, entered = [], [], []
+                locker = factory()
+                if mode == "busy":
+                    await locker.begin()
+                    await locker.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+                        {"key": f"sec-durable-rule:{rule.id}"},
+                    )
+
+                async def optional(*args, **kwargs):
+                    entered.append(True)
+                    try:
+                        if mode != "busy":
+                            await asyncio.Event().wait()
+                        return await normal_optional(*args, **kwargs)
+                    finally:
+                        if mode == "busy":
+                            await locker.rollback()
+
+                monkeypatch.setattr(atom, "refresh_candidates", optional)
+
+                async def prepare(scheduled):
+                    prepared.append(
+                        await research_monitor.refresh_configured_observations(
+                            settings,
+                            calendar_authority_id=CALENDAR_ID,
+                            scheduled_at=scheduled,
+                            environment=kwargs["environment"],
+                            repo_root=tmp_path,
+                        )
+                    )
+                    return prepared[-1]
+
+                async def scan():
+                    scanned.append(
+                        await research_monitor.scan_configured_once(
+                            settings, calendar_authority_id=CALENDAR_ID, scheduled_at=bucket
+                        )
+                    )
+                    return scanned[-1]
+
+                coordinator = PriceMonitorCoordinator(scan, prepare=prepare)
+                try:
+                    assert coordinator.kick(captured["clock"][0])
+                    await coordinator.close()
+                    assert len(prepared) == len(scanned) == 1, (mode, coordinator.last_diagnostic)
+                    primary = prepared[0]["sources"]["disclosure"]
+                    if primary["status"] == "unknown":
+                        # A once-claimed source must not be fetched again even
+                        # though the saved B is still qualified for this scan.
+                        assert primary["items"] == [{"status": "already_claimed"}]
+                        assert primary["provider_requests"] == 0
+                    else:
+                        assert primary["status"] in {"refreshed", "unchanged"}, (prepared, errors)
+                    async with factory() as db:
+                        _, current_b = await read_durable_index_capture(
+                            db, store, snapshot_id=snapshot_id, as_of=captured["clock"][0]
+                        )
+                        assert (
+                            timedelta(0)
+                            <= captured["clock"][0] - current_b.index.received_at
+                            <= timedelta(seconds=300)
+                        )
+                    assert scanned[0]["status"] != "missed_bucket", scanned
+                    assert bool(entered) == (mode != "late")
+                    assert prepared[0]["official_candidates"]["status"] == (
+                        "skipped" if mode == "late" else "unknown"
+                    )
+                    async with factory() as db:
+                        assert (
+                            await db.scalar(
+                                text(
+                                    "SELECT count(*) FROM sec_discovery_checks "
+                                    "WHERE rule_id=:rule AND scheduled_at=:bucket"
+                                ),
+                                {"rule": rule.id, "bucket": bucket},
+                            )
+                            == 1
+                        )
+                finally:
+                    await coordinator.close()
+                    await locker.close()
 
     finally:
         await client.aclose()
