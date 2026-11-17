@@ -402,7 +402,9 @@ async def prepare_durable_sec_research_batch(
         scheduled_at=now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0),
         checked_at=now,
         sealed_at=now,
-        observation_hash=sha256(json.dumps(sorted(trigger_ids)).encode()).hexdigest(),
+        observation_hash=sha256(
+            json.dumps(sorted(trigger_ids), separators=(",", ":")).encode()
+        ).hexdigest(),
         plan_ids=[str(plan.id)],
         check_ids=sorted(checks),
         trigger_ids=sorted(trigger_ids),

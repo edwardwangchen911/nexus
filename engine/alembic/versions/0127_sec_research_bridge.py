@@ -143,6 +143,7 @@ BEGIN
  AND c.result='true' AND c.reason IS NULL AND c.checked_at=x.bound_at AND c.checked_at<=b.checked_at AND greatest(t.created_at,c.created_at,x.created_at)<=b.sealed_at
  AND c.observation=jsonb_build_object('policy','durable_sec_research_binding_v1','binding_id',x.id::text,'event_id',e.id::text,'rule_id',e.rule_id::text,'event_key',e.event_key,'current_snapshot_id',x.capture_id::text,'current_hash',x.capture_hash,'received_at',c.observation->>'received_at','entry',e.entry)
  AND (c.observation->>'received_at')::timestamptz=(SELECT (payload#>>'{index,received_at}')::timestamptz FROM public.data_snapshots WHERE id=x.capture_id);
+ IF b.observation_hash IS DISTINCT FROM encode(sha256(convert_to(public.sec_positive_chain_canonical((SELECT jsonb_agg(value ORDER BY value COLLATE "C") FROM jsonb_array_elements_text(b.trigger_ids) AS event_ids(value))),'UTF8')),'hex') THEN RAISE EXCEPTION 'SEC_RESEARCH_BATCH_HASH_INVALID' USING ERRCODE='23514'; END IF;
  IF n<>jsonb_array_length(b.trigger_ids) OR n<>(SELECT count(*) FROM public.research_monitor_triggers WHERE batch_id=b.id)
  OR (SELECT count(DISTINCT v) FROM jsonb_array_elements_text(b.trigger_ids) v)<>n OR (SELECT count(DISTINCT v) FROM jsonb_array_elements_text(b.check_ids) v)<>n THEN RAISE EXCEPTION 'SEC_RESEARCH_BATCH_INVALID' USING ERRCODE='23514'; END IF;
 END $$""",
