@@ -138,7 +138,10 @@ async def test_no_rule_preserves_legacy_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_normal_host_preparation_bridges_after_sec_before_price(monkeypatch, tmp_path):
+@pytest.mark.parametrize("reconciliation_fails", [False, True])
+async def test_normal_host_preparation_bridges_after_sec_before_price(
+    monkeypatch, tmp_path, reconciliation_fails
+):
     from datetime import timedelta
 
     from nexus.ops import monitor_price_refresh, research_monitor
@@ -159,6 +162,13 @@ async def test_normal_host_preparation_bridges_after_sec_before_price(monkeypatc
     )
     calls = []
 
+    async def reconcile(current, args):
+        assert current is settings and args.action == "reconcile"
+        calls.append("reconcile")
+        if reconciliation_fails:
+            raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
+        return {"status": "reconciled", "recorded": 6}
+
     async def sec(*args, **kwargs):
         calls.append("sec")
         return {"status": "unchanged", "provider_requests": 0}
@@ -174,6 +184,18 @@ async def test_normal_host_preparation_bridges_after_sec_before_price(monkeypatc
     monkeypatch.setattr(refresh, "refresh_disclosure_observations", sec)
     monkeypatch.setattr(host, "prepare_registered_research", prepare)
     monkeypatch.setattr(monitor_price_refresh, "refresh_price_observations", price)
+    monkeypatch.setattr(research_monitor, "run", reconcile)
+    if reconciliation_fails:
+        with pytest.raises(ValueError, match="MONITOR_HOST_SCOPE_CHANGED"):
+            await research_monitor.refresh_configured_observations(
+                settings,
+                calendar_authority_id=CALENDAR,
+                environment={},
+                repo_root=tmp_path,
+                scheduled_at=NOW,
+            )
+        assert calls == ["reconcile"]
+        return
     result = await research_monitor.refresh_configured_observations(
         settings,
         calendar_authority_id=CALENDAR,
@@ -181,7 +203,8 @@ async def test_normal_host_preparation_bridges_after_sec_before_price(monkeypatc
         repo_root=tmp_path,
         scheduled_at=NOW,
     )
-    assert calls == ["sec", "bridge", "price"]
+    assert calls == ["reconcile", "sec", "bridge", "price"]
+    assert result["reconciliation"] == {"status": "reconciled", "recorded": 6}
     assert result["status"] == "refreshed"
     assert result["sources"]["disclosure"]["status"] == "unchanged"
     assert result["sources"]["disclosure"]["research_bridge"]["items"][0]["status"] == "blocked"

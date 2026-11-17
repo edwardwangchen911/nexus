@@ -229,6 +229,11 @@ async def refresh_configured_observations(
                 return {**fixed, "status": "market_closed", "provider_requests": 0}
     finally:
         await factory.kw["bind"].dispose()
+    # Cold completed-study verification can span several securities. Commit its
+    # normal guarded reconciliation within the existing preparation allowance,
+    # before source capture; the subsequent scan keeps its eight-second bound
+    # and still checks for results that completed after this transaction.
+    reconciled = await run(settings, argparse.Namespace(action="reconcile"))
     from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
     from nexus.ops.monitor_price_refresh import refresh_price_observations
 
@@ -286,6 +291,7 @@ async def refresh_configured_observations(
         **fixed,
         "status": status,
         "scheduled_at": bucket.isoformat(),
+        "reconciliation": reconciled,
         "sources": results,
         "provider_requests": sum(value for value in request_counts if isinstance(value, int))
         if known_requests
