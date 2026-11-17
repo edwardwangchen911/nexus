@@ -98,3 +98,20 @@ async def test_real_pool_wait_cannot_send_expired_candidate_headers():
         server.close()
         await server.wait_closed()
         await asyncio.gather(*handlers, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "kind,message,expected",
+    [
+        ("value", "SEC_ATOM_SOURCE_INVALID", "SEC_ATOM_SOURCE_INVALID"),
+        ("value", "SEC_ATOM_SOURCE_INVALID private-text", "unverified"),
+        ("http", "STATUS_REJECTED", "STATUS_REJECTED"),
+        ("http", "private-text", "unverified"),
+    ],
+)
+def test_candidate_diagnostic_never_logs_unlisted_error_text(kind, message, expected):
+    from nexus.ops.sec_atom_candidates import _failure_code
+    from nexus.providers.http import HttpPolicyError
+
+    error = HttpPolicyError(message) if kind == "http" else ValueError(message)
+    assert _failure_code(error) == expected

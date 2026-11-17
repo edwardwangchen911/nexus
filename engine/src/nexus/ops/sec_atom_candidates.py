@@ -6,10 +6,12 @@ can only precede the unchanged primary SEC capture/eligibility path.
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID, uuid4
@@ -32,7 +34,7 @@ from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.persistence.models.sec_monitor import SecMonitorRule
 from nexus.persistence.session import session_factory
-from nexus.providers.http import AllowedOrigin, HttpRequestPolicy
+from nexus.providers.http import AllowedOrigin, HttpPolicyError, HttpRequestPolicy
 from nexus.research.sec_atom_candidates import MAX_BYTES, parse_atom, source_url
 from nexus.research.sec_exhibit_storage import configured_exhibit_store
 from nexus.settings import EngineSettings
@@ -40,6 +42,30 @@ from nexus.settings import EngineSettings
 SOURCE = "sec_official_atom_candidates"
 SCHEMA = "sec_atom_candidates_v1"
 CLAIM = "research.monitor.sec_atom_candidates_claimed"
+log = logging.getLogger(__name__)
+
+
+def _failure_code(error: BaseException) -> str:
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    allowed = {
+        "SEC_ATOM_SOURCE_INVALID",
+        "SEC_ATOM_CUSTODY_INVALID",
+        "SEC_ATOM_SCOPE_CHANGED",
+        "SEC_ATOM_CLOCK_INVALID",
+        "SEC_ATOM_CONTACT_REFLECTION",
+        "SEC_ATOM_BUCKET_EXPIRED",
+        "DEADLINE_EXCEEDED",
+        "STATUS_REJECTED",
+        "RETRY_BUDGET_EXHAUSTED",
+        "REDIRECT_REJECTED",
+        "RESPONSE_TOO_LARGE",
+    }
+    return (
+        str(error)
+        if isinstance(error, ValueError | HttpPolicyError) and str(error) in allowed
+        else "unverified"
+    )
 
 
 class _SendDeadline:
@@ -168,6 +194,8 @@ async def refresh_candidates(
                 )
             # Never hold a DB transaction during public HTTP. An ambiguous or
             # failed collection occupies this bucket and is not retried.
+            stage = "request_setup"
+            started = monotonic()
             try:
                 url = source_url(rule.issuer_cik)
                 parts = urlsplit(url)
@@ -196,6 +224,7 @@ async def refresh_candidates(
                         ),
                         client=client,
                     )
+                    stage = "public_http"
                     raw = await transport.get_bytes(
                         ("cgi-bin", "browse-edgar"),
                         tuple(parse_qsl(parts.query)),
@@ -204,7 +233,6 @@ async def refresh_candidates(
                 if contact.encode() in raw:
                     raise ValueError("SEC_ATOM_CONTACT_REFLECTION")
                 received = datetime.now(UTC)
-                observation = parse_atom(raw, issuer_cik=rule.issuer_cik, received_at=received)
                 receipt = json.dumps(
                     {
                         "claim": claim,
@@ -216,9 +244,13 @@ async def refresh_candidates(
                     },
                     sort_keys=True,
                 ).encode()
+                stage = "quarantine"
                 await asyncio.to_thread(
                     _quarantine, repo_root, str(claim["operation_id"]), raw, receipt
                 )
+                stage = "parse"
+                observation = parse_atom(raw, issuer_cik=rule.issuer_cik, received_at=received)
+                stage = "publication"
                 async with (
                     account_transaction_turn(settings),
                     factory() as session,
@@ -341,7 +373,17 @@ async def refresh_candidates(
                         "primary_confirmation_required": True,
                     }
                 items.append(completed)
-            except (Exception, TimeoutError):
+            except BaseException as error:
+                # Fixed vocabulary only: no URL, headers, response text or credentials.
+                code = _failure_code(error)
+                log.warning(
+                    "sec_atom_candidate_unverified stage=%s elapsed_ms=%d code=%s",
+                    stage,
+                    int((monotonic() - started) * 1000),
+                    code,
+                )
+                if not isinstance(error, Exception):
+                    raise
                 items.append(
                     {
                         "status": "unknown",
