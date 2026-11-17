@@ -81,17 +81,7 @@ class SecRequestFence:
             original = request.extensions.get("trace")
 
             async def traced(name: str, info: dict[str, Any]) -> None:
-                # Revalidate at the transport boundary, after pool/TLS waits.
-                if name in {
-                    "http11.send_request_headers.started",
-                    "http2.send_request_headers.started",
-                }:
-                    if self.session is None:
-                        raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
-                    self._require_deadline()
-                    await require_new_send(self.session, self.run_id)
-                    self._require_deadline()
-                # Headers complete is an irreversible send, never a delivery or usage proof.
+                # Run other hooks before the final permission/deadline boundary.
                 try:
                     if original is not None:
                         await original(name, info)
@@ -103,6 +93,15 @@ class SecRequestFence:
                         "http2.send_request_headers.failed",
                     }:
                         await self.release()
+                if name in {
+                    "http11.send_request_headers.started",
+                    "http2.send_request_headers.started",
+                }:
+                    if self.session is None:
+                        raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
+                    self._require_deadline()
+                    await require_new_send(self.session, self.run_id)
+                    self._require_deadline()
 
             request.extensions["trace"] = traced
         except BaseException:

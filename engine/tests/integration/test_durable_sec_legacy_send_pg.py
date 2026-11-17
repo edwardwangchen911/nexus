@@ -1,6 +1,7 @@
 """Normal legacy mixed admission: pause between observed native stages preserves usage."""
 
 import argparse
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -9,12 +10,21 @@ from uuid import UUID
 
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "sec_primary", [False, True, "pure_price", "unknown_usage", "pause_inflight"]
+    "sec_primary",
+    [
+        False,
+        True,
+        "pure_price",
+        "unknown_usage",
+        "pause_inflight",
+        "first_registration_wait",
+        "first_registration_before_acquire",
+    ],
 )
 async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
     migrated_database_url, monkeypatch, tmp_path, sec_primary
@@ -65,6 +75,8 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
     pure_price = sec_primary == "pure_price"
     unknown_usage = sec_primary == "unknown_usage"
     pause_inflight = sec_primary in ("pause_inflight", "unknown_usage")
+    registration_wait = sec_primary == "first_registration_wait"
+    registration_before = sec_primary == "first_registration_before_acquire"
     if pure_price:
         from nexus.monitoring.batches import scan_stock_batch
 
@@ -217,6 +229,9 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
             return rule.id
 
     active_rule_id = await refresh_scope(pause=False) if pause_inflight else None
+    if registration_before:
+        await refresh_scope(pause=True)
+        committed.append("pause_committed_before_acquire")
     if unknown_usage:
         from integration import test_sol_native_stage_pg as native_fixture
 
@@ -236,14 +251,34 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
     calls, clients = install_sol_http(
         monkeypatch, store, model_response=add_mixed_fields, on_request=pause_before_response
     )
-    if pause_inflight:
+    if pause_inflight or registration_wait:
         original_transport = httpx.MockTransport.handle_async_request
 
         async def synthetic_headers(self, request):
+            registration = None
+            if registration_wait:
+                async with factory.begin() as other:
+                    assert (
+                        await other.scalar(
+                            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:scope,0))"),
+                            {
+                                "scope": (
+                                    f"research-monitor:{pointer.account_id}:{pointer.instrument_id}"
+                                )
+                            },
+                        )
+                        is False
+                    )
+                registration = asyncio.create_task(refresh_scope(pause=True))
+                await asyncio.sleep(0)
+                assert not registration.done()
             trace = request.extensions.get("trace")
             assert trace is not None, "active SEC run must acquire its actual request fence"
             await trace("http11.send_request_headers.started", {})
             await trace("http11.send_request_headers.complete", {})
+            if registration is not None:
+                await asyncio.wait_for(registration, 10)
+                committed.append("registration_waited_for_header_release")
             return await original_transport(self, request)
 
         monkeypatch.setattr(httpx.MockTransport, "handle_async_request", synthetic_headers)
@@ -252,7 +287,11 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
 
     async def cleanup_then_pause(self, ticket, **kwargs):
         await original_cleanup(self, ticket, **kwargs)
-        if ticket.run_id == member.run_id and ticket.stage == 1 and not pause_inflight:
+        if (
+            ticket.run_id == member.run_id
+            and ticket.stage == 1
+            and not (pause_inflight or registration_wait or registration_before)
+        ):
             async with factory() as session:
                 original = await stage_evidence(session, ticket.run_id)
                 assert len(original) == 1 and original[0]["confirmed"] is True
@@ -267,7 +306,13 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
             settings, job_ids=(member.job_id,), formal_stage_capacity=True
         )
         assert len(committed) == 1
-        expected_calls = ["research", "critique", "synthesis"] if pure_price else ["research"]
+        expected_calls = (
+            ["research", "critique", "synthesis"]
+            if pure_price
+            else []
+            if registration_before
+            else ["research"]
+        )
         assert calls == expected_calls, calls
         async with factory() as session:
             child = await session.get(AgentResearchRunRecord, member.run_id)
@@ -290,7 +335,7 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
                 )
             )
             assert (hold.id, hold.reserved_usd) == hold_identity
-            if unknown_usage:
+            if unknown_usage or registration_before:
                 assert child.settled_cost_usd is None
                 assert hold.state == "reserved" and hold.settled_usd is None
                 assert hold.reserved_usd > 0
@@ -304,10 +349,37 @@ async def test_legacy_mixed_pause_after_stage_one_has_no_next_send(
                 parent_after.input_tokens,
                 parent_after.output_tokens,
             ) == original_parent
-            proof = await read_terminal_proof(
-                session, run_id=child.id, now=later + timedelta(seconds=30)
-            )
-            assert proof.known is (not unknown_usage) and proof.cleanup_confirmed
+            if registration_before:
+                from nexus.agents.research_stages.protocol import ProtocolRejected
+
+                with pytest.raises(ProtocolRejected, match="STAGED_TERMINAL_PROOF_INVALID"):
+                    await read_terminal_proof(
+                        session,
+                        run_id=child.id,
+                        now=await session.scalar(select(func.clock_timestamp())),
+                    )
+                terminal = (
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT known,evidence,observed_stages "
+                                "FROM research_stage_terminal WHERE run_id=:run"
+                            ),
+                            {"run": child.id},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert terminal["known"] is False
+                assert terminal["evidence"] == terminal["observed_stages"] == []
+            else:
+                proof = await read_terminal_proof(
+                    session,
+                    run_id=child.id,
+                    now=await session.scalar(select(func.clock_timestamp())),
+                )
+                assert proof.known is (not unknown_usage) and proof.cleanup_confirmed
         assert not await run_agent_worker_once(
             settings, job_ids=(member.job_id,), formal_stage_capacity=True
         )

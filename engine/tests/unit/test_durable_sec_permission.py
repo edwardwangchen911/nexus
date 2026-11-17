@@ -97,3 +97,24 @@ async def test_transport_cannot_start_second_headers_after_fence_release(monkeyp
     await request.extensions["trace"]("http11.send_request_headers.complete", {})
     with pytest.raises(ValueError, match="PERMISSION_INVALID"):
         await request.extensions["trace"]("http11.send_request_headers.started", {})
+
+
+@pytest.mark.asyncio
+async def test_prior_trace_callback_cannot_cross_final_work_deadline(monkeypatch):
+    from asyncio import get_running_loop
+
+    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+    gate = AsyncMock(return_value=True)
+    monkeypatch.setattr(permission, "require_new_send", gate)
+    fence = permission.SecRequestFence(lambda: session, UUID(int=1))
+
+    async def original(name, info):
+        if name.endswith("send_request_headers.started"):
+            fence.work_deadline = get_running_loop().time() - 1
+
+    request = SimpleNamespace(extensions={"trace": original})
+    await fence.acquire(request)
+    with pytest.raises(TimeoutError, match="RESPONSES_WORK_DEADLINE"):
+        await request.extensions["trace"]("http11.send_request_headers.started", {})
+    assert gate.await_count == 1
+    await fence.release()

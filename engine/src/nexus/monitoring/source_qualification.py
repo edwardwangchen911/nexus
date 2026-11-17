@@ -134,11 +134,11 @@ async def _qualify_source(
             raise ValueError(invalid)
         context = paper[0]
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
-    # A completed independent Sol parent keeps its original price evidence.
+    # Completed, exactly bound Sol parents keep their original price evidence.
     # This read never grants a new child admission: its selected model must
     # still pass the current-price gate in the normal admission path.
     historical_sol_parent = (
-        isinstance(context, IndependentMonitorContext)
+        isinstance(context, IndependentMonitorContext | MixedMonitorContext)
         and model is not None
         and sol_business_model_matches(model)
     )
