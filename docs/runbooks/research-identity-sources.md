@@ -111,3 +111,22 @@ ready 还要求在研究快照原 cutoff 严格重验其冻结引用、归属和
 只有原件、身份、回执操作/桶、时间顺序、hash 和审计全部核验，且提交确认，才返回可用候选。
 已保存候选不承诺在进程中断后自动续接；只读检查使用原快照编号，不重发来源请求。
 原研究与通知资格、旧 once、预算、未知费用预留和历史 SEC 矛盾证据均不改变；无迁移。
+
+## NVDA 已发布的 SEC 日索引
+
+使用已登记的 NVDA 规则核对一个已过去的纽约业务日期。从规则生效当日开始，
+每次采集保存 SEC 季度目录、索引响应原件、接收时间、实际 HTTP 版本与传输凭据。
+目录未列索引、响应版本不符、传输或解压不完整时，核验拒绝。
+
+```sh
+.venv/bin/python -m nexus.ops.research_monitor --repo-root "$PWD" \
+  collect-sec-published-day --rule-id '<existing-nvda-rule-uuid>' --date YYYY-MM-DD \
+  --archive-dir .secrets/sec-nvda-day-proof
+.venv/bin/python -m nexus.ops.research_monitor --repo-root "$PWD" \
+  inspect-sec-published-day --rule-id '<existing-nvda-rule-uuid>' --date YYYY-MM-DD \
+  --archive-dir .secrets/sec-nvda-day-proof
+```
+
+采集要求目标目录尚未存在，最多发送两次官方只读请求。复核沿原目录执行，无外部请求。
+结果是该版本列出的目标表单和申报日期。接受时间区间继续沿正式监控核验。
+该入口不写数据库、不触发通知或研究、不改变历史覆盖与预算。
