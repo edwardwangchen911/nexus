@@ -40,3 +40,9 @@ $13、五项自然义务、旧 once、所有旧研究/通知/隔离费用及其�
 正常三股日研曾在第二股提前核验第一股尚未装配的 route，现对本事务可见的 in-progress credit（包括 savepoint）保留无条件 deferred commit proof；已提交 credit 立即复核。合格服务日历补足下一会话，统一测试数据库时钟后，正常原入口三股预留、完整装配、提交和唯一 credit 检查通过，非放宽源证据或 SQL 约束。首阶段 H 拒绝共用既有严格零调用收口；stage2 拒绝仅发生首阶段一次受控传输，known prefix 正常结算/清理；组合0次/1次前缀拒绝已验证。
 
 真实134正常备份已隔离恢复并升级135，全部旧业务表全行摘要相同、4148对象完整、目标残留0。新旧精确退出恢复60例通过。私有证据为 routine-natural-budget-20261118T0750 中的 natural-subtransaction-proof.log、stage2-send-refusal.log、natural-zero-followup2.log、natural-and-prefix-pg.log、final-boundaries-units.log、exit-final-units.log、restore-verify.log 和 restore-compatibility.private.json。完整最新两代及并发回归还在执行；指定终审、正式部署及运行验收尚未完成。
+
+## 2026-11-18 跨日锁与旧 schema 修复
+
+实测新增发送检查曾让旧长事务在等待外部结果时持有跨日总锁，且历史迁移验证访问不存在的135表。本轮以原失败用例修复：旧发送保存点内只读核验、明确回滚释放仅在其中新取得的总锁，原日锁和原预留继续保留；父事务已有总锁时拒绝进入外部等待。只读检查不登记、不采用新credit、不追加价档；正常短事务先持久化缺失或更新后的依据。新表不存在时，现有策略明确拒绝，无策略保持历史行为。
+
+正常旧SDK/Responses同日和跨日发送4例及空降级2例通过；有真实保护及预留的检查证明总锁释放、原日锁保留，父总锁拒绝、只读新价档拒绝且正常登记仍可用。定向三股日研、第二阶段拒绝后的已知前缀结算清理、并发与价格审计校验3例通过；单元22例和Mypy2通过。证据目录 routine-budget-lock-20261118T0121；独立代码复核未发现确定P1/P2。完整两代链正在本轮最终源码上补验。正式部署仍待新披露依赖风险的用户决定；不将该决定或尚未部署标成完成。

@@ -611,9 +611,12 @@ async def require_reserved_daily_budget(
     if reservation.state != "reserved":
         raise BudgetExhausted("research run has no open budget reservation")
     if for_new_send:
-        from nexus.paper.routine_budget import require_new_send
+        from nexus.paper.routine_budget import require_legacy_new_send, require_new_send
 
-        await require_new_send(session, business_date=reservation.business_date)
+        if accounting:
+            await require_new_send(session, business_date=reservation.business_date)
+        else:
+            await require_legacy_new_send(session, business_date=reservation.business_date)
     return reservation
 
 

@@ -18,7 +18,15 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.settings import EngineSettings
 
 
+async def _schema_present(session: AsyncSession) -> bool:
+    return (
+        await session.scalar(text("SELECT to_regclass('public.routine_budget_scopes')")) is not None
+    )
+
+
 async def scope(session: AsyncSession, day: date) -> RowMapping | None:
+    if not await _schema_present(session):
+        return None
     return (
         (
             await session.execute(
@@ -100,12 +108,14 @@ async def _adopt_original_owners(session: AsyncSession, guard: RowMapping) -> No
 
 
 async def _ensure_scope(
-    session: AsyncSession, *, now: datetime, daily_limit_usd: Decimal
+    session: AsyncSession, *, now: datetime, daily_limit_usd: Decimal, read_only: bool = False
 ) -> RowMapping | None:
     policies = await _policies(session)
     guard = await scope(session, now.date())
     if not policies and guard is None:
         return None
+    if not await _schema_present(session):
+        raise BudgetExhausted("ROUTINE_BUDGET_AUTHORITY_UNAVAILABLE")
     settings = session.info.get("engine_settings")
     if not isinstance(settings, EngineSettings) or len(policies) != 1:
         raise BudgetExhausted("ROUTINE_BUDGET_AUTHORITY_UNAVAILABLE")
@@ -149,7 +159,8 @@ async def _ensure_scope(
         ):
             raise BudgetExhausted("ROUTINE_BUDGET_SCOPE_INVALID")
         if guard["model_id"] == model.id:
-            await _adopt_original_owners(session, guard)
+            if not read_only:
+                await _adopt_original_owners(session, guard)
             return guard
         previous_model = await session.get(AgentModelConfigRecord, guard["model_id"])
         if (
@@ -162,8 +173,12 @@ async def _ensure_scope(
             )
         ):
             raise BudgetExhausted("ROUTINE_BUDGET_MODEL_CHANGED")
+        if read_only:
+            raise BudgetExhausted("ROUTINE_BUDGET_CURRENT_SCOPE_REQUIRED")
         calendar_id = guard["calendar_id"]
     else:
+        if read_only:
+            raise BudgetExhausted("ROUTINE_BUDGET_CURRENT_SCOPE_REQUIRED")
         calendar_id = (
             await select_agent_paper_service_calendar_authority(session, now=fresh)
         ).calendar_authority_id
@@ -225,10 +240,12 @@ async def _ensure_scope(
 
 
 async def ensure_scope(
-    session: AsyncSession, *, now: datetime, daily_limit_usd: Decimal
+    session: AsyncSession, *, now: datetime, daily_limit_usd: Decimal, read_only: bool = False
 ) -> RowMapping | None:
     try:
-        return await _ensure_scope(session, now=now, daily_limit_usd=daily_limit_usd)
+        return await _ensure_scope(
+            session, now=now, daily_limit_usd=daily_limit_usd, read_only=read_only
+        )
     except BudgetExhausted:
         raise
     except ValueError as error:
@@ -325,7 +342,11 @@ async def require_capacity(
 
 
 async def require_new_send(
-    session: AsyncSession, *, business_date: date, daily_limit_usd: Decimal | None = None
+    session: AsyncSession,
+    *,
+    business_date: date,
+    daily_limit_usd: Decimal | None = None,
+    read_only: bool = False,
 ) -> None:
     await _lock_budget_day(session, business_date.isoformat())
     now = await database_now(session)
@@ -337,7 +358,10 @@ async def require_new_send(
         # A conflicting or stale configured quote cannot skip price validation.
         # Original owner prices stay frozen; current H needs current authority.
         guard = await ensure_scope(
-            session, now=now, daily_limit_usd=settings.agent_daily_budget_usd
+            session,
+            now=now,
+            daily_limit_usd=settings.agent_daily_budget_usd,
+            read_only=read_only,
         )
     if guard is None:
         from nexus.paper.single_sol_budget import has_guard, remaining_obligations
@@ -380,7 +404,10 @@ async def require_new_send(
         if not isinstance(settings, EngineSettings):
             raise BudgetExhausted("ROUTINE_BUDGET_AUTHORITY_UNAVAILABLE")
         guard = await ensure_scope(
-            session, now=now, daily_limit_usd=settings.agent_daily_budget_usd
+            session,
+            now=now,
+            daily_limit_usd=settings.agent_daily_budget_usd,
+            read_only=read_only,
         )
     if guard is None:
         return
@@ -390,6 +417,39 @@ async def require_new_send(
     used = await _shared_daily_budget_used(session, business_date=business_date)
     if used + len(left) * guard["maximum"] > guard["daily_limit"]:
         raise BudgetExhausted("ROUTINE_NATURAL_BUDGET_PROTECTED")
+
+
+async def require_legacy_new_send(session: AsyncSession, *, business_date: date) -> None:
+    """Release only this check's accounting lock before legacy provider I/O.
+
+    The caller's original reservation/day locks remain in the outer transaction.
+    A normal short admission/registration must have persisted any current scope.
+    """
+    checkpoint = await session.begin_nested()
+    try:
+        # A parent-owned G cannot be released by rolling back this checkpoint.
+        # Such a caller must finish its preparation transaction before I/O.
+        if await session.scalar(
+            text("""
+            SELECT EXISTS(SELECT FROM pg_locks WHERE pid=pg_backend_pid()
+            AND locktype='advisory' AND granted AND objsubid=1
+            AND classid::bigint=((hashtext('agent-budget:accounting')::bigint>>32)&4294967295)
+            AND objid::bigint=(hashtext('agent-budget:accounting')::bigint&4294967295))
+        """)
+        ):
+            from nexus.agents.budget import ResearchAccountingBusy
+
+            raise ResearchAccountingBusy()
+        await require_new_send(session, business_date=business_date, read_only=True)
+    except BaseException as error:
+        try:
+            await checkpoint.rollback()
+        except BaseException:
+            error.add_note("BUDGET_CHECKPOINT_ROLLBACK_UNCONFIRMED")
+        raise
+    else:
+        # RELEASE would retain the newly acquired xact locks in the parent.
+        await checkpoint.rollback()
 
 
 async def require_native_new_send(session: AsyncSession, *, kind: str, run_id: UUID) -> None:

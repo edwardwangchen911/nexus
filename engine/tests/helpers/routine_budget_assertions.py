@@ -23,6 +23,31 @@ async def assert_allocations(settings, run_id, now):
     factory = session_factory(settings)
     try:
         async with factory.begin() as db:
+            await require_reserved_daily_budget(db, run_id=run_id, for_new_send=True)
+            assert (
+                await db.scalar(
+                    text("""
+                SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid()
+                AND locktype='advisory' AND objsubid=1
+                AND classid::bigint=((hashtext('agent-budget:accounting')::bigint>>32)&4294967295)
+                AND objid::bigint=(hashtext('agent-budget:accounting')::bigint&4294967295)
+            """)
+                )
+                == 0
+            )
+            assert (
+                await db.scalar(
+                    text("""
+                SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid()
+                AND locktype='advisory' AND objsubid=1
+                AND classid::bigint=((hashtext(:key)::bigint>>32)&4294967295)
+                AND objid::bigint=(hashtext(:key)::bigint&4294967295)
+            """),
+                    {"key": "agent-budget:" + now.date().isoformat()},
+                )
+                == 1
+            )
+        async with factory.begin() as db:
             original = await db.get(AgentResearchRunRecord, run_id)
             guard = await scope(db, now.date())
             assert guard is not None
@@ -35,6 +60,12 @@ async def assert_allocations(settings, run_id, now):
             assert (
                 len((await db.scalars(text("SELECT task FROM routine_budget_credits"))).all()) == 1
             )
+            # A caller still holding a parent accounting transaction cannot
+            # turn it into a long provider wait by using a nested checkpoint.
+            from nexus.agents.budget import ResearchAccountingBusy
+
+            with pytest.raises(ResearchAccountingBusy):
+                await require_reserved_daily_budget(db, run_id=run_id, for_new_send=True)
             maximum = guard["maximum"]
             assert maximum > 0
             other = next(i for i in guard["members"] if i != original.instrument_id)
@@ -185,6 +216,12 @@ async def assert_price_updates(settings, run_id, now):
         high_settings = settings.model_copy(update={"agent_paper_formal_model_config_id": high_id})
         hf = session_factory(high_settings)
         try:
+            # A legacy checkpoint cannot discard a newly created price scope.
+            # The normal short registration must persist it first.
+            async with hf.begin() as db:
+                with pytest.raises(BudgetExhausted, match="ROUTINE_BUDGET_CURRENT_SCOPE_REQUIRED"):
+                    await require_reserved_daily_budget(db, run_id=run_id, for_new_send=True)
+                assert await db.scalar(text("SELECT max(sequence) FROM routine_budget_scopes")) == 1
             # All scope fields and binding are valid; only audit actor is wrong.
             from nexus.audit.service import append_audit_event
 
