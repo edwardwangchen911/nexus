@@ -115,3 +115,90 @@ def test_candidate_diagnostic_never_logs_unlisted_error_text(kind, message, expe
 
     error = HttpPolicyError(message) if kind == "http" else ValueError(message)
     assert _failure_code(error) == expected
+
+
+@pytest.mark.asyncio
+async def test_equal_priority_candidates_take_first_turn_over_consecutive_buckets(
+    monkeypatch, tmp_path
+):
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from nexus.ops import sec_atom_candidates as atom
+    from nexus.settings import EngineSettings
+
+    class StopBeforeClaim(Exception):
+        pass
+
+    rules = [
+        SimpleNamespace(instrument_id=UUID(int=number), issuer_cik=f"{number:010d}")
+        for number in (2, 1, 3)
+    ]
+
+    @asynccontextmanager
+    async def clean_turn(*_args):
+        yield
+
+    class Reader:
+        def begin(self):
+            return clean_turn()
+
+        async def scalars(self, _statement):
+            return rules
+
+    reader = Reader()
+
+    async def clean_dispose():
+        pass
+
+    class Factory:
+        kw = {"bind": SimpleNamespace(dispose=clean_dispose)}
+
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return reader
+
+        async def __aexit__(self, *_exc):
+            pass
+
+    async def scope(_session, _settings, _account_id, _calendar_id, scheduled):
+        return scheduled, tuple(rule.instrument_id for rule in rules)
+
+    async def host_admitting(_session, _account_id):
+        pass
+
+    first_rules = []
+
+    async def stop_before_claim(_session, rule):
+        first_rules.append(rule.issuer_cik)
+        raise StopBeforeClaim
+
+    monkeypatch.setattr(atom, "session_factory", lambda _settings: Factory())
+    monkeypatch.setattr(atom, "account_transaction_turn", clean_turn)
+    monkeypatch.setattr(atom, "_scope", scope)
+    monkeypatch.setattr(atom, "require_host_admitting", host_admitting)
+    monkeypatch.setattr(atom, "_lock", stop_before_claim)
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus_test_atom_order",
+        agent_paper_cycle_enabled=True,
+        agent_paper_account_id=UUID(int=11),
+        agent_paper_formal_model_config_id=UUID(int=12),
+    )
+    start = datetime(2026, 11, 18, 20, tzinfo=UTC)
+    for i in range(6):
+        if i == 3:
+            rules.reverse()
+        with pytest.raises(StopBeforeClaim):
+            await atom.refresh_candidates(
+                settings,
+                calendar_authority_id=UUID(int=13),
+                scheduled_at=start + timedelta(minutes=5 * i),
+                environment={},
+                repo_root=tmp_path,
+            )
+    assert len(set(first_rules[:3])) == 3
+    assert first_rules[:3] == first_rules[3:]
