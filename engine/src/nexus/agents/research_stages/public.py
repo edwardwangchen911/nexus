@@ -280,7 +280,8 @@ async def _selected_member_settled(
     now: Any,
     allow_unknown_usage: Any,
     close_empty_unknown: bool = False,
-) -> Any:
+) -> bool:
+    """Return false for an unselected member, otherwise require its native closeout."""
     from nexus.agents.research_stages.routes import VERSION, _selected_route_row
     from nexus.paper.research_failure import require_unused_research_member_closed
 
@@ -288,7 +289,7 @@ async def _selected_member_settled(
     # owner once in the canonical proof, with these caller constraints intact.
     route = await _selected_route_row(session, member.job_id)
     if route is None:
-        return
+        return False
     if (
         route["kind"] != kind
         or route["scope_id"] != owner_id
@@ -318,11 +319,11 @@ async def _selected_member_settled(
             await require_claimed_uncalled_research_closed(
                 session, run_id=member.run_id, job_id=member.job_id, now=now
             )
-            return
+            return True
         await require_unused_research_member_closed(
             session, owner_id=owner_id, member=member, now=now
         )
-        return
+        return True
     try:
         proof = await read_terminal_proof(
             session,
@@ -350,6 +351,7 @@ async def _selected_member_settled(
         or (not allow_unknown_usage and (not proof.known))
     ):
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    return True
 
 
 async def _cycle_settled(session: Any, **kwargs: Any) -> Any:

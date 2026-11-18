@@ -41,7 +41,12 @@ async def proof(
         raise ValueError(BLOCKED)
     target = unknown[0]
     terminal = await read_terminal_proof(
-        session, run_id=target.run_id, now=now, close_empty_unknown=True
+        session,
+        run_id=target.run_id,
+        now=now,
+        close_empty_unknown=True,
+        expected_owner=(row.id, "independent"),
+        expected_job_id=target.job_id,
     )
     if (
         terminal is None
@@ -55,15 +60,17 @@ async def proof(
     # Full terminal reader proves the exact reservation is still held. Neither
     # that amount nor empty authorization bounds the unknown supplier invoice.
     for member in view.research.members:
-        if member.run_id != target.run_id:
-            await _selected_member_settled(
-                session,
-                owner_id=row.id,
-                kind="independent",
-                member=member,
-                now=now,
-                allow_unknown_usage=False,
-            )
+        if member.run_id == target.run_id:
+            continue
+        if not await _selected_member_settled(
+            session,
+            owner_id=row.id,
+            kind="independent",
+            member=member,
+            now=now,
+            allow_unknown_usage=False,
+        ):
+            raise ValueError(BLOCKED)
     return dict(
         kind="zero_stage_local_quiescent_v1",
         run_id=str(target.run_id),

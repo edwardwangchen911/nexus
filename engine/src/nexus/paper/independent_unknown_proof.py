@@ -6,10 +6,8 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.research_stages.routes import selected_route
 from nexus.jobs.models import job_input_hash
 from nexus.paper.manual_request import read_manual_request
-from nexus.paper.research_request import require_research_jobs_settled
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 
 BLOCKED = "INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"
@@ -68,10 +66,6 @@ async def independent_unknown_proof(
     unknown = sorted(str(m.run_id) for m in view.research.members if not m.usage_known)
     if not unknown:
         raise ValueError(BLOCKED)
-    for member in view.research.members:
-        route = await selected_route(session, member.job_id)
-        if route is None or route["kind"] != "independent" or route["scope_id"] != row.id:
-            raise ValueError(BLOCKED)
     # This is only a financial/cleanup proof, not an admission exemption.
     disposition: dict[str, object] = {}
     if zero_stage:
@@ -79,9 +73,20 @@ async def independent_unknown_proof(
 
         disposition["zero_stage_disposition"] = await proof(session, row=row, view=view, now=now)
     else:
-        await require_research_jobs_settled(
-            session, row=row, view=view.research, now=now, allow_unknown_usage=True
-        )
+        from nexus.agents.research_stages.public import _selected_member_settled
+
+        # The native closeout binds the exact owner and job. Historical
+        # disposition requires a selected route for every member.
+        for member in view.research.members:
+            if not await _selected_member_settled(
+                session,
+                owner_id=row.id,
+                kind="independent",
+                member=member,
+                now=now,
+                allow_unknown_usage=True,
+            ):
+                raise ValueError(BLOCKED)
     params = {
         "request": row.id,
         "runs": [m.run_id for m in view.research.members],
