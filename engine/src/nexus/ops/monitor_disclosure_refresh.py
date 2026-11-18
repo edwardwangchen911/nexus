@@ -24,6 +24,7 @@ from nexus.monitoring.storage import lock_security
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.monitor_batch_prepare import _archive_root
 from nexus.ops.monitor_content_local import _contact
+from nexus.ops.research_identity_local import SecDirectoryInBucket
 from nexus.ops.sec_index_local import collect_index
 from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
@@ -327,6 +328,9 @@ async def refresh_disclosure_observations(
                 if only_instrument not in instruments:
                     return _result("blocked", reason="MONITOR_SCOPE_INVALID")
                 instruments = (only_instrument,)
+            directory_in_bucket = (
+                SecDirectoryInBucket(scheduled_at) if len(instruments) > 1 else None
+            )
             for instrument in instruments:
                 try:
                     async with (
@@ -367,6 +371,7 @@ async def refresh_disclosure_observations(
                                 archive_dir=archive,
                                 contact=contact or "",
                                 client=client,
+                                directory_in_bucket=directory_in_bucket,
                             )
                         else:
                             collected = await collect_index(
