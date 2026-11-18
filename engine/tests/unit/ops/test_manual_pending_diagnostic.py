@@ -219,9 +219,21 @@ async def test_only_ended_owned_read_is_a_safe_deadline(monkeypatch, failure):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "finish",
-    ["queued", "unknown", "due_failed", "publish_failed", "monitor_unknown", "deferred_wrong_job"],
+    [
+        "queued",
+        "unknown",
+        "due_failed",
+        "publish_failed",
+        "monitor_unknown",
+        "deferred_wrong_job",
+        "callbacks_missing",
+        "pause_heartbeat_failed",
+        "resume_monitor_unknown",
+        "resume_heartbeat_failed",
+        "resume_publish_failed",
+    ],
 )
-async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, finish):
+async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, capsys, finish):
     from datetime import timedelta
 
     from unit.ops.test_agent_paper_loop import snapshot
@@ -316,10 +328,14 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
 
     async def heartbeat(_):
         heartbeats.append(elapsed)
+        if (finish, attempts) in {("pause_heartbeat_failed", 1), ("resume_heartbeat_failed", 3)}:
+            raise OSError("private heartbeat failure")
 
     async def record(notice):
         logs.append("pause" if notice else "ready")
-        if notice and finish == "publish_failed":
+        if (notice and finish == "publish_failed") or (
+            notice is None and finish == "resume_publish_failed"
+        ):
             raise OSError("commit unconfirmed")
 
     async def execute(action, state):
@@ -345,8 +361,9 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
         wake_for_pending_work=lambda: host.manual_work_pending(settings, account_id=account),
         kick_monitor=lambda _: logs.append("kick"),
         monitor_busy=monitor_busy,
-        monitor_confirmed=lambda: finish != "monitor_unknown",
-        record_probe=record,
+        monitor_confirmed=lambda: finish != "monitor_unknown"
+        and not (finish == "resume_monitor_unknown" and attempts > 2),
+        record_probe=None if finish == "callbacks_missing" else record,
         deferred_lease_remaining=AsyncMock(return_value=15),
         clock=lambda: base + timedelta(seconds=elapsed) + clock_shift,
         monotonic=lambda: elapsed,
@@ -366,5 +383,21 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, fini
         assert logs.count("pause") == 2 and "ready" not in logs
         assert result == loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN
     else:
-        assert not actions and "ready" not in logs
+        assert not actions and logs.count("ready") == int(finish == "resume_publish_failed")
         assert result == loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN
+
+    failure_steps = {
+        "callbacks_missing": "callbacks_unavailable",
+        "monitor_unknown": "pause_monitor_confirmation",
+        "pause_heartbeat_failed": "pause_heartbeat",
+        "publish_failed": "pause_record",
+        "resume_monitor_unknown": "resume_monitor_confirmation",
+        "resume_heartbeat_failed": "resume_heartbeat",
+        "resume_publish_failed": "resume_record",
+    }
+    if finish in failure_steps:
+        diagnostic = json.loads(capsys.readouterr().err)
+        assert diagnostic["inspection_site"] == "pending_work"
+        assert diagnostic.get("pending_probe_step") == failure_steps[finish], diagnostic
+        assert "commit unconfirmed" not in json.dumps(diagnostic)
+        assert "private heartbeat failure" not in json.dumps(diagnostic)
