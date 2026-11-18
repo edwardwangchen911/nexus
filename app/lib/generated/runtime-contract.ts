@@ -4107,6 +4107,25 @@ export const runtimeContractSchemas = {
             "type": "null"
           }
         ]
+      },
+      "research_status": {
+        "anyOf": [
+          {
+            "enum": [
+              "no_receipt",
+              "bound",
+              "increment_failed",
+              "addressed_increment",
+              "addressed_daily",
+              "unverified"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Research Status"
       }
     },
     "required": [

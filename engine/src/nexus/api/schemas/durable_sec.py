@@ -49,8 +49,18 @@ class DurableSecNoticeView(MonitoringViewModel):
     device_result: Literal["unknown"] = "unknown"
 
 
+DurableSecResearchStatus = Literal[
+    "no_receipt",
+    "bound",
+    "increment_failed",
+    "addressed_increment",
+    "addressed_daily",
+    "unverified",
+]
+
+
 class DurableSecEventView(MonitoringViewModel):
-    # The negotiated notice extension is absent on older API processes.
+    # Older API processes omit the optional readback fields.
     model_config = ConfigDict(json_schema_serialization_defaults_required=False)
 
     event_key: str
@@ -59,6 +69,7 @@ class DurableSecEventView(MonitoringViewModel):
     first_seen_at: datetime
     metadata_status: Literal["recorded", "conflict"]
     notice: DurableSecNoticeView | None = None
+    research_status: DurableSecResearchStatus | None = None
 
 
 class DurableSecView(MonitoringViewModel):

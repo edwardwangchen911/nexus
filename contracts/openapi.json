@@ -4444,6 +4444,25 @@
                 "type": "null"
               }
             ]
+          },
+          "research_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "no_receipt",
+                  "bound",
+                  "increment_failed",
+                  "addressed_increment",
+                  "addressed_daily",
+                  "unverified"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Research Status"
           }
         },
         "required": [
@@ -21842,6 +21861,22 @@
               ],
               "title": "X-Nexus-Sec-Notice-View"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Research-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Research-View"
+            }
           }
         ],
         "responses": {
@@ -25298,6 +25333,22 @@
                 }
               ],
               "title": "X-Nexus-Sec-Notice-View"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Research-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Research-View"
             }
           }
         ],

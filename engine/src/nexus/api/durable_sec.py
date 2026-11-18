@@ -10,14 +10,17 @@ from nexus.api.schemas.durable_sec import (
     DurableSecCheckView,
     DurableSecEventView,
     DurableSecNoticeView,
+    DurableSecResearchStatus,
     DurableSecView,
 )
 from nexus.domain.time import require_utc
 from nexus.monitoring.durable_sec_contracts import DurableSecPolicy
 from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
 from nexus.outbox.failure import FailureReason, read_delivery_failure
-from nexus.persistence.models.agents import AgentResearchRunRecord
-from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
+from nexus.persistence.models.agents import AgentResearchEventRecord, AgentResearchRunRecord
+from nexus.persistence.models.monitoring import MonitorIncrement
+from nexus.persistence.models.runtime import Job, OutboxDeliveryAttempt, OutboxEvent
+from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryCheck,
     SecDiscoveryEvent,
@@ -25,6 +28,10 @@ from nexus.persistence.models.sec_monitor import (
     SecMonitorRule,
     SecMonitorRuleState,
     SecNotificationClaim,
+)
+from nexus.persistence.models.sec_research import (
+    SecEventConsumptionReceipt,
+    SecEventResearchBinding,
 )
 from nexus.research.sec_disclosure_index import SecIndexEntry
 
@@ -34,33 +41,52 @@ type ViewFact = (
     | SecDiscoveryCheck
     | SecDiscoveryEvent
     | SecNotificationClaim
+    | SecEventResearchBinding
+    | SecEventConsumptionReceipt
+    | SecDurableDailyEventReceipt
 )
+
+_DISCOVERY_AUDIT = ("research.monitor.durable_fact", "durable_sec_v1")
+_RESEARCH_AUDIT = ("research.monitor.sec_research_fact", "durable_sec_research_binding_v1")
+_DAILY_AUDIT = ("research.monitor.sec_daily_consumed", "durable_sec_pending_v1")
+_VIEW_AUDITS = {
+    SecMonitorRule: _DISCOVERY_AUDIT,
+    SecMonitorRuleState: _DISCOVERY_AUDIT,
+    SecDiscoveryCheck: _DISCOVERY_AUDIT,
+    SecDiscoveryEvent: _DISCOVERY_AUDIT,
+    SecNotificationClaim: _DISCOVERY_AUDIT,
+    SecEventResearchBinding: _RESEARCH_AUDIT,
+    SecEventConsumptionReceipt: _RESEARCH_AUDIT,
+    SecDurableDailyEventReceipt: _DAILY_AUDIT,
+}
 
 
 async def _audited(session: AsyncSession, row: ViewFact, now: datetime) -> bool:
     # Table names are supplied only by these concrete mapped classes, never user input.
-    if type(row) not in (
-        SecMonitorRule,
-        SecMonitorRuleState,
-        SecDiscoveryCheck,
-        SecDiscoveryEvent,
-        SecNotificationClaim,
-    ):
+    audit = _VIEW_AUDITS.get(type(row))
+    if audit is None or row.created_at > now:
         return False
-    if row.created_at > now:
-        return False
+    action, schema = audit
+    table = row.__tablename__
     return bool(
         await session.scalar(
             text(
-                "SELECT EXISTS (SELECT 1 FROM audit_events a JOIN " + row.__tablename__ + " f "
+                "SELECT EXISTS (SELECT 1 FROM audit_events a JOIN " + table + " f "
                 "ON f.id=:id WHERE a.actor_id='research-monitor' "
-                "AND a.action='research.monitor.durable_fact' "
-                "AND a.schema_version='durable_sec_v1' "
+                "AND a.action=:action AND a.schema_version=:schema "
                 "AND a.occurred_at=f.created_at AND a.created_at<=:now "
-                "AND a.payload->>'table'=:table AND a.payload->>'row_id'=:row_id "
+                "AND a.payload->>'table' IS NOT DISTINCT FROM :audit_table "
+                "AND a.payload->>'row_id'=:row_id "
                 "AND a.payload->'binding'=to_jsonb(f)-'created_at')"
             ),
-            {"id": row.id, "row_id": str(row.id), "table": row.__tablename__, "now": now},
+            {
+                "id": row.id,
+                "row_id": str(row.id),
+                "audit_table": None if audit == _DAILY_AUDIT else table,
+                "action": action,
+                "schema": schema,
+                "now": now,
+            },
         )
     )
 
@@ -123,6 +149,7 @@ def project_event(
     *,
     conflict: bool,
     notice: DurableSecNoticeView | None = None,
+    research_status: DurableSecResearchStatus | None = None,
 ) -> DurableSecEventView:
     entry = SecIndexEntry.model_validate(row.entry)
     if (
@@ -142,6 +169,7 @@ def project_event(
             "first_seen_at": row.first_seen_at,
             "metadata_status": "conflict" if conflict else "recorded",
             "notice": notice,
+            "research_status": research_status,
         }
     )
 
@@ -264,12 +292,128 @@ async def _read_notice(
     )
 
 
+async def _verified_research_binding(
+    session: AsyncSession,
+    binding: SecEventResearchBinding,
+    event: SecDiscoveryEvent,
+    now: datetime,
+) -> bool:
+    return (
+        (binding.event_id, binding.account_id, binding.instrument_id, binding.rule_id)
+        == (event.id, event.account_id, event.instrument_id, event.rule_id)
+        and binding.metadata_hash == event.metadata_hash
+        and event.first_seen_at <= binding.bound_at <= now
+        and await _audited(session, binding, now)
+    )
+
+
+async def read_event_research_status(
+    session: AsyncSession, event: SecDiscoveryEvent, now: datetime
+) -> DurableSecResearchStatus:
+    """Project only saved research and per-event receipt facts for this exact event."""
+    if max(event.created_at, event.first_seen_at) > now:
+        return "unverified"
+    daily_receipt = await session.scalar(
+        select(SecDurableDailyEventReceipt).where(
+            SecDurableDailyEventReceipt.event_id == event.id,
+            SecDurableDailyEventReceipt.created_at <= now,
+        )
+    )
+    mirrored = (
+        await session.scalars(
+            select(SecEventConsumptionReceipt)
+            .where(
+                SecEventConsumptionReceipt.event_id == event.id,
+                SecEventConsumptionReceipt.created_at <= now,
+            )
+            .limit(2)
+        )
+    ).all()
+    # Receipt writers enforce the exact underlying research, review and settlement.
+    # Keep that receipt independent of a later plan, a run status or notification delivery.
+    if daily_receipt is not None:
+        if (
+            mirrored
+            or not event.first_seen_at <= daily_receipt.observed_at == daily_receipt.created_at
+            or not await _audited(session, daily_receipt, now)
+        ):
+            return "unverified"
+        return "addressed_daily"
+    if mirrored:
+        if len(mirrored) != 1:
+            return "unverified"
+        receipt = mirrored[0]
+        matched = await session.get(SecEventResearchBinding, receipt.binding_id)
+        if (
+            matched is None
+            or receipt.status != "addressed"
+            or (receipt.mixed_receipt_id is None) == (receipt.daily_receipt_id is None)
+            or matched.bound_at > receipt.created_at
+            or not await _verified_research_binding(session, matched, event, now)
+            or not await _audited(session, receipt, now)
+        ):
+            return "unverified"
+        return "addressed_daily" if receipt.daily_receipt_id is not None else "addressed_increment"
+
+    bindings = (
+        await session.scalars(
+            select(SecEventResearchBinding)
+            .where(
+                SecEventResearchBinding.event_id == event.id,
+                SecEventResearchBinding.created_at <= now,
+            )
+            .limit(2)
+        )
+    ).all()
+    if not bindings:
+        return "no_receipt"
+    for binding in bindings:
+        if not await _verified_research_binding(session, binding, event, now):
+            return "unverified"
+    if len(bindings) == 1:
+        linked = (
+            await session.execute(
+                select(MonitorIncrement, AgentResearchRunRecord, Job)
+                .join(AgentResearchRunRecord, AgentResearchRunRecord.id == MonitorIncrement.run_id)
+                .join(Job, Job.id == MonitorIncrement.job_id)
+                .where(
+                    MonitorIncrement.batch_id == bindings[0].batch_id,
+                    MonitorIncrement.created_at <= now,
+                )
+            )
+        ).one_or_none()
+        if linked is not None:
+            increment, run, job = linked
+            if (
+                (increment.account_id, increment.instrument_id, run.instrument_id)
+                != (event.account_id, event.instrument_id, event.instrument_id)
+                or job.job_type != "agent.paper.research"
+                or job.payload != {"run_id": str(run.id)}
+                or max(run.created_at, job.created_at) > now
+            ):
+                return "unverified"
+            if run.status == job.status == "failed" and job.finished_at is not None:
+                terminal = await session.scalar(
+                    select(AgentResearchEventRecord.state)
+                    .where(
+                        AgentResearchEventRecord.run_id == run.id,
+                        AgentResearchEventRecord.created_at <= now,
+                    )
+                    .order_by(AgentResearchEventRecord.sequence.desc())
+                    .limit(1)
+                )
+                if terminal == "failed" and bindings[0].bound_at <= job.finished_at <= now:
+                    return "increment_failed"
+    return "bound"
+
+
 async def read_durable_sec_view(
     session: AsyncSession,
     run: AgentResearchRunRecord,
     *,
     now: datetime,
     include_notice: bool = False,
+    include_research: bool = False,
 ) -> DurableSecView | None:
     now = require_utc(now)
     account_id = await _account(session, run, now)
@@ -363,6 +507,11 @@ async def read_durable_sec_view(
                     now,
                     conflict=row.id in conflicts,
                     notice=await _read_notice(session, row, now) if include_notice else None,
+                    research_status=(
+                        await read_event_research_status(session, row, now)
+                        if include_research
+                        else None
+                    ),
                 )
             )
         return DurableSecView.model_validate(

@@ -170,7 +170,9 @@ async def test_durable_sec_api_projection_outlives_anchor_without_research_autho
         async with factory() as session, session.begin():
             run = await session.get(AgentResearchRunRecord, pointer.source_run_id)
             now = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
-            view = await read_durable_sec_view(session, run, now=now, include_notice=True)
+            view = await read_durable_sec_view(
+                session, run, now=now, include_notice=True, include_research=True
+            )
             notice = view.events[0].notice
             assert notice is not None and notice.outbox_id == queued.outbox_id
             assert notice.attempt_count == 1 and notice.device_result == "unknown"
@@ -219,7 +221,13 @@ async def test_durable_sec_api_projection_outlives_anchor_without_research_autho
             )
             baseline_wire = json.loads(_research_wire(envelope, "1").body)
             opted_in_wire = json.loads(_research_wire(envelope, "1", include_sec_notices=True).body)
+            research_wire = json.loads(
+                _research_wire(envelope, "1", include_sec_research=True).body
+            )["data"]["durable_disclosure"]["events"][0]
             assert "notice" not in baseline_wire["data"]["durable_disclosure"]["events"][0]
+            assert "research_status" not in opted_in_wire["data"]["durable_disclosure"]["events"][0]
+            assert research_wire["research_status"] == "no_receipt"
+            assert "notice" not in research_wire
             assert opted_in_wire["data"]["durable_disclosure"]["events"][0]["notice"] == (
                 notice.model_dump(mode="json")
             )

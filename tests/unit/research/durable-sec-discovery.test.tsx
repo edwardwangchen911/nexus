@@ -59,6 +59,15 @@ describe("durable SEC discovery facts", () => {
     render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], metadata_status: "conflict" }] }} />);
     expect(screen.getByText(/公告元数据出现冲突/)).toBeVisible();
   });
+  it.each([
+    ["increment_failed", "原增量研究失败，暂无逐事件处理回执。"],
+    ["addressed_daily", "已保存日研的逐事件处理回执。"],
+    ["addressed_increment", "已保存增量研究的逐事件处理回执。"],
+  ] as const)("shows %s on the original event without an action", (research_status, label) => {
+    render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], research_status }] }} />);
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
   it("shows the original timeout as an unconfirmed server result with one attempt", () => {
     const id = "00000000-0000-4000-8000-000000000099";
     render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], notice: {

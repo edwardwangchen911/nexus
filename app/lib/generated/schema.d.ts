@@ -2862,6 +2862,8 @@ export interface components {
              */
             metadata_status: "recorded" | "conflict";
             notice?: components["schemas"]["DurableSecNoticeView"] | null;
+            /** Research Status */
+            research_status?: ("no_receipt" | "bound" | "increment_failed" | "addressed_increment" | "addressed_daily" | "unverified") | null;
         };
         /** DurableSecNoticeView */
         DurableSecNoticeView: {
@@ -9798,6 +9800,7 @@ export interface operations {
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
+                "X-Nexus-SEC-Research-View"?: string | null;
             };
             path: {
                 instrument_id: string;
@@ -12287,6 +12290,7 @@ export interface operations {
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
+                "X-Nexus-SEC-Research-View"?: string | null;
             };
             path: {
                 run_id: string;
