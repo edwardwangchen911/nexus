@@ -128,6 +128,11 @@ def parser() -> argparse.ArgumentParser:
         help="Verify saved originals without granting research qualification",
     )
     originals.add_argument("--snapshot-id", type=UUID, required=True)
+    for action in ("prove-content-relations", "inspect-content-relations"):
+        relations = commands.add_parser(
+            action, help="Verify binary relations without content eligibility"
+        )
+        relations.add_argument("--snapshot-id", type=UUID, required=True)
     preparation = commands.add_parser(
         "prepare-batch",
         help="Freeze parent theses and verified SEC content without admitting research",
@@ -633,11 +638,23 @@ async def _run(
                     "execution_locked": True,
                     "reconciled_results": 0,
                 }
-            if args.action == "inspect-content-originals":
+            if args.action in {
+                "inspect-content-originals",
+                "prove-content-relations",
+                "inspect-content-relations",
+            }:
                 from nexus.monitoring.filing_originals import read_originals
+                from nexus.monitoring.filing_relations import prove_relations, read_relations
                 from nexus.persistence.models.sec_monitor import SecMonitorRule
 
-                document = await read_originals(session, snapshot_id=args.snapshot_id, as_of=now)
+                relations_proof = None
+                original_id = args.snapshot_id
+                if args.action == "inspect-content-relations":
+                    relations_proof = await read_relations(
+                        session, snapshot_id=args.snapshot_id, as_of=now
+                    )
+                    original_id = relations_proof.original_snapshot_id
+                document = await read_originals(session, snapshot_id=original_id, as_of=now)
                 if (
                     await session.scalar(
                         select(SecMonitorRule.id).where(
@@ -649,10 +666,21 @@ async def _run(
                     is None
                 ):
                     raise ValueError("SEC_DURABLE_SCOPE_INVALID")
+                result_id = args.snapshot_id
+                if args.action == "prove-content-relations":
+                    saved = await prove_relations(session, snapshot_id=original_id, now=now)
+                    result_id = saved.id
+                    at = await session.scalar(select(func.clock_timestamp()))
+                    if not isinstance(at, datetime):
+                        raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
+                    relations_proof = await read_relations(session, snapshot_id=result_id, as_of=at)
                 return {
                     "status": "verified_unqualified",
-                    "snapshot_id": str(args.snapshot_id),
-                    "declarations": document.declarations,
+                    "snapshot_id": str(result_id),
+                    "original_snapshot_id": str(original_id),
+                    "declarations": document.declarations
+                    if relations_proof is None
+                    else relations_proof.declarations,
                     "research_qualified": False,
                     "nontext_content_status": "uninterpreted",
                     "model_requests": 0,

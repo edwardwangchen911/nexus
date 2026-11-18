@@ -1,6 +1,8 @@
 """v2 exact SEC submission-to-HTTP proof; originals are never rewritten."""
 
+import binascii
 import re
+from hashlib import sha256
 from urllib.parse import urlsplit
 
 _ERROR = "SEC_MONITOR_DOCUMENT_SIZE_INVALID"
@@ -79,3 +81,116 @@ def prove_document(
     if not any(a == b for a in expected for b in delivered):
         raise ValueError(_ERROR)
     return content
+
+
+def prove_graphic(
+    source: bytes,
+    received: bytes,
+    *,
+    accession: str,
+    issuer_cik: str,
+    form: str,
+    filename: str,
+    sequence: int,
+    declared_size: int,
+) -> dict[str, object]:
+    """Prove decoded aggregate bytes, without granting image content qualification."""
+    if (
+        not 0 < declared_size <= 8 * 1024 * 1024
+        or len(received) != declared_size
+        or not re.fullmatch(r"[a-zA-Z0-9_-]+\.(?:jpg|jpeg|png|gif|webp)", filename)
+        or not 0 < sequence <= 999
+        or len(source) > 8 * 1024 * 1024
+    ):
+        raise ValueError(_ERROR)
+    all_members = re.findall(rb"(?ms)^<DOCUMENT>\r?\n.*?^</DOCUMENT>(?:\r?\n|$)", source)
+    sequence_members = [
+        m
+        for m in all_members
+        if any(
+            n.strip().lstrip(b"0") == str(sequence).encode()
+            for n in re.findall(rb"(?m)^<SEQUENCE>([^\r\n]+)", m.split(b"<TEXT>", 1)[0])
+        )
+    ]
+    if len(sequence_members) != 1:
+        raise ValueError(_ERROR)
+    members = [
+        m
+        for m in all_members
+        if filename.encode() in re.findall(rb"(?m)^<FILENAME>([^\r\n]+)", m.split(b"<TEXT>", 1)[0])
+    ]
+    if len(members) != 1:
+        raise ValueError(_ERROR)
+    member = members[0]
+    if re.findall(rb"(?m)^<SEQUENCE>([^\r\n]+)", member.split(b"<TEXT>", 1)[0]) != [
+        str(sequence).encode()
+    ]:
+        raise ValueError(_ERROR)
+    bodies = re.findall(rb"(?ms)^<TEXT>\r?\n(.*?)\r?\n</TEXT>\r?\n</DOCUMENT>", member)
+    if len(bodies) != 1:
+        raise ValueError(_ERROR)
+    encoded = bodies[0]
+    prove_document(
+        source,
+        encoded,
+        accession=accession,
+        issuer_cik=issuer_cik,
+        form=form,
+        filename=filename,
+        kind="GRAPHIC",
+        declared_size=len(encoded),
+    )
+    if b"\r" in encoded.replace(b"\r\n", b""):
+        raise ValueError(_ERROR)
+    lines = encoded.replace(b"\r\n", b"\n").split(b"\n")
+    if (
+        len(lines) < 4
+        or lines[0] != b"begin 644 " + filename.encode()
+        or lines[-1] != b"end"
+        or lines[-2] not in {b"", b" ", b"`"}
+    ):
+        raise ValueError(_ERROR)
+    decoded = bytearray()
+    restored_zero_lines = []
+    unused_padding = []
+    data_lines = lines[1:-2]
+    if not data_lines or len(data_lines) != (declared_size + 44) // 45:
+        raise ValueError(_ERROR)
+    for i, line in enumerate(data_lines):
+        n = min(45, declared_size - len(decoded))
+        # SEC drops a trailing zero-encoded space on some full lines. Only that
+        # one omitted character is supported; missing meaningful bytes still fail
+        # the complete independent HTTP comparison below.
+        width = 1 + 4 * ((n + 2) // 3)
+        if (
+            not line
+            or line[0] != n + 32
+            or any(not 32 <= c <= 96 for c in line)
+            or len(line) not in ({width, width - 1} if n == 45 else {width})
+            or (i < len(data_lines) - 1 and n != 45)
+        ):
+            raise ValueError(_ERROR)
+        try:
+            # Decode complete six-bit groups, then use the declared byte count.
+            # EDGAR's unused final padding can encode 0x01 (CPython #100308).
+            expanded = binascii.a2b_uu(b"M" + line[1:])
+            value = expanded[:n]
+        except binascii.Error as error:
+            raise ValueError(_ERROR) from error
+        decoded.extend(value)
+        if len(line) == width - 1:
+            restored_zero_lines.append(i + 1)
+        padding = expanded[n : 3 * ((n + 2) // 3)]
+        if any(padding):
+            unused_padding.append({"line": i + 1, "hex": padding.hex()})
+    if bytes(decoded) != received:
+        raise ValueError(_ERROR)
+    return {
+        "decoder_profile": "sec_uu_http_exact_v1",
+        "aggregate_hash": sha256(source).hexdigest(),
+        "member_hash": sha256(member).hexdigest(),
+        "raw_hash": sha256(received).hexdigest(),
+        "restored_zero_lines": restored_zero_lines,
+        "nonzero_unused_padding": unused_padding,
+        "submission_relation": "verified",
+    }
