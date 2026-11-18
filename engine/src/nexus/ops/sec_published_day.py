@@ -18,12 +18,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 
 from nexus.ops.local_recovery import write_private
-from nexus.ops.research_identity_local import _Exact200Client
 from nexus.ops.sec_index_local import _read
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.sec_monitor import SecMonitorRule
 from nexus.persistence.session import session_factory
-from nexus.providers.http import AllowedOrigin, HttpPolicyError, HttpRequestPolicy
+from nexus.providers.http import (
+    AllowedOrigin,
+    FixedOriginHttpClient,
+    HttpPolicyError,
+    HttpRequestPolicy,
+)
 from nexus.research.identity_sources import parse_identity_source
 from nexus.research.sec_index_storage import _receipt
 from nexus.settings import EngineSettings
@@ -121,19 +125,23 @@ def _matching_rows(
     return len(lines) - 7, selected
 
 
-class _IndexResponse(BaseModel):
+class _SourceResponse(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
-    last_modified: str = Field(min_length=20, max_length=64)
+    last_modified: str | None = Field(min_length=20, max_length=64)
     content_length: int | None = Field(ge=1, le=MAX_BYTES)
     content_encoding: Literal["identity", "gzip", "deflate"]
     chunked: bool
 
-    def version(self, body: bytes) -> datetime:
+    def check_length(self, body: bytes) -> None:
         if (
             not 0 < len(body) <= MAX_BYTES
             or self.chunked == (self.content_length is not None)
             or (self.content_length is not None and self.content_length != len(body))
         ):
+            raise ValueError(INVALID)
+
+    def version(self) -> datetime:
+        if self.last_modified is None:
             raise ValueError(INVALID)
         modified = parsedate_to_datetime(self.last_modified)
         if modified.utcoffset() is None:
@@ -141,6 +149,7 @@ class _IndexResponse(BaseModel):
         return modified.astimezone(UTC)
 
     def decode(self, body: bytes) -> bytes:
+        self.check_length(body)
         if self.content_encoding == "identity":
             return body
         decoder = zlib.decompressobj(31 if self.content_encoding == "gzip" else 15)
@@ -159,10 +168,10 @@ class _IndexResponse(BaseModel):
         return decoded
 
 
-class _DayIndexClient(_Exact200Client):
-    """Bind the index body to the exact official directory version."""
+class _SourceClient(FixedOriginHttpClient):
+    """Archive a bounded HTTP response without transparent decompression."""
 
-    framing: _IndexResponse | None = None
+    framing: _SourceResponse | None = None
 
     async def _read_bounded(self, response: httpx.Response) -> bytes:
         if response.status_code != 200:
@@ -173,16 +182,16 @@ class _DayIndexClient(_Exact200Client):
         transfer = [value.lower() for value in headers.get_list("transfer-encoding")]
         encoding = headers.get("content-encoding", "identity").lower()
         if (
-            len(values) != 1
+            len(values) > 1
             or len(lengths) > 1
             or any(not length.isascii() or not length.isdecimal() for length in lengths)
             or transfer not in ([], ["chunked"])
         ):
             raise ValueError(INVALID)
         try:
-            framing = _IndexResponse.model_validate(
+            framing = _SourceResponse.model_validate(
                 {
-                    "last_modified": values[0],
+                    "last_modified": values[0] if values else None,
                     "content_length": int(lengths[0]) if lengths else None,
                     "content_encoding": encoding,
                     "chunked": transfer == ["chunked"],
@@ -194,7 +203,7 @@ class _DayIndexClient(_Exact200Client):
                     raise ValueError(INVALID)
                 body.extend(chunk)
             received = bytes(body)
-            framing.version(received)
+            framing.check_length(received)
         except ValueError as error:
             raise ValueError(INVALID) from error
         self.framing = framing
@@ -244,24 +253,28 @@ async def _collect(folder: Path, day: date, contact: str, scope: dict[str, objec
     origin = AllowedOrigin("https", "www.sec.gov")
     try:
         async with httpx.AsyncClient(follow_redirects=False) as transport:
-            directory_client = _Exact200Client(
+            directory_client = _SourceClient(
                 provider_name="sec", policy=policy, origin=origin, client=transport
             )
-            directory = await directory_client.get_bytes(directory_parts, (), headers)
-            if contact.encode() in directory:
-                raise ValueError(INVALID)
+            directory_wire = await directory_client.get_bytes(directory_parts, (), headers)
             directory_at = datetime.now(UTC)
-            _save(folder, "directory.json", directory, directory_parts, directory_at)
+            directory_framing = directory_client.framing
+            if directory_framing is None:
+                raise ValueError(INVALID)
+            directory = directory_framing.decode(directory_wire)
+            if contact.encode() in directory_wire or contact.encode() in directory:
+                raise ValueError(INVALID)
+            _save(folder, "directory.json.http-body", directory_wire, directory_parts, directory_at)
             listed = _listed_modified(directory, day)
             if listed > directory_at:
                 raise ValueError(INVALID)
-            index_client = _DayIndexClient(
+            index_client = _SourceClient(
                 provider_name="sec", policy=policy, origin=origin, client=transport
             )
             wire = await index_client.get_bytes(index_parts, (), headers)
             index_at = datetime.now(UTC)
             framing = index_client.framing
-            if framing is None or framing.version(wire) != listed:
+            if framing is None or framing.version() != listed:
                 raise ValueError(INVALID)
             raw = framing.decode(wire)
             if contact.encode() in wire or contact.encode() in raw:
@@ -273,6 +286,7 @@ async def _collect(folder: Path, day: date, contact: str, scope: dict[str, objec
                     {
                         "scope": scope,
                         "directory_sha256": sha256(directory).hexdigest(),
+                        "directory_framing": directory_framing.model_dump(),
                         "index_sha256": sha256(raw).hexdigest(),
                         "framing": framing.model_dump(),
                     },
@@ -294,13 +308,13 @@ def _verify(
 ) -> dict[str, object]:
     parts = _directory_parts(day)
     name = _index_name(day)
-    directory = _read(folder / "directory.json", limit=MAX_BYTES)
+    directory_wire = _read(folder / "directory.json.http-body", limit=MAX_BYTES)
     wire_name = name + ".http-body"
     wire = _read(folder / wire_name, limit=MAX_BYTES)
     prefix = f"{SOURCE}/{'/'.join(parts)}"
     directory_at = _receipt(
-        directory,
-        _read(folder / "directory.json.receipt.json", limit=65536),
+        directory_wire,
+        _read(folder / "directory.json.http-body.receipt.json", limit=65536),
         source_url=f"{prefix}/index.json",
         now=now,
     )
@@ -310,10 +324,12 @@ def _verify(
         source_url=f"{prefix}/{name}",
         now=now,
     )
-    modified = _listed_modified(directory, day)
     response = parse_identity_source(_read(folder / "index-response.json", limit=65536))
-    framing = _IndexResponse.model_validate(response.get("framing"))
-    if not modified <= directory_at <= index_at or framing.version(wire) != modified:
+    directory_framing = _SourceResponse.model_validate(response.get("directory_framing"))
+    directory = directory_framing.decode(directory_wire)
+    modified = _listed_modified(directory, day)
+    framing = _SourceResponse.model_validate(response.get("framing"))
+    if not modified <= directory_at <= index_at or framing.version() != modified:
         raise ValueError(INVALID)
     raw = framing.decode(wire)
     index_hash = sha256(raw).hexdigest()
@@ -321,6 +337,7 @@ def _verify(
     if response != {
         "scope": scope,
         "directory_sha256": directory_hash,
+        "directory_framing": directory_framing.model_dump(),
         "index_sha256": index_hash,
         "framing": framing.model_dump(),
     }:

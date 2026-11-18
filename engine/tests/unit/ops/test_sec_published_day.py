@@ -66,7 +66,7 @@ def transport(
     modified=MODIFIED,
     length=None,
     compressed=False,
-    no_footer=False,
+    missing_footer=None,
 ):
     calls = []
     client = httpx.AsyncClient
@@ -78,18 +78,19 @@ def transport(
         assert request.headers["accept-encoding"] == "gzip, deflate"
         name = request.url.path.rsplit("/", 1)[1]
         calls.append(name)
-        if name == "index.json":
-            return httpx.Response(200, content=listing)
-        assert name == FILE
-        body = gzip.compress(index) if compressed else index
-        if no_footer:
+        assert name in {"index.json", FILE}
+        payload = listing if name == "index.json" else index
+        body = gzip.compress(payload) if compressed else payload
+        if name == missing_footer:
             body = body[:-8]
         return httpx.Response(
             200,
             stream=httpx.ByteStream(body),
             headers={
                 "Last-Modified": modified,
-                "Content-Length": str(len(body) if length is None else length),
+                "Content-Length": str(
+                    len(body) if name == "index.json" or length is None else length
+                ),
                 "Content-Encoding": "gzip" if compressed else "identity",
             },
         )
@@ -166,12 +167,17 @@ async def test_unpublished_mismatched_or_truncated_version_has_no_proof(
 
 
 @pytest.mark.asyncio
-async def test_complete_http_frame_with_incomplete_gzip_stream_is_rejected(tmp_path, monkeypatch):
+@pytest.mark.parametrize("truncation", ["index.json", FILE])
+async def test_complete_http_frame_with_incomplete_gzip_stream_is_rejected(
+    tmp_path, monkeypatch, truncation
+):
     body = (HEADER + TARGET).encode()
-    calls = transport(monkeypatch, directory(FILE), body, compressed=True, no_footer=True)
+    calls = transport(
+        monkeypatch, directory(FILE), body, compressed=True, missing_footer=truncation
+    )
     with pytest.raises(ValueError, match=published.INVALID):
         await published._collect(tmp_path, DAY, CONTACT, SCOPE)
-    assert calls == ["index.json", FILE]
+    assert calls == (["index.json"] if truncation == "index.json" else ["index.json", FILE])
     assert not (tmp_path / "index-response.json").exists()
 
 
