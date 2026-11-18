@@ -39,11 +39,14 @@ async def test_host_heartbeat_does_not_wait_for_scan_and_shutdown_collects_it(
 
     async def foreground(**kwargs):
         await kwargs["heartbeat"](AT)
+        kwargs["kick_monitor"](AT)
         await started.wait()
         await kwargs["heartbeat"](AT + timedelta(seconds=15))
+        kwargs["kick_monitor"](AT + timedelta(seconds=15))
         assert not finished.is_set() and len(heartbeats) == 2
         # A new bucket while busy is consumed; it must not queue a catch-up scan.
         await kwargs["heartbeat"](AT + timedelta(minutes=5))
+        kwargs["kick_monitor"](AT + timedelta(minutes=5))
         release.set()
         return loop.AgentPaperLoopAction.STOP_REQUESTED
 
@@ -137,10 +140,14 @@ async def test_host_keeps_one_safe_diagnostic_per_failed_bucket_including_exit(
 
     async def foreground(**kwargs):
         await kwargs["heartbeat"](AT)
+        kwargs["kick_monitor"](AT)
         await first.wait()
         await kwargs["heartbeat"](AT + timedelta(seconds=15))
+        kwargs["kick_monitor"](AT + timedelta(seconds=15))
         await kwargs["heartbeat"](AT + timedelta(seconds=30))
+        kwargs["kick_monitor"](AT + timedelta(seconds=30))
         await kwargs["heartbeat"](AT + timedelta(minutes=5))
+        kwargs["kick_monitor"](AT + timedelta(minutes=5))
         await second.wait()
         return loop.AgentPaperLoopAction.STOP_REQUESTED
 
@@ -191,6 +198,7 @@ async def test_cancelled_host_collects_owned_scan_before_releasing_ownership(mon
 
     async def foreground(**kwargs):
         await kwargs["heartbeat"](AT)
+        kwargs["kick_monitor"](AT)
         await asyncio.Event().wait()
 
     monkeypatch.setattr(loop, "acquire_agent_paper_lock", lambda: nullcontext())
@@ -267,6 +275,7 @@ async def test_running_host_cannot_rebind_monitor_identity_after_inspection(
         nonlocal mutated
         await kwargs["inspect"]()
         await kwargs["heartbeat"](AT)
+        kwargs["kick_monitor"](AT)
         await did_scan.wait()
         mutated = True
         key = {
@@ -321,6 +330,7 @@ async def test_normal_host_observes_sources_before_its_read_only_scan(monkeypatc
 
     async def foreground(**kwargs):
         await kwargs["heartbeat"](AT)
+        kwargs["kick_monitor"](AT)
         for _ in range(20):
             if events == ["observe", "scan"]:
                 break
@@ -407,6 +417,9 @@ async def test_real_foreground_keeps_five_minute_checks_during_research(
     async def heartbeat(_settings, **kwargs):
         beats.append(kwargs["seen_at"])
 
+    async def initial_pause(*_args, **_kwargs):
+        return False
+
     async def execute(_settings, **kwargs):
         executions.append(kwargs["action"])
         started.set()
@@ -441,6 +454,7 @@ async def test_real_foreground_keeps_five_minute_checks_during_research(
     monkeypatch.setattr(manual_paper_host, "inspect_manual_queue", passthrough)
     monkeypatch.setattr(monitor_dispatch, "inspect_monitor_queue", passthrough)
     monkeypatch.setattr(loop, "heartbeat_agent_paper_loop", heartbeat)
+    monkeypatch.setattr(loop, "read_initial_probe_pause", initial_pause)
     monkeypatch.setattr(loop, "execute_agent_paper_loop_action", execute)
     monkeypatch.setattr(research_monitor, "refresh_host_observations", prepare)
     monkeypatch.setattr(research_monitor, "scan_host_once", scan)

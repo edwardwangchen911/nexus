@@ -55,13 +55,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "budget_pressure",
-    [False, True, "allocator", "send_refusal", "stage2_refusal"],
+    [False, True, "allocator", "send_refusal", "stage2_refusal", "host_handoff"],
     ids=[
         "two-generations",
         "natural-budget-protection",
         "shared-allocation",
         "send-refusal",
         "stage2-refusal",
+        "host-open-handoff",
     ],
 )
 async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor(
@@ -76,6 +77,9 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
 
     at = datetime(2026, 11, 11, 15, tzinfo=UTC)
     sessions = (datetime(2026, 11, 12, 15, tzinfo=UTC), datetime(2026, 11, 13, 15, tzinfo=UTC))
+    host_handoff = budget_pressure == "host_handoff"
+    if host_handoff:
+        sessions = (sessions[0].replace(hour=14, minute=24),)
     assert all(t < datetime.now(UTC) and t.weekday() < 5 for t in sessions)
     controller = DisposableClock(migrated_database_url)
     url = controller.uncached_url(migrated_database_url)
@@ -315,7 +319,8 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
             await trace("http11.send_request_headers.complete", {})
             return await normal_mock(self, request)
 
-        monkeypatch.setattr(httpx.MockTransport, "handle_async_request", synthetic_headers)
+        if not host_handoff:
+            monkeypatch.setattr(httpx.MockTransport, "handle_async_request", synthetic_headers)
         directory = (tmp_path / "baseline/directory.json").read_bytes()
         entries = []
         run_ids = []
@@ -341,42 +346,48 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                         prior_run.status == "completed"
                         and prior_run.settled_cost_usd == Decimal("0.0897")
                     )
-            await append_session_fresh_inputs(
-                factory, pointer.instrument_id, controller.now(), decision_session=day.date()
-            )
-            boundary_before = await candidate_input_boundary(
-                factory, settings, pointer.instrument_id, controller.now(), CALENDAR_ID
-            )
-            if index:
-                assert boundary_before == dict(
-                    candidate_count=0,
-                    prior_session=sessions[0].date(),
-                    daily_authorities=0,
-                    quote_present=True,
-                    same_quote=False,
-                ), boundary_before
-                await append_prior_session_daily(
-                    factory, monkeypatch, pointer.instrument_id, boundary_before["prior_session"]
+            if not host_handoff:
+                await append_session_fresh_inputs(
+                    factory, pointer.instrument_id, controller.now(), decision_session=day.date()
                 )
-                boundary_after = await candidate_input_boundary(
+                boundary_before = await candidate_input_boundary(
                     factory, settings, pointer.instrument_id, controller.now(), CALENDAR_ID
                 )
-                assert boundary_after == dict(
-                    candidate_count=1,
-                    prior_session=sessions[0].date(),
-                    daily_authorities=1,
-                    quote_present=True,
-                    same_quote=True,
-                ), boundary_after
-                print(
-                    "E2_CURRENT_INPUT_BOUNDARY="
-                    + json.dumps(dict(before=boundary_before, after=boundary_after), default=str),
-                    flush=True,
-                )
-            else:
-                assert boundary_before["candidate_count"] == 1 and boundary_before["same_quote"], (
-                    boundary_before
-                )
+                if index:
+                    assert boundary_before == dict(
+                        candidate_count=0,
+                        prior_session=sessions[0].date(),
+                        daily_authorities=0,
+                        quote_present=True,
+                        same_quote=False,
+                    ), boundary_before
+                    await append_prior_session_daily(
+                        factory,
+                        monkeypatch,
+                        pointer.instrument_id,
+                        boundary_before["prior_session"],
+                    )
+                    boundary_after = await candidate_input_boundary(
+                        factory, settings, pointer.instrument_id, controller.now(), CALENDAR_ID
+                    )
+                    assert boundary_after == dict(
+                        candidate_count=1,
+                        prior_session=sessions[0].date(),
+                        daily_authorities=1,
+                        quote_present=True,
+                        same_quote=True,
+                    ), boundary_after
+                    print(
+                        "E2_CURRENT_INPUT_BOUNDARY="
+                        + json.dumps(
+                            dict(before=boundary_before, after=boundary_after), default=str
+                        ),
+                        flush=True,
+                    )
+                else:
+                    assert (
+                        boundary_before["candidate_count"] == 1 and boundary_before["same_quote"]
+                    ), boundary_before
             accepted = controller.now()
             entry = dict(
                 accession_number=f"0000123456-26-00009{index + 1}",
@@ -431,7 +442,7 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                     account_id=pointer.account_id,
                     rule_id=rule.id,
                     capture_id=capture.id,
-                    scheduled_at=day.replace(minute=0),
+                    scheduled_at=day.replace(minute=day.minute // 5 * 5),
                 )
                 assert check.result == "true", check.reason
                 event = await db.scalar(
@@ -467,6 +478,26 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 settings, argparse.Namespace(action="prepare-batch", batch_id=batch.id)
             )
             assert material["status"] == "prepared", material
+            if host_handoff:
+                from helpers.durable_host_open import verify_open_handoff
+
+                await verify_open_handoff(
+                    monkeypatch,
+                    tmp_path,
+                    factory,
+                    settings,
+                    store,
+                    captured,
+                    pointer,
+                    controller,
+                    rule,
+                    batch.id,
+                    UUID(material["snapshot_id"]),
+                    directory,
+                    raw,
+                    calls,
+                )
+                return
             if index:
 
                 async def row_counts():

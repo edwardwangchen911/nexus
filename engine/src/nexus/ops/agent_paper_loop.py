@@ -2940,6 +2940,7 @@ async def run_local_agent_paper_loop(
             )
 
             monitor_scan_bucket: datetime | None = None
+            host_prepared_market_open_at: datetime | None = None
 
             async def scan_monitor() -> object:
                 return await scan_host_once(
@@ -3079,6 +3080,10 @@ async def run_local_agent_paper_loop(
 
                 normal = await inspect_manual_close(current, account_id=account_id, snapshot=normal)
                 normal = await inspect_manual_queue(current, account_id=account_id, snapshot=normal)
+                if host_prepared_market_open_at is not None:
+                    normal = replace(
+                        normal, host_prepared_market_open_at=host_prepared_market_open_at
+                    )
                 from nexus.monitoring.host import INCREMENT_ACTION_HEADROOM_SECONDS
                 from nexus.ops.monitor_dispatch import inspect_monitor_queue
 
@@ -3100,7 +3105,8 @@ async def run_local_agent_paper_loop(
             async def execute(
                 action: AgentPaperLoopAction, snapshot: AgentPaperLoopSnapshot
             ) -> AgentPaperLoopAction | None:
-                return await execute_agent_paper_loop_action(
+                nonlocal host_prepared_market_open_at
+                result = await execute_agent_paper_loop_action(
                     settings,
                     account_id=account_id,
                     repo_root=repo_root,
@@ -3108,6 +3114,9 @@ async def run_local_agent_paper_loop(
                     snapshot=snapshot,
                     **({"env_file": env_file} if env_file is not None else {}),
                 )
+                if action == AgentPaperLoopAction.PREPARE_INPUTS and result is None:
+                    host_prepared_market_open_at = snapshot.market_open_at
+                return result
 
             async def heartbeat(seen_at: datetime) -> None:
                 await heartbeat_agent_paper_loop(

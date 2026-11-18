@@ -510,6 +510,8 @@ async def dispatch_host_once(
     )
     normal = await inspect_manual_close(current, account_id=account_id, snapshot=normal)
     normal = await inspect_manual_queue(current, account_id=account_id, snapshot=normal)
+    if prepared_market_open_at is not None:
+        normal = replace(normal, host_prepared_market_open_at=prepared_market_open_at)
     selected = await inspect_monitor_queue(current, account_id=account_id, snapshot=normal)
     if selected.monitor_trigger_id != trigger_id or choose_loop_action(
         selected, prepared_market_open_at=prepared_market_open_at
