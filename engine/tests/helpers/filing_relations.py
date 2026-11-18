@@ -24,9 +24,7 @@ async def assert_relation_cli(factory, settings, store, capture_id, root, monkey
         _, index = await read_monitor_index(db, store, snapshot_id=UUID(capture_id), as_of=now)
         entry = next(e for e in index.entries if e.form == "8-K")
         base = filing_root(index.issuer_cik, entry.accession_number)
-        raw = {
-            entry.primary_document: b"<p>Item 2.02. Quarterly results and reconciliation.</p>"
-        }
+        raw = {entry.primary_document: b"<p>Item 2.02. Quarterly results and reconciliation.</p>"}
         graphic = b"\xff\xd8" + b"\x00" * 87 + b"\xff\xd9"
         raw["image.jpg"] = graphic
         members = []
