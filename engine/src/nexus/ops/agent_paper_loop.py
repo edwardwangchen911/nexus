@@ -2193,6 +2193,16 @@ def _annotate_agent_paper_failure(error: Exception, *, phase: str) -> None:
         return
 
 
+class _PendingProbeStep(StrEnum):
+    CALLBACKS_UNAVAILABLE = "callbacks_unavailable"
+    PAUSE_MONITOR_CONFIRMATION = "pause_monitor_confirmation"
+    PAUSE_HEARTBEAT = "pause_heartbeat"
+    PAUSE_RECORD = "pause_record"
+    RESUME_MONITOR_CONFIRMATION = "resume_monitor_confirmation"
+    RESUME_HEARTBEAT = "resume_heartbeat"
+    RESUME_RECORD = "resume_record"
+
+
 def _emit_agent_paper_unknown_failure(
     stage: str,
     occurred_at: datetime,
@@ -2200,6 +2210,7 @@ def _emit_agent_paper_unknown_failure(
     action: AgentPaperLoopAction | None = None,
     error: Exception | None = None,
     inspection_site: str | None = None,
+    pending_probe_step: _PendingProbeStep | None = None,
 ) -> None:
     """Best-effort safe stage evidence for one fail-closed unknown result."""
     if stage not in {"execute", "heartbeat", "inspect", "planner"}:
@@ -2218,6 +2229,8 @@ def _emit_agent_paper_unknown_failure(
         }:
             payload["inspection_site"] = inspection_site
         if stage == "inspect" and inspection_site == "pending_work":
+            if isinstance(pending_probe_step, _PendingProbeStep):
+                payload["pending_probe_step"] = pending_probe_step.value
             from nexus.ops.manual_paper_host import (
                 MANUAL_TRIGGER_CODES,
                 PENDING_WORK_KINDS,
@@ -2354,10 +2367,18 @@ async def run_foreground_loop(
         return seen_at
 
     def stop_unknown(
-        stage: str, *, error: Exception | None = None, inspection_site: str | None = None
+        stage: str,
+        *,
+        error: Exception | None = None,
+        inspection_site: str | None = None,
+        pending_probe_step: _PendingProbeStep | None = None,
     ) -> AgentPaperLoopAction:
         _emit_agent_paper_unknown_failure(
-            stage, clock(), error=error, inspection_site=inspection_site
+            stage,
+            clock(),
+            error=error,
+            inspection_site=inspection_site,
+            pending_probe_step=pending_probe_step,
         )
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
@@ -2391,23 +2412,38 @@ async def run_foreground_loop(
                 if monitor_busy():
                     must_probe = True
                     continue
+                probe_step = None
                 try:
                     result = await bounded_probe(
                         wake_for_pending_work, asyncio.timeout(interval_seconds)
                     )
                     if isinstance(result, ReadProbeDeadline):
                         paused = True
+                        probe_step = (
+                            _PendingProbeStep.CALLBACKS_UNAVAILABLE
+                            if record_probe is None
+                            else _PendingProbeStep.PAUSE_MONITOR_CONFIRMATION
+                        )
                         if record_probe is None or not monitor_confirmed():
                             raise RuntimeError("HOST_READ_PROBE_STATE_INVALID")
+                        probe_step = _PendingProbeStep.PAUSE_HEARTBEAT
                         await persist_heartbeat()
+                        probe_step = _PendingProbeStep.PAUSE_RECORD
                         async with asyncio.timeout(interval_seconds):
                             await record_probe(result)
+                        probe_step = _PendingProbeStep.PAUSE_HEARTBEAT
                         await persist_heartbeat()
                         paused = must_probe = True
                         continue
                     if paused:
+                        probe_step = (
+                            _PendingProbeStep.CALLBACKS_UNAVAILABLE
+                            if record_probe is None
+                            else _PendingProbeStep.RESUME_MONITOR_CONFIRMATION
+                        )
                         if record_probe is None or not monitor_confirmed():
                             raise RuntimeError("HOST_READ_PROBE_STATE_INVALID")
+                        probe_step = _PendingProbeStep.RESUME_HEARTBEAT
                         await persist_heartbeat()
                         recovery_inspect = True
                         return None
@@ -2415,7 +2451,12 @@ async def run_foreground_loop(
                     if result or must_probe:
                         break
                 except Exception as error:
-                    return stop_unknown("inspect", error=error, inspection_site="pending_work")
+                    return stop_unknown(
+                        "inspect",
+                        error=error,
+                        inspection_site="pending_work",
+                        pending_probe_step=probe_step,
+                    )
             if (
                 wall_started_at is not None
                 and seen_at >= wall_started_at
@@ -2438,7 +2479,11 @@ async def run_foreground_loop(
         return stop_unknown("heartbeat", error=error)
     if paused:
         if wake_for_pending_work is None or record_probe is None:
-            return stop_unknown("inspect", inspection_site="pending_work")
+            return stop_unknown(
+                "inspect",
+                inspection_site="pending_work",
+                pending_probe_step=_PendingProbeStep.CALLBACKS_UNAVAILABLE,
+            )
         now = clock()
         stopped = await wait_before_reinspection(
             snapshot_now=now, wait_until=now, elapsed_by_monotonic=False
@@ -2512,7 +2557,12 @@ async def run_foreground_loop(
                 async with asyncio.timeout(interval_seconds):
                     await record_probe(None)
             except Exception as error:
-                return stop_unknown("inspect", error=error, inspection_site="pending_work")
+                return stop_unknown(
+                    "inspect",
+                    error=error,
+                    inspection_site="pending_work",
+                    pending_probe_step=_PendingProbeStep.RESUME_RECORD,
+                )
             recovery_inspect = paused = False
         if action == AgentPaperLoopAction.WAIT_FOR_SLOT:
             next_slot = floor_decision_slot(snapshot.now) + timedelta(minutes=5)
