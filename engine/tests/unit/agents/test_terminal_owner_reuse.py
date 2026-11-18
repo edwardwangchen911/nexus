@@ -251,3 +251,94 @@ async def test_unstaged_public_member_keeps_full_owner_and_unused_guard(monkeypa
     owner.assert_awaited_once()
     unused.assert_awaited_once()
     assert unused.await_args.kwargs == {"owner_id": scope_id, "member": member, "now": now}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("companion_selected", [False, True])
+async def test_zero_stage_requires_the_original_route_for_all_three_members(
+    monkeypatch, companion_selected
+):
+    from nexus.paper import zero_stage_disposition as disposition
+
+    now = datetime(2026, 11, 16, tzinfo=UTC)
+    row = SimpleNamespace(id=uuid4(), contract_version=3, mode="research_and_monitor")
+    members = [
+        SimpleNamespace(run_id=uuid4(), job_id=uuid4(), usage_known=known)
+        for known in (False, True, True)
+    ]
+    view = SimpleNamespace(status="unknown", research=SimpleNamespace(members=members))
+    terminal = AsyncMock(
+        return_value=SimpleNamespace(
+            empty_authorizations=True,
+            known=False,
+            budget_settled=False,
+            cleanup_confirmed=False,
+            orphan=False,
+        )
+    )
+    companion = AsyncMock(return_value=companion_selected)
+    monkeypatch.setattr(disposition, "read_terminal_proof", terminal)
+    monkeypatch.setattr(disposition, "_selected_member_settled", companion)
+    session = object()
+
+    if companion_selected:
+        result = await disposition.proof(session, row=row, view=view, now=now)
+        assert result["run_id"] == str(members[0].run_id)
+        assert [c.kwargs["member"] for c in companion.await_args_list] == members[1:]
+    else:
+        with pytest.raises(ValueError, match=disposition.BLOCKED):
+            await disposition.proof(session, row=row, view=view, now=now)
+        companion.assert_awaited_once()
+    terminal.assert_awaited_once_with(
+        session,
+        run_id=members[0].run_id,
+        now=now,
+        close_empty_unknown=True,
+        expected_owner=(row.id, "independent"),
+        expected_job_id=members[0].job_id,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", [False, True])
+async def test_historical_proof_uses_native_closure_with_no_legacy_fallback(monkeypatch, selected):
+    from nexus.agents.research_stages import public
+    from nexus.paper import independent_unknown_proof as historical
+
+    now = datetime(2026, 11, 16, tzinfo=UTC)
+    row = SimpleNamespace(
+        id=uuid4(), account_id=uuid4(), contract_version=3, mode="research_and_monitor"
+    )
+    member = SimpleNamespace(run_id=uuid4(), job_id=uuid4(), usage_known=False)
+    view = SimpleNamespace(
+        cycle_id=None,
+        status="unknown",
+        code="MANUAL_RESULT_UNKNOWN",
+        research=SimpleNamespace(members=[member]),
+    )
+    statuses = ["queued", "preparing", "active", "unknown"]
+    session = SimpleNamespace(
+        scalars=AsyncMock(side_effect=[statuses, *[[] for _ in historical.FACT_FILTERS]])
+    )
+    close = AsyncMock(return_value=selected)
+    monkeypatch.setattr(historical, "read_manual_request", AsyncMock(return_value=view))
+    monkeypatch.setattr(public, "_selected_member_settled", close)
+    duplicate = AsyncMock(side_effect=AssertionError("duplicate preliminary owner resolution"))
+    monkeypatch.setattr(historical, "selected_route", duplicate, raising=False)
+
+    if selected:
+        result = await historical.independent_unknown_proof(session, row=row, now=now)
+        assert result["unknown_run_ids"] == [str(member.run_id)]
+        assert result["facts"].keys() == historical.FACT_FILTERS.keys()
+    else:
+        with pytest.raises(ValueError, match=historical.BLOCKED):
+            await historical.independent_unknown_proof(session, row=row, now=now)
+    close.assert_awaited_once_with(
+        session,
+        owner_id=row.id,
+        kind="independent",
+        member=member,
+        now=now,
+        allow_unknown_usage=True,
+    )
+    duplicate.assert_not_awaited()

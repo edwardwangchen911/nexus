@@ -371,12 +371,15 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             elif case == "wrong_scope":
                 from uuid import uuid4
 
-                from nexus.paper import independent_unknown_proof
+                from nexus.agents.research_stages import routes
 
-                async def other_route(*_args):
-                    return {"kind": "independent", "scope_id": uuid4()}
+                original_route = routes._selected_route_row
 
-                monkeypatch.setattr(independent_unknown_proof, "selected_route", other_route)
+                async def other_route(session, job_id):
+                    route = await original_route(session, job_id)
+                    return None if route is None else {**route, "scope_id": uuid4()}
+
+                monkeypatch.setattr(routes, "_selected_route_row", other_route)
             elif case == "wrong_account":
                 from uuid import uuid4
 
