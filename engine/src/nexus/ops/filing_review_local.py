@@ -40,7 +40,11 @@ async def prepare_review_material(
             schema = await db.scalar(text("SELECT version_num FROM alembic_version"))
             # This export only reads the unchanged archive/scope contracts. It
             # cannot enter any admission or dispatch path on either schema.
-            if schema not in {"0134_sec_foundation", "0135_routine_budget"}:
+            if schema not in {
+                "0134_sec_foundation",
+                "0135_routine_budget",
+                "0136_sec_adopted_content",
+            }:
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
             now = await db.scalar(text("SELECT clock_timestamp()"))
             if not isinstance(now, datetime):

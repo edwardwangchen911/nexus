@@ -14,7 +14,17 @@ from nexus.ops.research_monitor import parser, run
 from sqlalchemy import text
 
 
-async def assert_relation_cli(factory, settings, store, capture_id, root, monkeypatch):
+async def assert_relation_cli(
+    factory,
+    settings,
+    store,
+    capture_id,
+    root,
+    monkeypatch,
+    *,
+    target_accession=None,
+    keep_policy=False,
+):
     monkeypatch.setattr(
         "nexus.monitoring.filing_originals.configured_exhibit_store", lambda _: store
     )
@@ -22,9 +32,18 @@ async def assert_relation_cli(factory, settings, store, capture_id, root, monkey
         db.info["sec_exhibit_store"] = store
         now = await db.scalar(text("SELECT pg_catalog.clock_timestamp()"))
         _, index = await read_monitor_index(db, store, snapshot_id=UUID(capture_id), as_of=now)
-        entry = next(e for e in index.entries if e.form == "8-K")
+        entry = next(
+            e
+            for e in index.entries
+            if e.form == "8-K"
+            and (target_accession is None or e.accession_number == target_accession)
+        )
         base = filing_root(index.issuer_cik, entry.accession_number)
-        raw = {entry.primary_document: b"<p>Item 2.02. Quarterly results and reconciliation.</p>"}
+        raw = {
+            entry.primary_document: (
+                b'<img src="image.jpg"><p>Item 2.02. Quarterly results and reconciliation.</p>'
+            )
+        }
         graphic = b"\xff\xd8" + b"\x00" * 87 + b"\xff\xd9"
         raw["image.jpg"] = graphic
         members = []
@@ -180,8 +199,14 @@ async def assert_relation_cli(factory, settings, store, capture_id, root, monkey
         ]
     from helpers.graphic_adoption import assert_graphic_adoption
 
-    await assert_graphic_adoption(
-        factory, settings, export_dir / "material.json", root.parent, monkeypatch
+    adopted = await assert_graphic_adoption(
+        factory,
+        settings,
+        export_dir / "material.json",
+        root.parent,
+        monkeypatch,
+        store,
+        keep_policy=keep_policy,
     )
     for action, sid in (
         ("prove-content-relations", old_id),
@@ -221,3 +246,5 @@ async def assert_relation_cli(factory, settings, store, capture_id, root, monkey
                 "sec_auto_increment_day_claims",
             )
         ]
+
+    return adopted
