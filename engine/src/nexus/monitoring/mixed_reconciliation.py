@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.audit.service import append_audit_event
 from nexus.monitoring.mixed_context import MixedMonitorContext
 from nexus.monitoring.mixed_contracts import canonical_hash, compile_mixed_proposal
+from nexus.monitoring.original_occupancy import BLOCKED as ORIGINAL_OCCUPANCY_BLOCKED
+from nexus.monitoring.original_occupancy import accepted
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentResearchOutputRecord,
@@ -59,6 +61,23 @@ async def reconcile_mixed_run(
     from nexus.persistence.models.monitoring import MonitorMixedEventReceipt
 
     await lock_security(session, account_id=account_id, instrument_id=run.instrument_id)
+    if (member.run_id, member.account_id, member.instrument_id) == (
+        run.id,
+        account_id,
+        run.instrument_id,
+    ):
+        try:
+            stopped_without_authorization = await accepted(
+                session, run_id=run.id, account_id=account_id, now=now
+            )
+        except ValueError as error:
+            if str(error) != ORIGINAL_OCCUPANCY_BLOCKED:
+                raise
+            stopped_without_authorization = False
+        if stopped_without_authorization:
+            # Proved unknown and stopped before authorization: this exact job
+            # cannot publish a consumption, replacement or coverage receipt.
+            return None
     await _scope_evidence(session, run=run, account_id=account_id)
     trigger = await finish_increment(
         session, account_id=account_id, trigger_id=member.trigger_id, now=now

@@ -92,6 +92,27 @@ async def assert_disposition(factory, monkeypatch, account_id, run_id, job_id, f
             await occupancy.require_for_account_send(db, account_id, fenced_transport=False)
         assert not await occupancy.require_for_account_send(db, uuid4(), fenced_transport=False)
 
+    # Existing unknown completion must not repeatedly compile the mixed
+    # material in every scan. Reconciliation still cannot issue receipts.
+    from nexus.monitoring import mixed_reconciliation, reconciliation
+    from nexus.persistence.models.agents import AgentResearchRunRecord
+    from nexus.persistence.models.monitoring import MonitorIncrement
+
+    async with factory.begin() as db:
+        run = await db.get(AgentResearchRunRecord, run_id)
+        member = await db.scalar(select(MonitorIncrement).where(MonitorIncrement.run_id == run_id))
+        assert run is not None and member is not None
+
+        async def should_not_assemble(*args, **kwargs):
+            pytest.fail("Unfinishable original was fully assembled during normal reconciliation")
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(reconciliation, "_scope_evidence", should_not_assemble)
+            result = await mixed_reconciliation.reconcile_mixed_run(
+                db, account_id=account_id, run=run, member=member, now=now
+            )
+        assert result is None
+
     # A late additional failure fact blocks immediately even when the frozen
     # terminal, old lease, once, and budget have not changed.
     async with factory.begin() as db:
