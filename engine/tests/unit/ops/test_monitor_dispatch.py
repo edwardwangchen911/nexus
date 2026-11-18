@@ -76,6 +76,25 @@ def test_new_increment_reserves_the_daily_slot_worst_case_time(minute, expected)
     assert loop.choose_loop_action(snapshot).value == expected
 
 
+def test_untouched_sec_defer_keeps_the_host_waiting_during_the_daily_slot():
+    start = AT.replace(hour=14, minute=30)
+    due = loop._portfolio_slot(start)
+    at_slot = replace(
+        waiting(),
+        now=due + timedelta(minutes=1),
+        decision_window_start_at=start,
+        decision_window_end_at=start + timedelta(hours=5),
+    )
+    assert loop.choose_loop_action(at_slot) == loop.AgentPaperLoopAction.TRIGGER
+    assert (
+        loop.choose_loop_action(replace(at_slot, monitor_preclaim_deferred=True))
+        == loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+    )
+    assert loop._normal_wait_until(
+        at_slot, loop.AgentPaperLoopAction.WAIT_FOR_SLOT
+    ) == due + timedelta(minutes=5)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["allowed", "daily_due", "disabled", "changed_batch", "unknown"])
 @pytest.mark.parametrize("materials_only", [False, True])

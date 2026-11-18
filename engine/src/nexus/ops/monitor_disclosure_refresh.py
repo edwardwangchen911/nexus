@@ -282,6 +282,7 @@ async def refresh_disclosure_observations(
     environment: dict[str, str],
     repo_root: Path,
     candidate_hints: dict[UUID, tuple[str, ...]] | None = None,
+    only_instrument: UUID | None = None,
 ) -> dict[str, object]:
     """Refresh exact installed issuers once; failures never authorize research or execution."""
     if (
@@ -322,6 +323,10 @@ async def refresh_disclosure_observations(
                 )
             if not instruments:
                 return _result("market_closed")
+            if only_instrument is not None:
+                if only_instrument not in instruments:
+                    return _result("blocked", reason="MONITOR_SCOPE_INVALID")
+                instruments = (only_instrument,)
             for instrument in instruments:
                 try:
                     async with (

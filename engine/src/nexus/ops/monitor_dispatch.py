@@ -19,6 +19,16 @@ from nexus.ops.agent_paper_loop import (
     AgentPaperLoopSnapshot,
     choose_loop_action,
 )
+from nexus.ops.monitor_dispatch_sec import (
+    SEC_DEFERRED_ACTION as SEC_DEFERRED_ACTION,
+)
+from nexus.ops.monitor_dispatch_sec import (
+    WORKER_ACTION,
+    WorkerDispatchRefused,
+    confirm_deferred_stop,
+    deferred_receipt,
+    record_worker_dispatch,
+)
 from nexus.paper.host_probe_state import require_host_admitting
 from nexus.persistence.models.monitoring import MonitorIncrement, MonitorTrigger
 from nexus.persistence.models.runtime import AuditEvent, Job
@@ -29,7 +39,6 @@ IDLE_ACTIONS = frozenset(
     {AgentPaperLoopAction.WAIT_FOR_SLOT, AgentPaperLoopAction.WAIT_FOR_SESSION}
 )
 DISPATCH_ACTION = "research.monitor.dispatch_checked"
-WORKER_ACTION = "research.monitor.worker_dispatched"
 
 
 def unchecked(now: datetime) -> ColumnElement[bool]:
@@ -108,6 +117,23 @@ async def inspect_monitor_queue(
                         .limit(1)
                     )
                 )
+                if (
+                    job is not None
+                    and trigger.status == "admitted"
+                    and job.status == "queued"
+                    and job.attempt_count == 0
+                    and sent is None
+                ):
+                    from nexus.ops.monitor_disclosure_refresh import _bucket
+
+                    if (
+                        await deferred_receipt(
+                            session, member, since=_bucket(snapshot.now), now=snapshot.now
+                        )
+                        is not None
+                    ):
+                        # This queued Run still owns its original reservation.
+                        return replace(snapshot, monitor_preclaim_deferred=True)
                 status = (
                     "unknown"
                     if trigger.status == "unknown"
@@ -220,6 +246,7 @@ async def dispatch_configured_once(
     sec_contact: str | None = None,
     environment: dict[str, str] | None = None,
     prepare_materials_only: bool = False,
+    refresh_not_after: datetime | None = None,
 ) -> dict[str, object]:
     """Persist a bounded eligibility check, then consume only the original native Job.
 
@@ -399,30 +426,63 @@ async def dispatch_configured_once(
             if "trigger_id" in admitted:
                 trigger_id = UUID(str(admitted["trigger_id"]))
         if job_id is not None:
-            # Native claim, one attempt, exact Job and capacity/lease checks. No fallback key.
-            async with factory() as session, session.begin():
-                await require_host_admitting(session, settings.agent_paper_account_id)
-                sent = await session.scalar(
-                    select(AuditEvent.id)
-                    .where(
-                        AuditEvent.action == WORKER_ACTION,
-                        AuditEvent.payload["job_id"].astext == str(job_id),
+            from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
+            from nexus.paper.account_transaction_turn import account_transaction_turn
+
+            account_id = settings.agent_paper_account_id
+
+            async def record_dispatch(
+                selected_job: UUID,
+                *,
+                can_refresh: bool,
+                after_refresh: bool = False,
+                defer_source_confirmed: bool | None = None,
+            ) -> tuple[UUID, datetime] | str | None:
+                async with account_transaction_turn(settings), factory.begin() as session:
+                    return await record_worker_dispatch(
+                        session,
+                        settings=settings,
+                        account_id=account_id,
+                        trigger_id=trigger_id,
+                        job_id=selected_job,
+                        refresh_not_after=refresh_not_after,
+                        can_refresh=can_refresh,
+                        after_refresh=after_refresh,
+                        defer_source_confirmed=defer_source_confirmed,
                     )
-                    .limit(1)
+
+            try:
+                stale = await record_dispatch(
+                    job_id,
+                    can_refresh=repo_root is not None
+                    and bool((environment or {}).get("SEC_CONTACT")),
                 )
-                if sent is not None:
-                    return {"status": "unconfirmed", "execution_locked": True}
-                sent_at = await session.scalar(select(func.clock_timestamp()))
-                if not isinstance(sent_at, datetime):
-                    raise ValueError("MONITOR_CLOCK_UNAVAILABLE")
-                await append_audit_event(
-                    session,
-                    actor_id="research-monitor",
-                    action=WORKER_ACTION,
-                    schema_version="monitor_dispatch_v1",
-                    payload={"trigger_id": str(trigger_id), "job_id": str(job_id)},
-                    occurred_at=sent_at,
-                )
+                if isinstance(stale, tuple):
+                    instrument_id, scheduled_at = stale
+                    assert repo_root is not None
+                    observation = await refresh_disclosure_observations(
+                        settings,
+                        account_id=account_id,
+                        calendar_authority_id=calendar_authority_id,
+                        scheduled_at=scheduled_at,
+                        environment=environment or {},
+                        repo_root=repo_root,
+                        only_instrument=instrument_id,
+                    )
+                    status = observation["status"]
+                    stale = await record_dispatch(
+                        job_id,
+                        can_refresh=False,
+                        after_refresh=True,
+                        defer_source_confirmed=None
+                        if status in {"refreshed", "unchanged"}
+                        else status != "unknown"
+                        and type(observation.get("provider_requests")) is int,
+                    )
+                if isinstance(stale, str):
+                    return {"status": "deferred", "reason": stale, "execution_locked": True}
+            except WorkerDispatchRefused as error:
+                return {"status": "unconfirmed", "reason": str(error), "execution_locked": True}
             from nexus.ops.agent_capacity_rejection import dispatch_preclaim_code
 
             try:
@@ -540,6 +600,21 @@ async def dispatch_host_once(
             )
         ):
             return {"status": "deferred", "execution_locked": True}
+    from nexus.ops.agent_paper_loop import _portfolio_slot
+
+    cutoffs: list[datetime] = []
+    if normal.decision_window_start_at is not None:
+        daily = _portfolio_slot(normal.decision_window_start_at)
+        if normal.now < daily or choose_loop_action(normal) in {
+            AgentPaperLoopAction.TRIGGER,
+            AgentPaperLoopAction.PREPARE_INPUTS,
+        }:
+            cutoffs.append(daily)
+    if evaluation is not None and evaluation.evaluation_slot_at is not None:
+        cutoffs.append(evaluation.evaluation_slot_at)
+    refresh_not_after = (
+        min(cutoffs) - timedelta(seconds=INCREMENT_ACTION_HEADROOM_SECONDS) if cutoffs else None
+    )
     return await dispatch_configured_once(
         current,
         trigger_id=trigger_id,
@@ -548,6 +623,7 @@ async def dispatch_host_once(
         sec_contact=private_context.get("SEC_CONTACT"),
         environment=private_context,
         prepare_materials_only=prepare_materials_only,
+        refresh_not_after=refresh_not_after,
     )
 
 
@@ -583,7 +659,11 @@ async def confirm_monitor_materials_shutdown(
 
 
 async def confirm_monitor_shutdown(
-    settings: EngineSettings, *, account_id: UUID, trigger_id: UUID
+    settings: EngineSettings,
+    *,
+    account_id: UUID,
+    trigger_id: UUID,
+    action_started_at: datetime | None = None,
 ) -> bool:
     """Read exact native exit, known settlement and durable reconciliation only."""
     from nexus.monitoring.admission import require_increment_binding
@@ -622,6 +702,14 @@ async def confirm_monitor_shutdown(
                     settings, account_id=account_id, batch_id=trigger.batch_id
                 ) and await confirm_batch_market_preparation(
                     settings, account_id=account_id, batch_id=trigger.batch_id
+                )
+            if trigger.status == "admitted" and action_started_at is not None:
+                return await confirm_deferred_stop(
+                    session,
+                    account_id=account_id,
+                    run_id=trigger.research_run_id,
+                    action_started_at=action_started_at,
+                    now=now,
                 )
             if trigger.status not in {"completed", "failed"}:
                 return False

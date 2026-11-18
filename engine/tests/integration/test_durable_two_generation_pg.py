@@ -63,6 +63,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
         "stage2_refusal",
         "host_handoff",
         "sec_expired",
+        "sec_refresh_on_dispatch",
+        "sec_refresh_unavailable",
+        "sec_refresh_slot_guard",
+        "sec_refresh_dispatch_fenced",
+        "sec_refresh_crosses_cutoff",
     ],
     ids=[
         "two-generations",
@@ -72,6 +77,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
         "stage2-refusal",
         "host-open-handoff",
         "sec-expires-in-queue",
+        "sec-refresh-before-first-claim",
+        "sec-refresh-unavailable-no-claim",
+        "sec-refresh-respects-slot",
+        "sec-refresh-refuses-prior-dispatch",
+        "sec-refresh-rolls-back-marker-at-cutoff",
     ],
 )
 async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor(
@@ -322,6 +332,8 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
         normal_mock = httpx.MockTransport.handle_async_request
 
         async def synthetic_headers(self, request):
+            if request.url.host in {"www.sec.gov", "data.sec.gov"}:
+                return await normal_mock(self, request)
             trace = request.extensions.get("trace")
             assert trace is not None, "Active SEC request must have a send fence"
             await trace("http11.send_request_headers.started", {})
@@ -627,7 +639,14 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 await assert_price_updates(settings, UUID(admitted["run_id"]), controller.now())
                 assert calls == []
                 return
-            if budget_pressure == "sec_expired":
+            if budget_pressure in {
+                "sec_expired",
+                "sec_refresh_on_dispatch",
+                "sec_refresh_unavailable",
+                "sec_refresh_slot_guard",
+                "sec_refresh_dispatch_fenced",
+                "sec_refresh_crosses_cutoff",
+            }:
                 from nexus.agents.research_stages.protocol import stage_evidence
                 from nexus.monitoring import durable_sec_permission
                 from nexus.persistence.models.runtime import AuditEvent
@@ -643,6 +662,141 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 assert expired_at > controller.now()
                 async with factory.begin() as db:
                     await controller.set(db, expired_at, running=False, refresh_defaults=True)
+
+                if budget_pressure != "sec_expired":
+                    from helpers.durable_host_open import install_durable_refresh_mock
+                    from nexus.agents.research_stages.proof import read_terminal_proof
+                    from nexus.ops.agent_paper_loop import (
+                        AgentPaperLoopSnapshot,
+                        choose_loop_action,
+                    )
+                    from nexus.ops.monitor_dispatch import (
+                        SEC_DEFERRED_ACTION,
+                        WORKER_ACTION,
+                        confirm_monitor_shutdown,
+                        dispatch_configured_once,
+                        inspect_monitor_queue,
+                    )
+
+                    failed_source = budget_pressure == "sec_refresh_unavailable"
+                    sec_calls = install_durable_refresh_mock(
+                        monkeypatch,
+                        store,
+                        controller,
+                        directory,
+                        raw,
+                        unavailable=failed_source,
+                    )
+                    with pytest.raises(ValueError, match="SEC_RESEARCH_PERMISSION_INVALID"):
+                        async with factory.begin() as db:
+                            await durable_sec_permission.require_new_send(db, run_id)
+                    monkeypatch.setattr(worker, "run_agent_worker_once", synchronized_worker)
+                    options = dict(
+                        trigger_id=UUID(batch.trigger_ids[0]),
+                        calendar_authority_id=CALENDAR_ID,
+                        repo_root=tmp_path,
+                        environment={"SEC_CONTACT": "nexus test@example.invalid"},
+                    )
+                    if budget_pressure == "sec_refresh_slot_guard":
+                        options["refresh_not_after"] = controller.now() + timedelta(seconds=89)
+                    dispatched = budget_pressure == "sec_refresh_dispatch_fenced"
+                    if dispatched:
+                        from nexus.audit.service import append_audit_event
+
+                        async with factory.begin() as db:
+                            await append_audit_event(
+                                db,
+                                actor_id="research-monitor",
+                                action=WORKER_ACTION,
+                                schema_version="monitor_dispatch_v1",
+                                payload={
+                                    "trigger_id": str(options["trigger_id"]),
+                                    "job_id": str(job_id),
+                                },
+                                occurred_at=controller.now(),
+                            )
+
+                    crosses_cutoff = budget_pressure == "sec_refresh_crosses_cutoff"
+                    if crosses_cutoff:
+                        from nexus.audit import service as audit
+
+                        cutoff = controller.now() + timedelta(seconds=180)
+                        options["refresh_not_after"] = cutoff
+                        normal_append = audit.append_audit_event
+
+                        async def append_at_cutoff(db, **kwargs):
+                            event = await normal_append(db, **kwargs)
+                            if kwargs["action"] == WORKER_ACTION:
+                                await controller.set(db, cutoff, running=False)
+                            return event
+
+                        monkeypatch.setattr(audit, "append_audit_event", append_at_cutoff)
+
+                    result = await dispatch_configured_once(settings, **options)
+                    if budget_pressure != "sec_refresh_on_dispatch":
+                        assert result["status"] == ("unconfirmed" if dispatched else "deferred"), (
+                            result
+                        )
+                        assert not calls and len(sec_calls) == (
+                            2 if crosses_cutoff else int(failed_source)
+                        )
+                        async with factory() as db:
+                            job = await db.get(Job, job_id)
+                            assert (job.status, job.attempt_count) == ("queued", 0)
+                            sent = await db.scalar(
+                                select(AuditEvent.id).where(
+                                    AuditEvent.action == WORKER_ACTION,
+                                    AuditEvent.payload["job_id"].astext == str(job_id),
+                                )
+                            )
+                            assert bool(sent) is dispatched
+                            receipt = await db.scalar(
+                                select(AuditEvent).where(
+                                    AuditEvent.action == SEC_DEFERRED_ACTION,
+                                    AuditEvent.payload["job_id"].astext == str(job_id),
+                                )
+                            )
+                            assert (receipt is None) is dispatched
+                        if not dispatched:
+                            now = controller.now()
+                            snapshot = AgentPaperLoopSnapshot(
+                                now=now,
+                                calendar_authority_id=CALENDAR_ID,
+                                decision_window_start_at=now - timedelta(hours=2),
+                                decision_window_end_at=now - timedelta(minutes=1),
+                                next_decision_window_start_at=now + timedelta(days=1),
+                            )
+                            selected = await inspect_monitor_queue(
+                                settings, account_id=pointer.account_id, snapshot=snapshot
+                            )
+                            assert selected.monitor_preclaim_deferred
+                            assert selected.monitor_trigger_id is None
+                            assert choose_loop_action(selected) == choose_loop_action(snapshot)
+                            # The completed HTTP 503 records its request count.
+                            assert receipt.payload["source_confirmed"] is True
+                            assert await confirm_monitor_shutdown(
+                                settings,
+                                account_id=pointer.account_id,
+                                trigger_id=options["trigger_id"],
+                                action_started_at=expired_at,
+                            )
+                    else:
+                        assert result["status"] == "completed", result
+                        assert result["run_id"] == str(run_id)
+                        assert calls == ["research", "critique", "synthesis"]
+                        assert len(sec_calls) == 2
+                        async with factory() as db:
+                            job = await db.get(Job, job_id)
+                            assert (job.status, job.attempt_count) == ("succeeded", 1)
+                            proof = await read_terminal_proof(
+                                db, run_id=run_id, now=controller.now()
+                            )
+                            assert proof is not None and proof.known and proof.budget_settled
+                            assert proof.cleanup_confirmed
+                    before = len(calls), len(sec_calls)
+                    await dispatch_configured_once(settings, **options)
+                    assert (len(calls), len(sec_calls)) == before
+                    return
 
                 refusals = []
                 native_send = durable_sec_permission.require_new_send
