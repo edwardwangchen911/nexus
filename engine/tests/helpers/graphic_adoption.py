@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from nexus.monitoring import filing_adoption as adoption
 from nexus.ops.sec_graphic_adoption_local import parser, run
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.data import DataSnapshot
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -431,7 +432,7 @@ async def assert_graphic_adoption(
         async with factory() as db:
             assert (
                 await db.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0136_sec_adopted_content"
+                == CURRENT_MIGRATION_HEAD
             )
         # Even with valid SQL metadata, a changed immutable object fails strong read.
         original_id = UUID(material["original_snapshot_id"])
