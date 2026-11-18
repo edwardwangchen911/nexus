@@ -47,7 +47,11 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 {"key": SCHEMA_ADMISSION_LOCK_KEY},
             )
             schema = await db.scalar(text("SELECT version_num FROM alembic_version"))
-            if schema not in {"0134_sec_foundation", "0135_routine_budget"}:
+            if schema not in {
+                "0134_sec_foundation",
+                "0135_routine_budget",
+                "0136_sec_adopted_content",
+            }:
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
             created = False
             if args.action == "register":

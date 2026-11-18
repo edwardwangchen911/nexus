@@ -111,6 +111,11 @@ def parser() -> argparse.ArgumentParser:
         "inspect-sec-candidates", help="Verify one saved official hint observation"
     )
     candidates.add_argument("--snapshot-id", type=UUID, required=True)
+    for action in ("publish-reviewed-content", "inspect-reviewed-content"):
+        reviewed = commands.add_parser(
+            action, help="Verify an existing exact operator adoption and all filing bodies"
+        )
+        reviewed.add_argument("--adoption-snapshot-id", type=UUID, required=True)
     content = commands.add_parser(
         "import-content", help="Import exact SEC filing inventory and every declared text original"
     )
@@ -579,6 +584,10 @@ async def _run(
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action == "inspect-reviewed-content":
+        from nexus.ops.reviewed_content_local import inspect_reviewed_content
+
+        return await inspect_reviewed_content(settings, adoption_id=args.adoption_snapshot_id)
     if args.action == "prepare-content-review":
         from nexus.ops.filing_review_local import prepare_review_material
 
@@ -906,6 +915,28 @@ async def _run(
                     batch_id=args.batch_id,
                     now=now,
                 )
+            if args.action == "publish-reviewed-content":
+                from nexus.monitoring.filing_adopted_content import publish_adopted_content
+
+                content, created = await publish_adopted_content(
+                    session,
+                    adoption_id=args.adoption_snapshot_id,
+                    account_id=settings.agent_paper_account_id,
+                    now=now,
+                )
+                return {
+                    "status": "created" if created else "existing",
+                    "snapshot_id": str(content.snapshot_id),
+                    "evidence_ref_id": str(content.evidence_ref_id),
+                    "canonical_hash": content.canonical_hash,
+                    "content_schema": content.archive.schema_version,
+                    "documents": len(content.archive.documents),
+                    "research_authority_granted": False,
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
+                }
             if args.action == "import-content":
                 from nexus.monitoring.filing_archive import import_filing_content
                 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch

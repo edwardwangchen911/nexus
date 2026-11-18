@@ -8,7 +8,14 @@ from typing import Literal
 from uuid import UUID
 
 from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,11 +43,14 @@ from nexus.research.sec_index_storage import (
 SOURCE = "nexus_sec_monitor_filing"
 SCHEMA: Literal["sec_monitor_filing_v1"] = "sec_monitor_filing_v1"
 TRANSPORT_SCHEMA = "sec_monitor_filing_v2"
+ADOPTED_SCHEMA: Literal["sec_monitor_filing_v3"] = "sec_monitor_filing_v3"
 
 
 class FilingArchive(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal["sec_monitor_filing_v1", "sec_monitor_filing_v2"] = SCHEMA
+    schema_version: Literal[
+        "sec_monitor_filing_v1", "sec_monitor_filing_v2", "sec_monitor_filing_v3"
+    ] = SCHEMA
     instrument_id: UUID
     issuer_cik: str
     index_snapshot_id: UUID
@@ -50,6 +60,25 @@ class FilingArchive(BaseModel):
     amendment_relation_status: Literal["not_assessed"] = "not_assessed"
     originals: dict[str, tuple[IndexArchiveBinding, IndexArchiveBinding]]
     documents: tuple[FilingDocument, ...]
+    graphic_adoption_id: UUID | None = None
+    dependency_proof: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def exact_version(self) -> "FilingArchive":
+        extended = self.graphic_adoption_id is not None or self.dependency_proof is not None
+        if (self.schema_version == ADOPTED_SCHEMA) != extended or (
+            extended and (self.graphic_adoption_id is None or self.dependency_proof is None)
+        ):
+            raise ValueError("SEC_MONITOR_ARCHIVE_INVALID")
+        return self
+
+    @model_serializer(mode="wrap")
+    def legacy_serialization(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result = handler(self)
+        if self.schema_version != ADOPTED_SCHEMA:
+            result.pop("graphic_adoption_id", None)
+            result.pop("dependency_proof", None)
+        return dict(result)
 
     def canonical(self) -> bytes:
         return json.dumps(
@@ -178,12 +207,20 @@ async def import_filing_content(
         originals=originals,
         documents=documents,
     )
+    return await _persist_archive(session, document=document, now=now)
+
+
+async def _persist_archive(
+    session: AsyncSession, *, document: FilingArchive, now: datetime
+) -> tuple[VerifiedFilingContent, bool]:
+    store = configured_exhibit_store(session)
     raw = document.canonical()
     digest = sha256(raw).hexdigest()
     prior = await session.scalar(
         select(DataSnapshot).where(
             DataSnapshot.source == SOURCE,
-            DataSnapshot.provider_object_id == f"{index.issuer_cik}:{accession}",
+            DataSnapshot.provider_object_id
+            == f"{document.issuer_cik}:{document.entry.accession_number}",
             DataSnapshot.revision == digest,
         )
     )
@@ -193,7 +230,7 @@ async def import_filing_content(
             raise ValueError("SEC_MONITOR_ARCHIVE_INVALID")
         return verified, False
     uri = await store.put_if_absent(
-        key=f"evidence/monitor-filing/{index.issuer_cik}/{accession}/sha256/{digest}.json",
+        key=f"evidence/monitor-filing/{document.issuer_cik}/{document.entry.accession_number}/sha256/{digest}.json",
         content=raw,
     )
     published = await session.scalar(select(func.clock_timestamp()))
@@ -203,7 +240,7 @@ async def import_filing_content(
     evidence = ResearchEvidenceRef(
         created_at=now,
         source=SOURCE,
-        provider_object_id=f"{index.issuer_cik}:{accession}",
+        provider_object_id=f"{document.issuer_cik}:{document.entry.accession_number}",
         revision=digest,
         available_at=now,
         content_hash=digest,
@@ -215,7 +252,7 @@ async def import_filing_content(
         source=SOURCE,
         provider_object_id=evidence.provider_object_id,
         revision=digest,
-        observed_at=entry.accepted_at,
+        observed_at=document.entry.accepted_at,
         available_at=now,
         received_at=now,
         schema_version=document.schema_version,
@@ -232,10 +269,13 @@ async def import_filing_content(
         payload={
             "snapshot_id": str(snapshot.id),
             "canonical_hash": digest,
-            "index_snapshot_id": str(source.id),
+            "index_snapshot_id": str(document.index_snapshot_id),
         },
     )
-    result = await read_filing_content(session, snapshot_id=snapshot.id, as_of=now)
+    checked_at = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(checked_at, datetime) or checked_at < now:
+        raise ValueError("SEC_MONITOR_CLOCK_UNAVAILABLE")
+    result = await read_filing_content(session, snapshot_id=snapshot.id, as_of=checked_at)
     if result is None:
         raise ValueError("SEC_MONITOR_ARCHIVE_INVALID")
     return result, True
@@ -249,7 +289,7 @@ async def read_filing_content(
     if (
         row is None
         or row.source != SOURCE
-        or row.schema_version not in {SCHEMA, TRANSPORT_SCHEMA}
+        or row.schema_version not in {SCHEMA, TRANSPORT_SCHEMA, ADOPTED_SCHEMA}
         or max(row.created_at, row.observed_at, row.available_at, row.received_at) > as_of
     ):
         return None
@@ -280,8 +320,22 @@ async def read_filing_content(
         ):
             return None
         store = configured_exhibit_store(session)
+        adopted_binding = None
+        originals_asof = as_of
+        if document.schema_version == ADOPTED_SCHEMA:
+            if not await session.scalar(
+                text("SELECT sec_adopted_content_valid(:id,:cutoff)"),
+                {"id": row.id, "cutoff": as_of},
+            ):
+                return None
+            from nexus.monitoring.filing_adopted_content import read_adopted_binding
+
+            adopted_binding = await read_adopted_binding(
+                session, document=document, available_at=row.available_at, as_of=as_of
+            )
+            originals_asof = adopted_binding[3]
         source, index = await read_monitor_index(
-            session, store, snapshot_id=document.index_snapshot_id, as_of=as_of
+            session, store, snapshot_id=document.index_snapshot_id, as_of=originals_asof
         )
         if (
             source.revision != document.index_hash
@@ -306,26 +360,41 @@ async def read_filing_content(
                         artifact.available_at,
                         artifact.received_at,
                     )
-                    > as_of
+                    > originals_asof
                 ):
                     return None
                 pair.append(await _original(store, binding))
             originals[name] = (pair[0], pair[1])
-        name = document.entry.accession_number + "-index.html"
-        inventory = originals.pop(name)
-        submission = (
-            originals.pop(document.entry.accession_number + ".txt")
-            if document.schema_version == TRANSPORT_SCHEMA
-            else None
-        )
-        rebuilt = verify_filing_documents(
-            entry=document.entry,
-            issuer_cik=document.issuer_cik,
-            inventory=inventory,
-            documents=originals,
-            now=as_of,
-            submission=submission,
-        )
+        if adopted_binding is not None:
+            from nexus.monitoring.filing_adopted_content import verify_adopted_documents
+
+            designation, original, original_row, _ = adopted_binding
+            rebuilt, closure = verify_adopted_documents(
+                designation=designation,
+                original=original,
+                original_id=original_row.id,
+                original_hash=original_row.revision,
+                pairs=originals,
+                now=as_of,
+            )
+            if document.dependency_proof != closure:
+                return None
+        else:
+            name = document.entry.accession_number + "-index.html"
+            inventory = originals.pop(name)
+            submission = (
+                originals.pop(document.entry.accession_number + ".txt")
+                if document.schema_version == TRANSPORT_SCHEMA
+                else None
+            )
+            rebuilt = verify_filing_documents(
+                entry=document.entry,
+                issuer_cik=document.issuer_cik,
+                inventory=inventory,
+                documents=originals,
+                now=as_of,
+                submission=submission,
+            )
         canonical = await store.read_evidence(
             f"evidence/monitor-filing/{document.issuer_cik}/{document.entry.accession_number}/sha256/{digest}.json",
             uri=evidence.location,

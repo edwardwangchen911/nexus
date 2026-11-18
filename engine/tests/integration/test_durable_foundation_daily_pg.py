@@ -45,10 +45,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("resolution", ("addressed", "unresolved", "absent", "issue"))
+@pytest.mark.parametrize(
+    "resolution", ("addressed", "unresolved", "absent", "issue", "adopted_graphic")
+)
 async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
     migrated_database_url, monkeypatch, tmp_path, resolution
 ):
+    adopted_graphic = resolution == "adopted_graphic"
+    if adopted_graphic:
+        resolution = "addressed"
     from helpers import disclosure_observations as reader
 
     async def forbidden_real_http(*args, **kwargs):
@@ -281,15 +286,29 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                         assert rejected.value.orig.sqlstate == "23514"
                         assert code in str(rejected.value)
         monkeypatch.setattr(filing, "AT", day - timedelta(seconds=8))
-        imported = await run(
-            settings,
-            argparse.Namespace(
-                action="import-content",
-                index_snapshot_id=capture.id,
-                accession=entry["accession_number"],
-                archive_dir=filing.archive(tmp_path / "foundation-content", event.entry),
-            ),
-        )
+        if adopted_graphic:
+            from helpers.filing_relations import assert_relation_cli
+
+            imported = await assert_relation_cli(
+                factory,
+                settings,
+                store,
+                str(capture.id),
+                tmp_path / "graphic-originals",
+                monkeypatch,
+                target_accession=entry["accession_number"],
+                keep_policy=True,
+            )
+        else:
+            imported = await run(
+                settings,
+                argparse.Namespace(
+                    action="import-content",
+                    index_snapshot_id=capture.id,
+                    accession=entry["accession_number"],
+                    archive_dir=filing.archive(tmp_path / "foundation-content", event.entry),
+                ),
+            )
         async with factory() as db:
             assert (
                 await filing_archive.read_filing_content(

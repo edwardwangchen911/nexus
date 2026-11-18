@@ -149,6 +149,7 @@ async def read_adoption_record(
         anchor.actor_id != ACTOR
         or anchor.schema_version != SCHEMA
         or anchor.occurred_at != row.created_at
+        or anchor.created_at > as_of
         or anchor.payload
         != {"snapshot_id": str(row.id), "canonical_hash": row.revision, "purpose": result.purpose}
     ):
@@ -205,5 +206,6 @@ async def register_adoption(
         occurred_at=now,
         payload={"snapshot_id": str(row.id), "canonical_hash": digest, "purpose": result.purpose},
     )
-    await read_adoption(db, snapshot_id=row.id, account_id=account_id, as_of=now)
+    checked_at = require_utc(await db.scalar(text("SELECT clock_timestamp()")))
+    await read_adoption(db, snapshot_id=row.id, account_id=account_id, as_of=checked_at)
     return row, True
