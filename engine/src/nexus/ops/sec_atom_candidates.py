@@ -143,6 +143,12 @@ async def refresh_candidates(
                     )
                 )
             )
+        if rules:
+            # The optional work shares one short deadline. Rotate the stable
+            # order so early cancellations do not always skip the same issuer.
+            rules = tuple(sorted(rules, key=lambda rule: (rule.issuer_cik, rule.instrument_id)))
+            first = (int(scheduled_at.timestamp()) // 300) % len(rules)
+            rules = rules[first:] + rules[:first]
         for rule in rules:
             async with account_transaction_turn(settings), factory() as session, session.begin():
                 now, instruments = await _scope(
