@@ -3,6 +3,7 @@ import { formatDisplayTime } from "../lib/display-format";
 import { Badge } from "./ui/badge";
 
 type View = components["schemas"]["DurableSecView"];
+type Notice = components["schemas"]["DurableSecNoticeView"];
 const states = { active: "规则已启用", paused: "规则已暂停", revoked: "规则已撤销", unknown: "规则状态待核验" } as const;
 const coverage = { complete: "完整覆盖", partial: "部分覆盖", unknown: "覆盖范围未知" } as const;
 const results = { true: "发现规则生效后发布的新公告", false: "本次完整覆盖区间未发现新公告", unknown: "本次检查无法确认是否有新公告" } as const;
@@ -16,6 +17,51 @@ const reasons = {
   history_invalid: "既有公告身份记录未通过核验。",
   rule_inactive: "本次检查时规则未生效。",
 } as const;
+const noticeStatuses = {
+  queued: "等待领取",
+  delivering: "已领取，等待结果",
+  published: "已记录响应",
+  dead_letter: "发送尝试已结束",
+} satisfies Record<Notice["status"], string>;
+const serverResults = {
+  accepted: "Bark 已接受",
+  http_error: "收到非成功 HTTP 响应",
+  unconfirmed: "待核验",
+} satisfies Record<Notice["server_result"], string>;
+const failureReasons = {
+  UNKNOWN: "原始失败原因待核验",
+  PAYLOAD_INVALID: "通知内容校验未通过",
+  EVENT_UNSUPPORTED: "通知类型校验未通过",
+  ENCRYPTION_INVALID: "通知加密配置校验未通过",
+  ENCRYPTION_FAILED: "通知加密失败",
+  CONNECT_TIMEOUT: "连接 Bark 超时",
+  READ_TIMEOUT: "等待 Bark 响应超时",
+  WRITE_TIMEOUT: "向 Bark 提交请求超时",
+  POOL_TIMEOUT: "等待可用连接超时",
+  TRANSPORT_ERROR: "Bark 连接发生错误",
+  HTTP_REJECTED: "Bark 返回非成功响应",
+  RESPONSE_DECODE: "无法核验 Bark 响应",
+  PROVIDER_REJECTED: "Bark 的响应未能确认接受",
+} satisfies Record<components["schemas"]["FailureReason"], string>;
+
+function NoticeReceipt({ notice }: { notice: Notice }): React.ReactElement {
+  return <>
+    <dl className="decision-card__versions">
+      <div><dt>通知记录</dt><dd>{noticeStatuses[notice.status]} · {notice.attempt_count} 次尝试</dd></div>
+      <div><dt>通知服务结果</dt><dd>{serverResults[notice.server_result]}</dd></div>
+      <div><dt>手机实收</dt><dd>待核验</dd></div>
+    </dl>
+    {notice.failure_reason ? <p>{failureReasons[notice.failure_reason]}</p> : null}
+    <details>
+      <summary>通知编号与时间</summary>
+      <dl className="decision-card__versions">
+        <div><dt>通知编号</dt><dd>{notice.outbox_id}</dd></div>
+        {notice.attempted_at ? <div><dt>开始时间</dt><dd>{formatDisplayTime(notice.attempted_at)}</dd></div> : null}
+        {notice.finished_at ? <div><dt>结束时间</dt><dd>{formatDisplayTime(notice.finished_at)}</dd></div> : null}
+      </dl>
+    </details>
+  </>;
+}
 
 export function DurableSecDiscovery({ discovery }: { discovery: View }): React.ReactElement {
   const check = discovery.latest_check;
@@ -24,7 +70,7 @@ export function DurableSecDiscovery({ discovery }: { discovery: View }): React.R
     <p>公告发现规则不随旧研究计划到期；规则已启用不代表宿主当前在线。</p>
     <dl className="decision-card__versions">
       <div><dt>规则生效时间</dt><dd>{formatDisplayTime(discovery.effective_at)}</dd></div>
-      <div><dt>读取时点</dt><dd>{formatDisplayTime(discovery.observed_at)}</dd></div>
+      <div><dt>公告和通知读取时点</dt><dd>{formatDisplayTime(discovery.observed_at)}</dd></div>
       <div><dt>公告类型</dt><dd>{discovery.forms.length ? discovery.forms.join(" · ") : "待核验"}</dd></div>
     </dl>
     {check ? <section className="decision-card__section" aria-label="最近公告发现检查">
@@ -44,6 +90,7 @@ export function DurableSecDiscovery({ discovery }: { discovery: View }): React.R
       <h3>{event.form} · {event.event_key.split(":").at(-1)}</h3>
       <dl className="decision-card__versions"><div><dt>SEC 接受时间</dt><dd>{formatDisplayTime(event.accepted_at)}</dd></div><div><dt>首次发现时间</dt><dd>{formatDisplayTime(event.first_seen_at)}</dd></div></dl>
       {event.metadata_status === "conflict" ? <p>公告元数据出现冲突，后续处理状态待核验。</p> : null}
+      {event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>}
     </article>)}
     <p role="note">公告发现不代表通知已送达或研究已完成。研究有效期、旧事件一次限制、每日增量名额与未知费用仍独立核验；本区不表示可以发起研究或交易，交易保持锁定。</p>
   </section>;

@@ -6,25 +6,32 @@ from datetime import timedelta
 from hashlib import sha256
 from uuid import UUID
 
+import httpx
 import pytest
 from integration.test_monitor_disclosure_refresh_pg import settings_for_import, setup
 from nexus.api.durable_sec import read_durable_sec_view
+from nexus.api.routes.research import _research_wire
+from nexus.api.schemas.agents import ResearchRunEnvelope, ResearchRunResponse
+from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.monitoring import durable_sec_host as host
 from nexus.monitoring import durable_sec_storage as durable
 from nexus.monitoring.batches import scan_stock_batch
+from nexus.notifications.worker import load_bark_worker_settings, run_bark_worker
 from nexus.ops.durable_sec_index_local import import_durable_index
 from nexus.ops.sec_index_local import import_index
+from nexus.outbox.failure import read_delivery_failure
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.monitoring import MonitorPlan
-from nexus.persistence.models.runtime import OutboxEvent
+from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
 from nexus.persistence.models.sec_monitor import SecDiscoveryEvent, SecNotificationClaim
 from nexus.research.durable_sec_index_storage import read_durable_index_capture
 from sqlalchemy import func, select, text
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("server_response", ["accepted", "read_timeout", "ambiguous", "http_error"])
 async def test_durable_sec_api_projection_outlives_anchor_without_research_authority(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, server_response
 ):
     factory, store, captured, pointer, calls, client, invoke = await setup(
         migrated_database_url, monkeypatch, tmp_path
@@ -123,12 +130,99 @@ async def test_durable_sec_api_projection_outlives_anchor_without_research_autho
         async with factory() as session, session.begin():
             run = await session.get(AgentResearchRunRecord, pointer.source_run_id)
             now = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
-            view = await read_durable_sec_view(session, run, now=now)
+            view = await read_durable_sec_view(session, run, now=now, include_notice=True)
             assert view is not None and view.state == "active"
             assert view.latest_check.result == "true" and view.latest_check.coverage == "partial"
             assert view.event_count == 1 and len(view.events) == 1
             assert view.events[0].accepted_at < view.events[0].first_seen_at
             assert view.execution_locked is True
+            queued = view.events[0].notice
+            assert queued is not None and queued.status == "queued" and queued.attempt_count == 0
+            assert queued.server_result == "unconfirmed" and queued.device_result == "unknown"
+            before_attempt = now
+
+        sent = []
+
+        def respond(request):
+            assert request.url.path == "/push"
+            sent.append(request.url.path)
+            if server_response == "read_timeout":
+                raise httpx.ReadTimeout("private response text must not appear in the view")
+            if server_response == "ambiguous":
+                return httpx.Response(200, json={})
+            if server_response == "http_error":
+                return httpx.Response(500, json={"code": 500})
+            return httpx.Response(200, json={"code": 200})
+
+        bark = load_bark_worker_settings(
+            {
+                "NEXUS_BARK_ENABLED": "true",
+                "DATABASE_URL": settings.database_url,
+                "NEXUS_BARK_DEVICE_KEY": "test-device-key",
+                "NEXUS_BARK_ENCRYPTION_KEY": "0123456789abcdef",
+                "NEXUS_BARK_ACTIVATED_AT": rule.effective_at.isoformat(),
+            }
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
+            assert await run_bark_worker(bark, run_forever=False, client=transport) == 1
+            assert await run_bark_worker(bark, run_forever=False, client=transport) == 0
+        assert sent == ["/push"]
+        async with factory() as session, session.begin():
+            run = await session.get(AgentResearchRunRecord, pointer.source_run_id)
+            now = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
+            view = await read_durable_sec_view(session, run, now=now, include_notice=True)
+            notice = view.events[0].notice
+            assert notice is not None and notice.outbox_id == queued.outbox_id
+            assert notice.attempt_count == 1 and notice.device_result == "unknown"
+            assert before_attempt <= notice.attempted_at <= notice.finished_at <= now
+            if server_response == "accepted":
+                assert notice.status == "published" and notice.server_result == "accepted"
+                assert notice.failure_reason is None
+            else:
+                assert notice.status == "dead_letter"
+                assert notice.server_result == (
+                    "http_error" if server_response == "http_error" else "unconfirmed"
+                )
+                assert (
+                    notice.failure_reason
+                    == {
+                        "read_timeout": "READ_TIMEOUT",
+                        "ambiguous": "PROVIDER_REJECTED",
+                        "http_error": "HTTP_REJECTED",
+                    }[server_response]
+                )
+                wrong_time = await read_delivery_failure(
+                    session,
+                    event_id=notice.outbox_id,
+                    attempt_no=1,
+                    as_of=now,
+                    finished_at=notice.finished_at + timedelta(seconds=1),
+                )
+                assert wrong_time == {"stage": "unknown", "reason": "UNKNOWN"}
+            earlier = await read_durable_sec_view(
+                session, run, now=before_attempt, include_notice=True
+            )
+            assert earlier.event_count == 1 and earlier.events[0].notice == queued
+            attempt = await session.scalar(select(OutboxDeliveryAttempt))
+            pending_at = max(attempt.started_at, attempt.created_at)
+            assert pending_at < attempt.finished_at
+            inflight = await read_durable_sec_view(
+                session, run, now=pending_at, include_notice=True
+            )
+            assert inflight.events[0].notice.status == "delivering"
+            assert inflight.events[0].notice.finished_at is None
+            assert inflight.events[0].notice.server_result == "unconfirmed"
+
+            envelope = ResearchRunEnvelope.model_construct(
+                data=ResearchRunResponse.model_construct(durable_disclosure=view),
+                meta=SuccessMetaResponse(request_id=UUID(int=1), as_of=now),
+            )
+            baseline_wire = json.loads(_research_wire(envelope, "1").body)
+            opted_in_wire = json.loads(_research_wire(envelope, "1", include_sec_notices=True).body)
+            assert "notice" not in baseline_wire["data"]["durable_disclosure"]["events"][0]
+            assert opted_in_wire["data"]["durable_disclosure"]["events"][0]["notice"] == (
+                notice.model_dump(mode="json")
+            )
             await durable.change_state(
                 session, account_id=pointer.account_id, rule_id=rule.id, state="paused"
             )

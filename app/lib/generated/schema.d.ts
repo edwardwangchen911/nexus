@@ -240,7 +240,7 @@ export interface paths {
         };
         /**
          * Get Instrument Research
-         * @description Select the latest immutable research record by stable timestamp/id ordering.
+         * @description Select the immutable run as of the query. Monitoring has its own read time.
          */
         get: operations["getInstrumentResearch"];
         put?: never;
@@ -2861,6 +2861,42 @@ export interface components {
              * @enum {string}
              */
             metadata_status: "recorded" | "conflict";
+            notice?: components["schemas"]["DurableSecNoticeView"] | null;
+        };
+        /** DurableSecNoticeView */
+        DurableSecNoticeView: {
+            /**
+             * Attempt Count
+             * @enum {integer}
+             */
+            attempt_count: 0 | 1;
+            /** Attempted At */
+            attempted_at: string | null;
+            /**
+             * Device Result
+             * @default unknown
+             * @constant
+             */
+            device_result: "unknown";
+            failure_reason: components["schemas"]["FailureReason"] | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Outbox Id
+             * Format: uuid
+             */
+            outbox_id: string;
+            /**
+             * Server Result
+             * @default unconfirmed
+             * @enum {string}
+             */
+            server_result: "accepted" | "http_error" | "unconfirmed";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "delivering" | "published" | "dead_letter";
         };
         /** DurableSecPendingItem */
         DurableSecPendingItem: {
@@ -3341,6 +3377,11 @@ export interface components {
             /** Retryable */
             retryable: components["schemas"]["RetryableJobSummary"][];
         };
+        /**
+         * FailureReason
+         * @enum {string}
+         */
+        FailureReason: "UNKNOWN" | "PAYLOAD_INVALID" | "EVENT_UNSUPPORTED" | "ENCRYPTION_INVALID" | "ENCRYPTION_FAILED" | "CONNECT_TIMEOUT" | "READ_TIMEOUT" | "WRITE_TIMEOUT" | "POOL_TIMEOUT" | "TRANSPORT_ERROR" | "HTTP_REJECTED" | "RESPONSE_DECODE" | "PROVIDER_REJECTED";
         /** FrozenComparisonVariant */
         FrozenComparisonVariant: {
             /** Cost Complete */
@@ -9756,6 +9797,7 @@ export interface operations {
             };
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Notice-View"?: string | null;
             };
             path: {
                 instrument_id: string;
@@ -12244,6 +12286,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Notice-View"?: string | null;
             };
             path: {
                 run_id: string;

@@ -5,7 +5,8 @@ from typing import Literal
 from uuid import UUID
 
 from nexus.api.schemas.research_monitoring import MonitoringViewModel
-from pydantic import Field
+from nexus.outbox.failure import FailureReason
+from pydantic import ConfigDict, Field
 
 
 class DurableSecCoverageDetails(MonitoringViewModel):
@@ -37,12 +38,27 @@ class DurableSecCheckView(MonitoringViewModel):
     coverage_details: DurableSecCoverageDetails | None = None
 
 
+class DurableSecNoticeView(MonitoringViewModel):
+    outbox_id: UUID
+    status: Literal["queued", "delivering", "published", "dead_letter"]
+    attempt_count: Literal[0, 1]
+    attempted_at: datetime | None = None
+    finished_at: datetime | None = None
+    failure_reason: FailureReason | None = None
+    server_result: Literal["accepted", "http_error", "unconfirmed"] = "unconfirmed"
+    device_result: Literal["unknown"] = "unknown"
+
+
 class DurableSecEventView(MonitoringViewModel):
+    # The negotiated notice extension is absent on older API processes.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=False)
+
     event_key: str
     form: Literal["8-K", "8-K/A"]
     accepted_at: datetime
     first_seen_at: datetime
     metadata_status: Literal["recorded", "conflict"]
+    notice: DurableSecNoticeView | None = None
 
 
 class DurableSecView(MonitoringViewModel):

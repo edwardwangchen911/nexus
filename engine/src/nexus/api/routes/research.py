@@ -173,6 +173,7 @@ def _research_wire(
     *,
     status: int = 200,
     headers: dict[str, str] | None = None,
+    include_sec_notices: bool = False,
 ) -> JSONResponse:
     # A previous BFF rejects unknown keys. Negotiate the additive fields so
     # either service can roll back independently, including the create receipt.
@@ -181,10 +182,16 @@ def _research_wire(
         if view_version == "1"
         else {"data": {"monitoring_applicability", "price_check_windows"}}
     )
+    content = payload.model_dump(mode="json", exclude=exclude)
+    if not include_sec_notices:
+        discovery = content["data"].get("durable_disclosure")
+        if discovery is not None:
+            for event in discovery["events"]:
+                event.pop("notice", None)
     return JSONResponse(
         status_code=status,
         headers=headers,
-        content=payload.model_dump(mode="json", exclude=exclude),
+        content=content,
     )
 
 
@@ -270,6 +277,7 @@ async def create_research_run(
 async def get_research_run(
     run_id: UUID,
     monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
+    sec_notice_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Notice-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -280,10 +288,17 @@ async def get_research_run(
     output = await _latest_output(session, run.id)
     return _research_wire(
         ResearchRunEnvelope(
-            data=await _hydrate_response(session, run, output, window_summary=monitor_view == "1"),
+            data=await _hydrate_response(
+                session,
+                run,
+                output,
+                window_summary=monitor_view == "1",
+                include_sec_notices=sec_notice_view == "1",
+            ),
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
         ),
         monitor_view,
+        include_sec_notices=sec_notice_view == "1",
     )
 
 
@@ -301,10 +316,11 @@ async def get_instrument_research(
     instrument_id: UUID,
     as_of: Annotated[datetime, Query()],
     monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
+    sec_notice_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Notice-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
-    """Select the latest immutable research record by stable timestamp/id ordering."""
+    """Select the immutable run as of the query. Monitoring has its own read time."""
     try:
         bounded_as_of = require_utc(as_of)
     except ValueError as error:
@@ -334,10 +350,17 @@ async def get_instrument_research(
         output = None
     return _research_wire(
         ResearchRunEnvelope(
-            data=await _hydrate_response(session, run, output, window_summary=monitor_view == "1"),
+            data=await _hydrate_response(
+                session,
+                run,
+                output,
+                window_summary=monitor_view == "1",
+                include_sec_notices=sec_notice_view == "1",
+            ),
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
         ),
         monitor_view,
+        include_sec_notices=sec_notice_view == "1",
     )
 
 
@@ -360,6 +383,7 @@ async def _hydrate_response(
     *,
     observation_reader: ObservationReadback | None = None,
     window_summary: bool = False,
+    include_sec_notices: bool = False,
 ) -> ResearchRunResponse:
     with (
         identity_parse_scope(),
@@ -448,7 +472,9 @@ async def _hydrate_response(
                     if _declares_disclosure_monitoring(run)
                     else None
                 ),
-                "durable_disclosure": await read_durable_sec_view(session, run, now=reader.read_at),
+                "durable_disclosure": await read_durable_sec_view(
+                    session, run, now=reader.read_at, include_notice=include_sec_notices
+                ),
                 "stage_trace": await read_stage_trace(session, run),
                 "inputs": await read_research_inputs(
                     session,

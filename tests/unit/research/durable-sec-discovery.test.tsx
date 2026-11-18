@@ -5,6 +5,7 @@ import { ResearchPanel } from "../../../app/(protected)/research/[instrumentId]/
 import { researchData } from "./fixtures";
 import { disclosureMonitoring } from "./disclosure-monitoring-fixture";
 import type { components } from "../../../app/lib/generated/schema";
+import { runtimeContractSchemas } from "../../../app/lib/generated/runtime-contract";
 const at = "2026-11-17T03:00:00Z";
 const view: components["schemas"]["DurableSecView"] = {
   observed_at: at, rule_id: "00000000-0000-4000-8000-000000000001", state: "active",
@@ -14,6 +15,11 @@ const view: components["schemas"]["DurableSecView"] = {
     accepted_at: "2026-11-17T01:00:00Z", first_seen_at: at, metadata_status: "recorded" }],
 };
 describe("durable SEC discovery facts", () => {
+  it("accepts discovery events from an engine without notification readback", () => {
+    expect(runtimeContractSchemas.DurableSecEventView.required).not.toContain("notice");
+    render(<DurableSecDiscovery discovery={view} />);
+    expect(screen.getByText("暂无可核验通知记录。")).toBeVisible();
+  });
   it("explains unread history separately from bad rows without inventing a negative", () => {
     render(<DurableSecDiscovery discovery={{ ...view, latest_check: { ...view.latest_check!, result: "unknown", reason: "coverage_incomplete", coverage_details: { unread_history_files: 1, invalid_rows: 0, coverage_start_known: true } } }} />);
     expect(screen.getByText(/另有 1 份历史分片未纳入本次核验/)).toBeVisible();
@@ -52,5 +58,29 @@ describe("durable SEC discovery facts", () => {
   it("keeps metadata conflict visible", () => {
     render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], metadata_status: "conflict" }] }} />);
     expect(screen.getByText(/公告元数据出现冲突/)).toBeVisible();
+  });
+  it("shows the original timeout as an unconfirmed server result with one attempt", () => {
+    const id = "00000000-0000-4000-8000-000000000099";
+    render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], notice: {
+      outbox_id: id, status: "dead_letter", attempt_count: 1, attempted_at: at, finished_at: at,
+      server_result: "unconfirmed", device_result: "unknown", failure_reason: "READ_TIMEOUT",
+    } }] }} />);
+    expect(screen.getByText("发送尝试已结束 · 1 次尝试")).toBeVisible();
+    expect(screen.getByText("等待 Bark 响应超时")).toBeVisible();
+    expect(screen.getByText("手机实收")).toBeVisible();
+    expect(screen.getAllByText("待核验")).toHaveLength(2);
+    expect(screen.queryByText("Bark 已接受")).not.toBeInTheDocument();
+    expect(screen.getByText(id)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+  it("shows a Bark acknowledgment without treating it as device receipt", () => {
+    render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], notice: {
+      outbox_id: "00000000-0000-4000-8000-000000000099", status: "published", attempt_count: 1,
+      attempted_at: at, finished_at: at, server_result: "accepted", device_result: "unknown",
+      failure_reason: null,
+    } }] }} />);
+    expect(screen.getByText("Bark 已接受")).toBeVisible();
+    expect(screen.getByText("手机实收")).toBeVisible();
+    expect(screen.getByText("待核验")).toBeVisible();
   });
 });

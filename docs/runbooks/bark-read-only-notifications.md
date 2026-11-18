@@ -130,6 +130,10 @@ worker 只领取 `activated_at` 之后、白名单内的 outbox。新自然监�
 它不会重跑业务动作。断流、worker 退出或观察超时
 不是投递成功，先按 `outbox_events → outbox_delivery_attempts` 核对状态，不重复触发决策或订单。
 
+长期 SEC 公告页可展开原通知编号和时间。以公告区标明的读取时点核对本地领取和结束回执，
+分别显示 Bark 是否确认接受、是否返回非成功 HTTP 响应及手机实收待核验。
+读取超时保留原一次尝试，Bark 结果待核验；查看记录不会发起通知。
+
 真实验收必须使用启用后自然产生的一条已批准内部模拟事实，并同时核对：业务事实已提交、对应
 outbox event 为 published、delivery attempt 为 published、iPhone 实际显示解密后的通知内容。
 缺少任何一项都不能宣称真实 iPhone/APNs 验收完成。
