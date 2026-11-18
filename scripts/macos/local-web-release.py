@@ -33,6 +33,26 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def picomatch_proof(root):
+    result = subprocess.run(
+        [
+            shutil.which("node") or "node",
+            str(root / "scripts/ci/picomatch_patch.mjs"),
+            "--verify",
+            str(root),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    value = json.loads(result.stdout)
+    if value.get("status") != "source_patch_verified" or value.get("parsers") != 10:
+        raise ValueError("LOCAL_WEB_DEPENDENCY_PATCH_INVALID")
+    return value
+
+
 def private_directory(path):
     if (
         path.is_symlink()
@@ -61,6 +81,13 @@ def artifact_hashes(release):
 
 def verify_release(root, release):
     private_directory(release)
+    try:
+        actual = (release / "node_modules").resolve(strict=True)
+        expected = (root / "node_modules").resolve(strict=True)
+        if not actual.is_dir() or actual != expected:
+            raise ValueError("LOCAL_WEB_DEPENDENCY_TREE_MISMATCH")
+    except OSError as error:
+        raise ValueError("LOCAL_WEB_DEPENDENCY_TREE_MISMATCH") from error
     value = json.loads((release / MANIFEST).read_bytes())
     if (
         value.get("schema") != "nexus_local_web_release_v1"
@@ -70,6 +97,8 @@ def verify_release(root, release):
         raise ValueError("LOCAL_WEB_RELEASE_VERSION_MISMATCH")
     if value.get("artifacts") != artifact_hashes(release):
         raise ValueError("LOCAL_WEB_RELEASE_ARTIFACT_MISMATCH")
+    if value.get("picomatch_patch") != picomatch_proof(root):
+        raise ValueError("LOCAL_WEB_DEPENDENCY_PATCH_MISMATCH")
     return value
 
 
@@ -79,6 +108,7 @@ def build(root, release):
     private_directory(release.parent)
     if shutil.disk_usage(release.parent).free < 3 * 1024**3:
         raise ValueError("LOCAL_WEB_RELEASE_SPACE_REQUIRED")
+    patch_proof = picomatch_proof(root)
     revision = git(root, "rev-parse", "HEAD")
     release.mkdir(mode=0o700)
     raw = subprocess.check_output(["git", "-C", str(root), "archive", revision])
@@ -102,6 +132,7 @@ def build(root, release):
         revision=revision,
         tree=git(root, "rev-parse", "HEAD^{tree}"),
         artifacts=artifact_hashes(release),
+        picomatch_patch=patch_proof,
     )
     (release / MANIFEST).write_text(json.dumps(value, sort_keys=True, indent=2))
     return verify_release(root, release)

@@ -16,7 +16,9 @@ spec.loader.exec_module(web)
 
 
 @pytest.fixture
-def release(tmp_path):
+def release(tmp_path, monkeypatch):
+    patch_proof = {"status": "source_patch_verified", "parsers": 10, "files": []}
+    monkeypatch.setattr(web, "picomatch_proof", lambda root: patch_proof)
     root = tmp_path / "repo"
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], check=True)
@@ -37,8 +39,10 @@ def release(tmp_path):
         ],
         check=True,
     )
+    (root / "node_modules").mkdir()
     built = tmp_path / "release"
     built.mkdir(mode=0o700)
+    (built / "node_modules").symlink_to(root / "node_modules", target_is_directory=True)
     (built / "dist/server").mkdir(parents=True)
     (built / "dist/client").mkdir()
     (built / "dist/server/index.js").write_text("export default {}")
@@ -58,6 +62,7 @@ def release(tmp_path):
         revision=web.git(root, "rev-parse", "HEAD"),
         tree=web.git(root, "rev-parse", "HEAD^{tree}"),
         artifacts=web.artifact_hashes(built),
+        picomatch_patch=patch_proof,
     )
     (built / web.MANIFEST).write_text(json.dumps(manifest))
     env = root / ".env.local"
@@ -169,3 +174,22 @@ def test_runtime_binding_symlink_cannot_overwrite_another_file(release, monkeypa
     with pytest.raises((OSError, ValueError)):
         web.serve(root, built, env, 5173)
     assert protected.read_text() == "preserve this file"
+
+
+def test_changed_dependency_patch_proof_rejects_prebuilt_serving(release, monkeypatch):
+    root, built, env = release
+    monkeypatch.setattr(web, "picomatch_proof", lambda root: {"status": "changed"}, raising=False)
+    with pytest.raises(ValueError, match="DEPENDENCY_PATCH_MISMATCH"):
+        web.serve(root, built, env, 5173, check=True)
+
+
+def test_missing_or_different_actual_dependency_tree_is_rejected(release, monkeypatch, tmp_path):
+    root, built, env = release
+    (built / "node_modules").unlink()
+    with pytest.raises(ValueError, match="DEPENDENCY_TREE_MISMATCH"):
+        web.serve(root, built, env, 5173, check=True)
+    other = tmp_path / "other-dependencies"
+    other.mkdir()
+    (built / "node_modules").symlink_to(other, target_is_directory=True)
+    with pytest.raises(ValueError, match="DEPENDENCY_TREE_MISMATCH"):
+        web.serve(root, built, env, 5173, check=True)

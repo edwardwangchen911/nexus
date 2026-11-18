@@ -1,0 +1,267 @@
+{
+  "lock_sha256": "7e6a1d5d18cb9a3bc4e091ab1460010aaa2e1455d434bf7815770efc094e7ea5",
+  "packages": {
+    "picomatch": {
+      "picomatch/LICENSE": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
+      "picomatch/README.md": "f4653b68a1883a32f852083c1b93381ce87f44c6855ce1f01854d39d0563c98c",
+      "picomatch/index.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480",
+      "picomatch/lib/constants.js": "980225ab847a88a784f6d315557b8434f7742b2551ce20e354455c61b938c0a5",
+      "picomatch/lib/picomatch.js": "2cb169cbe17d356036c5f62a377318b85e30817877e59797842aec9d8b15f54b",
+      "picomatch/lib/scan.js": "227fcc994a477ea95c5a0435d32783566334c6bd0dcc4a103029735ad8c9c535",
+      "picomatch/lib/utils.js": "809fc29cf35ab0aa76b99cad29182f62c0ae598902481d10f9868eaef71981ee",
+      "picomatch/package.json": "63264d817e856a4bff57d4304f2b38d2964a4f6df520eb169e7bcdb619f13e9a"
+    },
+    "vite/node_modules/picomatch": {
+      "vite/node_modules/picomatch/LICENSE": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
+      "vite/node_modules/picomatch/README.md": "a69b87120fe2b9cb8f9057eaef6b9f9887f803e02185ca2f431e8162f6312220",
+      "vite/node_modules/picomatch/index.js": "02ae26406508e28f9ba0865be16cf77f0b33de6c4d4d49c212c4176df1d5625a",
+      "vite/node_modules/picomatch/lib/constants.js": "c28f952d2758261fe5428a121add485cc25b03e0193633f649de903dc0e5e222",
+      "vite/node_modules/picomatch/lib/picomatch.js": "fdd249d7ffff853f3bb1c77eafc8baa1a437bea85a94c35877b83c6a40d9ca94",
+      "vite/node_modules/picomatch/lib/scan.js": "6457a1764e5c2e543cc3a0c00ce12ebb3764097628868198370b64d4e642aaae",
+      "vite/node_modules/picomatch/lib/utils.js": "f04604f70cd1a3f6ace80b84766468674ff38b4bb83818d2ef1d81fc6355f935",
+      "vite/node_modules/picomatch/package.json": "479b70b87aa7b44344d62c8a459ae7e53dd2bca6c61f1396bd55e63e9de73fc6",
+      "vite/node_modules/picomatch/posix.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
+    },
+    "tinyglobby/node_modules/picomatch": {
+      "tinyglobby/node_modules/picomatch/LICENSE": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
+      "tinyglobby/node_modules/picomatch/README.md": "abaa6b58484e1f252b8d40b949b53602f5f2d7e6990f20d85fe6174ca5cb802f",
+      "tinyglobby/node_modules/picomatch/index.js": "02ae26406508e28f9ba0865be16cf77f0b33de6c4d4d49c212c4176df1d5625a",
+      "tinyglobby/node_modules/picomatch/lib/constants.js": "c28f952d2758261fe5428a121add485cc25b03e0193633f649de903dc0e5e222",
+      "tinyglobby/node_modules/picomatch/lib/picomatch.js": "bbe9824eae8210954eac016e1fa1ac6174093557f30a72e91621d74a6c25e170",
+      "tinyglobby/node_modules/picomatch/lib/scan.js": "227fcc994a477ea95c5a0435d32783566334c6bd0dcc4a103029735ad8c9c535",
+      "tinyglobby/node_modules/picomatch/lib/utils.js": "f04604f70cd1a3f6ace80b84766468674ff38b4bb83818d2ef1d81fc6355f935",
+      "tinyglobby/node_modules/picomatch/package.json": "b8deb10b4e1f7cc2fe8236a70995f4c6b5ec3ecf93f02f2b6427a8600d2c1d20",
+      "tinyglobby/node_modules/picomatch/posix.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
+    },
+    "vitest/node_modules/picomatch": {
+      "vitest/node_modules/picomatch/LICENSE": "d0cd141b0c322fded5dfad1d4645bb2fedfc05b7321fe1009469638190d59ef9",
+      "vitest/node_modules/picomatch/README.md": "a69b87120fe2b9cb8f9057eaef6b9f9887f803e02185ca2f431e8162f6312220",
+      "vitest/node_modules/picomatch/index.js": "02ae26406508e28f9ba0865be16cf77f0b33de6c4d4d49c212c4176df1d5625a",
+      "vitest/node_modules/picomatch/lib/constants.js": "c28f952d2758261fe5428a121add485cc25b03e0193633f649de903dc0e5e222",
+      "vitest/node_modules/picomatch/lib/picomatch.js": "fdd249d7ffff853f3bb1c77eafc8baa1a437bea85a94c35877b83c6a40d9ca94",
+      "vitest/node_modules/picomatch/lib/scan.js": "227fcc994a477ea95c5a0435d32783566334c6bd0dcc4a103029735ad8c9c535",
+      "vitest/node_modules/picomatch/lib/utils.js": "f04604f70cd1a3f6ace80b84766468674ff38b4bb83818d2ef1d81fc6355f935",
+      "vitest/node_modules/picomatch/package.json": "fb7766f5f9c724e13e075760a95d16f87cdb327143d153a913135fde267ec615",
+      "vitest/node_modules/picomatch/posix.js": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
+    }
+  },
+  "audit_findings": {
+    "@next/eslint-plugin-next": {
+      "name": "@next/eslint-plugin-next",
+      "severity": "high",
+      "via": [
+        "fast-glob"
+      ],
+      "nodes": [
+        "node_modules/@next/eslint-plugin-next"
+      ]
+    },
+    "@typescript-eslint/eslint-plugin": {
+      "name": "@typescript-eslint/eslint-plugin",
+      "severity": "high",
+      "via": [
+        "@typescript-eslint/parser",
+        "@typescript-eslint/type-utils",
+        "@typescript-eslint/utils"
+      ],
+      "nodes": [
+        "node_modules/@typescript-eslint/eslint-plugin"
+      ]
+    },
+    "@typescript-eslint/parser": {
+      "name": "@typescript-eslint/parser",
+      "severity": "high",
+      "via": [
+        "@typescript-eslint/typescript-estree"
+      ],
+      "nodes": [
+        "node_modules/@typescript-eslint/parser"
+      ]
+    },
+    "@typescript-eslint/type-utils": {
+      "name": "@typescript-eslint/type-utils",
+      "severity": "high",
+      "via": [
+        "@typescript-eslint/typescript-estree",
+        "@typescript-eslint/utils"
+      ],
+      "nodes": [
+        "node_modules/@typescript-eslint/type-utils"
+      ]
+    },
+    "@typescript-eslint/typescript-estree": {
+      "name": "@typescript-eslint/typescript-estree",
+      "severity": "high",
+      "via": [
+        "tinyglobby"
+      ],
+      "nodes": [
+        "node_modules/@typescript-eslint/typescript-estree"
+      ]
+    },
+    "@typescript-eslint/utils": {
+      "name": "@typescript-eslint/utils",
+      "severity": "high",
+      "via": [
+        "@typescript-eslint/typescript-estree"
+      ],
+      "nodes": [
+        "node_modules/@typescript-eslint/utils"
+      ]
+    },
+    "@vitejs/plugin-react": {
+      "name": "@vitejs/plugin-react",
+      "severity": "high",
+      "via": [
+        "vite"
+      ],
+      "nodes": [
+        "node_modules/@vitejs/plugin-react"
+      ]
+    },
+    "fast-glob": {
+      "name": "fast-glob",
+      "severity": "high",
+      "via": [
+        "micromatch"
+      ],
+      "nodes": [
+        "node_modules/fast-glob",
+        "node_modules/vite-plugin-dynamic-import/node_modules/fast-glob"
+      ]
+    },
+    "fdir": {
+      "name": "fdir",
+      "severity": "high",
+      "via": [
+        "picomatch"
+      ],
+      "nodes": [
+        "node_modules/tinyglobby/node_modules/fdir"
+      ]
+    },
+    "micromatch": {
+      "name": "micromatch",
+      "severity": "high",
+      "via": [
+        "picomatch"
+      ],
+      "nodes": [
+        "node_modules/micromatch"
+      ]
+    },
+    "picomatch": {
+      "name": "picomatch",
+      "severity": "high",
+      "via": [
+        {
+          "source": 1247710,
+          "name": "picomatch",
+          "dependency": "picomatch",
+          "title": "picomatch vulnerable to ReDoS through single-branch repeated extglobs",
+          "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+          "severity": "high",
+          "cwe": [
+            "CWE-1333"
+          ],
+          "cvss": {
+            "score": 7.5,
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+          },
+          "range": "<=4.0.7"
+        }
+      ],
+      "nodes": [
+        "node_modules/picomatch",
+        "node_modules/tinyglobby/node_modules/picomatch",
+        "node_modules/vite/node_modules/picomatch",
+        "node_modules/vitest/node_modules/picomatch"
+      ]
+    },
+    "tinyglobby": {
+      "name": "tinyglobby",
+      "severity": "high",
+      "via": [
+        "fdir",
+        "picomatch"
+      ],
+      "nodes": [
+        "node_modules/tinyglobby"
+      ]
+    },
+    "typescript-eslint": {
+      "name": "typescript-eslint",
+      "severity": "high",
+      "via": [
+        "@typescript-eslint/eslint-plugin",
+        "@typescript-eslint/parser",
+        "@typescript-eslint/typescript-estree",
+        "@typescript-eslint/utils"
+      ],
+      "nodes": [
+        "node_modules/typescript-eslint"
+      ]
+    },
+    "vinext": {
+      "name": "vinext",
+      "severity": "high",
+      "via": [
+        "vite",
+        "vite-plugin-commonjs"
+      ],
+      "nodes": [
+        "node_modules/vinext"
+      ]
+    },
+    "vite": {
+      "name": "vite",
+      "severity": "high",
+      "via": [
+        "picomatch",
+        "tinyglobby"
+      ],
+      "nodes": [
+        "node_modules/vite"
+      ]
+    },
+    "vite-plugin-commonjs": {
+      "name": "vite-plugin-commonjs",
+      "severity": "high",
+      "via": [
+        "vite-plugin-dynamic-import"
+      ],
+      "nodes": [
+        "node_modules/vite-plugin-commonjs"
+      ]
+    },
+    "vite-plugin-dynamic-import": {
+      "name": "vite-plugin-dynamic-import",
+      "severity": "high",
+      "via": [
+        "fast-glob"
+      ],
+      "nodes": [
+        "node_modules/vite-plugin-dynamic-import"
+      ]
+    },
+    "vitest": {
+      "name": "vitest",
+      "severity": "high",
+      "via": [
+        "picomatch",
+        "tinyglobby"
+      ],
+      "nodes": [
+        "node_modules/vitest"
+      ]
+    }
+  },
+  "audit_counts": {
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "high": 18,
+    "critical": 0,
+    "total": 18
+  }
+}
