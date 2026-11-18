@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 from nexus.agents import persistence
+from nexus.agents.budget import BudgetExhausted
 from nexus.agents.research_stages import routes
 from nexus.paper import agent_cycle
 
@@ -121,6 +122,12 @@ async def test_admission_failure_retains_safe_stage_only_after_pool_rollback(
     "error,expected",
     [
         (ValueError("SINGLE_SOL_NATURAL_BUDGET_PROTECTED"), "SINGLE_SOL_NATURAL_BUDGET_PROTECTED"),
+        (BudgetExhausted("ROUTINE_NATURAL_BUDGET_PROTECTED"), "ROUTINE_NATURAL_BUDGET_PROTECTED"),
+        (
+            BudgetExhausted("ROUTINE_BUDGET_AUTHORITY_UNAVAILABLE"),
+            "ROUTINE_BUDGET_AUTHORITY_UNAVAILABLE",
+        ),
+        (BudgetExhausted("ROUTINE_BUDGET_SCOPE_INVALID"), "ROUTINE_BUDGET_SCOPE_INVALID"),
         (ValueError("SINGLE_SOL_NATURAL_BUDGET_PROTECTED", "canary"), "UNKNOWN"),
         (ValueError("SINGLE_SOL_NATURAL_BUDGET_PROTECTED secret=canary"), "UNKNOWN"),
         (ValueError({"private": "canary"}), "UNKNOWN"),

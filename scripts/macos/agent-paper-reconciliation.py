@@ -16,7 +16,8 @@ from uuid import UUID
 _PREFIX = "AGENT_PAPER_EXIT_RECONCILIATION_"
 _DURABLE_SEC_POLICY = "sec_durable_0125_to_0133_v1"
 _FOUNDATION_POLICY = "sec_foundation_0133_to_0134_v1"
-_SCOPE_BOUND_POLICIES = frozenset({_DURABLE_SEC_POLICY, _FOUNDATION_POLICY})
+_ROUTINE_BUDGET_POLICY = "routine_budget_0134_to_0135_v1"
+_SCOPE_BOUND_POLICIES = frozenset({_DURABLE_SEC_POLICY, _FOUNDATION_POLICY, _ROUTINE_BUDGET_POLICY})
 # Exact reviewed edges only. Historical proofs keep their original policy;
 # neither numeric order nor migration ancestry confers a transitive permission.
 _CROSS_SCHEMA_POLICIES = {
@@ -29,6 +30,7 @@ _CROSS_SCHEMA_POLICIES = {
     # ordinary-exit edge does not authorize pending consumers or transitivity.
     ("0125_sec_positive_chain", "0133_sec_send_scope"): _DURABLE_SEC_POLICY,
     ("0133_sec_send_scope", "0134_sec_foundation"): _FOUNDATION_POLICY,
+    ("0134_sec_foundation", "0135_routine_budget"): _ROUTINE_BUDGET_POLICY,
 }
 _PENDING_POLICIES = {
     "0105_comparison_preclaim": "pending_consumer_exit_0105_v1",

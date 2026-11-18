@@ -581,7 +581,7 @@ async def settle_daily_budget(
 
 
 async def require_reserved_daily_budget(
-    session: AsyncSession, *, run_id: UUID, accounting: bool = False
+    session: AsyncSession, *, run_id: UUID, accounting: bool = False, for_new_send: bool = False
 ) -> AgentDailyBudgetReservationRecord:
     """Lock and require the exact open reservation before any provider work starts."""
     reservation = await _locked_reservation(session, run_id)
@@ -610,6 +610,10 @@ async def require_reserved_daily_budget(
             raise BudgetExhausted("reservation authority does not match run")
     if reservation.state != "reserved":
         raise BudgetExhausted("research run has no open budget reservation")
+    if for_new_send:
+        from nexus.paper.routine_budget import require_new_send
+
+        await require_new_send(session, business_date=reservation.business_date)
     return reservation
 
 

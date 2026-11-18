@@ -147,9 +147,7 @@ async def run_portfolio_decision_worker_once(
         try:
             compatible = callable(supports) and supports(authority.model_config)
         except Exception as error:
-            raise PortfolioDecisionExecutionError(
-                "PORTFOLIO_DECISION_AUTHORITY_INVALID"
-            ) from error
+            raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_AUTHORITY_INVALID") from error
         if not compatible:
             raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_AUTHORITY_INVALID")
         await mark_first_requested(target, run_id=run_id)
@@ -157,7 +155,7 @@ async def run_portfolio_decision_worker_once(
     try:
         async with factory() as session, session.begin():
             await checkpoint_job(session, claim=claim, now=clock(), apply=start)
-    except PortfolioDecisionExecutionError:
+    except PortfolioDecisionExecutionError as error:
         await _finish_pre_provider_failure(
             factory,
             claim=claim,
@@ -165,6 +163,9 @@ async def run_portfolio_decision_worker_once(
             now=clock(),
             outcome="failed",
             result_code="PORTFOLIO_DECISION_FAILED",
+            error_code=error.code
+            if error.code == "PORTFOLIO_DECISION_BUDGET_PROTECTED"
+            else "PORTFOLIO_DECISION_AUTHORITY_INVALID",
         )
         return True
     if authority is None:
@@ -204,8 +205,20 @@ async def run_portfolio_decision_worker_once(
     async def start_second(target: AsyncSession) -> None:
         await mark_second_requested(target, run_id=run_id)
 
-    async with factory() as session, session.begin():
-        await checkpoint_job(session, claim=claim, now=clock(), apply=start_second)
+    try:
+        async with factory() as session, session.begin():
+            await checkpoint_job(session, claim=claim, now=clock(), apply=start_second)
+    except PortfolioDecisionExecutionError as error:
+        if error.code != "PORTFOLIO_DECISION_BUDGET_PROTECTED":
+            raise
+        await _finish_model_error(
+            factory,
+            claim=claim,
+            run_id=run_id,
+            error=PortfolioDecisionModelError(error.code, usage=model.usage, usage_known=True),
+            now=clock(),
+        )
+        return True
 
     try:
         result = await model.request_intent(
@@ -309,13 +322,14 @@ async def _finish_pre_provider_failure(
     now: datetime,
     outcome: str,
     result_code: str,
+    error_code: str = "PORTFOLIO_DECISION_AUTHORITY_INVALID",
 ) -> None:
     async def persist(target: AsyncSession) -> None:
         await persist_portfolio_decision_terminal(
             target,
             run_id=run_id,
             status="failed",
-            error_code="PORTFOLIO_DECISION_AUTHORITY_INVALID",
+            error_code=error_code,
             intent=None,
             usage=UsageSnapshot(),
             usage_known=True,
@@ -339,7 +353,7 @@ async def _finish_pre_provider_failure(
                 outcome="failed",
                 result_code=result_code,
                 finished_at=now,
-                error_code="PORTFOLIO_DECISION_AUTHORITY_INVALID",
+                error_code=error_code,
             )
 
         await execute_and_finalize_job(

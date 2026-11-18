@@ -714,6 +714,9 @@ async def _run_synthesis_job_once(
             "input_hash": run.input_hash,
             "frozen_input": frozen.model_dump(mode="json"),
         }
+        from nexus.paper.routine_budget import require_native_new_send
+
+        await require_native_new_send(session, kind="synthesis", run_id=run.id)
         run.status = "running"
         await session.flush()
 

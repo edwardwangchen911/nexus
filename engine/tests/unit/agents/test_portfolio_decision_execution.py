@@ -463,3 +463,38 @@ def _authority_fixture() -> tuple[
     run.evidence_hash = evidence_hash
     run.evidence_manifest = manifest
     return run, prompt, model, report_record, report
+
+
+@pytest.fixture(autouse=True)
+def native_send_budget(monkeypatch):
+    from nexus.paper import routine_budget
+
+    guard = AsyncMock()
+    monkeypatch.setattr(routine_budget, "require_native_new_send", guard)
+    return guard
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["first", "second"])
+async def test_known_budget_refusal_preserves_original_request_phase(native_send_budget, phase):
+    from nexus.agents.budget import BudgetExhausted
+
+    run = _run()
+    session = _Session(run)
+    if phase == "second":
+        await mark_first_requested(session, run_id=RUN_ID)
+        await record_tool_result(
+            session,
+            run_id=RUN_ID,
+            projection=_projection(),
+            usage=UsageSnapshot(input_tokens=100, output_tokens=50, tool_calls=1, provider_calls=1),
+        )
+    original = (run.status, run.provider_phase, run.input_tokens, run.output_tokens)
+    native_send_budget.side_effect = BudgetExhausted("ROUTINE_NATURAL_BUDGET_PROTECTED")
+    with pytest.raises(
+        PortfolioDecisionExecutionError, match="PORTFOLIO_DECISION_BUDGET_PROTECTED"
+    ):
+        await (mark_first_requested if phase == "first" else mark_second_requested)(
+            session, run_id=RUN_ID
+        )
+    assert (run.status, run.provider_phase, run.input_tokens, run.output_tokens) == original

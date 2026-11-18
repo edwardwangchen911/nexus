@@ -1024,3 +1024,58 @@ class _UnboundClient:
 
     def __init__(self, intent: dict[str, object], factory) -> None:
         self.responses = _Responses(intent, factory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_turn", [1, 2])
+async def test_budget_refusal_closes_only_the_known_original_prefix(
+    migrated_database_url, monkeypatch, blocked_turn
+):
+    from nexus.agents.budget import BudgetExhausted
+    from nexus.paper import routine_budget
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    await _seed_authority(factory)
+    await _admit(factory, monkeypatch)
+    async with factory() as db:
+        run = await db.scalar(select(PortfolioDecisionRunRecord))
+        authority = await _authority(db, run)
+    monkeypatch.setattr(
+        "nexus.agents.portfolio_decision_worker.load_portfolio_decision_execution_authority",
+        AsyncMock(return_value=authority),
+    )
+    original = routine_budget.require_native_new_send
+    checks = []
+
+    async def guard(db, **kwargs):
+        checks.append(kwargs)
+        if len(checks) == blocked_turn:
+            raise BudgetExhausted("ROUTINE_NATURAL_BUDGET_PROTECTED")
+        await original(db, **kwargs)
+
+    monkeypatch.setattr(routine_budget, "require_native_new_send", guard)
+    client = _Client(_intent(authority), factory)
+    try:
+        assert await run_portfolio_decision_worker_once(settings, responses_client=client) is True
+        assert len(client.responses.calls) == blocked_turn - 1
+        async with factory() as db:
+            stored = await db.get(PortfolioDecisionRunRecord, run.id)
+            reserve = await db.scalar(
+                select(PortfolioDecisionBudgetReservationRecord).where(
+                    PortfolioDecisionBudgetReservationRecord.run_id == run.id
+                )
+            )
+            job = await db.scalar(select(Job).where(Job.job_type == "agent.portfolio_decision"))
+            assert stored.status == "failed" and stored.provider_phase == (
+                "none" if blocked_turn == 1 else "tool_recorded"
+            )
+            assert (
+                job.status == "failed"
+                and job.last_error_code == "PORTFOLIO_DECISION_BUDGET_PROTECTED"
+            )
+            assert reserve.state == ("released" if blocked_turn == 1 else "settled")
+            if blocked_turn == 2:
+                assert reserve.settled_usd == Decimal("0.000150000000")
+    finally:
+        await factory.kw["bind"].dispose()

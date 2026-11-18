@@ -76,6 +76,10 @@ async def freeze_single_sol_budget(
         raise ValueError("SINGLE_SOL_ACCOUNT_BUSY")
     day = (await database_now(session)).date()
     await _lock_budget_day(session, day.isoformat())
+    from nexus.paper.routine_budget import scope as routine_scope
+
+    if await routine_scope(session, day) is not None:
+        raise ValueError("SINGLE_SOL_ECONOMIC_SCOPE_CONFLICT")
     from nexus.paper.independent_priority import require_no_active_priority
 
     await require_no_active_priority(session, account_id=account)

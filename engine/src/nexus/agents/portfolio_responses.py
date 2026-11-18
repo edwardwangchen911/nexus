@@ -231,6 +231,15 @@ class NativePortfolioTransport:
                     raise _ScopeRejected("PORTFOLIO_PLATFORM_SOURCE_CHANGED")
                 try:
                     await self.require_job(session, job, at)
+                    from nexus.agents.budget import BudgetExhausted
+                    from nexus.paper.routine_budget import require_native_new_send
+
+                    try:
+                        await require_native_new_send(
+                            session, kind="synthesis", run_id=UUID(str(job.payload["run_id"]))
+                        )
+                    except BudgetExhausted as error:
+                        raise _ScopeRejected(str(error)) from error
                 except ValueError as error:
                     if str(error) in {
                         "PLATFORM_PRICE_WINDOW_INVALID",
