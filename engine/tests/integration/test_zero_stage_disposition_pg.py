@@ -446,6 +446,7 @@ async def test_zero_stage_disposition_normal_entry(
             from pathlib import Path
 
             from helpers.monitor_host_process import write_environment
+            from nexus.paper import preparation_unknown_ack
 
             store_client = configured_exhibit_store(None)._client
             (tmp_path / "objects.json").write_text(
@@ -464,6 +465,9 @@ async def test_zero_stage_disposition_normal_entry(
                         if is_successor
                         else case,
                         "old_run": str(first.run_id),
+                        "formal_successor_policy_at": (
+                            preparation_unknown_ack._FORMAL_SUCCESSOR_POLICY_AT.isoformat()
+                        ),
                         "bucket": configured_exhibit_store(None)._bucket,
                         "prefix": configured_exhibit_store(None)._prefix,
                     }
