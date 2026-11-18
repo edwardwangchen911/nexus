@@ -8,7 +8,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy import text
 
-from nexus.ops.research_identity_local import collect_identity_sources
+from nexus.ops.research_identity_local import SecDirectoryInBucket, collect_identity_sources
 from nexus.ops.sec_index_local import _read, _store
 from nexus.persistence.session import session_factory
 from nexus.research.durable_sec_index_storage import persist_durable_index_archive
@@ -74,6 +74,7 @@ async def collect_durable_index(
     contact: str,
     store: ExhibitStore | None = None,
     client: httpx.AsyncClient | None = None,
+    directory_in_bucket: SecDirectoryInBucket | None = None,
 ) -> dict[str, object]:
     archive_store = _store(settings, store)
     factory = session_factory(settings)
@@ -92,6 +93,10 @@ async def collect_durable_index(
                 contact=contact,
                 output_dir=archive_dir,
                 client=client,
+                directory_in_bucket=directory_in_bucket,
+                expected_directory_binding=(identity.identity.cik, identity.identity.exchange)
+                if directory_in_bucket is not None
+                else None,
             )
         result = await import_durable_index(
             settings,

@@ -5,11 +5,12 @@ import asyncio
 import json
 import os
 import stat
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import httpx
 
@@ -31,6 +32,25 @@ from nexus.research.identity_sources import (
 from nexus.research.identity_sources import (
     require_submissions_binding as _require_submissions,
 )
+from nexus.research.sec_index_storage import DIRECTORY_URL, _receipt
+
+
+@dataclass
+class SecDirectoryInBucket:
+    """One refresh pass may share exact originals, never a later pass or bucket."""
+
+    scheduled_at: datetime
+    original: tuple[bytes, bytes] | None = None
+
+    def current(self, now: datetime) -> tuple[bytes, bytes] | None:
+        if self.original is None or not self.scheduled_at <= now < (
+            self.scheduled_at + timedelta(minutes=5)
+        ):
+            return None
+        received = _receipt(*self.original, source_url=DIRECTORY_URL, now=now)
+        if received < self.scheduled_at:
+            return None
+        return self.original
 
 
 class _Exact200Client(FixedOriginHttpClient):
@@ -47,11 +67,17 @@ async def collect_identity_sources(
     contact: str,
     output_dir: Path,
     client: httpx.AsyncClient | None = None,
+    directory_in_bucket: SecDirectoryInBucket | None = None,
+    expected_directory_binding: tuple[str, str] | None = None,
 ) -> dict[str, object]:
     if not 1 <= len(symbols) <= 5 or len(set(symbols)) != len(symbols):
         raise ValueError("IDENTITY_COLLECTION_REQUEST_INVALID")
     for symbol in symbols:
         validate_symbol(symbol)
+    if directory_in_bucket is not None and (
+        len(symbols) != 1 or expected_directory_binding is None
+    ):
+        raise ValueError("IDENTITY_COLLECTION_REQUEST_INVALID")
     if (
         not contact
         or contact != contact.strip()
@@ -77,7 +103,14 @@ async def collect_identity_sources(
     phase = "request"
     started = monotonic()
 
-    async def get(host: str, parts: tuple[str, ...], name: str) -> dict[str, Any]:
+    def archive(name: str, original: tuple[bytes, bytes]) -> None:
+        nonlocal phase
+        phase = "archive"
+        raw, receipt = original
+        write_private(output_dir / f"{name}.json", raw)
+        write_private(output_dir / f"{name}-receipt.json", receipt)
+
+    async def get(host: str, parts: tuple[str, ...], name: str) -> tuple[bytes, bytes]:
         nonlocal requests, phase
         requests += 1
         phase = "request"
@@ -92,8 +125,6 @@ async def collect_identity_sources(
         phase = "binding"
         if contact.encode() in raw:
             raise ValueError("IDENTITY_COLLECTION_CONTACT_REFLECTION")
-        phase = "archive"
-        write_private(output_dir / f"{name}.json", raw)
         receipt = {
             "schema": "sec_identity_source_receipt_v1",
             "source_url": "https://" + host + "/" + "/".join(parts),
@@ -102,24 +133,50 @@ async def collect_identity_sources(
             "sha256": sha256(raw).hexdigest(),
             "byte_length": len(raw),
         }
-        write_private(
-            output_dir / f"{name}-receipt.json", json.dumps(receipt, sort_keys=True).encode()
-        )
-        phase = "parse"
-        return _document(raw)
+        original = raw, json.dumps(receipt, sort_keys=True).encode()
+        archive(name, original)
+        return original
 
     try:
         async with asyncio.timeout(60):
-            directory = await get(
-                "www.sec.gov", ("files", "company_tickers_exchange.json"), "directory"
-            )
+            reused = None
+            if directory_in_bucket is not None:
+                candidate = directory_in_bucket.current(datetime.now(UTC))
+                if candidate is not None:
+                    try:
+                        # The original may name a different current listing. In that
+                        # case this issuer gets its own normal directory observation.
+                        if _binding(_document(candidate[0]), symbols[0]) == (
+                            expected_directory_binding
+                        ):
+                            reused = candidate
+                    except ValueError:
+                        pass
+            if reused is None:
+                directory = await get(
+                    "www.sec.gov", ("files", "company_tickers_exchange.json"), "directory"
+                )
+            else:
+                archive("directory", reused)
+                directory = reused
+            phase = "parse"
+            mapping = _document(directory[0])
             phase = "binding"
-            bindings = {symbol: _binding(directory, symbol) for symbol in symbols}
+            bindings = {symbol: _binding(mapping, symbol) for symbol in symbols}
+            if directory_in_bucket is not None:
+                if bindings[symbols[0]] != expected_directory_binding:
+                    raise ValueError("IDENTITY_COLLECTION_MAPPING_INVALID")
+                # A newer verified directory can replace the previous original
+                # after a listing mismatch. A submissions failure cannot change it.
+                if reused is None:
+                    directory_in_bucket.original = directory
             for symbol, (cik, exchange) in bindings.items():
                 stage = "submissions"
-                document = await get(
+                submissions = await get(
                     "data.sec.gov", ("submissions", f"CIK{cik}.json"), f"{symbol}-submissions"
                 )
+                phase = "parse"
+                document = _document(submissions[0])
                 phase = "binding"
                 _require_submissions(document, symbol, cik, exchange)
         result: dict[str, object] = {

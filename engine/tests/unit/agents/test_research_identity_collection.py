@@ -214,3 +214,92 @@ async def test_failure_receipt_preserves_safe_phase_without_retry_or_private_err
     assert receipt["authority_registered"] is False
     assert "secret" not in json.dumps(receipt) and "test@example.invalid" not in json.dumps(receipt)
     assert "private.invalid" not in json.dumps(receipt)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "first_requests", "second_requests"),
+    [
+        ("ordinary", 2, 1),
+        ("first-submissions-failed", 2, 1),
+        ("first-directory-failed", 1, 2),
+        ("second-identity-changed", 2, 2),
+        ("left-bucket", 2, 2),
+    ],
+)
+async def test_directory_reuse_keeps_exact_per_issuer_receipts_and_bounds(
+    tmp_path, monkeypatch, case, first_requests, second_requests
+):
+    from datetime import timedelta
+
+    module = importlib.import_module("nexus.ops.research_identity_local")
+    started = datetime(2026, 11, 18, 18, 45, tzinfo=UTC)
+    now = started + timedelta(seconds=4)
+    calls = []
+    directory_path = "/files/company_tickers_exchange.json"
+    first_path = "/submissions/CIK0000320193.json"
+    second_path = "/submissions/CIK0001045810.json"
+    bodies = payloads()
+    bodies[directory_path]["data"].append([1045810, "Other disclosed issuer", "NVDA", "Nasdaq"])
+    bodies[second_path] = {"cik": 1045810, "tickers": ["NVDA"], "exchanges": ["Nasdaq"]}
+
+    class SourceClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(module, "datetime", SourceClock)
+    shared = module.SecDirectoryInBucket(started)
+
+    def respond(request):
+        path = request.url.path
+        calls.append(path)
+        if (case == "first-directory-failed" and calls == [directory_path]) or (
+            case == "first-submissions-failed" and calls == [directory_path, first_path]
+        ):
+            return httpx.Response(503)
+        if case == "second-identity-changed" and calls == [directory_path]:
+            return httpx.Response(
+                200,
+                json=dict(
+                    bodies[directory_path],
+                    data=[
+                        bodies[directory_path]["data"][0],
+                        [1045810, "Other disclosed issuer", "NVDA", "NYSE"],
+                    ],
+                ),
+            )
+        return httpx.Response(200, json=bodies[path])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        async def collect(symbol, cik):
+            return await module.collect_identity_sources(
+                symbols=(symbol,),
+                contact="test@example.invalid",
+                output_dir=tmp_path / symbol,
+                client=client,
+                directory_in_bucket=shared,
+                expected_directory_binding=(cik, "XNAS"),
+            )
+
+        if case in {"first-directory-failed", "first-submissions-failed"}:
+            with pytest.raises(ValueError, match="IDENTITY_COLLECTION_FAILED"):
+                await collect("AAPL", "0000320193")
+        else:
+            assert (await collect("AAPL", "0000320193"))["requests"] == first_requests
+        assert len(calls) == first_requests
+        now += timedelta(minutes=5) if case == "left-bucket" else timedelta(seconds=2)
+        assert (await collect("NVDA", "0001045810"))["requests"] == second_requests
+    assert calls[-1] == second_path
+    assert len(calls) == first_requests + second_requests
+    nvda = tmp_path / "NVDA"
+    if second_requests == 1:
+        apple = tmp_path / "AAPL"
+        for name in ("directory.json", "directory-receipt.json"):
+            assert (nvda / name).read_bytes() == (apple / name).read_bytes()
+    else:
+        assert calls[-2] == directory_path
+    receipt = json.loads((nvda / "NVDA-submissions-receipt.json").read_bytes())
+    assert receipt["received_at"] == now.isoformat()
+    assert receipt["source_url"].endswith(second_path)
