@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from nexus.market.ingestion import ingest_price_page
 from nexus.market.object_store import S3ProviderEvidenceStore
-from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.fosun_local import load_local_environment, local_read_settings
 from nexus.ops.local_recovery import write_private
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.paper import PAPER_DECISION_SOURCE_POLICY_ID
@@ -167,9 +167,7 @@ def main() -> int:
         args = parser.parse_args()
         if args.output.exists() or args.output.is_symlink():
             raise ValueError("ADJUSTED_AUTHORITY_IMPORT_OUTPUT_EXISTS")
-        settings = EngineSettings.model_validate(
-            load_local_environment(args.repo_root, os.environ)
-        )
+        settings = local_read_settings(load_local_environment(args.repo_root, os.environ))
         started = True
         result = asyncio.run(
             import_adjusted_authority(
