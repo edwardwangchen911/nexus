@@ -13,6 +13,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from nexus.monitoring.daily_consumption import daily_receipt, not_daily_covered
 from nexus.monitoring.durable_sec_refreeze import not_superseded_pending
 from nexus.monitoring.mixed_readback import not_mixed_consumed
+from nexus.monitoring.original_occupancy import accepted, active_monitor_runs
 from nexus.ops.agent_paper_loop import (
     AgentPaperLoopAction,
     AgentPaperLoopSnapshot,
@@ -77,17 +78,7 @@ async def inspect_monitor_queue(
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
             await session.execute(text("SET LOCAL statement_timeout='5s'"))
-            active = tuple(
-                await session.scalars(
-                    select(MonitorTrigger.research_run_id)
-                    .where(
-                        MonitorTrigger.account_id == account_id,
-                        MonitorTrigger.status.in_(("admitted", "unknown")),
-                    )
-                    .distinct()
-                    .limit(2)
-                )
-            )
+            active = await active_monitor_runs(session, account_id=account_id, now=snapshot.now)
             if len(active) > 1:
                 raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN")
             if active:
@@ -294,6 +285,17 @@ async def dispatch_configured_once(
                 original = await session.get(AgentResearchRunRecord, trigger.research_run_id)
                 if original is None:
                     raise ValueError("MONITOR_INCREMENT_BINDING_INVALID")
+                if await accepted(
+                    session, run_id=original.id, account_id=trigger.account_id, now=now
+                ):
+                    return {
+                        "status": "historical_occupancy_disposed",
+                        "trigger_id": str(trigger.id),
+                        "run_id": str(original.id),
+                        "execution_locked": True,
+                        "model_requests": 0,
+                        "provider_requests": 0,
+                    }
                 member = await require_increment_binding(session, original)
                 trigger_id = member.trigger_id
                 job = await session.get(Job, member.job_id)

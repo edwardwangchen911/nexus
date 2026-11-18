@@ -67,17 +67,29 @@ async def require_new_send(session: AsyncSession, run_id: UUID) -> bool:
 class SecRequestFence:
     """Hold request-send locks until headers, before observation or budget verification."""
 
-    def __init__(self, factory: Any, run_id: UUID):
+    def __init__(self, factory: Any, run_id: UUID | None, *, account_id: UUID | None = None):
         self.factory, self.run_id = factory, run_id
+        self.account_id = account_id
         self.session: AsyncSession | None = None
         self.work_deadline: float | None = None
+
+    async def _validate(self, session: AsyncSession) -> bool:
+        from nexus.monitoring.original_occupancy import require_for_account_send, require_for_send
+
+        if self.run_id is None:
+            return await require_for_account_send(session, self.account_id, fenced_transport=True)
+        occupancy = await require_for_send(
+            session, self.run_id, fenced_transport=True, hold_original=True
+        )
+        sec = await require_new_send(session, self.run_id)
+        return sec or occupancy
 
     async def acquire(self, request: Any) -> None:
         session = self.factory()
         self.session = session
         try:
             await session.begin()
-            active = await require_new_send(session, self.run_id)
+            active = await self._validate(session)
             if not active:
                 await self.release()
                 return
@@ -103,7 +115,7 @@ class SecRequestFence:
                     if self.session is None:
                         raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
                     self._require_deadline()
-                    await require_new_send(self.session, self.run_id)
+                    await self._validate(self.session)
                     self._require_deadline()
 
             request.extensions["trace"] = traced

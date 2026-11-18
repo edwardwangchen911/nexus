@@ -1,33 +1,28 @@
 """Recheck durable monitor activity under the same account lock used for new claims."""
 
 from collections import defaultdict
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
+from nexus.monitoring.original_occupancy import active_monitor_runs
 from nexus.ops import monitor_batch_prepare as material
 from nexus.ops import monitor_disclosure_refresh as disclosure
 from nexus.ops import monitor_market_prepare as market
 from nexus.ops import monitor_price_refresh as price
-from nexus.persistence.models.monitoring import MonitorObservationBatch, MonitorTrigger
+from nexus.persistence.models.monitoring import MonitorObservationBatch
 from nexus.persistence.models.runtime import AuditEvent
 
 INVALID = "HOST_READ_PROBE_STATE_INVALID"
 
 
 async def require_monitor_probe_idle(session: AsyncSession, account: UUID) -> None:
-    if (
-        await session.scalar(
-            select(MonitorTrigger.id)
-            .where(
-                MonitorTrigger.account_id == account,
-                MonitorTrigger.status.in_(("admitted", "unknown")),
-            )
-            .limit(1)
-        )
-        is not None
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime) or await active_monitor_runs(
+        session, account_id=account, now=now
     ):
         raise ValueError(INVALID)
     items = await session.scalars(

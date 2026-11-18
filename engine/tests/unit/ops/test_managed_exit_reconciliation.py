@@ -205,7 +205,10 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
             if "formal_intraday_intents" in str(statement):
                 assert parameters["account"] == config.agent_paper_account_id
                 assert parameters["model"] == config.agent_paper_formal_model_config_id
-                return None  # No live frozen intent; do not consume the accounting result.
+                return None  # No live frozen intent.
+            if "to_regclass('research_stage_terminal')" in str(statement):
+                events.append("canonical_accounting")
+                return "research_stage_terminal"
             return next(values)
 
         async def scalars(self, statement):
@@ -264,7 +267,7 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
     )
     assert "SET TRANSACTION READ ONLY" in statements
     assert events.index("canonical_budget_scope") < events.index("canonical_account_admission")
-    assert "canonical_account_admission" in events
+    assert events.index("canonical_account_admission") < events.index("canonical_accounting")
     assert result["status"] == ("blocked" if commit_fails else "eligible_at_check")
     assert ("publish" in events) is not commit_fails
 
@@ -416,3 +419,68 @@ def test_empty_activation_arguments_cannot_mix_with_reconciliation(capsys):
         json.loads(capsys.readouterr().out)["error_code"]
         == "AGENT_PAPER_RECOVERY_ACTIVATION_BLOCKED"
     )
+
+
+@pytest.mark.parametrize("fault", [None, "scope_changed", "check_only", "changed_exit"])
+def test_original_disposition_only_within_the_bound_normal_exit(
+    boundaries, monkeypatch, tmp_path, fault
+):
+    from nexus.ops import manual_paper, monitor_occupancy_local
+    from nexus.paper import manual_preparation_close
+
+    adapter, _, helper, config, _, events = boundaries
+    base_capture = helper.capture_exit
+
+    def capture(*args):
+        return {
+            **base_capture(*args),
+            "reconciliation_revision": config.release_revision,
+            "producer": {"schema": CURRENT_MIGRATION_HEAD},
+            "exit_code": 2 if fault == "changed_exit" and events.count("capture") > 2 else 1,
+        }
+
+    def record(effective, *, expected_hash, revalidate):
+        assert effective is config and expected_hash == "f" * 64
+        events.append("record")
+        revalidate()
+        return {"status": "recorded"}
+
+    def publish(*args, **kwargs):
+        events.append("publish")
+        return {"status": "reconciled"}
+
+    monkeypatch.setattr(helper, "capture_exit", capture)
+    monkeypatch.setattr(helper, "publish_exit", publish)
+    monkeypatch.setattr(monitor_occupancy_local, "record_for_managed_exit", record)
+    monkeypatch.setattr(manual_paper, "_require_maintenance_code", lambda *_: None)
+    monkeypatch.setattr(
+        manual_preparation_close, "require_preparation_inspector_source", lambda *_: None
+    )
+    result = adapter.reconcile_managed_exit(
+        config,
+        repo_root=tmp_path,
+        env_file=tmp_path / "env",
+        project="nexus" if fault == "scope_changed" else "nexus-fosun-live",
+        check_only=fault == "check_only",
+        record_original_nvda_proof="f" * 64,
+    )
+    if fault is None:
+        assert result["status"] == "reconciled" and result["original_occupancy"] == {
+            "status": "recorded"
+        }
+        assert events == [
+            "quiescence",
+            "capture",
+            "quiescence",
+            "capture",
+            "record",
+            "quiescence",
+            "capture",
+            "canonical",
+            "quiescence",
+            "publish",
+        ]
+    else:
+        assert result["status"] == "blocked" and "publish" not in events
+        if fault != "changed_exit":
+            assert "record" not in events
