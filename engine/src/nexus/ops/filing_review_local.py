@@ -44,6 +44,7 @@ async def prepare_review_material(
                 "0134_sec_foundation",
                 "0135_routine_budget",
                 "0136_sec_adopted_content",
+                "0137_linear_json_canonical",
             }:
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
             now = await db.scalar(text("SELECT clock_timestamp()"))
