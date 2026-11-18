@@ -48,7 +48,7 @@ async def main(root):
     from integration.test_sol_native_stage_pg import install_sol_http
     from nexus import worker
     from nexus.agents import snapshots
-    from nexus.paper import independent_history_scope
+    from nexus.paper import independent_history_scope, preparation_unknown_ack
 
     independent_history_scope.POLICY_AT = at - timedelta(days=1)
 
@@ -67,12 +67,22 @@ async def main(root):
     from unit.market.test_object_store import FakeS3Client
 
     fixture = json.loads((root / "objects.json").read_text())
+    # The subprocess must compare the synthetic acknowledgment with the same cutoff.
+    patch.setattr(
+        preparation_unknown_ack,
+        "_FORMAL_SUCCESSOR_POLICY_AT",
+        datetime.fromisoformat(fixture["formal_successor_policy_at"]),
+    )
     client = FakeS3Client()
     client.objects = {key: base64.b64decode(content) for key, content in fixture["objects"].items()}
     client.versions = fixture["versions"]
 
     fault_enabled = False
     authorization_refusals = []
+    second_authorization_ready = asyncio.Event()
+    first_critique_refused = asyncio.Event()
+    second_research_refused = asyncio.Event()
+    first_authorization_job = None
     if fixture["case"] == "policy_refusal":
         from contextvars import ContextVar
 
@@ -97,11 +107,25 @@ async def main(root):
                 raise ValueError(acceptance.BLOCKED)
             return await original_validate(*args, **kwargs)
 
-        async def authorize(self, *args, **kwargs):
+        async def authorize(self, claim, **kwargs):
+            nonlocal first_authorization_job
+            if kwargs["stage"] == 1:
+                if first_authorization_job is None:
+                    first_authorization_job = claim.job_id
+                elif claim.job_id != first_authorization_job:
+                    # Let both members pass preclaim before invalidating the predecessor.
+                    second_authorization_ready.set()
+                    await asyncio.wait_for(first_critique_refused.wait(), 30)
             try:
-                return await original_authorize(self, *args, **kwargs)
+                return await original_authorize(self, claim, **kwargs)
             except Exception as error:
                 authorization_refusals.append([type(error).__name__, str(error), kwargs["stage"]])
+                if kwargs["stage"] == 2 and claim.job_id == first_authorization_job:
+                    # Exercise both authorization gates before either worker closes the scope.
+                    first_critique_refused.set()
+                    await asyncio.wait_for(second_research_refused.wait(), 30)
+                elif kwargs["stage"] == 1 and claim.job_id != first_authorization_job:
+                    second_research_refused.set()
                 raise
 
         patch.setattr(priority, "capture_predecessor", capture)
@@ -114,6 +138,7 @@ async def main(root):
     async def on_request(payload):
         nonlocal fault_enabled
         if fixture["case"] == "policy_refusal":
+            await asyncio.wait_for(second_authorization_ready.wait(), 30)
             fault_enabled = True
         stage_calls.setdefault(str(payload["request"]["instrument_id"]), []).append(
             payload["stage"]
