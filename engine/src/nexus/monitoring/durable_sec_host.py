@@ -10,12 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.market.current_identity import SOURCE as IDENTITY_SOURCE
+from nexus.market.current_identity import identity_parse_scope
 from nexus.market.current_listing_revision import SOURCE as LISTING_SOURCE
 from nexus.monitoring.durable_sec_storage import _lock, record_discovery, rule_state
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.persistence.models.sec_monitor import SecDiscoveryCheck, SecMonitorRule
+from nexus.research.artifact_read_scope import artifact_read_scope
 from nexus.research.sec_exhibit_storage import _read_identity, configured_exhibit_store
+from nexus.workbench.evidence_read_scope import evidence_read_scope
 
 if TYPE_CHECKING:
     from nexus.settings import EngineSettings
@@ -209,18 +212,21 @@ async def scan_registered(
             SecDiscoveryCheck.scheduled_at == scheduled,
         )
     )
-    try:
-        await current_identity(session, rule, now)
-        capture = await latest_capture(session, rule, now)
-    except (ValueError, OSError):
-        capture = None
-    checked = await record_discovery(
-        session,
-        account_id=rule.account_id,
-        rule_id=rule.id,
-        capture_id=None if capture is None else capture.id,
-        scheduled_at=scheduled,
-    )
+    # The current identity and frozen capture can refer to the same originals.
+    # Reuse only immutable inputs, while each reader checks its own binding and time.
+    with identity_parse_scope(), evidence_read_scope(session), artifact_read_scope(session):
+        try:
+            await current_identity(session, rule, now)
+            capture = await latest_capture(session, rule, now)
+        except (ValueError, OSError):
+            capture = None
+        checked = await record_discovery(
+            session,
+            account_id=rule.account_id,
+            rule_id=rule.id,
+            capture_id=None if capture is None else capture.id,
+            scheduled_at=scheduled,
+        )
     events = checked.observation.get("events")
     notices = (
         sum(isinstance(e, dict) and e.get("classification") == "new" for e in events)

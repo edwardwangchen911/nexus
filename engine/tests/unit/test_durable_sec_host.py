@@ -111,6 +111,52 @@ async def test_registered_reuse_reserves_full_prep_budget(monkeypatch, tmp_path,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("identity_version", "capture_version", "expected_reads"),
+    [("v1", "v1", 1), ("v1", "v2", 2), (None, None, 2)],
+)
+async def test_scan_registered_reuses_only_exact_versioned_originals_within_one_check(
+    monkeypatch, identity_version, capture_version, expected_reads
+):
+    source = SimpleNamespace(read_raw=AsyncMock(return_value=b"original"))
+    session = SimpleNamespace(
+        info={"sec_exhibit_store": source}, scalar=AsyncMock(return_value=None)
+    )
+    capture = SimpleNamespace(id=UUID(int=6))
+    check = SimpleNamespace(observation={"events": []})
+    monkeypatch.setattr(host, "_lock", AsyncMock())
+    monkeypatch.setattr(host, "rule_state", AsyncMock(return_value="active"))
+    monkeypatch.setattr(host, "latest_capture", AsyncMock(return_value=capture))
+
+    async def read_original(version):
+        uri = "s3://test/raw/identity"
+        if version is not None:
+            uri += f"?versionId={version}"
+        store = host.configured_exhibit_store(session)
+        assert await store.read_raw("raw/identity", uri=uri) == b"original"
+
+    async def verify_identity(*args):
+        await read_original(identity_version)
+        return IDENTITY
+
+    async def verify_capture(*args, **kwargs):
+        assert kwargs["capture_id"] == capture.id
+        await read_original(capture_version)
+        return check
+
+    identity = AsyncMock(side_effect=verify_identity)
+    discovery = AsyncMock(side_effect=verify_capture)
+    monkeypatch.setattr(host, "current_identity", identity)
+    monkeypatch.setattr(host, "record_discovery", discovery)
+
+    for attempt in (1, 2):
+        assert await host.scan_registered(session, rule(), NOW) == (check, 0)
+        assert source.read_raw.await_count == attempt * expected_reads
+        assert session.info["sec_exhibit_store"] is source
+        assert identity.await_count == discovery.await_count == attempt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("active", [False, True])
 @pytest.mark.parametrize("has_plan", [False, True])
 async def test_normal_scan_expired_anchor_uses_durable_only(monkeypatch, active, has_plan):
