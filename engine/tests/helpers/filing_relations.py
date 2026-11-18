@@ -178,6 +178,11 @@ async def assert_relation_cli(factory, settings, store, capture_id, root, monkey
             await db.scalar(text(f"SELECT count(*) FROM {t}"))
             for t in ("data_snapshots", "audit_events")
         ]
+    from helpers.graphic_adoption import assert_graphic_adoption
+
+    await assert_graphic_adoption(
+        factory, settings, export_dir / "material.json", root.parent, monkeypatch
+    )
     for action, sid in (
         ("prove-content-relations", old_id),
         ("inspect-content-relations", first["snapshot_id"]),
