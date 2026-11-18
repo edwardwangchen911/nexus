@@ -549,7 +549,12 @@ async def _durable_index_with_scope(
 async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, object]:
     from nexus.paper.account_transaction_turn import account_transaction_turn
 
-    if args.action not in {"scan", "reconcile"} or settings.agent_paper_account_id is None:
+    # Mixed admission holds the same account lock as the background observation
+    # refresh. Take its host turn before opening SQL, including commit cleanup.
+    if (
+        args.action not in {"scan", "reconcile", "admit-batch"}
+        or settings.agent_paper_account_id is None
+    ):
         return await _run(settings, args)
     bucket = None
     if args.action == "scan":
