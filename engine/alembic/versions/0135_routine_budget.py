@@ -151,7 +151,7 @@ def upgrade() -> None:
           OR NOT EXISTS(SELECT FROM routine_budget_scopes g WHERE g.id=NEW.scope_id AND g.budget_day=NEW.budget_day)
         THEN RAISE EXCEPTION 'ROUTINE_BUDGET_CREDIT_UNPROVEN'; END IF;
        ELSE
-        IF NOT EXISTS(SELECT FROM audit_events a WHERE a.action='research.routine_budget.scope'
+        IF NOT EXISTS(SELECT FROM audit_events a WHERE a.actor_id='research-monitor' AND a.action='research.routine_budget.scope'
           AND a.schema_version='routine_budget_scope_v1' AND a.occurred_at=NEW.created_at
           AND a.payload=jsonb_build_object('binding',(to_jsonb(NEW)-'maximum'-'daily_limit')||jsonb_build_object('maximum',NEW.maximum::text,'daily_limit',NEW.daily_limit::text)))
         THEN RAISE EXCEPTION 'ROUTINE_BUDGET_AUDIT_INVALID'; END IF;

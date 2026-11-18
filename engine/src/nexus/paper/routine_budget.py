@@ -331,28 +331,11 @@ async def require_new_send(
     now = await database_now(session)
     guard = await scope(session, business_date)
     settings = session.info.get("engine_settings")
-    update_price = (
-        guard is not None and now.date() == business_date and isinstance(settings, EngineSettings)
-    )
-    if update_price:
-        assert guard is not None and isinstance(settings, EngineSettings)
-        selected_model = await session.get(
-            AgentModelConfigRecord, settings.agent_paper_formal_model_config_id
-        )
-        frozen_model = await session.get(AgentModelConfigRecord, guard["model_id"])
-        update_price = (
-            selected_model is not None
-            and frozen_model is not None
-            and (
-                selected_model.pricing_available_at > frozen_model.pricing_available_at
-                or (
-                    selected_model.pricing_available_at == frozen_model.pricing_available_at
-                    and (selected_model.platform_profile or {}).get("price_record")
-                    == (frozen_model.platform_profile or {}).get("price_record")
-                )
-            )
-        )
-    if update_price:
+    if guard is not None and now.date() == business_date:
+        if not isinstance(settings, EngineSettings):
+            raise BudgetExhausted("ROUTINE_BUDGET_AUTHORITY_UNAVAILABLE")
+        # A conflicting or stale configured quote cannot skip price validation.
+        # Original owner prices stay frozen; current H needs current authority.
         guard = await ensure_scope(
             session, now=now, daily_limit_usd=settings.agent_daily_budget_usd
         )

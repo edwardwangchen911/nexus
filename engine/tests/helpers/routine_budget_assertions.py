@@ -158,6 +158,25 @@ async def assert_price_updates(settings, run_id, now):
         ).isoformat()
         evidence = b"controlled higher-price evidence; never a real provider call"
         high["source_evidence_sha256"] = sha256(evidence).hexdigest()
+        # Same verification time with a DIFFERENT higher price must stop the
+        # normal new-send path even when the old H would still fit.
+        conflict = {**high, "verified_at": low["verified_at"]}
+        async with f.begin() as db:
+            row = await register_sol_business_profile(
+                db, price_record=conflict, source_evidence=evidence
+            )
+            conflict_id = row.id
+        cf = session_factory(
+            settings.model_copy(update={"agent_paper_formal_model_config_id": conflict_id})
+        )
+        try:
+            with pytest.raises(BudgetExhausted, match="ROUTINE_BUDGET_MODEL_CHANGED"):
+                async with cf.begin() as db:
+                    await require_reserved_daily_budget(
+                        db, run_id=run_id, accounting=True, for_new_send=True
+                    )
+        finally:
+            await cf.kw["bind"].dispose()
         async with f.begin() as db:
             row = await register_sol_business_profile(
                 db, price_record=high, source_evidence=evidence
@@ -166,10 +185,53 @@ async def assert_price_updates(settings, run_id, now):
         high_settings = settings.model_copy(update={"agent_paper_formal_model_config_id": high_id})
         hf = session_factory(high_settings)
         try:
+            # All scope fields and binding are valid; only audit actor is wrong.
+            from nexus.audit.service import append_audit_event
+
+            with pytest.raises(DBAPIError, match="ROUTINE_BUDGET_AUDIT_INVALID"):
+                async with hf.begin() as db:
+                    identity = uuid4()
+                    at = await db.scalar(text("SELECT clock_timestamp()"))
+                    await db.execute(
+                        text("""
+                        INSERT INTO routine_budget_scopes
+                        SELECT :id,budget_day,sequence+1,id,account_id,batch_id,policy_id,
+                        :model,calendar_id,slot,:at,day_is_session,daily_limit,:maximum
+                        FROM routine_budget_scopes WHERE sequence=1
+                    """),
+                        dict(
+                            id=identity,
+                            model=high_id,
+                            at=at,
+                            maximum=2 * original.reserved_cost_usd,
+                        ),
+                    )
+                    binding = await db.scalar(
+                        text("""
+                        SELECT (to_jsonb(g)-'maximum'-'daily_limit')||jsonb_build_object(
+                        'maximum',g.maximum::text,'daily_limit',g.daily_limit::text)
+                        FROM routine_budget_scopes g WHERE id=:id
+                    """),
+                        {"id": identity},
+                    )
+                    await append_audit_event(
+                        db,
+                        actor_id="wrong-budget-source",
+                        action="research.routine_budget.scope",
+                        schema_version="routine_budget_scope_v1",
+                        occurred_at=at,
+                        payload={"binding": binding},
+                    )
+                    await db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
             async with hf.begin() as db:
                 g = await ensure_scope(db, now=now, daily_limit_usd=Decimal(13))
                 assert g["sequence"] == 2 and g["maximum"] == 2 * original.reserved_cost_usd
                 assert await db.scalar(text("SELECT count(*) FROM routine_budget_credits")) == 1
+            with pytest.raises(BudgetExhausted, match="ROUTINE_NATURAL_BUDGET_PROTECTED"):
+                async with hf.begin() as db:
+                    await require_reserved_daily_budget(
+                        db, run_id=run_id, accounting=True, for_new_send=True
+                    )
         finally:
             await hf.kw["bind"].dispose()
         # A distinct, lower quote at the SAME verification instant is not equivalent.
@@ -206,7 +268,7 @@ async def assert_price_updates(settings, run_id, now):
         async with f.begin() as db:
             # Original reservation remains readable for observation/cleanup.
             await require_reserved_daily_budget(db, run_id=run_id, accounting=True)
-        with pytest.raises(BudgetExhausted, match="ROUTINE_NATURAL_BUDGET_PROTECTED"):
+        with pytest.raises(BudgetExhausted, match="ROUTINE_BUDGET_MODEL_CHANGED"):
             async with f.begin() as db:
                 await require_reserved_daily_budget(
                     db, run_id=run_id, accounting=True, for_new_send=True
