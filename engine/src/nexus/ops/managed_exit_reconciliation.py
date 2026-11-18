@@ -56,10 +56,15 @@ def reconcile_managed_exit(
     project: str,
     check_only: bool,
     target_model_config_id: UUID | None = None,
+    record_original_nvda_proof: str | None = None,
 ) -> dict[str, object]:
     """Hold both locks continuously through committed canonical inspection and proof publish."""
-    allowed = _CODES | recovery._KNOWN_CODES
+    from nexus.monitoring.original_occupancy import BLOCKED as ORIGINAL_OCCUPANCY_BLOCKED
+    from nexus.ops.monitor_occupancy_local import DispositionResultUnknown
+
+    allowed = _CODES | recovery._KNOWN_CODES | {ORIGINAL_OCCUPANCY_BLOCKED}
     failure = _PREFIX + "UNAVAILABLE"
+    recorded: dict[str, object] | None = None
 
     def blocked(codes: list[str]) -> dict[str, object]:
         return {
@@ -69,6 +74,7 @@ def reconcile_managed_exit(
             "external_requests": 0,
             "check_only": check_only,
             "current_eligible": False,
+            **({"original_occupancy": recorded} if recorded is not None else {}),
         }
 
     try:
@@ -91,6 +97,38 @@ def reconcile_managed_exit(
             failure = _PREFIX + "UNAVAILABLE"
             manager = service._recovery_module()
             capture = helper.capture_exit(service, manager, repo_root, env_file, project)
+            if record_original_nvda_proof is not None:
+                from nexus.ops.manual_paper import _require_maintenance_code
+                from nexus.ops.monitor_occupancy_local import record_for_managed_exit
+                from nexus.paper.manual_preparation_close import (
+                    require_preparation_inspector_source,
+                )
+
+                revision = settings.release_revision
+                if (
+                    check_only
+                    or target_model_config_id is not None
+                    or project != "nexus-fosun-live"
+                    or "pending_attempt" in capture["producer"]
+                    or capture["producer"]["schema"] != CURRENT_MIGRATION_HEAD
+                    or capture["reconciliation_revision"] != revision
+                ):
+                    raise ValueError(_PREFIX + "SCOPE_INVALID")
+
+                def revalidate() -> None:
+                    _require_maintenance_code(repo_root, revision)
+                    require_preparation_inspector_source(repo_root, revision)
+                    recovery.require_recovery_process_quiescence()
+                    if (
+                        helper.capture_exit(service, manager, repo_root, env_file, project)
+                        != capture
+                    ):
+                        raise ValueError(_PREFIX + "SCOPE_INVALID")
+
+                revalidate()
+                recorded = record_for_managed_exit(
+                    settings, expected_hash=record_original_nvda_proof, revalidate=revalidate
+                )
             target = None
             source = None
             if target_model_config_id is not None:
@@ -152,6 +190,7 @@ def reconcile_managed_exit(
                 "external_requests": 0,
                 "check_only": check_only,
                 "current_eligible": True,
+                **({"original_occupancy": recorded} if recorded is not None else {}),
             }
             if "proof_id" in published:
                 value = published["proof_id"]
@@ -164,6 +203,12 @@ def reconcile_managed_exit(
                     raise ValueError(_PREFIX + "UNAVAILABLE")
                 result["proof_hash"] = value
             return result
+    except DispositionResultUnknown:
+        return {
+            **blocked([ORIGINAL_OCCUPANCY_BLOCKED]),
+            "status": "result_unknown",
+            "read_original_disposition": True,
+        }
     except Exception as error:
         code = str(error)
         if code in {"AGENT_PAPER_LOOP_ALREADY_RUNNING", "AGENT_PAPER_SERVICE_CONTROL_BUSY"}:

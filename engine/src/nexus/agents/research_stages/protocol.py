@@ -309,6 +309,19 @@ class StagedProtocol:
             raise ProtocolRejected("ORIGIN_STOPPED_OR_UNAVAILABLE")
         async with self.factory() as session, dispatch_failure_boundary(session):
             await session.begin()
+            from nexus.monitoring.original_occupancy import BLOCKED as OCCUPANCY_BLOCKED
+            from nexus.monitoring.original_occupancy import require_for_send
+
+            try:
+                await require_for_send(
+                    session,
+                    UUID(str(claim.payload["run_id"])),
+                    fenced_transport=self.native_settings is not None,
+                )
+            except ValueError as error:
+                if str(error) == OCCUPANCY_BLOCKED:
+                    raise ProtocolRejected(OCCUPANCY_BLOCKED) from None
+                raise
             member = await self._member(session, claim)
             from nexus.agents.research_stages.routes import selected_route
             from nexus.paper.independent_unknown_acceptance import (

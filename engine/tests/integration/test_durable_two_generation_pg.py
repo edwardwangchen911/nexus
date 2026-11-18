@@ -55,7 +55,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "budget_pressure",
-    [False, True, "allocator", "send_refusal", "stage2_refusal", "host_handoff"],
+    [
+        False,
+        True,
+        "allocator",
+        "send_refusal",
+        "stage2_refusal",
+        "host_handoff",
+        "sec_expired",
+    ],
     ids=[
         "two-generations",
         "natural-budget-protection",
@@ -63,6 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
         "send-refusal",
         "stage2-refusal",
         "host-open-handoff",
+        "sec-expires-in-queue",
     ],
 )
 async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor(
@@ -616,6 +625,86 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 from helpers.routine_budget_assertions import assert_price_updates
 
                 await assert_price_updates(settings, UUID(admitted["run_id"]), controller.now())
+                assert calls == []
+                return
+            if budget_pressure == "sec_expired":
+                from nexus.agents.research_stages.protocol import stage_evidence
+                from nexus.monitoring import durable_sec_permission
+                from nexus.persistence.models.runtime import AuditEvent
+
+                run_id = UUID(admitted["run_id"])
+                job_id = UUID(admitted["job_id"])
+                async with factory.begin() as db:
+                    assert await durable_sec_permission.require_new_send(db, run_id)
+                    assert (await db.get(Job, job_id)).attempt_count == 0
+                # Model the real ordering: custody was fresh when admitted,
+                # but no new official receipt arrives before the first claim.
+                expired_at = received + timedelta(seconds=301)
+                assert expired_at > controller.now()
+                async with factory.begin() as db:
+                    await controller.set(db, expired_at, running=False, refresh_defaults=True)
+
+                refusals = []
+                native_send = durable_sec_permission.require_new_send
+
+                async def observed_send(db, selected):
+                    try:
+                        return await native_send(db, selected)
+                    except ValueError as error:
+                        assert selected == run_id
+                        refusals.append(str(error))
+                        raise
+
+                monkeypatch.setattr(durable_sec_permission, "require_new_send", observed_send)
+                assert await synchronized_worker(
+                    settings, job_ids=(job_id,), formal_stage_capacity=True
+                )
+                assert refusals == ["SEC_RESEARCH_PERMISSION_INVALID"] and calls == []
+                async with factory() as db:
+                    job = await db.get(Job, job_id)
+                    assert (job.status, job.attempt_count, job.manual_retry_count) == (
+                        "failed",
+                        1,
+                        0,
+                    )
+                    terminal = await db.scalar(
+                        text("SELECT known FROM research_stage_terminal WHERE run_id=:run"),
+                        {"run": run_id},
+                    )
+                    assert terminal is False and await stage_evidence(db, run_id) == []
+                    failure = await db.scalar(
+                        select(AuditEvent).where(
+                            AuditEvent.action == "research.stage_failure",
+                            AuditEvent.payload["run_id"].astext == str(run_id),
+                        )
+                    )
+                    assert failure.payload["failure_phase"] == "authorization"
+                    hold = await db.scalar(
+                        select(AgentDailyBudgetReservationRecord).where(
+                            AgentDailyBudgetReservationRecord.run_id == run_id
+                        )
+                    )
+                    assert hold.state == "reserved" and hold.settled_usd is None
+                assert not await synchronized_worker(
+                    settings, job_ids=(job_id,), formal_stage_capacity=True
+                )
+                from helpers.original_monitor_occupancy import assert_disposition
+
+                async with factory.begin() as db:
+                    expiry = await db.scalar(
+                        text("SELECT expires_at FROM job_leases WHERE job_id=:job"), {"job": job_id}
+                    )
+                    closed_at = expiry + timedelta(seconds=1)
+                    await controller.set(db, closed_at, running=False, refresh_defaults=True)
+                await assert_disposition(
+                    factory,
+                    monkeypatch,
+                    pointer.account_id,
+                    run_id,
+                    job_id,
+                    failure.event_hash,
+                    closed_at,
+                )
                 assert calls == []
                 return
             if budget_pressure == "stage2_refusal":

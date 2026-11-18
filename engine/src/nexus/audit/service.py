@@ -29,11 +29,12 @@ async def append_audit_event(
     occurred_at: datetime,
 ) -> AuditEvent:
     """Append and flush one event while holding the global transaction lock."""
+    if action == "research.stage_failure":
+        from nexus.monitoring.original_occupancy import fence_failure_append
+
+        await fence_failure_append(session, payload.get("run_id"))
     await session.execute(
-        text(
-            "SELECT pg_advisory_xact_lock("
-            "hashtextextended('nexus:audit-chain', 2020))"
-        )
+        text("SELECT pg_advisory_xact_lock(hashtextextended('nexus:audit-chain', 2020))")
     )
     previous = await session.scalar(
         select(AuditEvent).order_by(AuditEvent.event_seq.desc()).limit(1)

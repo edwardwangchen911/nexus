@@ -714,8 +714,14 @@ async def _run_synthesis_job_once(
             "input_hash": run.input_hash,
             "frozen_input": frozen.model_dump(mode="json"),
         }
+        from nexus.monitoring.original_occupancy import require_for_account_send
         from nexus.paper.routine_budget import require_native_new_send
 
+        await require_for_account_send(
+            session,
+            frozen.account_id,
+            fenced_transport=isinstance(transport, NativePortfolioTransport),
+        )
         await require_native_new_send(session, kind="synthesis", run_id=run.id)
         run.status = "running"
         await session.flush()

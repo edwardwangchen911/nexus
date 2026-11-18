@@ -670,11 +670,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--acknowledge-unconfirmed", action="store_true")
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--target-model-config-id")
+    parser.add_argument("--record-original-nvda-proof")
     args = parser.parse_args(argv)
     if (
-        (args.check_only or args.target_model_config_id is not None)
-        and args.action != "reconcile-exit"
-    ) or (args.acknowledge_unconfirmed and args.action != "stop"):
+        (
+            (args.check_only or args.target_model_config_id is not None)
+            and args.action != "reconcile-exit"
+        )
+        or (args.acknowledge_unconfirmed and args.action != "stop")
+        or (
+            args.record_original_nvda_proof is not None
+            and (
+                args.action != "reconcile-exit"
+                or args.check_only
+                or args.target_model_config_id is not None
+            )
+        )
+    ):
         _emit({"error_code": "AGENT_PAPER_SERVICE_ACTION_INVALID"})
         return 2
     try:
@@ -697,6 +709,11 @@ def main(argv: list[str] | None = None) -> int:
                     "--service-project-name",
                     args.project_name,
                     *_engine_arguments(root, env_file),
+                    *(
+                        ["--record-original-nvda-proof", args.record_original_nvda_proof]
+                        if args.record_original_nvda_proof is not None
+                        else []
+                    ),
                     *(
                         ["--target-model-config-id", args.target_model_config_id]
                         if args.target_model_config_id is not None
