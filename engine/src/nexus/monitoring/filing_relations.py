@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
-from nexus.monitoring.filing_originals import _read_pairs, read_originals
+from nexus.monitoring.filing_originals import OriginalArchive, _read_pairs, read_originals
 from nexus.monitoring.filing_transport import prove_graphic
 from nexus.persistence.models.data import DataSnapshot
 
@@ -40,6 +40,18 @@ async def _prove(session: AsyncSession, *, snapshot_id: UUID, as_of: datetime) -
     original = await session.get(DataSnapshot, snapshot_id)
     assert original is not None
     pairs = await _read_pairs(session, document=document, as_of=as_of)
+    return prove_original_relations(
+        document=document, snapshot_id=snapshot_id, original_hash=original.revision, pairs=pairs
+    )
+
+
+def prove_original_relations(
+    *,
+    document: OriginalArchive,
+    snapshot_id: UUID,
+    original_hash: str,
+    pairs: dict[str, tuple[bytes, bytes]],
+) -> OriginalRelations:
     source = pairs[document.entry.accession_number + ".txt"][0]
     declarations = []
     for declaration in document.declarations:
@@ -61,7 +73,7 @@ async def _prove(session: AsyncSession, *, snapshot_id: UUID, as_of: datetime) -
         raise ValueError("SEC_MONITOR_DOCUMENT_SET_INVALID")
     return OriginalRelations(
         original_snapshot_id=snapshot_id,
-        original_hash=original.revision,
+        original_hash=original_hash,
         declarations=declarations,
     )
 

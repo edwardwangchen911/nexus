@@ -230,41 +230,17 @@ def verify_filing_documents(
         result = []
         for filename, kind, size in rows:
             raw, receipt = documents[filename]
-            if not 0 < size <= MAX_ARCHIVE_BYTES or not 0 < len(raw) <= MAX_ARCHIVE_BYTES:
-                raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
-            content = raw
-            if submission is None:
-                if size != len(raw):
-                    raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
-            else:
-                from nexus.monitoring.filing_transport import prove_document
-
-                content = prove_document(
-                    submission[0],
-                    raw,
-                    accession=entry.accession_number,
+            result.append(
+                verify_text_document(
+                    entry=entry,
                     issuer_cik=issuer_cik,
-                    form=entry.form,
                     filename=filename,
                     kind=kind,
-                    declared_size=size,
-                )
-            received = _receipt(raw, receipt, source_url=root + filename, now=now)
-            if received < max(entry.accepted_at, entry.filed_at):
-                raise ValueError("SEC_MONITOR_DOCUMENT_TIME_INVALID")
-            parser = _VisibleText()
-            parser.feed(content.decode("utf-8-sig"))
-            parser.close()
-            text = " ".join(" ".join(parser.parts).split())
-            if not 20 <= len(text) <= 32000:
-                raise ValueError("SEC_MONITOR_CONTENT_CAPACITY")
-            result.append(
-                FilingDocument(
-                    filename=filename,
-                    document_type=kind,
-                    source_url=root + filename,
-                    raw_hash=sha256(raw).hexdigest(),
-                    text=text,
+                    size=size,
+                    raw=raw,
+                    receipt=receipt,
+                    now=now,
+                    submission=submission,
                 )
             )
         return tuple(result)
@@ -272,3 +248,58 @@ def verify_filing_documents(
         if str(error).startswith("SEC_MONITOR_"):
             raise
         raise ValueError("SEC_MONITOR_ORIGINAL_INVALID") from None
+
+
+def verify_text_document(
+    *,
+    entry: SecIndexEntry,
+    issuer_cik: str,
+    filename: str,
+    kind: str,
+    size: int,
+    raw: bytes,
+    receipt: bytes,
+    now: datetime,
+    submission: tuple[bytes, bytes] | None,
+) -> FilingDocument:
+    """The existing exact body proof, shared by complete inventory consumers."""
+    if not 0 < size <= MAX_ARCHIVE_BYTES or not 0 < len(raw) <= MAX_ARCHIVE_BYTES:
+        raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
+    content = raw
+    if submission is None:
+        if size != len(raw):
+            raise ValueError("SEC_MONITOR_DOCUMENT_SIZE_INVALID")
+    else:
+        from nexus.monitoring.filing_transport import prove_document
+
+        content = prove_document(
+            submission[0],
+            raw,
+            accession=entry.accession_number,
+            issuer_cik=issuer_cik,
+            form=entry.form,
+            filename=filename,
+            kind=kind,
+            declared_size=size,
+        )
+    received = _receipt(
+        raw, receipt, source_url=filing_root(issuer_cik, entry.accession_number) + filename, now=now
+    )
+    if (
+        received < max(entry.accepted_at, entry.filed_at)
+        or max(entry.accepted_at, entry.filed_at) > now
+    ):
+        raise ValueError("SEC_MONITOR_DOCUMENT_TIME_INVALID")
+    parser = _VisibleText()
+    parser.feed(content.decode("utf-8-sig"))
+    parser.close()
+    body = " ".join(" ".join(parser.parts).split())
+    if not 20 <= len(body) <= 32000:
+        raise ValueError("SEC_MONITOR_CONTENT_CAPACITY")
+    return FilingDocument(
+        filename=filename,
+        document_type=kind,
+        source_url=filing_root(issuer_cik, entry.accession_number) + filename,
+        raw_hash=sha256(raw).hexdigest(),
+        text=body,
+    )
