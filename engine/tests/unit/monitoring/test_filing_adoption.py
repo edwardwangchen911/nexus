@@ -76,7 +76,8 @@ async def test_operator_requires_configured_account_before_access(monkeypatch, t
 
 
 def test_database_error_never_claims_rollback_or_prints_response(monkeypatch, tmp_path, capsys):
-    from nexus.ops import local_stack, openai_local, sec_graphic_adoption_local as local
+    from nexus.ops import local_stack, openai_local
+    from nexus.ops import sec_graphic_adoption_local as local
     from nexus.settings import EngineSettings
     from sqlalchemy.exc import SQLAlchemyError
 

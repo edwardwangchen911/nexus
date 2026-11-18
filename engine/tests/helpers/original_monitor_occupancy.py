@@ -73,7 +73,15 @@ async def assert_disposition(factory, monkeypatch, account_id, run_id, job_id, f
     async with factory.begin() as db:
         assert await decide(db, "check") == first
         assert await decide(db, "record", at=now + timedelta(seconds=1)) == first
-        await account(db, at=now + timedelta(days=1))
+        from nexus.agents.research_stages import public
+
+        with monkeypatch.context() as scoped:
+
+            async def should_not_read_terminal(*args, **kwargs):
+                pytest.fail("Exact historical occupancy must not decode generic terminal proof")
+
+            scoped.setattr(public, "read_terminal_proof", should_not_read_terminal)
+            await account(db, at=now + timedelta(days=1))
         assert not await occupancy.active_monitor_runs(db, account_id=account_id, now=now)
         with pytest.raises(ProtocolRejected, match="STAGED_TERMINAL_PROOF_INVALID"):
             await read_terminal_proof(db, run_id=run_id, now=now)
