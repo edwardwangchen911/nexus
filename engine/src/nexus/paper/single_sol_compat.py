@@ -58,6 +58,22 @@ async def inspect_service_budget_scope(
         .one_or_none()
     )
     if guard is None:
+        from nexus.paper.routine_budget import _policies
+        from nexus.paper.routine_budget import remaining as routine_remaining
+        from nexus.paper.routine_budget import scope as routine_scope
+
+        routine = await routine_scope(session, now.date())
+        if routine is not None:
+            if (
+                routine["account_id"] != settings.agent_paper_account_id
+                or routine["batch_id"] != settings.agent_paper_candidate_batch_id
+                or routine["daily_limit"] != settings.agent_daily_budget_usd
+            ):
+                raise ValueError("ROUTINE_BUDGET_SCOPE_INVALID")
+            left, _ = await routine_remaining(session, routine, now=now)
+            return {"status": "routine", "remaining_obligations": len(left)}
+        if await _policies(session):
+            return {"status": "pending_initialization", "remaining_obligations": 5}
         return {"status": "no_guard", "remaining_obligations": 0}
     if (
         guard["account_id"] != settings.agent_paper_account_id

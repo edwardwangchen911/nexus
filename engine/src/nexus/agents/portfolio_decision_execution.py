@@ -64,6 +64,7 @@ _TERMINAL_ERROR_STATUS = {
     "PORTFOLIO_DECISION_MODEL_FAILED": "failed",
     "PORTFOLIO_DECISION_PERSISTENCE_UNCERTAIN": "failed",
     "PORTFOLIO_DECISION_AUTHORITY_INVALID": "failed",
+    "PORTFOLIO_DECISION_BUDGET_PROTECTED": "failed",
 }
 
 
@@ -114,9 +115,7 @@ async def load_portfolio_decision_execution_authority(
 
     prompt = await session.get(AgentPromptVersionRecord, run.prompt_version_id)
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
-    report_record = await session.get(
-        PortfolioDiagnosticReportRecord, run.diagnostic_report_id
-    )
+    report_record = await session.get(PortfolioDiagnosticReportRecord, run.diagnostic_report_id)
     if prompt is None or model is None or report_record is None:
         raise _authority_error()
     if (
@@ -468,8 +467,7 @@ def _terminal_usage(
 def _valid_usage_values(usage: UsageSnapshot) -> bool:
     values = (usage.input_tokens, usage.output_tokens, usage.tool_calls, usage.provider_calls)
     return all(
-        isinstance(value, int) and not isinstance(value, bool) and value >= 0
-        for value in values
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in values
     )
 
 
@@ -492,6 +490,13 @@ async def mark_first_requested(
         or run.output_tokens is not None
     ):
         raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_PHASE_INVALID")
+    from nexus.agents.budget import BudgetExhausted
+    from nexus.paper.routine_budget import require_native_new_send
+
+    try:
+        await require_native_new_send(session, kind="portfolio_decision", run_id=run.id)
+    except BudgetExhausted as error:
+        raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_BUDGET_PROTECTED") from error
     run.status = "running"
     run.provider_phase = "first_requested"
     await session.flush()
@@ -521,9 +526,7 @@ async def record_tool_result(
     try:
         frozen = parse_portfolio_decision_input(run.frozen_input)
     except (TypeError, ValidationError) as error:
-        raise PortfolioDecisionExecutionError(
-            "PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH"
-        ) from error
+        raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH") from error
     if (
         canonical_portfolio_decision_hash(frozen) != run.input_hash
         or projection.objective != frozen.objective
@@ -560,20 +563,23 @@ async def mark_second_requested(
     try:
         projection = AgentScenarioProjectionV1.model_validate(run.tool_projection)
     except (TypeError, ValidationError) as error:
-        raise PortfolioDecisionExecutionError(
-            "PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH"
-        ) from error
+        raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH") from error
     if projection.result_hash != run.tool_result_hash:
         raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_TOOL_RESULT_MISMATCH")
 
+    from nexus.agents.budget import BudgetExhausted
+    from nexus.paper.routine_budget import require_native_new_send
+
+    try:
+        await require_native_new_send(session, kind="portfolio_decision", run_id=run.id)
+    except BudgetExhausted as error:
+        raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_BUDGET_PROTECTED") from error
     run.provider_phase = "second_requested"
     await session.flush()
     return run
 
 
-async def _locked_run(
-    session: AsyncSession, run_id: UUID
-) -> PortfolioDecisionRunRecord:
+async def _locked_run(session: AsyncSession, run_id: UUID) -> PortfolioDecisionRunRecord:
     run = await session.get(PortfolioDecisionRunRecord, run_id, with_for_update=True)
     if run is None:
         raise PortfolioDecisionExecutionError("PORTFOLIO_DECISION_RUN_MISSING")

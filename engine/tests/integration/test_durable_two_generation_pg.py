@@ -6,7 +6,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -53,8 +53,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "budget_pressure",
+    [False, True, "allocator", "send_refusal", "stage2_refusal"],
+    ids=[
+        "two-generations",
+        "natural-budget-protection",
+        "shared-allocation",
+        "send-refusal",
+        "stage2-refusal",
+    ],
+)
 async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, budget_pressure
 ):
     from helpers import disclosure_observations as reader
 
@@ -491,6 +502,61 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                     + json.dumps(dict(result=expired, counts=before_expired)),
                     flush=True,
                 )
+            if budget_pressure is True:
+                # Two unrelated original reservations occupy this UTC day. They
+                # never receive a route or transport; the isolated ledger is real.
+                async with factory.begin() as db:
+                    base = {
+                        column.name: getattr(source, column.name)
+                        for column in source.__table__.columns
+                    }
+                    model = await db.get(AgentModelConfigRecord, model_id)
+                    other_members = await db.scalar(
+                        text(
+                            "SELECT candidate_instrument_ids FROM agent_paper_candidate_batches "
+                            "WHERE id=:id"
+                        ),
+                        {"id": settings.agent_paper_candidate_batch_id},
+                    )
+                    other_instrument = next(i for i in other_members if i != pointer.instrument_id)
+                    for _ in range(2):
+                        identity = uuid4()
+                        db.add(
+                            AgentResearchRunRecord(
+                                **(
+                                    base
+                                    | dict(
+                                        id=identity,
+                                        actor_id="unrelated-budget-fixture",
+                                        instrument_id=other_instrument,
+                                        idempotency_key=str(identity),
+                                        input_hash=identity.hex * 2,
+                                        decision_time=controller.now(),
+                                        created_at=controller.now(),
+                                        status="prepared",
+                                        model_config_id=model.id,
+                                        model_hash=model.config_hash,
+                                        pricing_version=model.version,
+                                        reserved_cost_usd=model.worst_case_cost_usd,
+                                        settled_cost_usd=None,
+                                        input_tokens=None,
+                                        output_tokens=None,
+                                    )
+                                )
+                            )
+                        )
+                        await db.flush()
+                        db.add(
+                            AgentDailyBudgetReservationRecord(
+                                run_id=identity,
+                                business_date=day.date(),
+                                state="reserved",
+                                reserved_usd=model.worst_case_cost_usd,
+                                settled_usd=None,
+                                pricing_version=model.version,
+                            )
+                        )
+                assert calls == []
             admitted = await run(
                 settings,
                 argparse.Namespace(
@@ -500,9 +566,125 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                     calendar_authority_id=CALENDAR_ID,
                 ),
             )
+            if budget_pressure is True:
+                assert admitted["status"] == "blocked", admitted
+                assert admitted["reason"] == "MONITOR_BUDGET_UNAVAILABLE", dict(
+                    result=admitted, errors=admission_errors
+                )
+                assert calls == []
+                async with factory() as db:
+                    assert await db.scalar(select(func.count()).select_from(MonitorIncrement)) == 0
+                return
             assert admitted["status"] == "admitted", json.dumps(
                 dict(result=admitted, errors=admission_errors), default=str
             )
+            if budget_pressure == "allocator":
+                from helpers.routine_budget_assertions import assert_allocations
+
+                await assert_allocations(settings, UUID(admitted["run_id"]), controller.now())
+                from helpers.routine_budget_assertions import assert_price_updates
+
+                await assert_price_updates(settings, UUID(admitted["run_id"]), controller.now())
+                assert calls == []
+                return
+            if budget_pressure == "stage2_refusal":
+                from nexus.agents.budget import BudgetExhausted
+                from nexus.agents.research_stages.proof import read_terminal_proof
+                from nexus.paper import routine_budget
+
+                normal_send = routine_budget.require_new_send
+
+                async def refuse_after_first(*args, **kwargs):
+                    if calls:
+                        raise BudgetExhausted("ROUTINE_NATURAL_BUDGET_PROTECTED")
+                    return await normal_send(*args, **kwargs)
+
+                monkeypatch.setattr(routine_budget, "require_new_send", refuse_after_first)
+                assert await synchronized_worker(
+                    settings, job_ids=(UUID(admitted["job_id"]),), formal_stage_capacity=True
+                )
+                assert calls == ["research"]
+                async with factory() as db:
+                    identity = UUID(admitted["run_id"])
+                    proof = await read_terminal_proof(db, run_id=identity, now=controller.now())
+                    assert (
+                        proof is not None
+                        and proof.known
+                        and proof.budget_settled
+                        and proof.cleanup_confirmed
+                    )
+                    assert (
+                        await db.scalar(
+                            text(
+                                "SELECT count(*) FROM research_stage_authorization "
+                                "WHERE run_id=:run"
+                            ),
+                            {"run": identity},
+                        )
+                        == 1
+                    )
+                    assert (
+                        await db.scalar(
+                            text(
+                                "SELECT state FROM agent_daily_budget_reservations "
+                                "WHERE run_id=:run"
+                            ),
+                            {"run": identity},
+                        )
+                        == "settled"
+                    )
+                return
+            if budget_pressure == "send_refusal":
+                from nexus.agents.budget import BudgetExhausted
+                from nexus.paper import routine_budget
+
+                async def refuse_new_send(*args, **kwargs):
+                    raise BudgetExhausted("ROUTINE_NATURAL_BUDGET_PROTECTED")
+
+                monkeypatch.setattr(routine_budget, "require_new_send", refuse_new_send)
+                assert await synchronized_worker(
+                    settings, job_ids=(UUID(admitted["job_id"]),), formal_stage_capacity=True
+                )
+                assert calls == []
+                async with factory() as db:
+                    job = await db.get(Job, UUID(admitted["job_id"]))
+                    terminal = (
+                        await db.execute(
+                            text("SELECT known FROM research_stage_terminal WHERE run_id=:run"),
+                            {"run": UUID(admitted["run_id"])},
+                        )
+                    ).one_or_none()
+                    assert (
+                        job.status == "skipped"
+                        and job.result_code == "AGENT_ABSTAINED"
+                        and job.last_error_code != "AUTHORIZATION_COMMIT_UNCONFIRMED"
+                    )
+                    from nexus.paper.research_failure import (
+                        require_claimed_uncalled_research_closed,
+                    )
+
+                    await require_claimed_uncalled_research_closed(
+                        db, run_id=UUID(admitted["run_id"]), job_id=job.id, now=controller.now()
+                    )
+                    assert terminal is None
+                    assert (
+                        await db.scalar(
+                            text("SELECT count(*) FROM research_stage_member WHERE run_id=:run"),
+                            {"run": UUID(admitted["run_id"])},
+                        )
+                        == 0
+                    )
+                    assert (
+                        await db.scalar(
+                            text(
+                                "SELECT count(*) FROM research_stage_authorization "
+                                "WHERE run_id=:run"
+                            ),
+                            {"run": UUID(admitted["run_id"])},
+                        )
+                        == 0
+                    )
+                return
             run_ids.append(UUID(admitted["run_id"]))
             assert await synchronized_worker(
                 settings, job_ids=(UUID(admitted["job_id"]),), formal_stage_capacity=True

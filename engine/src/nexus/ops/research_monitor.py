@@ -31,6 +31,13 @@ def parser() -> argparse.ArgumentParser:
         "reconcile", help="Reconcile persisted research results into monitor coverage"
     )
     commands.add_parser(
+        "ensure-budget-protection",
+        help="Register current ordinary-day protection without research or model calls",
+    )
+    commands.add_parser(
+        "inspect-budget-protection", help="Read current protection without creating it"
+    )
+    commands.add_parser(
         "enable-auto-increment-limit",
         help="Register stock-session limits without research permission",
     )
@@ -648,6 +655,31 @@ async def _run(
                     "declarations": document.declarations,
                     "research_qualified": False,
                     "nontext_content_status": "uninterpreted",
+                    "model_requests": 0,
+                    "provider_requests": 0,
+                    "job_created": False,
+                    "execution_locked": True,
+                }
+            if args.action in {"ensure-budget-protection", "inspect-budget-protection"}:
+                from nexus.paper.single_sol_compat import inspect_service_budget_scope
+
+                if args.action == "ensure-budget-protection":
+                    from nexus.agents.persistence import _lock_budget_day
+                    from nexus.agents.research_usage import require_research_accounting_clear
+                    from nexus.paper.routine_budget import ensure_scope
+
+                    await _lock_budget_day(session, now.date().isoformat())
+                    await require_research_accounting_clear(session)
+                    await ensure_scope(
+                        session, now=now, daily_limit_usd=settings.agent_daily_budget_usd
+                    )
+                status = await inspect_service_budget_scope(session, settings, now=now)
+                return {
+                    "status": "registered"
+                    if args.action == "ensure-budget-protection"
+                    else "inspected",
+                    "budget_scope": status,
+                    "research_authority_granted": False,
                     "model_requests": 0,
                     "provider_requests": 0,
                     "job_created": False,

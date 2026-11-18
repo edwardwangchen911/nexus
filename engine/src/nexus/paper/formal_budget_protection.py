@@ -197,6 +197,10 @@ async def apply_protection(
     from nexus.paper.single_sol_budget import require_no_single_sol_guard
 
     await require_no_single_sol_guard(session, now.date())
+    from nexus.paper.routine_budget import scope as routine_scope
+
+    if await routine_scope(session, now.date()) is not None:
+        raise ValueError("FORMAL_BUDGET_ROUTINE_SCOPE_CONFLICT")
     from nexus.paper.preparation_unknown_ack import require_no_conflicting_formal_successor
     from nexus.persistence.models.manual_paper import FormalIntradayIntent
 
@@ -619,7 +623,17 @@ async def require_protected_admission(
         return True
     demand = await protected_demand(session, business_date=now.date(), now=now)
     if demand is None:
-        return False
+        from nexus.paper.routine_budget import require_capacity
+
+        return await require_capacity(
+            session,
+            kind=kind,
+            run_id=run_id,
+            now=now,
+            daily_limit_usd=daily_limit_usd,
+            amount=amount,
+            allocation=allocation,
+        )
     if demand.daily_limit_usd != daily_limit_usd:
         raise ValueError("FORMAL_BUDGET_LIMIT_PENDING_APPLY")
     credit = Decimal(0)

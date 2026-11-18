@@ -525,6 +525,7 @@ async def execute_staged_claim(
                 and str(error)
                 in PRECLAIM_CODES
                 | {
+                    "RESEARCH_BUDGET_SEND_REFUSED",
                     "PLATFORM_PROFILE_INVALID",
                     "PLATFORM_WIRE_CHANGED",
                     "PLATFORM_COMPACT_INSTRUCTIONS_REQUIRED",

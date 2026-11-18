@@ -497,6 +497,10 @@ async def hold_pair_budget(
     from nexus.paper.single_sol_budget import require_no_single_sol_guard
 
     await require_no_single_sol_guard(session, now.date())
+    from nexus.paper.routine_budget import _policies
+
+    if await _policies(session):
+        raise ValueError("ROUTINE_BUDGET_ECONOMIC_SCOPE_CONFLICT")
     demand = await protected_demand(session, business_date=now.date(), now=now)
     uncovered = request.uncovered_formal_usd
     if demand is not None:

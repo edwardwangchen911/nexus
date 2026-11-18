@@ -45,8 +45,8 @@ async def require_claimed_uncalled_research_closed(
 ) -> None:
     """Prove the native pure-preparation stop, never infer zero calls from absence.
 
-    stop_uncalled_research is the only native path with this exact two-event
-    stopped shape before a running event. The Job must finalize in that same
+    Native preparation stops share the exact two-event stopped shape before a
+    running event. The Job must finalize in that same
     transaction; an expired or terminal-looking lease alone is insufficient.
     """
     from nexus.agents.execution import _hash

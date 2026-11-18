@@ -106,6 +106,31 @@ async def execute_research_run(
         raise ValueError("research run is missing")
     if run.status != "prepared":
         raise ValueError("only a prepared research run can execute")
+    from nexus.agents.research_stages.executor import is_staged_preparation
+
+    if is_staged_preparation(committee) and await session.scalar(
+        text("SELECT 1 FROM research_stage_route WHERE run_id=:run"), {"run": run.id}
+    ):
+        # An admitted worker may stop before preparation creates any event/member.
+        # Route freezing at admission has no committed route and does not enter here.
+        try:
+            await require_reserved_daily_budget(
+                session, run_id=run.id, accounting=True, for_new_send=True
+            )
+        except BudgetExhausted:
+            from nexus.audit.service import append_audit_event
+            from nexus.paper.research_request import database_now
+
+            result = await _stop_prepared_research(session, run=run)
+            await append_audit_event(
+                session,
+                actor_id="research-worker",
+                action="research.budget_stop",
+                schema_version="research_budget_stop_v1",
+                payload={"run_id": str(run.id), "reason": "RESEARCH_BUDGET_SEND_REFUSED"},
+                occurred_at=await database_now(session),
+            )
+            return result
     event_sequence = 1
     output_sequence = 1
     await _append_event(session, run, event_sequence, "prepared", {})
@@ -187,6 +212,7 @@ async def execute_research_run(
         decision_time=run.decision_time,
     )
     from nexus.agents.research_stages.executor import (
+        FrozenCommittee,
         capture_validated_preparation,
         is_staged_preparation,
     )
@@ -197,7 +223,9 @@ async def execute_research_run(
             # short accounting boundary, never the legacy long-lived day lock.
             await require_reserved_daily_budget(session, run_id=run.id, accounting=True)
         else:
-            await require_reserved_daily_budget(session, run_id=run.id)
+            await require_reserved_daily_budget(
+                session, run_id=run.id, for_new_send=not isinstance(committee, FrozenCommittee)
+            )
     except BudgetExhausted:
         return await _terminal_without_usage(
             session,
@@ -551,6 +579,15 @@ async def stop_uncalled_research(session: AsyncSession, *, run_id: UUID) -> Rese
         or run is None
         or run.status != "prepared"
     ):
+        raise ValueError("RESEARCH_DISPATCH_INVALID")
+    return await _stop_prepared_research(session, run=run)
+
+
+async def _stop_prepared_research(
+    session: AsyncSession, *, run: AgentResearchRunRecord
+) -> ResearchRunResult:
+    """Common unsent preparation close; callers retain their native claim barriers."""
+    if run.status != "prepared":
         raise ValueError("RESEARCH_DISPATCH_INVALID")
     await require_reserved_daily_budget(session, run_id=run.id)
     await _append_event(session, run, 1, "prepared", {})

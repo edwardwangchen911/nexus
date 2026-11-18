@@ -1175,14 +1175,33 @@ async def test_fresh_multistock_candidate_cycle_freezes_native_jobs(
                         assert lease is not None
                         lease.expires_at = clock_at[0] + timedelta(minutes=1)
                         await session.flush()
-                        # Projected execution completion never waives research leases.
-                        with pytest.raises(ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"):
-                            await require_settled_account_cycle_history(
-                                session,
-                                account_id=authority.account_id,
-                                now=clock_at[0],
-                                allow_scheduled_completion=True,
+                        # A terminal attempt consumes its exact fence even while
+                        # its retained lease audit has a future expiry.
+                        await require_settled_account_cycle_history(
+                            session,
+                            account_id=authority.account_id,
+                            now=clock_at[0],
+                            allow_scheduled_completion=True,
+                        )
+
+                        # An unproven future lease remains blocking. Simulate
+                        # missing proof rather than a reclaim the DB itself rejects.
+                        async def unproven(*args, **kwargs):
+                            return False
+
+                        with monkeypatch.context() as proof_context:
+                            proof_context.setattr(
+                                "nexus.jobs.repository.job_lease_consumed", unproven
                             )
+                            with pytest.raises(
+                                ValueError, match="^MANUAL_ACCOUNT_BUSY_OR_UNKNOWN$"
+                            ):
+                                await require_settled_account_cycle_history(
+                                    session,
+                                    account_id=authority.account_id,
+                                    now=clock_at[0],
+                                    allow_scheduled_completion=True,
+                                )
                     finally:
                         await transaction.rollback()
         elif profile != "v7" and count == 3:
