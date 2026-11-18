@@ -16,7 +16,12 @@
     "test:e2e:real": "node scripts/e2e/run-real-fixture.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "generate:client": "node scripts/generate-client.mjs",
-    "check:generated": "node scripts/generate-client.mjs --check"
+    "check:generated": "node scripts/generate-client.mjs --check",
+    "postinstall": "node scripts/ci/picomatch_patch.mjs --apply",
+    "check:picomatch": "node --test scripts/ci/picomatch_patch.test.mjs && node scripts/ci/picomatch_patch.mjs --verify && node scripts/ci/picomatch_probe.mjs",
+    "prebuild": "npm run check:picomatch",
+    "predev": "npm run check:picomatch",
+    "prestart": "npm run check:picomatch"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.23",

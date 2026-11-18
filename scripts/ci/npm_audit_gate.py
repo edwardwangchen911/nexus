@@ -341,7 +341,13 @@ def minimatch_graph_digest(vulnerabilities: dict) -> str:
     ).hexdigest()
 
 
-def evaluate_minimatch(vulnerabilities, counts, exit_code, root, now):
+def evaluate_minimatch(
+    vulnerabilities: dict,
+    counts: dict,
+    exit_code: int,
+    root: Path,
+    now: datetime | Callable[[], datetime],
+) -> str:
     expected = {"info": 0, "low": 0, "moderate": 14, "high": 0, "critical": 0, "total": 14}
     # The unchanged normal command uses --audit-level=high: moderate-only is 0.
     if (
@@ -366,6 +372,45 @@ def evaluate_minimatch(vulnerabilities, counts, exit_code, root, now):
     if not MINIMATCH_ACTIVE_FROM <= checked_at < MINIMATCH_EXPIRES_AT:
         raise AuditRejected("AUDIT_ACCEPTANCE_EXPIRED")
     return "risk_accepted_minimatch_until_2026-11-01T00:00:00Z"
+
+
+def verify_picomatch_patch(root: Path) -> None:
+    """Verify actual installed sources and all embedded matchers, never a waiver."""
+    for filename, arguments, expected in (
+        ("picomatch_patch.mjs", ["--verify", str(root)], "source_patch_verified"),
+        ("picomatch_probe.mjs", [str(root)], "verified"),
+    ):
+        result = subprocess.run(
+            ["node", str(root / "scripts/ci" / filename), *arguments],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AuditRejected("AUDIT_PICOMATCH_PATCH_INVALID")
+        proof = parse_report(result.stdout)
+        if proof.get("status") != expected or proof.get("parsers") != 10:
+            raise AuditRejected("AUDIT_PICOMATCH_PATCH_INVALID")
+
+
+def evaluate_picomatch(vulnerabilities: dict, counts: dict, exit_code: int, root: Path) -> str:
+    identity = parse_report(Path(__file__).with_name("picomatch_sources.json").read_text())
+    expected = identity["audit_findings"]
+    if (
+        exit_code != 1
+        or counts != identity["audit_counts"]
+        or set(vulnerabilities) != set(expected)
+    ):
+        raise AuditRejected("AUDIT_UNACCEPTED_FINDING")
+    for name, finding in vulnerabilities.items():
+        if {field: finding[field] for field in ("name", "severity", "via", "nodes")} != expected[
+            name
+        ]:
+            raise AuditRejected("AUDIT_UNACCEPTED_FINDING")
+    verify_picomatch_patch(root)
+    return "fixed_locally_picomatch_GHSA-fc5q-39xc-vjpf"
 
 
 def evaluate(
@@ -406,6 +451,8 @@ def evaluate(
             raise AuditRejected("AUDIT_REPORT_INVALID")
         if not vulnerabilities and counts == empty and exit_code == 0:
             return "clean"
+        if "picomatch" in vulnerabilities:
+            return evaluate_picomatch(vulnerabilities, counts, exit_code, root)
         if "minimatch" in vulnerabilities:
             return evaluate_minimatch(vulnerabilities, counts, exit_code, root, now)
         if exit_code != 1 or set(vulnerabilities) != set(CHAIN):
@@ -490,6 +537,8 @@ def main() -> int:
         print(json.dumps({"status": "blocked", "code": "AUDIT_EXECUTION_FAILED"}))
         return 1
     advisory = MINIMATCH_ADVISORY if status.startswith("risk_accepted_minimatch_") else ADVISORY
+    if status == "fixed_locally_picomatch_GHSA-fc5q-39xc-vjpf":
+        advisory = "https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
     print(json.dumps({"status": status, "advisory": advisory if status != "clean" else None}))
     return 0
 

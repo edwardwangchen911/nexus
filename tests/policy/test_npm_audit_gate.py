@@ -251,3 +251,65 @@ def test_identity_check_crossing_expiry_is_rejected(root, report, monkeypatch):
     monkeypatch.setattr(gate, "surface_digest", digest)
     with pytest.raises(gate.AuditRejected, match="AUDIT_ACCEPTANCE_EXPIRED"):
         gate.evaluate(report, 1, root, lambda: current)
+
+
+def test_picomatch_source_remediation_requires_verified_actual_code(root, monkeypatch):
+    (root / "package-lock.json").write_bytes(
+        (Path(__file__).parents[2] / "package-lock.json").read_bytes()
+    )
+    observed = json.loads((Path(__file__).parent / "fixtures/npm-audit-picomatch.json").read_text())
+    checked = []
+    monkeypatch.setattr(
+        gate, "verify_picomatch_patch", lambda value: checked.append(value), raising=False
+    )
+    assert gate.evaluate(observed, 1, root, NOW) == "fixed_locally_picomatch_GHSA-fc5q-39xc-vjpf"
+    assert checked == [root]
+
+
+@pytest.mark.parametrize("mutation", ["url", "range", "extra", "node", "via", "counts"])
+def test_picomatch_remediation_does_not_hide_other_findings(root, monkeypatch, mutation):
+    (root / "package-lock.json").write_bytes(
+        (Path(__file__).parents[2] / "package-lock.json").read_bytes()
+    )
+    observed = json.loads((Path(__file__).parent / "fixtures/npm-audit-picomatch.json").read_text())
+    monkeypatch.setattr(gate, "verify_picomatch_patch", lambda value: None, raising=False)
+    if mutation == "url":
+        observed["vulnerabilities"]["picomatch"]["via"][0]["url"] += "-other"
+    elif mutation == "range":
+        observed["vulnerabilities"]["picomatch"]["via"][0]["range"] = "<=99"
+    elif mutation == "extra":
+        observed["vulnerabilities"]["other"] = observed["vulnerabilities"]["picomatch"]
+    elif mutation == "node":
+        observed["vulnerabilities"]["picomatch"]["nodes"].append("node_modules/other/picomatch")
+    elif mutation == "via":
+        observed["vulnerabilities"]["vite"]["via"].append("new-vulnerability")
+    else:
+        observed["metadata"]["vulnerabilities"]["high"] += 1
+    with pytest.raises(gate.AuditRejected):
+        gate.evaluate(observed, 1, root, NOW)
+
+
+def test_picomatch_missing_source_patch_still_rejects(root, monkeypatch):
+    (root / "package-lock.json").write_bytes(
+        (Path(__file__).parents[2] / "package-lock.json").read_bytes()
+    )
+    observed = json.loads((Path(__file__).parent / "fixtures/npm-audit-picomatch.json").read_text())
+
+    def missing(value):
+        raise gate.AuditRejected("AUDIT_PICOMATCH_PATCH_INVALID")
+
+    monkeypatch.setattr(gate, "verify_picomatch_patch", missing, raising=False)
+    with pytest.raises(gate.AuditRejected, match="AUDIT_PICOMATCH_PATCH_INVALID"):
+        gate.evaluate(observed, 1, root, NOW)
+
+
+def test_fixed_picomatch_cli_names_the_remediated_advisory(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(gate, "run", lambda *args: "fixed_locally_picomatch_GHSA-fc5q-39xc-vjpf")
+    monkeypatch.setattr(
+        sys, "argv", ["npm_audit_gate.py", "--report", str(tmp_path / "audit.json")]
+    )
+    assert gate.main() == 0
+    assert (
+        json.loads(capsys.readouterr().out)["advisory"]
+        == "https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
+    )
