@@ -191,17 +191,26 @@ async def test_public_member_runs_canonical_owner_validation_once(monkeypatch, k
         "read_stage_accounting_model",
         AsyncMock(side_effect=ReachedAccounting),
     )
+    member = SimpleNamespace(run_id=run_id, job_id=job_id)
     with pytest.raises(
         ReachedAccounting if owner_fault is None else (ValueError, ProtocolRejected)
     ):
-        await public._selected_member_settled(
-            Session(),
-            owner_id=scope_id,
-            kind=kind,
-            member=SimpleNamespace(run_id=run_id, job_id=job_id),
-            now=now,
-            allow_unknown_usage=False,
-        )
+        if kind == "independent":
+            await public._research_settled(
+                Session(),
+                row=SimpleNamespace(id=scope_id),
+                view=SimpleNamespace(members=(member,)),
+                now=now,
+            )
+        else:
+            await public._selected_member_settled(
+                Session(),
+                owner_id=scope_id,
+                kind=kind,
+                member=member,
+                now=now,
+                allow_unknown_usage=False,
+            )
     assert owner.await_count == (0 if owner_fault in {"run", "job", "version", "native"} else 1)
 
 

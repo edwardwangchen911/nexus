@@ -246,13 +246,10 @@ async def _research_settled(
     # The independent opt-in is never forwarded by acceptance or admission.
     historical = []
     for member in view.members:
-        if await selected_route(session, member.job_id) is None:
-            historical.append(member)
-            continue
         # The formal proof validates the consumed fence and cleanup separately
         # from usage. A retained, unexpired lease must not prevent recording an
         # unknown outcome; it still cannot grant next-round admission.
-        await _selected_member_settled(
+        if not await _selected_member_settled(
             session,
             owner_id=row.id,
             kind="independent",
@@ -260,7 +257,8 @@ async def _research_settled(
             now=now,
             allow_unknown_usage=allow_unknown_usage,
             close_empty_unknown=close_empty_unknown,
-        )
+        ):
+            historical.append(member)
     if historical:
         await research_request._legacy_require_research_jobs_settled(
             session,
