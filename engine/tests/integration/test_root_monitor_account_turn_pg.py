@@ -14,6 +14,72 @@ from sqlalchemy import text
 
 
 @pytest.mark.asyncio
+async def test_mixed_admission_queues_monitor_before_opening_its_transaction(
+    migrated_database_url, monkeypatch
+):
+    from nexus.ops import research_monitor
+    from nexus.paper import target_service
+
+    account, batch, materials, calendar, model = (UUID(int=n) for n in range(1, 6))
+    settings = EngineSettings.for_test().model_copy(
+        update={
+            "database_url": migrated_database_url,
+            "agent_paper_account_id": account,
+            "agent_paper_candidate_batch_id": batch,
+            "agent_paper_formal_model_config_id": model,
+        }
+    )
+    args = research_monitor.parser().parse_args(
+        [
+            "admit-batch",
+            "--batch-id",
+            str(batch),
+            "--materials-snapshot-id",
+            str(materials),
+            "--calendar-authority-id",
+            str(calendar),
+        ]
+    )
+    factory = session_factory(settings)
+    held, release, monitor_started, monitor_opened = (asyncio.Event() for _ in range(4))
+
+    async def hold_admission(session, account_id):
+        await lock_portfolio_account(session, account_id)
+        held.set()
+        await release.wait()
+
+    async def next_monitor_observation():
+        monitor_started.set()
+        async with account_transaction_turn(settings), factory() as db, db.begin():
+            monitor_opened.set()
+            await db.execute(text("SET LOCAL lock_timeout='2s'"))
+            await lock_portfolio_account(db, account)
+            return await db.scalar(text("SELECT clock_timestamp()"))
+
+    monkeypatch.setattr(target_service, "lock_portfolio_account", hold_admission)
+    admission = asyncio.create_task(research_monitor.run(settings, args))
+    monitor = None
+    try:
+        await asyncio.wait_for(held.wait(), timeout=10)
+        monitor = asyncio.create_task(next_monitor_observation())
+        await monitor_started.wait()
+        opened_before_release = monitor_opened.is_set()
+        release.set()
+        with pytest.raises(ValueError, match="MONITOR_BATCH_UNAVAILABLE"):
+            await admission
+        assert await monitor is not None
+        assert not opened_before_release
+        async with factory() as db:
+            assert await db.scalar(text("SELECT count(*) FROM research_monitor_increments")) == 0
+            assert await db.scalar(text("SELECT count(*) FROM sec_auto_increment_day_claims")) == 0
+    finally:
+        release.set()
+        tasks = (admission,) if monitor is None else (admission, monitor)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_root_reservation_does_not_expose_monitor_to_account_lock_timeout(
     temporary_database_url, monkeypatch, tmp_path
 ):
