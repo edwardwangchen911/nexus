@@ -123,6 +123,15 @@ class HistorySealReceipt(BaseModel):
 
 
 def require_research_processes_quiescent() -> None:
+    _require_research_processes_quiescent(formal_recovery=False)
+
+
+def require_formal_recovery_processes_quiescent() -> None:
+    """Use the desktop bridge topology reviewed for managed host recovery."""
+    _require_research_processes_quiescent(formal_recovery=True)
+
+
+def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
     """Inspect process identity and executable mappings; never argv or credentials."""
 
     def output(command: list[str]) -> str:
@@ -186,17 +195,25 @@ def require_research_processes_quiescent() -> None:
     verified: set[int] = set()
     for pid in desktop:
         parent = host.get(host[pid][0])
-        chain = (
-            (_DESKTOP_CHILD, _DESKTOP_PARENT)
-            if parent is not None and parent[3] == _DESKTOP_PARENT
-            else (_DESKTOP_CHILD, _DESKTOP_REPL, _DESKTOP_NODE, _DESKTOP_CHILD, _DESKTOP_PARENT)
-        )
+        ancestor = None if parent is None else host.get(parent[0])
+        chain: tuple[str, ...]
+        roles: tuple[str, ...]
+        if parent is not None and parent[3] == _DESKTOP_PARENT:
+            chain = (_DESKTOP_CHILD, _DESKTOP_PARENT)
+            roles = ("candidate", "desktop")
+        elif (
+            formal_recovery
+            and parent is not None
+            and parent[3] == _DESKTOP_REPL
+            and ancestor is not None
+            and ancestor[3] == _DESKTOP_CHILD
+        ):
+            chain = (_DESKTOP_CHILD, _DESKTOP_REPL, _DESKTOP_CHILD, _DESKTOP_PARENT)
+            roles = ("candidate", "repl", "ancestor_codex", "desktop")
+        else:
+            chain = (_DESKTOP_CHILD, _DESKTOP_REPL, _DESKTOP_NODE, _DESKTOP_CHILD, _DESKTOP_PARENT)
+            roles = ("candidate", "repl", "node", "ancestor_codex", "desktop")
         ancestors: set[int] = set()
-        roles = (
-            ("candidate", "desktop")
-            if len(chain) == 2
-            else ("candidate", "repl", "node", "ancestor_codex", "desktop")
-        )
         for role, executable in zip(roles, chain, strict=True):
             row = host.get(pid)
             observed = (

@@ -48,9 +48,9 @@ _KNOWN_CODES = frozenset(
 
 def require_recovery_process_quiescence() -> None:
     """Reuse exact SDK process identity checks; never stop or acknowledge a process."""
-    from nexus.paper.history_seal import require_research_processes_quiescent
+    from nexus.paper.history_seal import require_formal_recovery_processes_quiescent
 
-    require_research_processes_quiescent()
+    require_formal_recovery_processes_quiescent()
 
 
 def _recovery_model_matches(

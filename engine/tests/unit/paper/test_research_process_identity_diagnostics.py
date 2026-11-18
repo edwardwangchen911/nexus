@@ -16,6 +16,93 @@ _DESKTOP = (
 _BIRTH = "Mon Oct 12 10:00:00 2026"
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "valid",
+        "historical",
+        "extra_node",
+        "wrong_path",
+        "wrong_owner",
+        "wrong_mapping",
+        "research_cwd",
+        "ambiguous_cwd",
+        "changed_birth",
+        "changed_parent",
+        "other_candidate",
+        "running_container_codex",
+    ],
+)
+def test_formal_recovery_classifies_only_exact_repl_ancestry(monkeypatch, scenario):
+    from nexus.ops.agent_paper_recovery import require_recovery_process_quiescence
+
+    uid = os.getuid()
+    paths = [
+        _DESKTOP,
+        history_seal._DESKTOP_REPL,
+        _DESKTOP,
+        history_seal._DESKTOP_PARENT,
+    ]
+    if scenario == "extra_node":
+        paths.insert(2, "/usr/bin/sh")
+    if scenario == "wrong_path":
+        paths[1] = "/tmp/node_repl"
+    snapshots = 0
+    container_checks = []
+
+    def execute(command, **kwargs):
+        nonlocal snapshots
+        if command[0] == "/bin/ps":
+            snapshots += 1
+            rows = []
+            for index, executable in enumerate(paths):
+                pid, parent = index + 200, index + 201
+                owner = uid + 1 if scenario == "wrong_owner" and index == 1 else uid
+                born = _BIRTH
+                if snapshots == 2 and index == 1:
+                    if scenario == "changed_birth":
+                        born = "Mon Oct 12 10:00:01 2026"
+                    if scenario == "changed_parent":
+                        parent = 400
+                rows.append(f"{pid} {parent} {owner} {born} {executable}")
+            if scenario == "other_candidate":
+                rows.append(f"400 0 {uid} {_BIRTH} /opt/unowned/codex")
+            output = "\n".join(rows)
+        elif command[0] == "/usr/sbin/lsof":
+            pid = int(command[command.index("-p") + 1])
+            mapped = paths[pid - 200]
+            cwd = "/Users/test/workbench"
+            if pid == 201:
+                if scenario == "wrong_mapping":
+                    mapped = "/tmp/node_repl"
+                if scenario == "research_cwd":
+                    cwd = "/tmp/nexus-codex-unknown/run"
+            output = f"p{pid}\nftxt\nn{mapped}\nfcwd\nn{cwd}\n"
+            if pid == 201 and scenario == "ambiguous_cwd":
+                output += "fcwd\nn/tmp/other\n"
+        elif command[1] == "ps":
+            output = "abc123\n"
+        else:
+            container_checks.append(command)
+            output = "PID COMMAND\n1 python\n"
+            if scenario == "running_container_codex":
+                output += "2 codex\n"
+        return subprocess.CompletedProcess(command, 0, output)
+
+    monkeypatch.setattr(history_seal.subprocess, "run", execute)
+    if scenario == "valid":
+        require_recovery_process_quiescence()
+        assert snapshots == 2 and len(container_checks) == 1
+    else:
+        check = (
+            history_seal.require_research_processes_quiescent
+            if scenario == "historical"
+            else require_recovery_process_quiescence
+        )
+        with pytest.raises(history_seal.ResearchProcessDiagnosticError):
+            check()
+
+
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize(
     "fault,reason",
