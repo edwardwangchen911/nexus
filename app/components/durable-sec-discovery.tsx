@@ -4,6 +4,7 @@ import { Badge } from "./ui/badge";
 
 type View = components["schemas"]["DurableSecView"];
 type Notice = components["schemas"]["DurableSecNoticeView"];
+type ResearchStatus = NonNullable<components["schemas"]["DurableSecEventView"]["research_status"]>;
 const states = { active: "规则已启用", paused: "规则已暂停", revoked: "规则已撤销", unknown: "规则状态待核验" } as const;
 const coverage = { complete: "完整覆盖", partial: "部分覆盖", unknown: "覆盖范围未知" } as const;
 const results = { true: "发现规则生效后发布的新公告", false: "本次完整覆盖区间未发现新公告", unknown: "本次检查无法确认是否有新公告" } as const;
@@ -23,6 +24,14 @@ const noticeStatuses = {
   published: "已记录响应",
   dead_letter: "发送尝试已结束",
 } satisfies Record<Notice["status"], string>;
+const researchStatuses = {
+  no_receipt: "暂无逐事件处理回执。",
+  bound: "已关联增量材料，暂无逐事件处理回执。",
+  increment_failed: "原增量研究失败，暂无逐事件处理回执。",
+  addressed_increment: "已保存增量研究的逐事件处理回执。",
+  addressed_daily: "已保存日研的逐事件处理回执。",
+  unverified: "逐事件处理证据待核验。",
+} satisfies Record<ResearchStatus, string>;
 const serverResults = {
   accepted: "Bark 已接受",
   http_error: "收到非成功 HTTP 响应",
@@ -90,6 +99,7 @@ export function DurableSecDiscovery({ discovery }: { discovery: View }): React.R
       <h3>{event.form} · {event.event_key.split(":").at(-1)}</h3>
       <dl className="decision-card__versions"><div><dt>SEC 接受时间</dt><dd>{formatDisplayTime(event.accepted_at)}</dd></div><div><dt>首次发现时间</dt><dd>{formatDisplayTime(event.first_seen_at)}</dd></div></dl>
       {event.metadata_status === "conflict" ? <p>公告元数据出现冲突，后续处理状态待核验。</p> : null}
+      {event.research_status ? <p>{researchStatuses[event.research_status]}</p> : null}
       {event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>}
     </article>)}
     <p role="note">公告发现不代表通知已送达或研究已完成。研究有效期、旧事件一次限制、每日增量名额与未知费用仍独立核验；本区不表示可以发起研究或交易，交易保持锁定。</p>

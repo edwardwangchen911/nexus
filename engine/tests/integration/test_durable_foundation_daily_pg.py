@@ -500,13 +500,18 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             )
         await run(settings, argparse.Namespace(action="reconcile"))
         async with factory() as db:
+            from nexus.api.durable_sec import read_event_research_status
+
+            read_at = await db.scalar(select(func.clock_timestamp()))
             rows = tuple(await db.scalars(select(SecDurableDailyEventReceipt)))
             if resolution in {"addressed", "issue"}:
                 assert (
                     len(rows) == 1 and rows[0].event_id == event.id and rows[0].run_id == child.id
                 )
+                assert await read_event_research_status(db, event, read_at) == "addressed_daily"
             else:
                 assert not rows
+                assert await read_event_research_status(db, event, read_at) == "no_receipt"
             from nexus.monitoring.durable_sec_daily import freeze_durable_sec_pending
 
             pending, gap = await freeze_durable_sec_pending(

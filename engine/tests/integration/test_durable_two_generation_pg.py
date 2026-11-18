@@ -1060,6 +1060,10 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 assert proof is not None
                 native_receipt = await db.get(MonitorMixedEventReceipt, proof.mixed_receipt_id)
                 assert native_receipt.run_id == child.id
+                from nexus.api.durable_sec import read_event_research_status
+
+                read_at = await db.scalar(select(func.clock_timestamp()))
+                assert await read_event_research_status(db, event, read_at) == "addressed_increment"
                 assert await db.scalar(select(func.count()).select_from(OutboxEvent)) == notices
                 assert (
                     await db.scalar(select(func.count()).select_from(SecNotificationClaim))

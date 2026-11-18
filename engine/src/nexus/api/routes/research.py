@@ -174,6 +174,7 @@ def _research_wire(
     status: int = 200,
     headers: dict[str, str] | None = None,
     include_sec_notices: bool = False,
+    include_sec_research: bool = False,
 ) -> JSONResponse:
     # A previous BFF rejects unknown keys. Negotiate the additive fields so
     # either service can roll back independently, including the create receipt.
@@ -183,11 +184,13 @@ def _research_wire(
         else {"data": {"monitoring_applicability", "price_check_windows"}}
     )
     content = payload.model_dump(mode="json", exclude=exclude)
-    if not include_sec_notices:
-        discovery = content["data"].get("durable_disclosure")
-        if discovery is not None:
-            for event in discovery["events"]:
+    discovery = content["data"].get("durable_disclosure")
+    if discovery is not None:
+        for event in discovery["events"]:
+            if not include_sec_notices:
                 event.pop("notice", None)
+            if not include_sec_research:
+                event.pop("research_status", None)
     return JSONResponse(
         status_code=status,
         headers=headers,
@@ -278,6 +281,7 @@ async def get_research_run(
     run_id: UUID,
     monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     sec_notice_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Notice-View")] = None,
+    sec_research_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Research-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -294,11 +298,13 @@ async def get_research_run(
                 output,
                 window_summary=monitor_view == "1",
                 include_sec_notices=sec_notice_view == "1",
+                include_sec_research=sec_research_view == "1",
             ),
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
         ),
         monitor_view,
         include_sec_notices=sec_notice_view == "1",
+        include_sec_research=sec_research_view == "1",
     )
 
 
@@ -317,6 +323,7 @@ async def get_instrument_research(
     as_of: Annotated[datetime, Query()],
     monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     sec_notice_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Notice-View")] = None,
+    sec_research_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Research-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -356,11 +363,13 @@ async def get_instrument_research(
                 output,
                 window_summary=monitor_view == "1",
                 include_sec_notices=sec_notice_view == "1",
+                include_sec_research=sec_research_view == "1",
             ),
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
         ),
         monitor_view,
         include_sec_notices=sec_notice_view == "1",
+        include_sec_research=sec_research_view == "1",
     )
 
 
@@ -384,6 +393,7 @@ async def _hydrate_response(
     observation_reader: ObservationReadback | None = None,
     window_summary: bool = False,
     include_sec_notices: bool = False,
+    include_sec_research: bool = False,
 ) -> ResearchRunResponse:
     with (
         identity_parse_scope(),
@@ -473,7 +483,11 @@ async def _hydrate_response(
                     else None
                 ),
                 "durable_disclosure": await read_durable_sec_view(
-                    session, run, now=reader.read_at, include_notice=include_sec_notices
+                    session,
+                    run,
+                    now=reader.read_at,
+                    include_notice=include_sec_notices,
+                    include_research=include_sec_research,
                 ),
                 "stage_trace": await read_stage_trace(session, run),
                 "inputs": await read_research_inputs(

@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from nexus.api.durable_sec import project_check, project_event
+from nexus.api.durable_sec import project_check, project_event, read_event_research_status
 from nexus.monitoring.durable_sec_contracts import DurableSecPolicy
+from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
 from nexus.persistence.models.sec_monitor import SecDiscoveryCheck, SecDiscoveryEvent
 
 NOW = datetime(2026, 11, 17, 4, tzinfo=UTC)
@@ -118,6 +120,40 @@ def test_first_seen_is_not_acceptance_and_conflict_stays_visible():
     view = project_event(row, policy, NOW, conflict=True)
     assert view.accepted_at < view.first_seen_at
     assert view.metadata_status == "conflict"
+
+
+def test_event_can_show_persisted_research_without_relabeling_discovery():
+    row, policy = event()
+    view = project_event(row, policy, NOW, conflict=True, research_status="increment_failed")
+    assert view.research_status == "increment_failed"
+    assert view.metadata_status == "conflict" and view.notice is None
+
+
+@pytest.mark.asyncio
+async def test_an_unaudited_daily_receipt_does_not_mark_an_event_addressed():
+    row, _ = event()
+    row.id = uuid4()
+    receipt = SecDurableDailyEventReceipt(
+        id=uuid4(), event_id=row.id, observed_at=NOW, created_at=NOW
+    )
+    session = Mock(
+        scalar=AsyncMock(side_effect=[receipt, False]), scalars=AsyncMock(return_value=Mock())
+    )
+    session.scalars.return_value.all.return_value = []
+
+    assert await read_event_research_status(session, row, NOW) == "unverified"
+    assert session.scalar.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_research_status_cannot_be_read_before_event_visibility():
+    row, _ = event()
+    session = Mock()
+
+    assert (
+        await read_event_research_status(session, row, NOW - timedelta(seconds=1)) == "unverified"
+    )
+    assert not session.mock_calls
 
 
 @pytest.mark.parametrize("failure", ["scope", "key", "old", "future"])
