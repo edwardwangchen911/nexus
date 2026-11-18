@@ -79,6 +79,7 @@ async def verify_material(
     if prepared > as_of or material.get("database_schema") not in {
         "0134_sec_foundation",
         "0135_routine_budget",
+        "0136_sec_adopted_content",
     }:
         raise ValueError(ERROR)
     snapshot_id = UUID(str(material["original_snapshot_id"]))
@@ -107,6 +108,18 @@ async def verify_material(
 async def read_adoption(
     db: AsyncSession, *, snapshot_id: UUID, account_id: UUID, as_of: datetime
 ) -> GraphicDesignation:
+    result = await read_adoption_record(db, snapshot_id=snapshot_id, as_of=as_of)
+    await verify_material(db, result, account_id=account_id, as_of=as_of)
+    return result
+
+
+async def read_adoption_record(
+    db: AsyncSession, *, snapshot_id: UUID, as_of: datetime
+) -> GraphicDesignation:
+    """Verify the authority fact; consumers must additionally prove all material.
+
+    This is not sufficient content eligibility and is not an operator endpoint.
+    """
     as_of = require_utc(as_of)
     row = await db.get(DataSnapshot, snapshot_id)
     if (
@@ -140,7 +153,6 @@ async def read_adoption(
         != {"snapshot_id": str(row.id), "canonical_hash": row.revision, "purpose": result.purpose}
     ):
         raise ValueError(ERROR)
-    await verify_material(db, result, account_id=account_id, as_of=as_of)
     return result
 
 

@@ -8,8 +8,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.monitoring.filing_originals import _read_pairs, read_originals
-from nexus.monitoring.filing_relations import _prove
+from nexus.monitoring.filing_originals import OriginalArchive, _read_pairs, read_originals
+from nexus.monitoring.filing_relations import OriginalRelations, _prove
 from nexus.monitoring.filing_review import ERROR, observe_html_dependencies
 
 
@@ -19,6 +19,25 @@ async def rebuild_material(
     document = await read_originals(db, snapshot_id=snapshot_id, as_of=prepared_at)
     pairs = await _read_pairs(db, document=document, as_of=prepared_at)
     relations = await _prove(db, snapshot_id=snapshot_id, as_of=prepared_at)
+    return build_material(
+        document=document,
+        snapshot_id=snapshot_id,
+        pairs=pairs,
+        relations=relations,
+        prepared_at=prepared_at,
+        schema=schema,
+    ), pairs
+
+
+def build_material(
+    *,
+    document: OriginalArchive,
+    snapshot_id: UUID,
+    pairs: dict[str, tuple[bytes, bytes]],
+    relations: OriginalRelations,
+    prepared_at: datetime,
+    schema: str,
+) -> dict[str, object]:
     descriptions = []
     html = {}
     for name, (raw, receipt) in pairs.items():
@@ -57,4 +76,4 @@ async def rebuild_material(
         "research_qualified": False,
         "nontext_content_status": "uninterpreted",
     }
-    return material, pairs
+    return material
