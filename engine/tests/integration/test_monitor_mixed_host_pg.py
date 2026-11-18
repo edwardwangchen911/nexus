@@ -26,7 +26,7 @@ from nexus.persistence.models.monitoring import (
     MonitorMixedEventReceipt,
     MonitorTrigger,
 )
-from nexus.persistence.models.runtime import Job, JobLease
+from nexus.persistence.models.runtime import AuditEvent, Job, JobLease
 from nexus.settings import AgentRuntimeMode
 from sqlalchemy import func, select
 
@@ -72,7 +72,7 @@ async def ready_host_batch(url, monkeypatch, root, *, sec_only=False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["success", "unknown", "sec_only"])
+@pytest.mark.parametrize("mode", ["success", "unknown", "sec_only", "noncanonical"])
 async def test_normal_host_selects_prepared_typed_batch_and_never_replays_it(
     migrated_database_url, monkeypatch, tmp_path, mode
 ):
@@ -104,6 +104,47 @@ async def test_normal_host_selects_prepared_typed_batch_and_never_replays_it(
     assert (
         await inspect_monitor_queue(settings, account_id=pointer.account_id, snapshot=daily)
     ).monitor_trigger_id is None
+    if mode == "noncanonical":
+        from nexus import worker
+        from nexus.ops.monitor_dispatch_sec import WORKER_ACTION
+
+        dispatched_jobs = []
+
+        async def observe_worker(config, *, job_ids, formal_stage_capacity):
+            assert config == settings and formal_stage_capacity is True
+            dispatched_jobs.extend(job_ids)
+
+        monkeypatch.setattr(worker, "run_agent_worker_once", observe_worker)
+        assert len(members) >= 2
+        dispatched = await dispatch_configured_once(
+            settings, trigger_id=members[-1].id, calendar_authority_id=CALENDAR_ID
+        )
+        assert dispatched["status"] == "unconfirmed", dispatched
+        async with factory() as session:
+            member = await session.scalar(
+                select(MonitorIncrement).where(MonitorIncrement.batch_id == batch_id)
+            )
+            assert member is not None and dispatched_jobs == [member.job_id]
+            job = await session.get(Job, member.job_id)
+            assert job.status == "queued" and job.attempt_count == 0
+            receipts = tuple(
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.action == WORKER_ACTION,
+                        AuditEvent.payload["job_id"].astext == str(job.id),
+                    )
+                )
+            )
+            assert [receipt.payload for receipt in receipts] == [
+                {"trigger_id": str(members[0].id), "job_id": str(job.id)}
+            ]
+        again = await dispatch_configured_once(
+            settings, trigger_id=members[-1].id, calendar_authority_id=CALENDAR_ID
+        )
+        assert again["status"] == "unconfirmed" and dispatched_jobs == [member.job_id]
+        await factory.kw["bind"].dispose()
+        return
+
     calls = []
     native = codex_staged.invoke_codex
 
@@ -144,7 +185,9 @@ async def test_normal_host_selects_prepared_typed_batch_and_never_replays_it(
         action=loop.AgentPaperLoopAction.RUN_MONITOR_INCREMENT,
         snapshot=selected,
     )
-    assert result == (loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN if mode == "unknown" else None)
+    assert result == (
+        loop.AgentPaperLoopAction.STOP_RESULT_UNKNOWN if mode == "unknown" else None
+    )
     assert calls == (
         ["research", "critique"] if mode == "unknown" else ["research", "critique", "synthesis"]
     )

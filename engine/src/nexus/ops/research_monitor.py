@@ -1146,6 +1146,7 @@ async def _run(
                 return {
                     "status": "admitted" if first is None else first.status,
                     "batch_id": str(args.batch_id),
+                    "trigger_id": str(member.trigger_id),
                     "run_id": str(member.run_id),
                     "job_id": str(member.job_id),
                     "reserved_sdk_calls": 3,

@@ -24,6 +24,46 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 
 
+def install_durable_refresh_mock(
+    monkeypatch, store, controller, directory, submissions, *, unavailable=False
+):
+    """Keep the ordinary bounded collector and substitute only the SEC HTTP and file clock."""
+    from nexus.ops import durable_sec_index_local, sec_index_local
+
+    sec_requests = []
+
+    def sec_response(request):
+        assert request.method == "GET" and request.url.host in {"www.sec.gov", "data.sec.gov"}
+        sec_requests.append({"at": controller.now(), "path": request.url.path})
+        if unavailable:
+            return httpx.Response(503, content=b"")
+        content = directory if request.url.host == "www.sec.gov" else submissions
+        return httpx.Response(200, content=content)
+
+    monkeypatch.setattr(
+        monitor_disclosure_refresh,
+        "_client",
+        lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(sec_response),
+            follow_redirects=False,
+        ),
+    )
+    for collector in (sec_index_local, durable_sec_index_local):
+        monkeypatch.setattr(collector, "_store", lambda _settings, supplied: supplied or store)
+
+    class ClockMeta(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class SourceClock(datetime, metaclass=ClockMeta):
+        @classmethod
+        def now(cls, tz=None):
+            return controller.now().astimezone(tz or UTC)
+
+    monkeypatch.setattr(research_identity_local, "datetime", SourceClock)
+    return sec_requests
+
+
 async def verify_open_handoff(
     monkeypatch,
     root,
@@ -42,7 +82,6 @@ async def verify_open_handoff(
 ):
     """Keep real queue/selector/refresh/admission; replace provider and worker edges."""
     from nexus import worker
-    from nexus.ops import sec_index_local
 
     async def move(at, *, refresh_defaults=False):
         captured["clock"][0] = at
@@ -118,7 +157,7 @@ async def verify_open_handoff(
     assert (opened - original_capture.received_at).total_seconds() > 300
     assert (opened - old_quote.received_at).total_seconds() > 300
 
-    sec_requests, quote_requests, worker_calls, actions = [], [], [], []
+    quote_requests, worker_calls, actions = [], [], []
     completed_scans = []
     action_active = False
     from nexus.ops import monitor_batch_prepare, research_monitor
@@ -142,32 +181,9 @@ async def verify_open_handoff(
     monkeypatch.setattr(research_monitor, "scan_host_once", observed_scan)
     monkeypatch.setattr(monitor_batch_prepare, "prepare_batch_inputs", observed_material)
 
-    def sec_response(request):
-        assert request.method == "GET" and request.url.host in {"www.sec.gov", "data.sec.gov"}
-        sec_requests.append({"at": controller.now(), "path": request.url.path})
-        content = directory if request.url.host == "www.sec.gov" else submissions
-        return httpx.Response(200, content=content)
-
-    monkeypatch.setattr(
-        monitor_disclosure_refresh,
-        "_client",
-        lambda: httpx.AsyncClient(
-            transport=httpx.MockTransport(sec_response),
-            follow_redirects=False,
-        ),
+    sec_requests = install_durable_refresh_mock(
+        monkeypatch, store, controller, directory, submissions
     )
-    monkeypatch.setattr(sec_index_local, "_store", lambda _settings, supplied: supplied or store)
-
-    class ClockMeta(type):
-        def __instancecheck__(cls, value):
-            return isinstance(value, datetime)
-
-    class SourceClock(datetime, metaclass=ClockMeta):
-        @classmethod
-        def now(cls, tz=None):
-            return controller.now().astimezone(tz or UTC)
-
-    monkeypatch.setattr(research_identity_local, "datetime", SourceClock)
 
     async def unrelated_opening_refresh(*_args, **_kwargs):
         # These ordinary opening refreshes have their own acceptance. Preserve

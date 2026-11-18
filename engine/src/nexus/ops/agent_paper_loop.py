@@ -315,6 +315,7 @@ class AgentPaperLoopSnapshot:
     monitor_trigger_status: str | None = None
     monitor_batch_id: UUID | None = None
     monitor_materials_status: str | None = None
+    monitor_preclaim_deferred: bool = False
     host_prepared_market_open_at: datetime | None = None
 
 
@@ -1900,6 +1901,17 @@ def choose_loop_action(
         if ordinary in {AgentPaperLoopAction.WAIT_FOR_SESSION, AgentPaperLoopAction.WAIT_FOR_SLOT}:
             return AgentPaperLoopAction.ADMIT_FORMAL_INTENT
         return ordinary
+    if snapshot.monitor_preclaim_deferred:
+        ordinary = choose_loop_action(
+            replace(snapshot, monitor_preclaim_deferred=False),
+            prepared_market_open_at=prepared_market_open_at,
+        )
+        # The exact unclaimed increment still occupies the shared account.
+        # Let the normal observation cadence run without attempting a daily
+        # action that cannot pass that existing gate.
+        if ordinary in {AgentPaperLoopAction.TRIGGER, AgentPaperLoopAction.PREPARE_INPUTS}:
+            return AgentPaperLoopAction.WAIT_FOR_SLOT
+        return ordinary
     if snapshot.monitor_trigger_id is not None:
         ordinary = choose_loop_action(
             replace(snapshot, monitor_trigger_id=None, monitor_trigger_status=None),
@@ -2713,7 +2725,10 @@ async def confirm_agent_paper_shutdown(
         ):
             return False
         return await confirm_monitor_shutdown(
-            settings, account_id=account_id, trigger_id=before_snapshot.monitor_trigger_id
+            settings,
+            account_id=account_id,
+            trigger_id=before_snapshot.monitor_trigger_id,
+            action_started_at=before_snapshot.now,
         )
     exact_actions = {
         AgentPaperLoopAction.COLLECT_WINDOW,
