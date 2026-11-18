@@ -118,8 +118,9 @@ def test_candidate_diagnostic_never_logs_unlisted_error_text(kind, message, expe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("issuer_count", [2, 3])
 async def test_equal_priority_candidates_take_first_turn_over_consecutive_buckets(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, issuer_count
 ):
     from contextlib import asynccontextmanager
     from datetime import UTC, datetime, timedelta
@@ -134,7 +135,7 @@ async def test_equal_priority_candidates_take_first_turn_over_consecutive_bucket
 
     rules = [
         SimpleNamespace(instrument_id=UUID(int=number), issuer_cik=f"{number:010d}")
-        for number in (2, 1, 3)
+        for number in (2, 1, 3)[:issuer_count]
     ]
 
     @asynccontextmanager
@@ -189,8 +190,8 @@ async def test_equal_priority_candidates_take_first_turn_over_consecutive_bucket
         agent_paper_formal_model_config_id=UUID(int=12),
     )
     start = datetime(2026, 11, 18, 20, tzinfo=UTC)
-    for i in range(6):
-        if i == 3:
+    for i in range(2 * issuer_count):
+        if i == issuer_count:
             rules.reverse()
         with pytest.raises(StopBeforeClaim):
             await atom.refresh_candidates(
@@ -200,5 +201,5 @@ async def test_equal_priority_candidates_take_first_turn_over_consecutive_bucket
                 environment={},
                 repo_root=tmp_path,
             )
-    assert len(set(first_rules[:3])) == 3
-    assert first_rules[:3] == first_rules[3:]
+    assert len(set(first_rules[:issuer_count])) == issuer_count
+    assert first_rules[:issuer_count] == first_rules[issuer_count:]
