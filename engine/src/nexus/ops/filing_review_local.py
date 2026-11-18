@@ -9,9 +9,9 @@ from uuid import UUID
 from sqlalchemy import select, text
 
 from nexus.domain.time import require_utc
-from nexus.monitoring.filing_originals import _read_pairs, read_originals
-from nexus.monitoring.filing_relations import _prove
-from nexus.monitoring.filing_review import ERROR, observe_html_dependencies
+from nexus.monitoring.filing_material import rebuild_material
+from nexus.monitoring.filing_originals import read_originals
+from nexus.monitoring.filing_review import ERROR
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.local_recovery import write_private
 from nexus.ops.monitor_content_local import _private_directory
@@ -58,47 +58,9 @@ async def prepare_review_material(
                 is None
             ):
                 raise ValueError("SEC_DURABLE_SCOPE_INVALID")
-            pairs = await _read_pairs(db, document=document, as_of=now)
-            relations = await _prove(db, snapshot_id=snapshot_id, as_of=now)
-            descriptions = []
-            html = {}
-            for name, (raw, receipt) in pairs.items():
-                if Path(name).name != name or name in {"material.json", "complete.json"}:
-                    raise ValueError(ERROR)
-                proof = json.loads(receipt)
-                descriptions.append(
-                    {
-                        "filename": name,
-                        "sha256": sha256(raw).hexdigest(),
-                        "bytes": len(raw),
-                        "receipt_sha256": sha256(receipt).hexdigest(),
-                        "source_url": proof["source_url"],
-                        "received_at": proof["received_at"],
-                    }
-                )
-                if any(
-                    d["filename"] == name and d["document_type"] != "GRAPHIC"
-                    for d in document.declarations
-                ):
-                    html[name] = observe_html_dependencies(raw)
-            material = {
-                "schema_version": "sec_content_review_material_v1",
-                "original_snapshot_id": str(snapshot_id),
-                "original_hash": relations.original_hash,
-                "source_schema": document.schema_version,
-                "prepared_at": now.isoformat(),
-                "database_schema": schema,
-                "entry": document.entry.model_dump(mode="json"),
-                "issuer_cik": document.issuer_cik,
-                "originals": descriptions,
-                "original_declarations": document.declarations,
-                "derived_relations": relations.model_dump(mode="json"),
-                "html_dependency_observations": html,
-                "authority_status": "unverified",
-                "reviewer_status": "not_designated",
-                "research_qualified": False,
-                "nontext_content_status": "uninterpreted",
-            }
+            material, pairs = await rebuild_material(
+                db, snapshot_id=snapshot_id, prepared_at=now, schema=schema
+            )
         canonical = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
         if len(canonical) > 32 * 1024 * 1024:
             raise ValueError(ERROR)
