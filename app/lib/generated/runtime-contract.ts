@@ -4097,6 +4097,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "Metadata Status",
         "type": "string"
+      },
+      "notice": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DurableSecNoticeView"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
@@ -4107,6 +4117,96 @@ export const runtimeContractSchemas = {
       "metadata_status"
     ],
     "title": "DurableSecEventView",
+    "type": "object"
+  },
+  "DurableSecNoticeView": {
+    "additionalProperties": false,
+    "properties": {
+      "attempt_count": {
+        "enum": [
+          0,
+          1
+        ],
+        "title": "Attempt Count",
+        "type": "integer"
+      },
+      "attempted_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Attempted At"
+      },
+      "device_result": {
+        "const": "unknown",
+        "default": "unknown",
+        "title": "Device Result",
+        "type": "string"
+      },
+      "failure_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/FailureReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "finished_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Finished At"
+      },
+      "outbox_id": {
+        "format": "uuid",
+        "title": "Outbox Id",
+        "type": "string"
+      },
+      "server_result": {
+        "default": "unconfirmed",
+        "enum": [
+          "accepted",
+          "http_error",
+          "unconfirmed"
+        ],
+        "title": "Server Result",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "queued",
+          "delivering",
+          "published",
+          "dead_letter"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "outbox_id",
+      "status",
+      "attempt_count",
+      "attempted_at",
+      "finished_at",
+      "failure_reason",
+      "server_result",
+      "device_result"
+    ],
+    "title": "DurableSecNoticeView",
     "type": "object"
   },
   "DurableSecPendingItem": {
@@ -5155,6 +5255,25 @@ export const runtimeContractSchemas = {
     ],
     "title": "FailedJobSummary",
     "type": "object"
+  },
+  "FailureReason": {
+    "enum": [
+      "UNKNOWN",
+      "PAYLOAD_INVALID",
+      "EVENT_UNSUPPORTED",
+      "ENCRYPTION_INVALID",
+      "ENCRYPTION_FAILED",
+      "CONNECT_TIMEOUT",
+      "READ_TIMEOUT",
+      "WRITE_TIMEOUT",
+      "POOL_TIMEOUT",
+      "TRANSPORT_ERROR",
+      "HTTP_REJECTED",
+      "RESPONSE_DECODE",
+      "PROVIDER_REJECTED"
+    ],
+    "title": "FailureReason",
+    "type": "string"
   },
   "FrozenComparisonVariant": {
     "additionalProperties": false,

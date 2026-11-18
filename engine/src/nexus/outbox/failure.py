@@ -1,5 +1,6 @@
 """Allowlisted delivery diagnostics, separate from retry and delivery authority."""
 
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
@@ -58,27 +59,31 @@ class PublisherFailure(RuntimeError):
 
 
 async def read_delivery_failure(
-    session: AsyncSession, *, event_id: UUID, attempt_no: int
+    session: AsyncSession,
+    *,
+    event_id: UUID,
+    attempt_no: int,
+    as_of: datetime | None = None,
+    finished_at: datetime | None = None,
 ) -> dict[str, str] | None:
-    rows = list(
-        await session.scalars(
-            select(AuditEvent.payload)
-            .where(
-                AuditEvent.action == FAILURE_ACTION,
-                AuditEvent.schema_version == FAILURE_SCHEMA,
-                AuditEvent.actor_id == "outbox-dispatcher",
-                AuditEvent.payload["event_id"].as_string() == str(event_id),
-                AuditEvent.payload["attempt_no"].as_string() == str(attempt_no),
-            )
-            .limit(2)
-        )
+    scope = select(AuditEvent.payload, AuditEvent.occurred_at).where(
+        AuditEvent.action == FAILURE_ACTION,
+        AuditEvent.schema_version == FAILURE_SCHEMA,
+        AuditEvent.actor_id == "outbox-dispatcher",
+        AuditEvent.payload["event_id"].as_string() == str(event_id),
+        AuditEvent.payload["attempt_no"].as_string() == str(attempt_no),
     )
+    if as_of is not None:
+        scope = scope.where(AuditEvent.created_at <= as_of, AuditEvent.occurred_at <= as_of)
+    rows = (await session.execute(scope.limit(2))).all()
     if not rows:
         return None  # Legacy failures have no original detailed evidence.
     unknown = {"stage": "unknown", "reason": "UNKNOWN"}
     if len(rows) != 1:
         return unknown
-    payload = rows[0]
+    payload, occurred_at = rows[0]
+    if finished_at is not None and occurred_at != finished_at:
+        return unknown
     raw_reason = payload.get("reason")
     if not isinstance(raw_reason, str):
         return unknown
