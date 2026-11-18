@@ -61,7 +61,13 @@ async def _member_available(session: Any, *, member: Any, now: Any) -> Any:
         )
     try:
         proof = await read_terminal_proof(session, run_id=member.run_id, now=now)
-    except ProtocolRejected:
+    except ProtocolRejected as error:
+        from nexus.monitoring.original_occupancy import accepted
+
+        if str(error) == "STAGED_TERMINAL_PROOF_INVALID" and await accepted(
+            session, run_id=member.run_id, account_id=member.account_id, now=now
+        ):
+            return
         raise ValueError("MONITOR_ACCOUNT_BUSY_OR_UNKNOWN") from None
     if proof is None:
         return await admission._legacy_require_monitor_member_available(

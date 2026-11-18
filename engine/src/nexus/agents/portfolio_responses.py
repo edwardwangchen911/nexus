@@ -334,6 +334,8 @@ class NativePortfolioTransport:
         async def authorize() -> None:
             await record("authorized", identity)
 
+        from nexus.monitoring.durable_sec_permission import SecRequestFence
+
         client = platform_native.native_http_client()
 
         def headers() -> None:
@@ -376,6 +378,9 @@ class NativePortfolioTransport:
             on_terminal=terminal,
             work_deadline=lifecycle.work_at,
             cleanup_deadline=lifecycle.cleanup_at,
+            request_fence=SecRequestFence(
+                self.factory, None, account_id=self.settings.agent_paper_account_id
+            ),
         )
         accepting_terminal = False
         for pending_task in observation.cleanup.pending:
