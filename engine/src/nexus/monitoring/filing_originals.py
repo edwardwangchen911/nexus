@@ -272,6 +272,21 @@ async def read_originals(
         or document.entry not in index.entries
     ):
         raise ValueError("SEC_MONITOR_ARCHIVE_INVALID")
+    pairs = await _read_pairs(session, document=document, as_of=as_of)
+    if (
+        verify_originals(
+            entry=document.entry, issuer_cik=document.issuer_cik, originals=pairs, now=as_of
+        )
+        != document.declarations
+    ):
+        raise ValueError("SEC_MONITOR_ARCHIVE_INVALID")
+    return document
+
+
+async def _read_pairs(
+    session: AsyncSession, *, document: OriginalArchive, as_of: datetime
+) -> dict[str, tuple[bytes, bytes]]:
+    store = configured_exhibit_store(session)
     pairs = {}
     for name, bindings in document.originals.items():
         raw = []
@@ -286,11 +301,4 @@ async def read_originals(
                 raise ValueError("SEC_MONITOR_ARTIFACT_INVALID")
             raw.append(await _original(store, b))
         pairs[name] = (raw[0], raw[1])
-    if (
-        verify_originals(
-            entry=document.entry, issuer_cik=document.issuer_cik, originals=pairs, now=as_of
-        )
-        != document.declarations
-    ):
-        raise ValueError("SEC_MONITOR_ARCHIVE_INVALID")
-    return document
+    return pairs

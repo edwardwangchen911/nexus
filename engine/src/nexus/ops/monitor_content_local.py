@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -13,6 +14,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy import func, select
 
+from nexus.domain.time import require_utc
 from nexus.monitoring.filing_archive import import_filing_content
 from nexus.monitoring.filing_content import (
     MAX_ARCHIVE_BYTES,
@@ -118,6 +120,7 @@ async def _collect_documents(
     archive_dir: Path,
     contact: str,
     http_client: httpx.AsyncClient | None = None,
+    received_clock: Callable[[], Awaitable[datetime]] | None = None,
 ) -> int:
     _contact(contact)
     root = filing_root(issuer_cik, entry.accession_number)
@@ -146,10 +149,10 @@ async def _collect_documents(
             total_bytes += len(raw)
             if total_bytes > MAX_ARCHIVE_BYTES:
                 raise ValueError("SEC_MONITOR_CONTENT_CAPACITY")
-            received = datetime.now(UTC)
             if contact.encode() in raw:
                 raise ValueError("SEC_MONITOR_COLLECTION_CONTACT_REFLECTION")
             write_private(archive_dir / name, raw)
+            received = datetime.now(UTC) if received_clock is None else await received_clock()
             write_private(
                 archive_dir / (name + ".receipt.json"),
                 json.dumps(
@@ -222,12 +225,24 @@ async def collect_filing_content(
             matches = [entry for entry in index.entries if entry.accession_number == accession]
             if len(matches) != 1:
                 raise ValueError("SEC_MONITOR_ENTRY_INVALID")
+
+        async def received_clock() -> datetime:
+            # Record only after bytes have arrived, on the same authority used by
+            # immutable import/as-of checks. A faster client clock must not make
+            # a newly captured original appear to come from the future.
+            async with factory.begin() as db:
+                recorded = await db.scalar(select(func.clock_timestamp()))
+            if not isinstance(recorded, datetime):
+                raise ValueError("SEC_MONITOR_CLOCK_UNAVAILABLE")
+            return require_utc(recorded)
+
         requests = await _collect_documents(
             entry=matches[0],
             issuer_cik=index.issuer_cik,
             archive_dir=archive_dir,
             contact=contact,
             http_client=http_client,
+            received_clock=received_clock,
         )
         try:
             async with factory() as session, session.begin():

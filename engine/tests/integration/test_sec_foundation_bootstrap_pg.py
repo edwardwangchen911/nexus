@@ -164,6 +164,17 @@ async def test_no_plan_bootstrap_is_forward_scoped_audited_and_never_paid(
         assert result["provider_requests"] == result["model_requests"] == 0
         repeated = await run(settings, args)
         assert repeated == result
+        if capture_kind == "v1":
+            from helpers.filing_relations import assert_relation_cli
+
+            await assert_relation_cli(
+                factory,
+                settings,
+                store,
+                fresh["snapshot_id"],
+                tmp_path / "graphic-relations",
+                monkeypatch,
+            )
         async with factory.begin() as db:
             rule = await db.get(SecMonitorRule, UUID(result["rule_id"]))
             assert rule.anchor_plan_id is None

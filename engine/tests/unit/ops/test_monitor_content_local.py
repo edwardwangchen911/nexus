@@ -42,6 +42,40 @@ def destination(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_clock_failure_preserves_received_bytes_without_receipt_or_retry(tmp_path):
+    from nexus.ops.monitor_content_local import _collect_documents
+
+    calls = []
+    raw = inventory()
+
+    def respond(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, content=raw)
+
+    async def unavailable_clock():
+        raise ValueError("SEC_MONITOR_CLOCK_UNAVAILABLE")
+
+    path = destination(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="SEC_MONITOR_CLOCK_UNAVAILABLE"):
+            await _collect_documents(
+                entry=ENTRY,
+                issuer_cik=CIK,
+                archive_dir=path,
+                contact="test@example.invalid",
+                http_client=client,
+                received_clock=unavailable_clock,
+            )
+    assert calls == [ROOT + ACCESSION + "-index.html"]
+    assert (path / (ACCESSION + "-index.html")).read_bytes() == raw
+    assert not (path / (ACCESSION + "-index.html.receipt.json")).exists()
+    assert (
+        json.loads((path / "result.json").read_text())["error_code"]
+        == "SEC_MONITOR_CLOCK_UNAVAILABLE"
+    )
+
+
+@pytest.mark.asyncio
 async def test_each_real_200_is_frozen_with_exact_receipt_and_private_permissions(tmp_path):
     from nexus.ops.monitor_content_local import _collect_documents
 

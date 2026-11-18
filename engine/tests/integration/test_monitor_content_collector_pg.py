@@ -1,6 +1,9 @@
 """Normal exact SEC content collection imports immutable originals, never research jobs."""
 
+import binascii
 import json
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import UUID
 
 import httpx
@@ -44,12 +47,19 @@ def documents(entry, *, invalid_text=False):
         "import_failure",
         "transport_v2",
         "graphic",
+        "graphic_relation",
     ],
 )
 async def test_normal_collector_binds_exact_index_and_preserves_failed_originals(
     migrated_database_url, tmp_path, monkeypatch, mode
 ):
     settings, store, identity, parent = await seed(migrated_database_url, tmp_path)
+    if mode == "graphic_relation":
+
+        def reveal_original_failure(_path, *, error, **_kwargs):
+            raise error
+
+        monkeypatch.setattr("nexus.ops.monitor_content_local._failure", reveal_original_failure)
     monkeypatch.setattr(store, "read_evidence", store.read_raw, raising=False)
     metadata = submissions()
     if mode == "8-K/A":
@@ -66,7 +76,7 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
     recent = metadata["filings"]["recent"]
     raw_inventory, bodies = documents(recent, invalid_text=mode == "import_failure")
     accession = recent["accessionNumber"][0]
-    if mode in {"transport_v2", "graphic"}:
+    if mode in {"transport_v2", "graphic", "graphic_relation"}:
         from helpers.current_identity import CIK
 
         members = []
@@ -86,13 +96,19 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
             bodies[name] = body.replace(
                 b"</body>", b'<script type="text/javascript" src="/delivery/path"></script></body>'
             )
-        if mode == "graphic":
+        if mode in {"graphic", "graphic_relation"}:
             graphic = b"\xff\xd8financial-figure-not-qualified\xff\xd9"
             rows.append(
                 '<tr><td>8</td><td>Figure</td><td><a href="logo.jpg">logo.jpg</a></td>'
                 f"<td>GRAPHIC</td><td>{len(graphic)}</td></tr>"
             )
             bodies["logo.jpg"] = graphic
+            if mode == "graphic_relation":
+                encoded = binascii.b2a_uu(graphic).rstrip(b"\n")
+                members.append(
+                    b"<DOCUMENT>\n<TYPE>GRAPHIC\n<SEQUENCE>8\n<FILENAME>logo.jpg\n<TEXT>\n"
+                    b"begin 644 logo.jpg\n" + encoded + b"\n\nend\n</TEXT>\n</DOCUMENT>\n"
+                )
         raw_inventory = (
             '<table summary="Document Format Files">' + "".join(rows) + "</table>"
         ).encode()
@@ -130,6 +146,18 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
     from nexus.ops.monitor_content_local import collect_filing_content
 
     archive = parent / "content"
+    if mode == "graphic_relation":
+
+        class ClientClockMeta(type):
+            def __instancecheck__(cls, value):
+                return isinstance(value, datetime)
+
+        class ClientClock(datetime, metaclass=ClientClockMeta):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz or UTC) + timedelta(seconds=60)
+
+        monkeypatch.setattr("nexus.ops.monitor_content_local.datetime", ClientClock)
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         kwargs = dict(
             index_snapshot_id=UUID(first["snapshot_id"]),
@@ -144,9 +172,11 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
                 await collect_filing_content(settings, **kwargs)
         else:
             result = await collect_filing_content(settings, **kwargs)
-            assert result["status"] == ("archived_unqualified" if mode == "graphic" else "created")
+            assert result["status"] == (
+                "archived_unqualified" if mode in {"graphic", "graphic_relation"} else "created"
+            )
             assert result["provider_requests"] == (
-                5 if mode == "graphic" else 4 if mode == "transport_v2" else 3
+                5 if mode in {"graphic", "graphic_relation"} else 4 if mode == "transport_v2" else 3
             )
             assert result["model_requests"] == 0 and result["job_created"] is False
         assert not client.is_closed
@@ -168,7 +198,7 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
                     )
                     == 0
                 )
-            elif mode == "graphic":
+            elif mode in {"graphic", "graphic_relation"}:
                 from nexus.persistence.models.agents import (
                     AgentDailyBudgetReservationRecord,
                     AgentResearchRunRecord,
@@ -214,12 +244,78 @@ async def test_normal_collector_binds_exact_index_and_preserves_failed_originals
                     now=now,
                 )
                 assert again.id == saved.id
+                from nexus.monitoring.filing_relations import prove_relations, read_relations
+
+                if mode == "graphic":
+                    with pytest.raises(ValueError):
+                        await prove_relations(session, snapshot_id=saved.id, now=now)
+                else:
+                    original_payload = saved.payload.copy()
+                    proof = await prove_relations(session, snapshot_id=saved.id, now=now)
+                    later = await session.scalar(select(func.clock_timestamp()))
+                    verified = await read_relations(session, snapshot_id=proof.id, as_of=later)
+                    assert verified.original_snapshot_id == saved.id
+                    assert verified.original_hash == saved.revision
+                    assert verified.declarations[-1]["submission_relation"] == "verified"
+                    assert verified.research_qualified is False
+                    from nexus.monitoring.filing_relations import (
+                        SCHEMA as RELATION_SCHEMA,
+                    )
+                    from nexus.monitoring.filing_relations import (
+                        SOURCE as RELATION_SOURCE,
+                    )
+
+                    for damaged in (
+                        verified.model_copy(update={"original_hash": "0" * 64}),
+                        verified.model_copy(
+                            update={
+                                "declarations": [{**verified.declarations[0], "raw_hash": "0" * 64}]
+                            }
+                        ),
+                    ):
+                        counterfeit = DataSnapshot(
+                            source=RELATION_SOURCE,
+                            schema_version=RELATION_SCHEMA,
+                            provider_object_id=str(saved.id),
+                            revision=sha256(damaged.canonical()).hexdigest(),
+                            payload=damaged.model_dump(mode="json"),
+                            created_at=later,
+                            observed_at=later,
+                            available_at=later,
+                            received_at=later,
+                        )
+                        session.add(counterfeit)
+                        await session.flush()
+                        with pytest.raises(ValueError, match="SEC_MONITOR_ARCHIVE_INVALID"):
+                            await read_relations(session, snapshot_id=counterfeit.id, as_of=later)
+                    assert saved.payload == original_payload
+                    assert saved.payload["declarations"][-1]["submission_relation"] == "unverified"
+                    repeat = await prove_relations(session, snapshot_id=saved.id, now=later)
+                    assert repeat.id == proof.id and repeat.available_at == proof.available_at
+                    with pytest.raises(ValueError):
+                        await read_relations(session, snapshot_id=proof.id, as_of=now)
+                    assert (
+                        await read_filing_content(session, snapshot_id=proof.id, as_of=later)
+                        is None
+                    )
+                    for model in (
+                        Job,
+                        ResearchEvidenceRef,
+                        AgentResearchRunRecord,
+                        AgentDailyBudgetReservationRecord,
+                        MonitorIncrement,
+                        OutboxEvent,
+                    ):
+                        assert await session.scalar(select(func.count()).select_from(model)) == 0
                 binding = packet.originals["logo.jpg"][0]
                 key = binding.uri.removeprefix("s3://synthetic/")
                 previous = store.objects[key]
                 store.objects[key] = previous + b"tampered"
                 with pytest.raises(ValueError):
                     await read_originals(session, snapshot_id=saved.id, as_of=now)
+                if mode == "graphic_relation":
+                    with pytest.raises(ValueError):
+                        await read_relations(session, snapshot_id=proof.id, as_of=later)
                 store.objects[key] = previous
             else:
                 assert len(snapshots) == 1
