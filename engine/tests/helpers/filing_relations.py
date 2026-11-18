@@ -89,6 +89,95 @@ async def assert_relation_cli(factory, settings, store, capture_id, root, monkey
     first = await run(
         settings, parser().parse_args(["prove-content-relations", "--snapshot-id", str(old_id)])
     )
+    async with factory() as db:
+        before_export = [
+            await db.scalar(text(f"SELECT count(*) FROM {t}"))
+            for t in ("data_snapshots", "audit_events")
+        ]
+    export_dir = root.parent / "review-export"
+    export_args = parser().parse_args(
+        ["prepare-content-review", "--snapshot-id", str(old_id), "--output-dir", str(export_dir)]
+    )
+    exported = await run(settings, export_args)
+    assert exported["status"] == "prepared_unqualified"
+    assert exported["research_qualified"] is False and exported["authority_status"] == "unverified"
+    raw_material = (export_dir / "material.json").read_bytes()
+    material = json.loads(raw_material)
+    complete = json.loads((export_dir / "complete.json").read_bytes())
+    assert (
+        sha256(raw_material).hexdigest()
+        == exported["material_sha256"]
+        == complete["material_sha256"]
+    )
+    assert material["original_hash"] == old_revision
+    assert (
+        material["research_qualified"] is False and material["reviewer_status"] == "not_designated"
+    )
+    assert material["original_declarations"][-1]["submission_relation"] == "unverified"
+    assert material["derived_relations"]["declarations"][-1]["submission_relation"] == "verified"
+    for binding in material["originals"]:
+        path = export_dir / binding["filename"]
+        assert sha256(path.read_bytes()).hexdigest() == binding["sha256"]
+        assert path.stat().st_mode & 0o077 == 0
+        receipt = export_dir / (binding["filename"] + ".receipt.json")
+        assert sha256(receipt.read_bytes()).hexdigest() == binding["receipt_sha256"]
+    with pytest.raises(ValueError, match="SEC_MONITOR_COLLECTION_DIRECTORY_INVALID"):
+        await run(settings, export_args)
+    denied = root.parent / "review-denied"
+    denied_args = parser().parse_args(
+        ["prepare-content-review", "--snapshot-id", str(old_id), "--output-dir", str(denied)]
+    )
+    with pytest.raises(ValueError, match="SEC_DURABLE_SCOPE_INVALID"):
+        await run(settings.model_copy(update={"agent_paper_account_id": uuid4()}), denied_args)
+    assert not denied.exists()
+    foreign_source = root.parent / "review-wrong-source"
+    with pytest.raises(ValueError, match="SEC_MONITOR_ARCHIVE_UNAVAILABLE"):
+        await run(
+            settings,
+            parser().parse_args(
+                [
+                    "prepare-content-review",
+                    "--snapshot-id",
+                    first["snapshot_id"],
+                    "--output-dir",
+                    str(foreign_source),
+                ]
+            ),
+        )
+    assert not foreign_source.exists()
+    from nexus.ops import filing_review_local
+
+    failed_export = root.parent / "review-write-failed"
+    normal_write = filing_review_local.write_private
+
+    def fail_receipt_write(path, content):
+        if path.name.endswith(".receipt.json"):
+            raise OSError("isolated export write failure")
+        normal_write(path, content)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(filing_review_local, "write_private", fail_receipt_write)
+        with pytest.raises(OSError, match="isolated export write failure"):
+            await run(
+                settings,
+                parser().parse_args(
+                    [
+                        "prepare-content-review",
+                        "--snapshot-id",
+                        str(old_id),
+                        "--output-dir",
+                        str(failed_export),
+                    ]
+                ),
+            )
+    assert not (failed_export / "complete.json").exists()
+    assert not (failed_export / "material.json").exists()
+    assert len(list(failed_export.iterdir())) == 1
+    async with factory() as db:
+        assert before_export == [
+            await db.scalar(text(f"SELECT count(*) FROM {t}"))
+            for t in ("data_snapshots", "audit_events")
+        ]
     for action, sid in (
         ("prove-content-relations", old_id),
         ("inspect-content-relations", first["snapshot_id"]),

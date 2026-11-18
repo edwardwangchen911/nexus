@@ -128,6 +128,12 @@ def parser() -> argparse.ArgumentParser:
         help="Verify saved originals without granting research qualification",
     )
     originals.add_argument("--snapshot-id", type=UUID, required=True)
+    review = commands.add_parser(
+        "prepare-content-review",
+        help="Export exact unqualified review material without database writes",
+    )
+    review.add_argument("--snapshot-id", type=UUID, required=True)
+    review.add_argument("--output-dir", type=Path, required=True)
     for action in ("prove-content-relations", "inspect-content-relations"):
         relations = commands.add_parser(
             action, help="Verify binary relations without content eligibility"
@@ -573,6 +579,12 @@ async def _run(
     if settings.agent_paper_account_id is None:
         raise ValueError("MONITOR_ACCOUNT_UNCONFIGURED")
     _validate_local_database(settings.database_url)
+    if args.action == "prepare-content-review":
+        from nexus.ops.filing_review_local import prepare_review_material
+
+        return await prepare_review_material(
+            settings, snapshot_id=args.snapshot_id, output_dir=args.output_dir
+        )
     if args.action == "observe-sec-candidates":
         from nexus.ops.sec_atom_candidates import refresh_candidates
 
@@ -1439,6 +1451,7 @@ def main(argv: list[str] | None = None) -> int:
             "AGENT_PAPER_CALENDAR_UNAVAILABLE",
             "RESEARCH_OUTPUT_NOT_ACTIONABLE",
             "SEC_MONITOR_ARCHIVE_INVALID",
+            "SEC_MONITOR_REVIEW_MATERIAL_INVALID",
             "SEC_MONITOR_ARCHIVE_UNAVAILABLE",
             "SEC_MONITOR_ARTIFACT_INVALID",
             "SEC_MONITOR_ENTRY_UNAVAILABLE",
