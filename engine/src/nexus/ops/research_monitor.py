@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -70,6 +70,11 @@ def parser() -> argparse.ArgumentParser:
         source.add_argument("--rule-id", type=UUID, required=True)
         source.add_argument("--identity-snapshot-id", type=UUID, required=True)
         source.add_argument("--archive-dir", type=Path, required=True)
+    for action in ("collect-sec-published-day", "inspect-sec-published-day"):
+        index_day = commands.add_parser(action, help="Verify one published SEC daily index version")
+        index_day.add_argument("--rule-id", type=UUID, required=True)
+        index_day.add_argument("--date", dest="day", type=date.fromisoformat, required=True)
+        index_day.add_argument("--archive-dir", type=Path, required=True)
     pending = commands.add_parser(
         "prepare-pending", help="Prepare one sealed batch without model I/O"
     )
@@ -614,6 +619,18 @@ async def _run(
         return await inspect_snapshot(settings, args.snapshot_id)
     if args.action in {"import-durable-sec-index", "collect-durable-sec-index"}:
         return await _durable_index_with_scope(settings, args)
+    if args.action in {"collect-sec-published-day", "inspect-sec-published-day"}:
+        from nexus.ops.sec_published_day import verify_published_day
+
+        return await verify_published_day(
+            settings,
+            rule_id=args.rule_id,
+            day=args.day,
+            root=args.repo_root,
+            folder=args.archive_dir,
+            collect=args.action == "collect-sec-published-day",
+            contact=getattr(args, "_sec_contact", None),
+        )
     if args.action == "observe":
         return await refresh_configured_observations(
             settings,
@@ -1450,7 +1467,12 @@ async def run_configured(
     settings = _FileEngineSettings.model_validate(environment)
     if args.action in {"observe", "observe-sec-candidates"}:
         args = argparse.Namespace(**vars(args), _observation_environment=dict(environment))
-    if args.action in {"collect-content", "prepare-pending", "collect-durable-sec-index"}:
+    if args.action in {
+        "collect-content",
+        "prepare-pending",
+        "collect-durable-sec-index",
+        "collect-sec-published-day",
+    }:
         args = argparse.Namespace(**vars(args), _sec_contact=environment.get("SEC_CONTACT"))
 
     if args.action in {"admit", "admit-batch"}:
@@ -1506,6 +1528,9 @@ def main(argv: list[str] | None = None) -> int:
             "SEC_MONITOR_ENTRY_INVALID",
             "SEC_MONITOR_COLLECTION_DIRECTORY_INVALID",
             "SEC_MONITOR_COLLECTION_FAILED",
+            "SEC_DAY_INDEX_EVIDENCE_INVALID",
+            "SEC_DAY_INDEX_FETCH_FAILED",
+            "SEC_DAY_INDEX_NOT_PUBLISHED",
             "MONITOR_CONTEXT_INVALID",
             "MONITOR_INCREMENT_BINDING_INVALID",
             "MONITOR_CURRENT_INPUTS_UNAVAILABLE",
