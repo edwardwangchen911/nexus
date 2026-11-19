@@ -115,15 +115,20 @@ class LocalDatabaseError(RuntimeError):
     """Value-free failure at the local persisted-status boundary."""
 
 
-def local_read_settings(environment: Mapping[str, str]) -> EngineSettings:
-    """Validate local reader settings without granting a model transport."""
-    values = dict(environment)
+def local_read_environment(environment: Mapping[str, str]) -> dict[str, str | None]:
+    """Preserve local source and storage inputs while removing model access."""
+    values: dict[str, str | None] = dict(environment)
     if (
         values.get("AGENT_RUNTIME_MODE", os.environ.get("AGENT_RUNTIME_MODE"))
         == AgentRuntimeMode.RESPONSES
     ):
         values["AGENT_RUNTIME_MODE"] = AgentRuntimeMode.FIXTURE.value
-    return EngineSettings.model_validate({**values, "OPENAI_API_KEY": None})
+    values["OPENAI_API_KEY"] = None
+    return values
+
+
+def local_read_settings(environment: Mapping[str, str]) -> EngineSettings:
+    return EngineSettings.model_validate(local_read_environment(environment))
 
 
 def load_local_environment(
