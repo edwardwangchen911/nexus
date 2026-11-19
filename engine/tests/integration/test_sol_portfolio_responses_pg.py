@@ -528,3 +528,25 @@ async def _run_native_portfolio_http(
             )
         if case == "complete":
             assert ended.result_code == expected_complete_code
+            if ended.result_code == "PORTFOLIO_ASSESSMENT_DEFERRED":
+                from nexus.paper.read_service import PaperReadService
+
+                reader = PaperReadService(session, checked)
+                detail = await reader.management_cycle_detail(portfolio.cycle_id)
+                basic = await reader.agent_cycle_detail(portfolio.cycle_id)
+                assert detail is not None and basic is not None
+                assert detail.cycle.decision is None and not detail.orders and not basic.orders
+                assert detail.cycle.candidates == basic.cycle.candidates
+                sources = {row.instrument_id: row for row in detail.security_research}
+                assert (
+                    len(sources)
+                    == len(basic.cycle.candidates)
+                    == len(portfolio.research_output_ids)
+                )
+                for candidate in basic.cycle.candidates:
+                    source = sources[candidate.instrument_id]
+                    assert candidate.research_status == "completed"
+                    assert candidate.output_id == source.research_output_id
+                    assert candidate.intent_hash == source.intent_hash
+                    assert candidate.stance == source.stance
+                    assert candidate.sizing_action is None
