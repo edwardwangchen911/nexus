@@ -1140,6 +1140,37 @@ async def require_no_running_manual_request(
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
 
 
+async def require_scheduled_account_available(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    trigger_key: str,
+    formal_stage_capacity: bool,
+    now: datetime | None = None,
+) -> None:
+    """Check current occupancy and frozen history in the current admission transaction."""
+    from nexus.market.current_identity import identity_parse_scope
+    from nexus.research.artifact_read_scope import artifact_read_scope
+    from nexus.research.identity_sources import identity_source_parse_scope
+    from nexus.workbench.evidence_read_scope import evidence_read_scope
+
+    # The same original may back several cycle proofs. Reuse its immutable
+    # inputs only while these gates run. Each gate still validates its own state.
+    with (
+        identity_parse_scope(),
+        identity_source_parse_scope(),
+        artifact_read_scope(session),
+        evidence_read_scope(session),
+    ):
+        await require_no_running_manual_request(
+            session, account_id=account_id, current_trigger_key=trigger_key
+        )
+        if formal_stage_capacity:
+            await require_settled_account_cycle_history(
+                session, account_id=account_id, now=now, allow_scheduled_completion=True
+            )
+
+
 async def manual_request_for_cycle(
     session: AsyncSession, *, cycle_id: UUID
 ) -> ManualPaperRequest | None:
