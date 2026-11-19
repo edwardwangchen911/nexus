@@ -73,10 +73,25 @@ def test_normal_cli_keeps_liquidity_opt_in(tmp_path, monkeypatch, capsys, enable
     if enabled:
         args.append("--liquidity-observation")
     monkeypatch.setattr("sys.argv", args)
-    monkeypatch.setattr(entry, "load_local_environment", lambda *args: {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    database = "postgresql+asyncpg://127.0.0.1:5432/nexus_test_trends"
+    object_store = "http://127.0.0.1:9000"
+    monkeypatch.setattr(
+        entry,
+        "load_local_environment",
+        lambda *_: {
+            "NEXUS_ENV": "development",
+            "AGENT_RUNTIME_MODE": "responses",
+            "DATABASE_URL": database,
+            "OBJECT_STORE_ENDPOINT": object_store,
+        },
+    )
     calls = []
 
-    async def imported(*args, **kwargs):
+    async def imported(settings, **kwargs):
+        assert settings.database_url == database
+        assert settings.object_store_endpoint == object_store
+        assert settings.openai_api_key is None
         calls.append(kwargs["include_liquidity_observation"])
         return {"status": "stored_context"}
 

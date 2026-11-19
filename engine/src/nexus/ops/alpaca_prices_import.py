@@ -16,7 +16,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.market.object_store import S3ProviderEvidenceStore
-from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.fosun_local import load_local_environment, local_read_settings
 from nexus.ops.local_recovery import write_private
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.research.alpaca_prices_archive import ValidatedPriceArchive, load_price_collection
@@ -136,7 +136,7 @@ def main() -> int:
         if args.output.exists() or args.output.is_symlink():
             raise ValueError("CURRENT_TRENDS_IMPORT_OUTPUT_EXISTS")
         environment = load_local_environment(args.repo_root, os.environ)
-        settings = EngineSettings.model_validate(environment)
+        settings = local_read_settings(environment)
         started_import = True
         result = asyncio.run(
             import_trends(
