@@ -599,14 +599,17 @@ async def test_forward_refresh_dbapi_ack_loss(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("listed_history", [False, True])
 async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_claim(
-    migrated_database_url, monkeypatch, tmp_path
+    migrated_database_url, monkeypatch, tmp_path, listed_history
 ):
     import json
     from pathlib import Path
 
+    from nexus.ops.monitor_probe_idle import require_monitor_probe_idle
+
     factory, store, captured, pointer, calls, client, invoke = await setup(
-        migrated_database_url, monkeypatch, tmp_path
+        migrated_database_url, monkeypatch, tmp_path, listed_history=listed_history
     )
     original_client = refresh._client
     failed_requests = []
@@ -624,6 +627,8 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
         failed = await invoke()
         assert failed["items"][0]["status"] == "failed"
         assert failed_requests == ["/files/company_tickers_exchange.json"]
+        assert failed["items"][0]["provider_requests"] == 1
+        assert failed["provider_requests"] == 1
         async with factory() as session:
             audit = await session.scalar(
                 select(AuditEvent).where(
@@ -632,6 +637,8 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
                 )
             )
             payload = dict(audit.payload)
+            assert payload["provider_requests"] == 1
+            await require_monitor_probe_idle(session, pointer.account_id)
             receipt_path = Path(payload["archive_dir"]) / "result.json"
             receipt_bytes = receipt_path.read_bytes()
             receipt = json.loads(receipt_bytes)
@@ -648,15 +655,19 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
         monkeypatch.setattr(refresh, "_client", original_client)
         captured["clock"][0] += timedelta(minutes=5)
         await _set_test_insert_clock(factory, captured["clock"][0])
-        assert (await invoke())["status"] == "refreshed"
-        assert len(calls) == 2 and len(failed_requests) == 1
+        next_bucket = await invoke()
+        assert next_bucket["status"] == "refreshed"
+        assert next_bucket["provider_requests"] == len(calls) == (4 if listed_history else 2)
+        assert len(failed_requests) == 1
         assert receipt_path.read_bytes() == receipt_bytes
         async with factory() as session:
             assert (await session.get(AuditEvent, audit.id)).payload == payload
-            observed = await refresh.read_disclosure_observation(
-                session, plan=pointer, now=captured["clock"][0]
-            )
-            assert observed.reason != "SEC_INDEX_STALE"
+            await require_monitor_probe_idle(session, pointer.account_id)
+            if not listed_history:
+                observed = await refresh.read_disclosure_observation(
+                    session, plan=pointer, now=captured["clock"][0]
+                )
+                assert observed.reason != "SEC_INDEX_STALE"
     finally:
         await client.aclose()
         await factory.kw["bind"].dispose()

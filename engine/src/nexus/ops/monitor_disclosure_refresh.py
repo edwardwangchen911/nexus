@@ -24,7 +24,7 @@ from nexus.monitoring.storage import lock_security
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.monitor_batch_prepare import _archive_root
 from nexus.ops.monitor_content_local import _contact
-from nexus.ops.research_identity_local import SecDirectoryInBucket
+from nexus.ops.research_identity_local import IdentityCollectionFailure, SecDirectoryInBucket
 from nexus.ops.sec_index_local import collect_index
 from nexus.paper.account_transaction_turn import account_transaction_turn
 from nexus.paper.agent_cycle_authority import load_agent_paper_service_calendar_authority
@@ -448,13 +448,19 @@ async def refresh_disclosure_observations(
                 except SQLAlchemyError:
                     # A database commit outcome is unknown; never fabricate a terminal result.
                     raise
-                except Exception:
+                except Exception as error:
                     # The body finished; any exit failure can be a lost commit
                     # acknowledgement even when the driver does not wrap it.
                     if result_ready:
                         raise
-                    count = _request_count(
-                        archive, listed_history=claim.get("listed_history") is True
+                    # A terminal identity failure cannot have reached the later
+                    # listed-history collector. Its own receipt already has the full count.
+                    count = (
+                        error.attempted_requests
+                        if isinstance(error, IdentityCollectionFailure)
+                        else _request_count(
+                            archive, listed_history=claim.get("listed_history") is True
+                        )
                     )
                     item = {
                         "status": "failed",

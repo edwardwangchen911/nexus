@@ -35,6 +35,14 @@ from nexus.research.identity_sources import (
 from nexus.research.sec_index_storage import DIRECTORY_URL, _receipt
 
 
+class IdentityCollectionFailure(ValueError):
+    """Terminal identity failure with the count recorded by this invocation."""
+
+    def __init__(self, attempted_requests: int) -> None:
+        super().__init__("IDENTITY_COLLECTION_FAILED")
+        self.attempted_requests = attempted_requests
+
+
 @dataclass
 class SecDirectoryInBucket:
     """One refresh pass may share exact originals, never a later pass or bucket."""
@@ -206,7 +214,7 @@ async def collect_identity_sources(
         if isinstance(error, HttpPolicyError) and error.http_status is not None:
             result["http_status"] = error.http_status
         write_private(output_dir / "result.json", json.dumps(result).encode())
-        raise ValueError("IDENTITY_COLLECTION_FAILED") from None
+        raise IdentityCollectionFailure(requests) from None
     finally:
         if owned:
             await transport.aclose()
