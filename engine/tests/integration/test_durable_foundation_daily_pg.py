@@ -115,7 +115,16 @@ async def accept_fixture_notices(database_url, day, event_ids):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "resolution",
-    ("addressed", "unresolved", "absent", "issue", "adopted_graphic", "collected", "missing_index"),
+    (
+        "addressed",
+        "unresolved",
+        "absent",
+        "issue",
+        "adopted_graphic",
+        "collected",
+        "missing_index",
+        "late_content",
+    ),
 )
 async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
     migrated_database_url, monkeypatch, tmp_path, resolution
@@ -123,6 +132,7 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
     adopted_graphic = resolution == "adopted_graphic"
     collected = resolution == "collected"
     missing_index = resolution == "missing_index"
+    late_content = resolution == "late_content"
     if adopted_graphic or collected:
         resolution = "addressed"
     from helpers import disclosure_observations as reader
@@ -413,7 +423,7 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                 target_accession=entry["accession_number"],
                 keep_policy=True,
             )
-        else:
+        elif not late_content:
             imported = await run(
                 settings,
                 argparse.Namespace(
@@ -424,12 +434,13 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                 ),
             )
         async with factory() as db:
-            assert (
-                await filing_archive.read_filing_content(
-                    db, snapshot_id=UUID(imported["snapshot_id"]), as_of=day
-                )
-                is not None
-            ), "FROZEN_FILING_READER_REFUSED"
+            if not late_content:
+                assert (
+                    await filing_archive.read_filing_content(
+                        db, snapshot_id=UUID(imported["snapshot_id"]), as_of=day
+                    )
+                    is not None
+                ), "FROZEN_FILING_READER_REFUSED"
             await host.current_identity(db, rule, day)
             assert not tuple(await db.scalars(select(SecEventResearchBinding)))
             assert not tuple(await db.scalars(select(SecDurableDailyEventReceipt)))
@@ -485,6 +496,28 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
         if missing_index:
             assert failures
             monkeypatch.setattr(store, "read_raw", normal_read_raw)
+        if late_content:
+            published_at = day + timedelta(seconds=30)
+            captured["clock"][0] = published_at
+            async with factory.begin() as db:
+                await controller.set(db, published_at, running=False, refresh_defaults=True)
+            imported = await collect_fixture_filing(
+                settings, store, capture.id, event, tmp_path, monkeypatch
+            )
+            late_snapshot_id = UUID(imported["snapshot_id"])
+            async with factory() as db:
+                assert (
+                    await filing_archive.read_filing_content(
+                        db, snapshot_id=late_snapshot_id, as_of=day
+                    )
+                    is None
+                )
+                assert (
+                    await filing_archive.read_filing_content(
+                        db, snapshot_id=late_snapshot_id, as_of=published_at
+                    )
+                    is not None
+                )
         async with factory() as db:
             target = await db.scalar(
                 select(AgentResearchRunRecord).where(
@@ -498,12 +531,17 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             )
             paper = snapshot.payload["agent_paper_context"]
             assert paper.get("pending_monitoring_v2") is None
-            if missing_index:
-                assert paper["disclosure_monitoring"]["gap_reason"] == "SEC_BASELINE_INVALID"
+            if missing_index or late_content:
                 assert paper.get("pending_durable_sec") is None
                 gap = paper["pending_durable_sec_gap"]
                 assert gap["reason"] == "DURABLE_SEC_PENDING_EVIDENCE_INVALID"
                 assert gap["pending_count"] == 1
+                if missing_index:
+                    assert paper["disclosure_monitoring"]["gap_reason"] == "SEC_BASELINE_INVALID"
+                else:
+                    assert [(issue["event_id"], issue["reason"]) for issue in gap["issues"]] == [
+                        (str(event.id), "DURABLE_SEC_EVENT_EVIDENCE_UNAVAILABLE")
+                    ]
             else:
                 assert paper.get("pending_durable_sec") is not None, paper.get(
                     "pending_durable_sec_gap"
@@ -689,11 +727,23 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                 assert (pending is None) is (resolution == "addressed")
             if pending is not None and second_event is None:
                 assert tuple(x.event_id for x in pending.events) == (event.id,)
+            if late_content:
+                before, before_gap = await freeze_durable_sec_pending(
+                    db, cycle_id=cycle.cycle_id, instrument_id=pointer.instrument_id, as_of=day
+                )
+                assert before is None and before_gap is not None
+                assert before_gap.model_dump(mode="json") == paper["pending_durable_sec_gap"]
+                assert (
+                    pending is not None
+                    and pending.events[0].content.snapshot_id == late_snapshot_id
+                )
+                saved = await db.get(type(snapshot), snapshot.id)
+                assert saved.revision == snapshot.revision and saved.payload == snapshot.payload
             assert not tuple(await db.scalars(select(MonitorIncrement)))
             assert await db.scalar(select(func.count()).select_from(OutboxEvent)) == notices
             assert await db.scalar(select(func.count()).select_from(SecNotificationClaim)) == claims
         stages = ["research", "critique", "synthesis"]
         assert calls == stages * 3
-        assert seen == ([] if missing_index else stages)
+        assert seen == ([] if missing_index or late_content else stages)
     finally:
         await factory.kw["bind"].dispose()
