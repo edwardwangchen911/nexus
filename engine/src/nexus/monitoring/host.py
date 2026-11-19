@@ -22,6 +22,7 @@ INCREMENT_ACTION_HEADROOM_SECONDS = (
 # One exact filing (60s), one bounded market preparation (300s), short
 # transactions and durable closeout (60s). Worker/model deadlines stay unchanged.
 BATCH_PREPARATION_HEADROOM_SECONDS = 420
+_OBSERVATION_SOURCES = ("disclosure", "research_bridge", "price")
 
 
 preparation_deadline: ContextVar[float | None] = ContextVar(
@@ -70,6 +71,7 @@ class PriceMonitorCoordinator:
         self._last_bucket: datetime | None = None
         self._last_diagnostic: str | None = None
         self._diagnostic_bucket: datetime | None = None
+        self._incomplete_sources: tuple[str, ...] = ()
 
     @property
     def busy(self) -> bool:
@@ -87,6 +89,12 @@ class PriceMonitorCoordinator:
     def diagnostic_bucket(self) -> datetime | None:
         return self._diagnostic_bucket
 
+    @property
+    def diagnostic_sources(self) -> tuple[str, ...]:
+        if self._last_diagnostic != "MONITOR_OBSERVATIONS_INCOMPLETE":
+            return ()
+        return self._incomplete_sources
+
     def kick(self, now: datetime) -> bool:
         """Synchronously start at most one scan, returning whether one started."""
         if self._closed:
@@ -100,6 +108,7 @@ class PriceMonitorCoordinator:
             return False
         self._last_diagnostic = None
         self._diagnostic_bucket = None
+        self._incomplete_sources = ()
         self._task = create_task(self._run_scan(bucket), name="nexus-price-monitor")
         return True
 
@@ -129,6 +138,11 @@ class PriceMonitorCoordinator:
                         "unavailable",
                     }:
                         self._last_diagnostic = "MONITOR_OBSERVATIONS_INCOMPLETE"
+                        sources = prepared.get("incomplete_sources")
+                        if isinstance(sources, tuple):
+                            self._incomplete_sources = tuple(
+                                source for source in _OBSERVATION_SOURCES if source in sources
+                            )
                 except TimeoutError:
                     self._last_diagnostic = "MONITOR_OBSERVATIONS_TIMEOUT"
                 except Exception:

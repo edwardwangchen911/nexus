@@ -3075,12 +3075,18 @@ async def run_local_agent_paper_loop(
                 # Fixed monitor diagnostics are distinct from research unknowns.
                 # Never print the scan result, configuration or exception text.
                 try:
+                    diagnostic_sources = monitor.diagnostic_sources
                     print(
                         json.dumps(
                             {
                                 "event": "research.monitor.scan_failed",
                                 "error_code": monitor.last_diagnostic,
                                 "scheduled_at": monitor.diagnostic_bucket.isoformat(),
+                                **(
+                                    {"incomplete_sources": diagnostic_sources}
+                                    if diagnostic_sources
+                                    else {}
+                                ),
                             },
                             sort_keys=True,
                         ),

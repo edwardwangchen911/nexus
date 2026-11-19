@@ -138,9 +138,9 @@ async def test_no_rule_preserves_legacy_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reconciliation_fails", [False, True])
+@pytest.mark.parametrize("failure", [None, "reconciliation", "research_bridge", "price"])
 async def test_normal_host_preparation_bridges_after_sec_before_price(
-    monkeypatch, tmp_path, reconciliation_fails
+    monkeypatch, tmp_path, failure
 ):
     from datetime import timedelta
 
@@ -165,27 +165,35 @@ async def test_normal_host_preparation_bridges_after_sec_before_price(
     async def reconcile(current, args):
         assert current is settings and args.action == "reconcile"
         calls.append("reconcile")
-        if reconciliation_fails:
+        if failure == "reconciliation":
             raise ValueError("MONITOR_HOST_SCOPE_CHANGED")
         return {"status": "reconciled", "recorded": 6}
 
     async def sec(*args, **kwargs):
         calls.append("sec")
-        return {"status": "unchanged", "provider_requests": 0}
+        return {"status": "refreshed", "provider_requests": 2}
 
     async def prepare(*args, **kwargs):
         calls.append("bridge")
+        if failure == "research_bridge":
+            raise OSError("private bridge details")
         return {"items": [{"status": "blocked", "reason": "MONITOR_AWAITING_RECONCILIATION"}]}
 
     async def price(*args, **kwargs):
         calls.append("price")
+        if failure == "price":
+            raise OSError("private market details")
         return {"status": "refreshed", "provider_requests": 0}
 
     monkeypatch.setattr(refresh, "refresh_disclosure_observations", sec)
     monkeypatch.setattr(host, "prepare_registered_research", prepare)
     monkeypatch.setattr(monitor_price_refresh, "refresh_price_observations", price)
     monkeypatch.setattr(research_monitor, "run", reconcile)
-    if reconciliation_fails:
+    monkeypatch.setattr(
+        "nexus.ops.sec_atom_candidates.refresh_candidates",
+        AsyncMock(return_value={"status": "skipped", "provider_requests": 0}),
+    )
+    if failure == "reconciliation":
         with pytest.raises(ValueError, match="MONITOR_HOST_SCOPE_CHANGED"):
             await research_monitor.refresh_configured_observations(
                 settings,
@@ -205,6 +213,14 @@ async def test_normal_host_preparation_bridges_after_sec_before_price(
     )
     assert calls == ["reconcile", "sec", "bridge", "price"]
     assert result["reconciliation"] == {"status": "reconciled", "recorded": 6}
-    assert result["status"] == "refreshed"
-    assert result["sources"]["disclosure"]["status"] == "unchanged"
-    assert result["sources"]["disclosure"]["research_bridge"]["items"][0]["status"] == "blocked"
+    assert result["status"] == ("partial" if failure else "refreshed")
+    assert result["sources"]["disclosure"]["status"] == "refreshed"
+    assert result["sources"]["disclosure"]["provider_requests"] == 2
+    bridge = result["sources"]["disclosure"]["research_bridge"]
+    if failure == "research_bridge":
+        assert bridge["status"] == "unknown"
+        assert "private bridge details" not in repr(result)
+    else:
+        assert bridge["items"][0]["status"] == "blocked"
+    assert result["provider_requests"] == (None if failure == "price" else 2)
+    assert result["incomplete_sources"] == ((failure,) if failure else ())
