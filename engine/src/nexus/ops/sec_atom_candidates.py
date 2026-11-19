@@ -113,6 +113,7 @@ async def refresh_candidates(
     scheduled_at: datetime | None = None,
     environment: dict[str, str],
     repo_root: Path,
+    observed_items: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     if (
         not settings.agent_paper_cycle_enabled
@@ -122,7 +123,7 @@ async def refresh_candidates(
         return _result("disabled")
     factory = session_factory(settings)
     account_id = settings.agent_paper_account_id
-    items: list[dict[str, object]] = []
+    items = observed_items if observed_items is not None else []
     requests = 0
     try:
         async with account_transaction_turn(settings), factory() as session, session.begin():
@@ -381,6 +382,7 @@ async def refresh_candidates(
                         "negative_conclusion_authorized": False,
                         "primary_confirmation_required": True,
                     }
+                # Report hints only after the snapshot and receipt transaction commits.
                 items.append(completed)
             except BaseException as error:
                 # Fixed vocabulary only: no URL, headers, response text or credentials.

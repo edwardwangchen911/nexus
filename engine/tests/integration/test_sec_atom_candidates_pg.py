@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
         (False, "clock_skew"),
         (False, "parse_invalid"),
         (False, "host_latency"),
+        (False, "tail_timeout"),
     ],
 )
 async def test_normal_candidate_entry_custody_once_and_no_effects(
@@ -200,7 +201,17 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
                     == 1
                 )
             return
-        if cross_bucket == "host_latency":
+        if cross_bucket in ("host_latency", "tail_timeout"):
+            if cross_bucket == "tail_timeout":
+                normal_optional = atom.refresh_candidates
+
+                async def timeout_after_first_receipt(*args, **kwargs):
+                    completed = await normal_optional(*args, **kwargs)
+                    assert completed["items"][0]["candidate_hints"] == ["0001193125-26-000099"]
+                    raise TimeoutError
+
+                monkeypatch.setattr(atom, "refresh_candidates", timeout_after_first_receipt)
+            primary_requests_before = len(source_calls)
             observed = await research_monitor.refresh_configured_observations(
                 settings,
                 calendar_authority_id=CALENDAR_ID,
@@ -211,6 +222,10 @@ async def test_normal_candidate_entry_custody_once_and_no_effects(
             candidate = observed["official_candidates"]
             assert candidate["items"] and candidate["items"][0].get("snapshot_id"), candidate
             assert len(calls) == 1
+            if cross_bucket == "tail_timeout":
+                assert candidate["status"] == "unknown" and candidate["provider_requests"] is None
+                assert len(source_calls) > primary_requests_before
+            assert candidate["negative_conclusion_authorized"] is False
             verified = await research_monitor.run(
                 settings,
                 argparse.Namespace(

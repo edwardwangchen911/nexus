@@ -305,6 +305,7 @@ async def refresh_configured_observations(
         + (min(bucket + timedelta(minutes=5), calendar.market_close_at) - now).total_seconds(),
         loop.time(),
     )
+    observed_items: list[dict[str, object]] = []
     try:
         if optional_deadline is None:
             candidates = {
@@ -321,9 +322,12 @@ async def refresh_configured_observations(
                     scheduled_at=bucket,
                     environment=environment,
                     repo_root=repo_root,
+                    observed_items=observed_items,
                 )
     except Exception:
+        # A later failure cannot discard hints whose original receipt committed.
         candidates = {
+            "items": observed_items,
             "status": "unknown",
             "provider_requests": None,
             "model_requests": 0,
