@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from nexus.jobs.daily_pipeline import assert_daily_pipeline_schema_ready
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.daily_once import DailyOnceSettings
-from nexus.ops.fosun_local import load_local_environment
+from nexus.ops.fosun_local import load_local_environment, local_read_environment
 from nexus.providers.fred_http import FredHttpTransport
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from nexus.research.fred_collection import collect_fred_vintage, load_fred_collection
@@ -148,7 +148,7 @@ def main() -> None:
                 raise ValueError
             args.output_dir.mkdir(mode=0o700)
         else:
-            settings = DailyOnceSettings.model_validate(environment)
+            settings = DailyOnceSettings.model_validate(local_read_environment(environment))
             validate_local_import(settings)
     except Exception:
         print('{"status":"rejected","code":"FRED_CONFIG_INVALID"}', file=sys.stderr)

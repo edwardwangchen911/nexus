@@ -109,6 +109,8 @@ def test_main_real_loader_honors_process_key_and_local_database_override(
     expected_db = "postgresql+asyncpg://synthetic:synthetic@127.0.0.1:55436/isolated_override"
     monkeypatch.setenv("FRED_API_KEY", "synthetic-env-key")
     monkeypatch.setenv("DATABASE_URL", expected_db)
+    monkeypatch.setenv("AGENT_RUNTIME_MODE", "responses")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     for name, value in {
         "ENDPOINT": "http://127.0.0.1:9000",
         "REGION": "test",
@@ -126,6 +128,8 @@ def test_main_real_loader_honors_process_key_and_local_database_override(
 
     async def importing(settings, *, collection):
         assert settings.database_url == expected_db
+        assert settings.openai_api_key is None
+        assert settings.explicit_artifact_config
         fred_local.validate_local_import(settings)
         called.append("import")
         return {"status": "imported"}
