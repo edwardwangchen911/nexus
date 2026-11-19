@@ -84,7 +84,7 @@ def test_known_or_legacy_never_new(legacy):
         known_entries={} if legacy else {key: item},
         legacy_event_keys=frozenset({key}) if legacy else frozenset(),
     )
-    assert result.result == "false"
+    assert (result.result, result.coverage) == ("unknown", "partial")
     assert result.events[0].classification == "known"
 
 
@@ -101,15 +101,14 @@ def test_conflict_only_quarantines_its_event():
 
 
 @pytest.mark.parametrize(
-    "complete,start,expected",
-    [(False, T0, "unknown"), (True, T0, "false"), (True, T0 + timedelta(seconds=1), "unknown")],
+    "complete,start",
+    [(False, T0), (True, T0), (True, T0 + timedelta(seconds=1))],
 )
-def test_false_requires_exact_complete_interval(complete, start, expected):
+def test_structural_coverage_does_not_prove_accepted_time_cutoff(complete, start):
     result = evaluate(source(complete=complete, coverage_start_at=start))
-    assert result.result == expected
-    if expected == "false":
-        assert result.coverage == "complete"
-        assert result.issuer_cik == CIK and result.forms == ("8-K", "8-K/A")
+    assert (result.result, result.coverage) == ("unknown", "partial")
+    assert result.reason == "DURABLE_SEC_ACCEPTED_CUTOFF_UNPROVEN"
+    assert result.issuer_cik == CIK and result.forms == ("8-K", "8-K/A")
 
 
 def test_complete_missing_known_entry_is_not_absence_proof():
@@ -177,7 +176,7 @@ def test_filtered_form_is_not_a_new_effect():
         source((entry().model_copy(update={"form": "8-K/A"}),), complete=True),
         policy=policy(forms=("8-K",)),
     )
-    assert result.result == "false" and result.events[0].classification == "out_of_scope"
+    assert result.result == "unknown" and result.events[0].classification == "out_of_scope"
 
 
 def test_invalid_prior_binding_fails_closed():
@@ -218,14 +217,22 @@ def test_conflict_without_independent_new_never_false_even_with_complete_coverag
 
 def test_historical_discovery_does_not_become_new_publication():
     result = evaluate(source((entry(seconds=-1),), complete=True))
-    assert result.result == "false"
+    assert result.result == "unknown"
     assert result.events[0].classification == "historical"
     assert result.events[0].entry.accepted_at < result.interval_start
 
 
-def test_complete_new_source_keeps_exact_coverage_and_positive_event():
-    result = evaluate(source((entry(),), complete=True))
-    assert result.result == "true" and result.coverage == "complete"
+def test_late_event_before_previous_capture_without_shards_is_still_new():
+    prior = evaluate(source(complete=True))
+    received = T0 + timedelta(minutes=6)
+    result = evaluate(
+        source((entry(),), complete=True, received_at=received),
+        available_at=received,
+        checked_at=received,
+    )
+    assert (prior.result, prior.coverage) == ("unknown", "partial")
+    assert (result.result, result.coverage) == ("true", "partial")
+    assert result.events[0].entry.accepted_at < prior.interval_end
     assert result.reason is None
 
 

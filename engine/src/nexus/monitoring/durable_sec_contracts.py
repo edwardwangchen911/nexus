@@ -11,6 +11,7 @@ from nexus.research.sec_disclosure_index import SecIndexEntry
 
 SecForm = Literal["8-K", "8-K/A"]
 RuleState = Literal["active", "paused", "revoked"]
+ACCEPTED_CUTOFF_EVALUATION = "accepted_cutoff_v1"
 DiscoveryReason = Literal[
     "DURABLE_SEC_RULE_INACTIVE",
     "DURABLE_SEC_SOURCE_INVALID",
@@ -20,7 +21,7 @@ DiscoveryReason = Literal[
     "DURABLE_SEC_EVENT_CONFLICT",
     "DURABLE_SEC_EVENT_TIME_INVALID",
     "DURABLE_SEC_COVERAGE_CONFLICT",
-    "DURABLE_SEC_COVERAGE_INCOMPLETE",
+    "DURABLE_SEC_ACCEPTED_CUTOFF_UNPROVEN",
 ]
 
 
@@ -71,9 +72,9 @@ class DiscoveryResult(BaseModel):
     issuer_cik: str
     forms: tuple[SecForm, ...]
     policy_version: Literal["durable_sec_v1"] = "durable_sec_v1"
-    result: Literal["true", "false", "unknown"]
-    coverage: Literal["complete", "partial", "unknown"]
-    # An interval is only reported for a valid, current shared source.
+    result: Literal["true", "unknown"]
+    coverage: Literal["partial", "unknown"]
+    # The requested interval ends at capture receipt; it does not establish a cutoff.
     interval_start: AwareDatetime | None
     interval_end: AwareDatetime | None
     events: tuple[DiscoveryEvent, ...] = ()

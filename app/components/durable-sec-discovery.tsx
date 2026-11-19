@@ -11,6 +11,7 @@ const results = { true: "发现规则生效后发布的新公告", false: "本�
 const reasons = {
   evidence_unverified: "检查依据尚未核验完整。",
   coverage_incomplete: "覆盖依据尚不完整；独立可证的新增仍会单独核验，其余保持未知。",
+  accepted_cutoff_unproven: "SEC 原件已核验，尚无完整受理截止证明。",
   coverage_conflict: "覆盖记录或公告元数据存在矛盾，受影响部分保持未知。",
   source_stale: "本次原件已超过新鲜度要求。",
   source_invalid: "原件或发行人身份未通过核验。",
@@ -83,8 +84,13 @@ export function DurableSecDiscovery({ discovery }: { discovery: View }): React.R
       <div><dt>公告类型</dt><dd>{discovery.forms.length ? discovery.forms.join(" · ") : "待核验"}</dd></div>
     </dl>
     {check ? <section className="decision-card__section" aria-label="最近公告发现检查">
-      <h3>最近已保存检查</h3><p>{results[check.result]} · {coverage[check.coverage]}</p>
-      {check.interval_start && check.interval_end ? <p>本次核对区间：{formatDisplayTime(check.interval_start)} 至 {formatDisplayTime(check.interval_end)}。</p> : null}
+      <h3>最近已保存检查</h3>
+      {!check.evaluation_version && check.coverage === "complete" ? <>
+        <p>{check.result === "false" ? "历史记录（按旧口径）· 当时保存为完整覆盖、未发现新公告" : "历史记录（按旧口径）· 当时保存为完整覆盖"}</p>
+        <p>当前受理区间完整性未知，等待按新口径完成下一次常规检查。</p>
+      </> : <p>{results[check.result]} · {coverage[check.coverage]}</p>}
+      {check.source_received_at ? <p>SEC 原件收到时间：{formatDisplayTime(check.source_received_at)}。</p> : null}
+      {!check.evaluation_version && check.interval_start && check.interval_end ? <p>历史记录区间：{formatDisplayTime(check.interval_start)} 至 {formatDisplayTime(check.interval_end)}。</p> : null}
       <p>检查时间：{formatDisplayTime(check.checked_at)}。这是当时的保存结果，不代表当前资料仍然新鲜。</p>
       {check.result === "true" && check.coverage !== "complete" ? <p>已独立确认的新增公告仍成立；未覆盖部分保持未知。</p> : null}
       {check.result === "unknown" ? <p>{reasons[check.reason ?? "evidence_unverified"]}不按“没有公告”处理。</p> : null}

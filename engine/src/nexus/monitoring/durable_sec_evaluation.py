@@ -29,9 +29,9 @@ def evaluate_discovery(
 ) -> DiscoveryResult:
     """New means accepted strictly after rule activation, never merely newly downloaded.
 
-    Callers must verify original bytes/hash before this pure layer. The complete
-    interval is [effective_at, received_at]; only strictly later acceptances can
-    create new effects. No partial-scan or research-generation watermark exists.
+    Callers must verify original bytes/hash before this pure layer. A capture receipt
+    provides no complete acceptance cutoff. New effects require acceptance after
+    rule activation, regardless of any previous capture or research generation.
     """
 
     def unknown(reason: DiscoveryReason) -> DiscoveryResult:
@@ -132,20 +132,14 @@ def evaluate_discovery(
         for key, item in known_entries.items()
     ):
         contradiction = True
-    complete = (
-        current.history_complete
-        and coverage_start is not None
-        and coverage_start <= effective
-        and not contradiction
-    )
     has_new = any(event.classification == "new" for event in events)
     return DiscoveryResult(
         account_id=policy.account_id,
         instrument_id=policy.instrument_id,
         issuer_cik=policy.issuer_cik,
         forms=policy.forms,
-        result="true" if has_new else "false" if complete else "unknown",
-        coverage="complete" if complete else "partial",
+        result="true" if has_new else "unknown",
+        coverage="partial",
         interval_start=effective,
         interval_end=received,
         events=tuple(events),
@@ -153,7 +147,7 @@ def evaluate_discovery(
             "DURABLE_SEC_COVERAGE_CONFLICT"
             if contradiction
             else None
-            if complete or has_new
-            else "DURABLE_SEC_COVERAGE_INCOMPLETE"
+            if has_new
+            else "DURABLE_SEC_ACCEPTED_CUTOFF_UNPROVEN"
         ),
     )

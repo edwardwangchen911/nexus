@@ -26,6 +26,7 @@ from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
 from nexus.persistence.models.sec_monitor import SecDiscoveryEvent, SecNotificationClaim
 from nexus.research.durable_sec_index_storage import read_durable_index_capture
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 
 @pytest.mark.asyncio
@@ -117,8 +118,51 @@ async def test_durable_sec_api_projection_outlives_anchor_without_research_autho
             check, notices = await host.scan_registered(session, rule, now)
             assert notices == 1
             assert (check.result, check.coverage) == ("true", "partial")
+            assert check.observation["evaluation_version"] == "accepted_cutoff_v1"
+            assert check.observation["accepted_complete_through_at"] is None
+            assert "coverage_proof" not in check.observation
             assert len(check.observation["row_issues"]) == 1
             check_id = check.id
+            for result, coverage, observation in (
+                ("unknown", "partial", {}),
+                (
+                    "unknown",
+                    "complete",
+                    {
+                        "evaluation_version": "accepted_cutoff_v1",
+                        "accepted_complete_through_at": None,
+                    },
+                ),
+                (
+                    "unknown",
+                    "partial",
+                    {
+                        "evaluation_version": "accepted_cutoff_v1",
+                        "accepted_complete_through_at": received.isoformat(),
+                    },
+                ),
+            ):
+                with pytest.raises(
+                    IntegrityError, match="ck_sec_discovery_checks_accepted_cutoff_v1"
+                ):
+                    async with session.begin_nested():
+                        await session.execute(
+                            text(
+                                "INSERT INTO sec_discovery_checks "
+                                "(id, rule_id, capture_id, scheduled_at, checked_at, "
+                                "result, coverage, observation, created_at) "
+                                "SELECT gen_random_uuid(), rule_id, capture_id, "
+                                "scheduled_at - interval '5 minutes', checked_at, "
+                                ":result, :coverage, CAST(:observation AS jsonb), created_at "
+                                "FROM sec_discovery_checks WHERE id=:check_id"
+                            ),
+                            {
+                                "result": result,
+                                "coverage": coverage,
+                                "observation": json.dumps(observation),
+                                "check_id": check_id,
+                            },
+                        )
         async with factory() as session, session.begin():
             now = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
             check2, notices = await host.scan_registered(session, rule, now)
@@ -133,6 +177,9 @@ async def test_durable_sec_api_projection_outlives_anchor_without_research_autho
             view = await read_durable_sec_view(session, run, now=now, include_notice=True)
             assert view is not None and view.state == "active"
             assert view.latest_check.result == "true" and view.latest_check.coverage == "partial"
+            assert view.latest_check.evaluation_version == "accepted_cutoff_v1"
+            assert view.latest_check.source_received_at == received
+            assert view.latest_check.accepted_complete_through_at is None
             assert view.event_count == 1 and len(view.events) == 1
             assert view.events[0].accepted_at < view.events[0].first_seen_at
             assert view.execution_locked is True

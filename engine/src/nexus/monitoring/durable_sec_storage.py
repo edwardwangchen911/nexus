@@ -13,7 +13,11 @@ from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
 from nexus.monitoring.disclosure_observations import _bound_proposal, _capture
 from nexus.monitoring.durable_sec_claims import audit_fact, claim_notice
-from nexus.monitoring.durable_sec_contracts import DurableSecPolicy, RuleState
+from nexus.monitoring.durable_sec_contracts import (
+    ACCEPTED_CUTOFF_EVALUATION,
+    DurableSecPolicy,
+    RuleState,
+)
 from nexus.monitoring.durable_sec_evaluation import evaluate_discovery, stable_event_key
 from nexus.monitoring.sec_index_reader import read_monitor_index
 from nexus.monitoring.storage import lock_security
@@ -323,13 +327,6 @@ async def record_discovery(
             observation["coverage_details"] = source_details
         result, coverage = decision.result, decision.coverage
         reason = decision.reason if result == "unknown" else None
-        if result == "false":
-            observation["coverage_proof"] = {
-                "capture_id": str(capture.id),
-                "capture_hash": capture.revision,
-                "from": rule.effective_at.isoformat(),
-                "to": index.received_at.isoformat(),
-            }
         by_key = {v.event_key: v for v in rows}
         legacy_by_key = {key: (document, trigger_id) for key, document, trigger_id in legacy}
         # Generic metadata preserves conflicts even when the form changed out of
@@ -399,11 +396,9 @@ async def record_discovery(
         conflicts = sorted(set(conflicts) | set(prior_conflicts))
         if conflicts:
             observation["metadata_conflicts"] = conflicts
-            coverage = "partial"
-            if result == "false":
-                result, reason = "unknown", "DURABLE_SEC_EVENT_CONFLICT"
-                observation.pop("coverage_proof", None)
-            observation.update(result=result, coverage=coverage, reason=reason)
+            if reason == "DURABLE_SEC_ACCEPTED_CUTOFF_UNPROVEN":
+                reason = "DURABLE_SEC_COVERAGE_CONFLICT"
+            observation["reason"] = reason
         for item in decision.events:
             if item.classification != "new":
                 continue
@@ -472,6 +467,8 @@ async def record_discovery(
                 )
             )
             await session.flush()
+    observation["evaluation_version"] = ACCEPTED_CUTOFF_EVALUATION
+    observation["accepted_complete_through_at"] = None
     check = SecDiscoveryCheck(
         id=new_uuid7(),
         created_at=now,

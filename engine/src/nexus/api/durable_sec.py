@@ -14,7 +14,7 @@ from nexus.api.schemas.durable_sec import (
     DurableSecView,
 )
 from nexus.domain.time import require_utc
-from nexus.monitoring.durable_sec_contracts import DurableSecPolicy
+from nexus.monitoring.durable_sec_contracts import ACCEPTED_CUTOFF_EVALUATION, DurableSecPolicy
 from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
 from nexus.outbox.failure import FailureReason, read_delivery_failure
 from nexus.persistence.models.agents import AgentResearchEventRecord, AgentResearchRunRecord
@@ -97,6 +97,16 @@ def project_check(row: SecDiscoveryCheck, now: datetime) -> DurableSecCheckView:
     if row.result == "false" and row.coverage != "complete":
         raise ValueError("DURABLE_SEC_VIEW_INVALID")
     observation = row.observation or {}
+    version = observation.get("evaluation_version")
+    if version is not None and (
+        version != ACCEPTED_CUTOFF_EVALUATION
+        or row.coverage == "complete"
+        or row.result == "false"
+        or "coverage_proof" in observation
+        or "accepted_complete_through_at" not in observation
+        or observation["accepted_complete_through_at"] is not None
+    ):
+        raise ValueError("DURABLE_SEC_VIEW_INVALID")
     start, end = observation.get("interval_start"), observation.get("interval_end")
     if start is not None or end is not None:
         if not isinstance(start, str) or not isinstance(end, str):
@@ -126,8 +136,11 @@ def project_check(row: SecDiscoveryCheck, now: datetime) -> DurableSecCheckView:
             "coverage": row.coverage,
             "interval_start": start,
             "interval_end": end,
+            "evaluation_version": version,
+            "source_received_at": end if version == ACCEPTED_CUTOFF_EVALUATION else None,
             "reason": {
                 "DURABLE_SEC_COVERAGE_INCOMPLETE": "coverage_incomplete",
+                "DURABLE_SEC_ACCEPTED_CUTOFF_UNPROVEN": "accepted_cutoff_unproven",
                 "DURABLE_SEC_COVERAGE_CONFLICT": "coverage_conflict",
                 "DURABLE_SEC_SOURCE_STALE": "source_stale",
                 "DURABLE_SEC_SOURCE_INVALID": "source_invalid",
