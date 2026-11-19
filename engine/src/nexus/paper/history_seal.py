@@ -50,7 +50,7 @@ _EXPIRED_SCHEMA = "paper_expired_attempt_close_v1"
 _ACTOR = "local-manual-history-seal"
 _BLOCKED = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
 _REVIEWED_HISTORY_ACTION = "paper.legacy_research.reviewed_history_bound"
-_REVIEWED_HISTORY_SCHEMA = "paper_reviewed_history_binding_v1"
+_REVIEWED_HISTORY_SCHEMA = "paper_reviewed_history_bind_v1"
 # NEXUS-SCHEDULED-SEAL-HISTORY-20261119-R1. These digests pin one maintenance
 # operation without putting the live account or original request IDs in code.
 _REVIEWED_SEAL_IDENTITY = "bc14cefcfa06eaf51d38a0773b9194fb226bc355f2294c58f724e0857305f7c2"
