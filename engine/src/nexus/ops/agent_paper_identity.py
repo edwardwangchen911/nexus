@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from sqlalchemy import func, select, text
 
 from nexus.agents.persistence import select_authoritative_snapshot
@@ -194,6 +195,11 @@ async def _read_scope(
                                 base_id = bases[0].id
                         except ValueError:
                             pass
+                        except ClientError as error:
+                            if error.operation_name != "GetObject" or error.response.get(
+                                "Error", {}
+                            ).get("Code") not in {"NoSuchKey", "NoSuchVersion"}:
+                                raise
                 entries.append((candidate.instrument_id, candidate.symbol, base_id))
             return IdentityPreparationScope(
                 day=calendar.session,
