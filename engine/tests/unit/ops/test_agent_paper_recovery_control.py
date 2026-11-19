@@ -51,6 +51,12 @@ def recovery_root(tmp_path, *, schema=CURRENT_MIGRATION_HEAD):
             "job = json.loads(state.read_text())",
         )
         .replace("elif action == 'kill':\n", "elif action == 'kill':\n    job.pop('pid', None)\n")
+        .replace(
+            "    sys.exit(options.get('kickstart_exit', 0))",
+            "    if options.get('kickstart_timeout'):\n"
+            "        __import__('time').sleep(30)\n"
+            "    sys.exit(options.get('kickstart_exit', 0))",
+        )
     )
     _executable(tmp_path / "bin/sysctl", "print('11111111-1111-1111-1111-111111111111')\n")
     engine = root / ".venv/bin/nexus-engine-agent-paper-loop"
@@ -285,7 +291,8 @@ def test_managed_start_keeps_normal_running_status_contract(tmp_path):
     assert starts(root) == []
 
 
-def test_managed_start_never_reports_success_for_an_unconfirmed_launch(tmp_path):
+@pytest.mark.parametrize("launch_state", ["inactive", "starting", "timeout"])
+def test_managed_start_never_reports_success_for_an_unconfirmed_launch(tmp_path, launch_state):
     root, env = recovery_root(tmp_path)
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
@@ -297,10 +304,23 @@ def test_managed_start_never_reports_success_for_an_unconfirmed_launch(tmp_path)
     finally:
         child.terminate()
         child.wait(timeout=10)
-    options(root, kickstart_state="inactive", kickstart_exit=1, exit=0)
+    options(
+        root,
+        kickstart_state="inactive" if launch_state == "timeout" else launch_state,
+        kickstart_timeout=launch_state == "timeout",
+        kickstart_exit=1,
+        exit=0,
+    )
     result = _invoke(root, env, "start")
     assert result.returncode == 1
-    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_START_FAILED"
+    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_RECOVERY_START_UNCONFIRMED"
+    target = root / ".secrets/nexus-agent-paper/recovery.json"
+    attempt = json.loads(target.read_text())["attempt"]
+    assert attempt is not None
+    repeated = _invoke(root, env, "start")
+    assert repeated.returncode == 1
+    assert json.loads(repeated.stdout) == json.loads(result.stdout)
+    assert json.loads(target.read_text())["attempt"] == attempt
     assert len(starts(root)) == 1
 
 
@@ -540,7 +560,16 @@ def test_missing_registration_does_not_become_a_clean_exit_through_stop(tmp_path
     assert starts(root) == []
 
 
-def test_new_running_process_without_activation_receipt_is_still_pending(tmp_path):
+@pytest.mark.parametrize(
+    "last_exit,expected",
+    [
+        (0, "AGENT_PAPER_RECOVERY_START_UNCONFIRMED"),
+        (75, "AGENT_PAPER_SERVICE_START_FAILED"),
+    ],
+)
+def test_new_running_process_requires_activation_receipt_and_safe_exit(
+    tmp_path, last_exit, expected
+):
     root, env = recovery_root(tmp_path)
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
@@ -550,10 +579,10 @@ def test_new_running_process_without_activation_receipt_is_still_pending(tmp_pat
         child.terminate()
         child.wait(timeout=10)
     assert _invoke(root, env, "stop").returncode == 0
-    options(root, kickstart_state="running", kickstart_exit=0, exit=0)
+    options(root, kickstart_state="running", kickstart_exit=0, exit=last_exit)
     result = _invoke(root, env, "start")
     assert result.returncode == 1
-    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_START_FAILED"
+    assert json.loads(result.stdout)["error_code"] == expected
     value = json.loads((root / ".secrets/nexus-agent-paper/recovery.json").read_text())
     assert value["attempt"] is not None and len(starts(root)) == 1
 

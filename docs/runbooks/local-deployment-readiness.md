@@ -17,6 +17,8 @@ API/Worker 健康、源码一致和一次纯研究成功不代表已启用的正
 
 `verify-deployment` 只读检查，不构建、不启动或停止服务、不采集数据、不调用模型。
 
+启动返回 `AGENT_PAPER_RECOVERY_START_UNCONFIRMED` 时，先用同一宿主的 `status` 和原尝试回执确认结果。监督器按原启动身份核验回执及心跳，确认 READY 后再执行部署检查。若原回执已记录拒绝或退出，核对该终态的原因。此状态不授权第二次启动。
+
 - 配置启用：托管宿主必须 running，数据库心跳 fresh 且 release 与当前 checkout 一致，零外呼预检通过。
 - 配置停用：宿主必须 inactive/stopped，不要求保留的历史心跳继续新鲜。
 - 两种模式均核对 API、Worker 的精确 release；任何缺失、不一致或宿主状态不符均返回非零。

@@ -48,6 +48,7 @@ class LocalStackStepResult:
 _HOST_STATUSES = frozenset({"started", "running", "inactive", "stopped"})
 _HOST_ERROR_CODES = frozenset(
     {
+        "AGENT_PAPER_RECOVERY_START_UNCONFIRMED",
         "AGENT_PAPER_SERVICE_ACKNOWLEDGEMENT_INVALID",
         "AGENT_PAPER_SERVICE_ACTION_INVALID",
         "AGENT_PAPER_SERVICE_BACKGROUND_ACCESS_REQUIRED",

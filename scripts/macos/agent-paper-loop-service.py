@@ -286,6 +286,40 @@ def _write_service_plist(
     return path
 
 
+def _start_managed(root: Path, env_file: Path, project: str) -> int:
+    service = sys.modules[__name__]
+    recovery = _recovery_module()
+    unconfirmed = {"error_code": "AGENT_PAPER_RECOVERY_START_UNCONFIRMED"}
+    try:
+        before, _ = _launchctl_inspection("launchctl", root, env_file, project)
+        recovery.enable(service, root, env_file, project, report=False)
+        after, last_exit = _launchctl_inspection("launchctl", root, env_file, project)
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        if (
+            isinstance(error, RuntimeError)
+            and str(error) != "AGENT_PAPER_SERVICE_STATUS_UNAVAILABLE"
+        ):
+            raise
+        managed = recovery.read(root)
+        if managed is None or managed.get("attempt") is None:
+            raise
+        recovery.bound(service, root, env_file, project, managed)
+        _emit(unconfirmed)
+        return 1
+
+    managed = recovery.read(root)
+    if managed is None:
+        raise ValueError("AGENT_PAPER_RECOVERY_STATE_INVALID")
+    if last_exit != 75 and managed.get("attempt") is not None:
+        _emit(unconfirmed)
+        return 1
+    if after != "running" or last_exit == 75:
+        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
+        return 1
+    _emit({"label": LABEL, "status": "running" if before == "running" else "started"})
+    return 0
+
+
 def _start(root: Path, env_file: Path, project: str) -> int:
     engine = root / ".venv" / "bin" / "nexus-engine-agent-paper-loop"
     launchctl = shutil.which("launchctl")
@@ -774,23 +808,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with _service_control_lock():
                 if _has_recovery(root):
-                    before, _ = _launchctl_inspection(
-                        "launchctl", root, env_file, args.project_name
-                    )
-                    _recovery_module().enable(
-                        sys.modules[__name__], root, env_file, args.project_name, report=False
-                    )
-                    after, last_exit = _launchctl_inspection(
-                        "launchctl", root, env_file, args.project_name
-                    )
-                    managed = _recovery_module().read(root)
-                    if after != "running" or last_exit == 75 or managed.get("attempt") is not None:
-                        _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
-                        return 1
-                    _emit(
-                        {"label": LABEL, "status": "running" if before == "running" else "started"}
-                    )
-                    return 0
+                    return _start_managed(root, env_file, args.project_name)
                 return _start(root, env_file, args.project_name)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             code = str(error)
