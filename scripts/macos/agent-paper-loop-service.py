@@ -784,7 +784,10 @@ def main(argv: list[str] | None = None) -> int:
                         "launchctl", root, env_file, args.project_name
                     )
                     managed = _recovery_module().read(root)
-                    if after != "running" or last_exit == 75 or managed.get("attempt") is not None:
+                    if last_exit != 75 and managed.get("attempt") is not None:
+                        _emit({"error_code": "AGENT_PAPER_RECOVERY_START_UNCONFIRMED"})
+                        return 1
+                    if after != "running" or last_exit == 75:
                         _emit({"error_code": "AGENT_PAPER_SERVICE_START_FAILED"})
                         return 1
                     _emit(

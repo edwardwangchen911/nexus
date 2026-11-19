@@ -961,15 +961,19 @@ def test_down_requires_explicit_stopped_status_before_compose(
 
 
 @pytest.mark.parametrize(
-    "host_output",
+    "host_output,result_code",
     (
-        '{"status":"inactive"}',
-        '{"status":"stopped"}',
-        '{"error_code":"AGENT_PAPER_SERVICE_START_FAILED"}',
+        ('{"status":"inactive"}', "AGENT_PAPER_SERVICE_INACTIVE"),
+        ('{"status":"stopped"}', "AGENT_PAPER_SERVICE_STOPPED"),
+        ('{"error_code":"AGENT_PAPER_SERVICE_START_FAILED"}', "AGENT_PAPER_SERVICE_START_FAILED"),
+        (
+            '{"error_code":"AGENT_PAPER_RECOVERY_START_UNCONFIRMED"}',
+            "AGENT_PAPER_RECOVERY_START_UNCONFIRMED",
+        ),
     ),
 )
 def test_enabled_up_accepts_only_started_or_running_host_status(
-    repo_root: Path, host_output: str
+    repo_root: Path, host_output: str, result_code: str
 ) -> None:
     """An exit-zero host response must still prove that start reached a live state."""
     env_file = repo_root / "infra/.env.local"
@@ -1012,6 +1016,7 @@ def test_enabled_up_accepts_only_started_or_running_host_status(
     assert len(results) == 10
     assert results[-1].fact == "host_service"
     assert results[-1].exit_code != 0
+    assert results[-1].result_code == result_code
 
 
 def test_down_stops_host_before_exact_compose_project(repo_root: Path) -> None:

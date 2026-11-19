@@ -300,7 +300,14 @@ def test_managed_start_never_reports_success_for_an_unconfirmed_launch(tmp_path)
     options(root, kickstart_state="inactive", kickstart_exit=1, exit=0)
     result = _invoke(root, env, "start")
     assert result.returncode == 1
-    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_START_FAILED"
+    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_RECOVERY_START_UNCONFIRMED"
+    target = root / ".secrets/nexus-agent-paper/recovery.json"
+    attempt = json.loads(target.read_text())["attempt"]
+    assert attempt is not None
+    repeated = _invoke(root, env, "start")
+    assert repeated.returncode == 1
+    assert json.loads(repeated.stdout) == json.loads(result.stdout)
+    assert json.loads(target.read_text())["attempt"] == attempt
     assert len(starts(root)) == 1
 
 
@@ -553,7 +560,7 @@ def test_new_running_process_without_activation_receipt_is_still_pending(tmp_pat
     options(root, kickstart_state="running", kickstart_exit=0, exit=0)
     result = _invoke(root, env, "start")
     assert result.returncode == 1
-    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_SERVICE_START_FAILED"
+    assert json.loads(result.stdout)["error_code"] == "AGENT_PAPER_RECOVERY_START_UNCONFIRMED"
     value = json.loads((root / ".secrets/nexus-agent-paper/recovery.json").read_text())
     assert value["attempt"] is not None and len(starts(root)) == 1
 
