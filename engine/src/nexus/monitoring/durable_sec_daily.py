@@ -4,10 +4,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
+from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.monitoring.filing_archive import SOURCE as FILING_SOURCE
 from nexus.monitoring.filing_archive import VerifiedFilingContent, read_filing_content
 from nexus.monitoring.mixed_contracts import canonical_hash
@@ -26,6 +28,14 @@ from nexus.persistence.models.sec_research import (
 
 if TYPE_CHECKING:
     from nexus.monitoring.source_qualification import QualifiedSource
+
+_EVIDENCE_READ_ERRORS = (
+    ValueError,
+    OSError,
+    BotoCoreError,
+    ClientError,
+    ProviderObjectIOUnavailable,
+)
 
 type SecGapReason = Literal[
     "DURABLE_SEC_PENDING_OVERFLOW",
@@ -240,7 +250,7 @@ async def freeze_durable_sec_pending(
                             content=valid_contents[0],
                         )
                     )
-                except ValueError:
+                except _EVIDENCE_READ_ERRORS:
                     issues.append(
                         PendingSecIssue(
                             event_id=event.id,
@@ -248,7 +258,9 @@ async def freeze_durable_sec_pending(
                             reason="DURABLE_SEC_EVENT_EVIDENCE_UNAVAILABLE",
                         )
                     )
-        except ValueError:
+        except _EVIDENCE_READ_ERRORS:
+            # This optional SEC input is unverified. Keep its events pending
+            # and let the ordinary cycle validate the remaining inputs.
             reason = "DURABLE_SEC_PENDING_EVIDENCE_INVALID"
     if not selected and reason is None:
         reason = "DURABLE_SEC_PENDING_EVIDENCE_INVALID"
@@ -348,7 +360,7 @@ async def validate_durable_sec_pending(
                 or content.archive.entry != entry
             ):
                 return False
-        except ValueError:
+        except _EVIDENCE_READ_ERRORS:
             return False
     return True
 

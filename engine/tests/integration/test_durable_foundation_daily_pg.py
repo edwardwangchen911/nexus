@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 from helpers.database_clock import is_fixture_clock_read
 from helpers.durable_session_inputs import (
     append_prior_session_daily,
@@ -113,13 +114,15 @@ async def accept_fixture_notices(database_url, day, event_ids):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "resolution", ("addressed", "unresolved", "absent", "issue", "adopted_graphic", "collected")
+    "resolution",
+    ("addressed", "unresolved", "absent", "issue", "adopted_graphic", "collected", "missing_index"),
 )
 async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
     migrated_database_url, monkeypatch, tmp_path, resolution
 ):
     adopted_graphic = resolution == "adopted_graphic"
     collected = resolution == "collected"
+    missing_index = resolution == "missing_index"
     if adopted_graphic or collected:
         resolution = "addressed"
     from helpers import disclosure_observations as reader
@@ -435,6 +438,18 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             )
             notices = await db.scalar(select(func.count()).select_from(OutboxEvent))
             claims = await db.scalar(select(func.count()).select_from(SecNotificationClaim))
+        normal_read_raw = store.read_raw
+        failures = []
+        if missing_index:
+            submissions_uri = capture.payload["originals"][2]["uri"]
+
+            async def read_raw(key, *, uri):
+                if uri == submissions_uri:
+                    failures.append(key)
+                    raise ClientError({"Error": {"Code": "NoSuchVersion"}}, "GetObject")
+                return await normal_read_raw(key, uri=uri)
+
+            monkeypatch.setattr(store, "read_raw", read_raw)
         async with factory.begin() as db:
             authority = await load_quasi_realtime_cycle_authority(
                 db,
@@ -466,6 +481,10 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                     {k: v for k, v in facts.items() if k in ("failure_phase", "failure_code")},
                 )
             assert cycle.result_code == "RESEARCH_JOBS_PREPARED", cycle.result_code
+        assert len(cycle.research_run_ids) == len(batch.instrument_ids) == 3
+        if missing_index:
+            assert failures
+            monkeypatch.setattr(store, "read_raw", normal_read_raw)
         async with factory() as db:
             target = await db.scalar(
                 select(AgentResearchRunRecord).where(
@@ -479,15 +498,22 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             )
             paper = snapshot.payload["agent_paper_context"]
             assert paper.get("pending_monitoring_v2") is None
-            assert paper.get("pending_durable_sec") is not None, paper.get(
-                "pending_durable_sec_gap"
-            )
-            expected_events = {str(event.id)}
-            if second_event is not None:
-                expected_events.add(str(second_event.id))
-            assert {
-                x["event_id"] for x in paper["pending_durable_sec"]["events"]
-            } == expected_events
+            if missing_index:
+                assert paper["disclosure_monitoring"]["gap_reason"] == "SEC_BASELINE_INVALID"
+                assert paper.get("pending_durable_sec") is None
+                gap = paper["pending_durable_sec_gap"]
+                assert gap["reason"] == "DURABLE_SEC_PENDING_EVIDENCE_INVALID"
+                assert gap["pending_count"] == 1
+            else:
+                assert paper.get("pending_durable_sec") is not None, paper.get(
+                    "pending_durable_sec_gap"
+                )
+                expected_events = {str(event.id)}
+                if second_event is not None:
+                    expected_events.add(str(second_event.id))
+                assert {
+                    x["event_id"] for x in paper["pending_durable_sec"]["events"]
+                } == expected_events
             if resolution == "issue":
                 assert [x["event_key"] for x in paper["pending_durable_sec"]["issues"]] == [
                     f"sec:{rule.issuer_cik}:0000123456-26-000098"
@@ -666,10 +692,8 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             assert not tuple(await db.scalars(select(MonitorIncrement)))
             assert await db.scalar(select(func.count()).select_from(OutboxEvent)) == notices
             assert await db.scalar(select(func.count()).select_from(SecNotificationClaim)) == claims
-        assert calls == ["research", "critique", "synthesis"] * 3 and seen == [
-            "research",
-            "critique",
-            "synthesis",
-        ]
+        stages = ["research", "critique", "synthesis"]
+        assert calls == stages * 3
+        assert seen == ([] if missing_index else stages)
     finally:
         await factory.kw["bind"].dispose()
