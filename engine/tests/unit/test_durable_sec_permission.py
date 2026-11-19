@@ -6,9 +6,20 @@ import pytest
 from nexus.monitoring import durable_sec_permission as permission
 
 
+@pytest.fixture
+def session():
+    return SimpleNamespace(
+        scalar=AsyncMock(return_value=None),
+        begin=AsyncMock(),
+        rollback=AsyncMock(),
+        close=AsyncMock(),
+    )
+
+
 @pytest.mark.asyncio
-async def test_send_fence_releases_on_real_headers_before_response_verification(monkeypatch):
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+async def test_send_fence_releases_on_real_headers_before_response_verification(
+    monkeypatch, session
+):
     monkeypatch.setattr(permission, "require_new_send", AsyncMock(return_value=True))
     fence = permission.SecRequestFence(lambda: session, UUID(int=1))
     request = SimpleNamespace(extensions={})
@@ -22,8 +33,7 @@ async def test_send_fence_releases_on_real_headers_before_response_verification(
 
 
 @pytest.mark.asyncio
-async def test_refused_permission_cleans_up_before_any_headers(monkeypatch):
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+async def test_refused_permission_cleans_up_before_any_headers(monkeypatch, session):
     monkeypatch.setattr(
         permission,
         "require_new_send",
@@ -38,8 +48,7 @@ async def test_refused_permission_cleans_up_before_any_headers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_durable_batch_never_holds_request_transaction(monkeypatch):
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+async def test_no_durable_batch_never_holds_request_transaction(monkeypatch, session):
     monkeypatch.setattr(permission, "require_new_send", AsyncMock(return_value=False))
     request = SimpleNamespace(extensions={})
     await permission.SecRequestFence(lambda: session, UUID(int=1)).acquire(request)
@@ -71,8 +80,7 @@ async def test_current_capture_raw_custody_is_required_after_sql_gate(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_headers_start_rechecks_permission_after_pool_or_tls_wait(monkeypatch):
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+async def test_headers_start_rechecks_permission_after_pool_or_tls_wait(monkeypatch, session):
     gate = AsyncMock(side_effect=[True, ValueError("SEC_RESEARCH_PERMISSION_INVALID")])
     monkeypatch.setattr(permission, "require_new_send", gate)
     fence = permission.SecRequestFence(lambda: session, UUID(int=1))
@@ -85,10 +93,9 @@ async def test_headers_start_rechecks_permission_after_pool_or_tls_wait(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_expired_work_cannot_start_headers(monkeypatch):
+async def test_expired_work_cannot_start_headers(monkeypatch, session):
     from asyncio import get_running_loop
 
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
     monkeypatch.setattr(permission, "require_new_send", AsyncMock(return_value=True))
     fence = permission.SecRequestFence(lambda: session, UUID(int=1))
     request = SimpleNamespace(extensions={})
@@ -100,8 +107,7 @@ async def test_expired_work_cannot_start_headers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_transport_cannot_start_second_headers_after_fence_release(monkeypatch):
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
+async def test_transport_cannot_start_second_headers_after_fence_release(monkeypatch, session):
     monkeypatch.setattr(permission, "require_new_send", AsyncMock(return_value=True))
     fence = permission.SecRequestFence(lambda: session, UUID(int=1))
     request = SimpleNamespace(extensions={})
@@ -112,10 +118,9 @@ async def test_transport_cannot_start_second_headers_after_fence_release(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_prior_trace_callback_cannot_cross_final_work_deadline(monkeypatch):
+async def test_prior_trace_callback_cannot_cross_final_work_deadline(monkeypatch, session):
     from asyncio import get_running_loop
 
-    session = SimpleNamespace(begin=AsyncMock(), rollback=AsyncMock(), close=AsyncMock())
     gate = AsyncMock(return_value=True)
     monkeypatch.setattr(permission, "require_new_send", gate)
     fence = permission.SecRequestFence(lambda: session, UUID(int=1))

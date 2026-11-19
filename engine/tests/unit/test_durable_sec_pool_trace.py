@@ -3,9 +3,91 @@
 import asyncio
 from uuid import UUID
 
+import httpcore
 import httpx
 import pytest
 from nexus.monitoring import durable_sec_permission as permission
+from nexus.monitoring import original_occupancy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", [None, "permission", "deadline"])
+async def test_https_proxy_tunnel_preserves_fence_until_provider_headers(monkeypatch, refusal):
+    loop = asyncio.get_running_loop()
+    wire_methods, traced_methods, qualified_methods = [], [], []
+
+    class Session:
+        async def begin(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+        async def close(self):
+            pass
+
+    async def qualify(session, run_id, *, fenced_transport, hold_original):
+        assert fenced_transport and hold_original
+        method = traced_methods[-1] if traced_methods else None
+        qualified_methods.append(method)
+        if refusal == "permission" and method == b"POST":
+            raise ValueError("SEC_RESEARCH_PERMISSION_BUSY")
+        return True
+
+    async def no_sec_dependencies(session, run_id):
+        return False
+
+    class Stream(httpcore.AsyncMockStream):
+        async def write(self, buffer, timeout=None):
+            if buffer.startswith((b"CONNECT ", b"POST ")):
+                wire_methods.append(buffer.split(b" ", 1)[0])
+            await super().write(buffer, timeout)
+
+    class Backend(httpcore.AsyncMockBackend):
+        async def connect_tcp(self, *args, **kwargs):
+            return Stream(
+                [
+                    b"HTTP/1.1 200 Connection Established\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+                ]
+            )
+
+    monkeypatch.setattr(original_occupancy, "require_for_send", qualify)
+    monkeypatch.setattr(permission, "require_new_send", no_sec_dependencies)
+    transport = httpx.AsyncHTTPTransport(proxy="http://127.0.0.1:1")
+    monkeypatch.setattr(transport._pool, "_network_backend", Backend([]))
+    async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
+        fence = permission.SecRequestFence(Session, UUID(int=1))
+        fence.work_deadline = loop.time() + 30
+        request = client.build_request("POST", "https://provider.invalid/v1/responses")
+
+        async def trace(name, info):
+            if name == "http11.send_request_headers.started":
+                method = info["request"].method
+                traced_methods.append(method)
+                if refusal == "deadline" and method == b"POST":
+                    fence.work_deadline = loop.time() - 1
+
+        request.extensions["trace"] = trace
+        await fence.acquire(request)
+        try:
+            if refusal == "permission":
+                with pytest.raises(ValueError, match="SEC_RESEARCH_PERMISSION_BUSY"):
+                    await client.send(request)
+            elif refusal == "deadline":
+                with pytest.raises(TimeoutError, match="RESPONSES_WORK_DEADLINE"):
+                    await client.send(request)
+            else:
+                assert (await client.send(request)).status_code == 200
+                assert fence.session is None
+        finally:
+            await fence.release()
+
+    assert traced_methods == [b"CONNECT", b"POST"]
+    assert qualified_methods == (
+        [None, b"CONNECT"] if refusal == "deadline" else [None, b"CONNECT", b"POST"]
+    )
+    assert wire_methods == ([b"CONNECT"] if refusal else [b"CONNECT", b"POST"])
 
 
 @pytest.mark.asyncio
@@ -18,6 +100,10 @@ async def test_real_pool_wait_cannot_send_headers_after_fence_expiry(monkeypatch
 
     class Session:
         closed = False
+
+        async def scalar(self, statement, params=None):
+            assert "original.account_id" in str(statement)
+            return None
 
         async def begin(self):
             pass

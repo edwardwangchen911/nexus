@@ -94,14 +94,17 @@ class SecRequestFence:
                 await self.release()
                 return
             original = request.extensions.get("trace")
+            request_method = getattr(request, "method", None)
+            proxy_connect_headers = False
 
             async def traced(name: str, info: dict[str, Any]) -> None:
+                nonlocal proxy_connect_headers
                 # Run other hooks before the final permission/deadline boundary.
                 try:
                     if original is not None:
                         await original(name, info)
                 finally:
-                    if name in {
+                    if not proxy_connect_headers and name in {
                         "http11.send_request_headers.complete",
                         "http2.send_request_headers.complete",
                         "http11.send_request_headers.failed",
@@ -112,6 +115,12 @@ class SecRequestFence:
                     "http11.send_request_headers.started",
                     "http2.send_request_headers.started",
                 }:
+                    # httpcore shares this trace with the proxy's CONNECT.
+                    # Only the application request leaves the send fence.
+                    proxy_connect_headers = (
+                        request_method not in ("CONNECT", b"CONNECT")
+                        and getattr(info.get("request"), "method", None) == b"CONNECT"
+                    )
                     if self.session is None:
                         raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
                     self._require_deadline()
