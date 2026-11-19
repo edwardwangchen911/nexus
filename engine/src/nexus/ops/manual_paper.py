@@ -291,6 +291,11 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--run-id", dest="run_ids", type=UUID, action="append", required=True)
     seal.add_argument("--accept-unknown-usage", action="store_true", required=True)
     seal.add_argument(
+        "--with-reviewed-independent-history",
+        action="store_true",
+        help="Use the exact independently reviewed history scope for its approved same-day seal",
+    )
+    seal.add_argument(
         "--same-day",
         action="store_true",
         help="Close a terminal failed research today; preserve unknown usage and reservations",
@@ -477,8 +482,12 @@ async def run(
                     return await finish_configured_manual_request(
                         session, settings, request_id=args.request_id, cancel_unused=True
                     )
+        reviewed_seal = args.action == "seal-failed-research" and getattr(
+            args, "with_reviewed_independent_history", False
+        )
         if (
-            args.action == "seal-failed-research" and getattr(args, "expired_attempt", False)
+            args.action == "seal-failed-research"
+            and (getattr(args, "expired_attempt", False) or reviewed_seal)
         ) or args.action in {
             "check-synthesis-acceptance",
             "accept-failed-synthesis-usage",
@@ -500,6 +509,15 @@ async def run(
                     "AGENT_PAPER_SERVICE_CONTROL_LOCK_UNSAFE": "LOCK_UNSAFE",
                 }.get(str(error), "LOCK_UNAVAILABLE")
                 raise PreparationCloseDiagnosticError("service_control_lock", reason) from None
+        if reviewed_seal:
+            from nexus.paper.manual_preparation_close import require_preparation_producers_stopped
+
+            require_preparation_producers_stopped(
+                args.repo_root,
+                args.env_file,
+                inspector_repo_root=args.repo_root,
+                inspector_revision=settings.release_revision,
+            )
         async with diagnostic.transaction(factory) as session:
             if args.action in {
                 "check-synthesis-acceptance",
@@ -675,6 +693,7 @@ async def run(
                         accept_unknown_usage=args.accept_unknown_usage,
                         same_day=getattr(args, "same_day", False),
                         expired_attempt=getattr(args, "expired_attempt", False),
+                        **({"with_reviewed_independent_history": True} if reviewed_seal else {}),
                     )
                     _require_maintenance_code(args.repo_root, settings.release_revision)
                     return receipt
