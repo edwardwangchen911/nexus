@@ -13,7 +13,7 @@ from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_formal_stage import formal_preparation_model_matches
@@ -49,6 +49,19 @@ _SAME_DAY_SCHEMA = "paper_same_day_close_v1"
 _EXPIRED_SCHEMA = "paper_expired_attempt_close_v1"
 _ACTOR = "local-manual-history-seal"
 _BLOCKED = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+_REVIEWED_HISTORY_ACTION = "paper.legacy_research.reviewed_history_bound"
+_REVIEWED_HISTORY_SCHEMA = "paper_reviewed_history_binding_v1"
+# NEXUS-SCHEDULED-SEAL-HISTORY-20261119-R1. These digests pin one maintenance
+# operation without putting the live account or original request IDs in code.
+_REVIEWED_SEAL_IDENTITY = "bc14cefcfa06eaf51d38a0773b9194fb226bc355f2294c58f724e0857305f7c2"
+_REVIEWED_SEAL_PROOF = "2e558cc92a3d66bf7509e0278aa18c69fa378e0b92365c31ecb91ca021faa78a"
+_REVIEWED_INDEPENDENT_PROOFS = frozenset(
+    {
+        "48e510a8345b00495bf5dbe283ff92dbdbeb363e1ed280980f5493ad3a5b4e7f",
+        "c8bd6784d341e8aea0681a28a98441edc937f2b07d65889e1cf013251eeb4c7c",
+        "e72bd2a98a12ef6ad86947ff2bc3ff8234fd85eef13885c8b6693185b1092a28",
+    }
+)
 _DESKTOP_CHILD = (
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 )
@@ -457,7 +470,12 @@ async def _require_stage_usage_proof(
 
 
 async def _seal_manual_scope(
-    session: AsyncSession, *, account_id: UUID, cycle_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    cycle_id: UUID,
+    now: datetime,
+    reviewed_history: dict[str, dict[str, object]] | None = None,
 ) -> ManualPaperRequest | None:
     from nexus.paper.manual_preparation_close import preparation_closed
     from nexus.paper.manual_request import manual_request_for_cycle, read_manual_request
@@ -465,7 +483,9 @@ async def _seal_manual_scope(
     target = await manual_request_for_cycle(session, cycle_id=cycle_id)
     rows = tuple(
         await session.scalars(
-            select(ManualPaperRequest).where(ManualPaperRequest.account_id == account_id)
+            select(ManualPaperRequest)
+            .where(ManualPaperRequest.account_id == account_id)
+            .order_by(ManualPaperRequest.id)
         )
     )
     for row in rows:
@@ -474,12 +494,110 @@ async def _seal_manual_scope(
             if view.status not in {"active", "unavailable"} or view.cycle_id != cycle_id:
                 raise ValueError(_BLOCKED)
         elif view.status in {"preparing", "active", "unknown"}:
-            if view.status == "unknown" and await preparation_closed(session, row, now=now):
-                continue
+            if view.status == "unknown":
+                if await preparation_closed(session, row, now=now):
+                    continue
+                if (
+                    target is None
+                    and reviewed_history is not None
+                    and row.contract_version in {3, 4}
+                ):
+                    digest, binding = await _verified_reviewed_history_binding(
+                        session, row, now=now
+                    )
+                    if digest in reviewed_history:
+                        raise ValueError(_BLOCKED)
+                    reviewed_history[digest] = binding
+                    continue
             raise ValueError(_BLOCKED)
     if target is not None and target.account_id != account_id:
         raise ValueError(_BLOCKED)
+    if reviewed_history is not None and (
+        target is not None or reviewed_history.keys() != _REVIEWED_INDEPENDENT_PROOFS
+    ):
+        raise ValueError(_BLOCKED)
     return target
+
+
+async def _verified_reviewed_history_binding(
+    session: AsyncSession, row: ManualPaperRequest, *, now: datetime
+) -> tuple[str, dict[str, object]]:
+    from nexus.paper.independent_unknown_acceptance import _audits, _validate
+
+    audits = await _audits(session, row.id)
+    if len(audits) != 1:
+        raise ValueError(_BLOCKED)
+    audit = audits[0]
+    binding = {
+        "request_id": str(row.id),
+        "contract": row.contract_version,
+        "audit_id": str(audit.id),
+        "event_hash": audit.event_hash,
+        "proof_hash": audit.payload.get("proof_hash"),
+    }
+    digest = job_input_hash(binding)
+    if digest not in _REVIEWED_INDEPENDENT_PROOFS:
+        raise ValueError(_BLOCKED)
+    # The same validator as account recovery holds the original scope lock
+    # through this maintenance transaction and refuses late or changed facts.
+    if await _validate(session, row=row, audit=audit, now=now) != binding["proof_hash"]:
+        raise ValueError(_BLOCKED)
+    return digest, binding
+
+
+def _reviewed_history_payload(
+    seal: AuditEvent, reviewed: dict[str, dict[str, object]]
+) -> dict[str, object]:
+    return {
+        "review": "NEXUS-SCHEDULED-SEAL-HISTORY-20261119-R1",
+        "seal_event_id": str(seal.id),
+        "seal_event_hash": seal.event_hash,
+        "run_id": seal.payload["run_id"],
+        "cycle_id": seal.payload["cycle_id"],
+        "account_id": seal.payload["account_id"],
+        "source_acceptances": [reviewed[digest] for digest in sorted(reviewed)],
+    }
+
+
+async def _require_reviewed_history_receipt(
+    session: AsyncSession, run_id: UUID, reviewed: dict[str, dict[str, object]]
+) -> None:
+    rows = tuple(
+        await session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action.in_((_ACTION, _REVIEWED_HISTORY_ACTION)),
+                AuditEvent.payload["run_id"].as_string() == str(run_id),
+            )
+        )
+    )
+    seals = [row for row in rows if row.action == _ACTION]
+    bindings = [row for row in rows if row.action == _REVIEWED_HISTORY_ACTION]
+    if len(seals) != 1 or len(bindings) != 1:
+        raise ValueError(_BLOCKED)
+    seal, binding = seals[0], bindings[0]
+    canonical = canonical_audit_event(
+        AuditChainInput(
+            event_seq=binding.event_seq,
+            occurred_at=binding.occurred_at,
+            actor_id=binding.actor_id,
+            action=binding.action,
+            schema_version=binding.schema_version,
+            payload=binding.payload,
+        )
+    )
+    if (
+        job_input_hash(seal.payload) != _REVIEWED_SEAL_PROOF
+        or binding.actor_id != _ACTOR
+        or binding.schema_version != _REVIEWED_HISTORY_SCHEMA
+        or binding.chain_version != seal.chain_version
+        or binding.event_seq != seal.event_seq + 1
+        or binding.occurred_at != seal.occurred_at
+        or binding.previous_hash != seal.event_hash
+        or binding.payload != _reviewed_history_payload(seal, reviewed)
+        or binding.canonical_event != canonical
+        or binding.event_hash != audit_event_hash(seal.event_hash, canonical)
+    ):
+        raise ValueError(_BLOCKED)
 
 
 async def _legacy_proof(
@@ -817,11 +935,13 @@ async def seal_failed_research(
     accept_unknown_usage: bool,
     same_day: bool = False,
     expired_attempt: bool = False,
+    with_reviewed_independent_history: bool = False,
 ) -> HistorySealReceipt:
     if (
         accept_unknown_usage is not True
         or type(same_day) is not bool
         or type(expired_attempt) is not bool
+        or type(with_reviewed_independent_history) is not bool
         or (expired_attempt and not same_day)
         or not 1 <= len(run_ids) <= 5
         or len(set(run_ids)) != len(run_ids)
@@ -831,6 +951,25 @@ async def seal_failed_research(
     cycle = await session.get(AgentPaperCycleRecord, cycle_id, with_for_update=True)
     if cycle is None or cycle.account_id != account_id:
         raise ValueError(_BLOCKED)
+    reviewed: dict[str, dict[str, object]] | None = None
+    if with_reviewed_independent_history:
+        if (
+            not same_day
+            or expired_attempt
+            or len(run_ids) != 1
+            or job_input_hash(
+                {
+                    "account_id": str(account_id),
+                    "cycle_id": str(cycle_id),
+                    "run_id": str(run_ids[0]),
+                }
+            )
+            != _REVIEWED_SEAL_IDENTITY
+            or await session.scalar(text("SHOW transaction_read_only")) != "off"
+            or await session.scalar(text("SHOW transaction_isolation")) != "read committed"
+        ):
+            raise ValueError(_BLOCKED)
+        reviewed = {}
     if expired_attempt:
         from nexus.paper.manual_request import manual_request_for_cycle, read_manual_request
 
@@ -847,15 +986,24 @@ async def seal_failed_research(
                 # A verified historical receipt does not require today's legitimate
                 # producer to stop. No closing, cancellation or new audit is done.
                 return HistorySealReceipt(sealed_research=len(run_ids), replayed=True)
-    manual = await _seal_manual_scope(session, account_id=account_id, cycle_id=cycle_id, now=now)
+    manual = await _seal_manual_scope(
+        session, account_id=account_id, cycle_id=cycle_id, now=now, reviewed_history=reviewed
+    )
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_activation_projection_unoccupied(
         session, account_id=account_id, projection=projection
     )
     require_research_processes_quiescent()
+    if reviewed is not None:
+        recorded_at = await session.scalar(text("SELECT clock_timestamp()"))
+        if not isinstance(recorded_at, datetime) or recorded_at < now:
+            raise ValueError(_BLOCKED)
+        now = recorded_at
     new = 0
     for run_id in run_ids:
         if await legacy_research_sealed(session, cycle_id=cycle_id, run_id=run_id, now=now):
+            if reviewed is not None:
+                await _require_reviewed_history_receipt(session, run_id, reviewed)
             continue
         proof = await _proof(
             session,
@@ -865,7 +1013,9 @@ async def seal_failed_research(
             same_day=same_day,
             expired_attempt=expired_attempt,
         )
-        await append_audit_event(
+        if reviewed is not None and job_input_hash(proof) != _REVIEWED_SEAL_PROOF:
+            raise ValueError(_BLOCKED)
+        seal = await append_audit_event(
             session,
             actor_id=_ACTOR,
             action=_ACTION,
@@ -877,6 +1027,15 @@ async def seal_failed_research(
             payload=proof,
             occurred_at=now,
         )
+        if reviewed is not None:
+            await append_audit_event(
+                session,
+                actor_id=_ACTOR,
+                action=_REVIEWED_HISTORY_ACTION,
+                schema_version=_REVIEWED_HISTORY_SCHEMA,
+                payload=_reviewed_history_payload(seal, reviewed),
+                occurred_at=now,
+            )
         new += 1
     if manual is not None:
         from nexus.paper.manual_request import close_failed_manual_request

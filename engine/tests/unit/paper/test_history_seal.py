@@ -135,6 +135,152 @@ async def test_exact_terminal_manual_seal_does_not_exempt_another_request(
         preparation_closed.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "fourth", "missing", "wrong_audit", "late", "active"])
+async def test_reviewed_seal_revalidates_only_the_exact_three_old_acceptances(monkeypatch, fault):
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper import (
+        history_seal,
+        independent_unknown_acceptance,
+        manual_preparation_close,
+        manual_request,
+    )
+
+    account_id, cycle_id = UUID(int=100), UUID(int=101)
+    now = datetime(2026, 10, 16, 14, tzinfo=UTC)
+    rows = [
+        SimpleNamespace(id=UUID(int=i), account_id=account_id, contract_version=contract)
+        for i, contract in [(1, 3), (2, 4), (3, 3), (4, 3)]
+    ]
+    audits = {
+        row.id: SimpleNamespace(
+            id=UUID(int=10 + row.id.int),
+            event_hash=f"{row.id.int:x}" * 64,
+            payload={"proof_hash": "a" * 64},
+        )
+        for row in rows
+    }
+    allowed = frozenset(
+        job_input_hash(
+            {
+                "request_id": str(row.id),
+                "contract": row.contract_version,
+                "audit_id": str(audits[row.id].id),
+                "event_hash": audits[row.id].event_hash,
+                "proof_hash": "a" * 64,
+            }
+        )
+        for row in rows[:3]
+    )
+    if fault == "wrong_audit":
+        audits[rows[2].id].id = UUID(int=99)
+    actual = rows if fault == "fourth" else rows[:2] if fault == "missing" else rows[:3]
+    checked = []
+
+    async def read_view(session, row):
+        return SimpleNamespace(
+            status="active" if fault == "active" and row.id.int == 3 else "unknown"
+        )
+
+    async def get_audits(session, request_id):
+        return [audits[request_id]]
+
+    async def validate(session, *, row, audit, now):
+        assert row.id.int < 4 and audit is audits[row.id]
+        checked.append(row.id.int)
+        if fault == "late" and row.id.int == 3:
+            raise ValueError("INDEPENDENT_HISTORY_PROOF_INVALID")
+        return "a" * 64
+
+    monkeypatch.setattr(history_seal, "_REVIEWED_INDEPENDENT_PROOFS", allowed, raising=False)
+    monkeypatch.setattr(manual_request, "read_manual_request", read_view)
+    monkeypatch.setattr(manual_request, "manual_request_for_cycle", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        manual_preparation_close, "preparation_closed", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(independent_unknown_acceptance, "_audits", get_audits)
+    monkeypatch.setattr(independent_unknown_acceptance, "_validate", validate)
+    session = SimpleNamespace(scalars=AsyncMock(return_value=actual))
+    reviewed = {}
+    if fault is None:
+        assert (
+            await history_seal._seal_manual_scope(
+                session,
+                account_id=account_id,
+                cycle_id=cycle_id,
+                now=now,
+                reviewed_history=reviewed,
+            )
+            is None
+        )
+        assert set(reviewed) == allowed and checked == [1, 2, 3]
+    else:
+        code = (
+            "INDEPENDENT_HISTORY_PROOF_INVALID"
+            if fault == "late"
+            else "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+        )
+        with pytest.raises(ValueError, match=code):
+            await history_seal._seal_manual_scope(
+                session,
+                account_id=account_id,
+                cycle_id=cycle_id,
+                now=now,
+                reviewed_history=reviewed,
+            )
+        assert 4 not in checked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["run", "multiple_runs", "readonly", "isolation", "expired"])
+async def test_reviewed_scope_rejects_outside_approved_maintenance_before_history(
+    monkeypatch, fault
+):
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper import history_seal
+
+    account_id, cycle_id, run_id = (UUID(int=x) for x in range(1, 4))
+    monkeypatch.setattr(
+        history_seal,
+        "_REVIEWED_SEAL_IDENTITY",
+        job_input_hash(
+            {"account_id": str(account_id), "cycle_id": str(cycle_id), "run_id": str(run_id)}
+        ),
+    )
+    monkeypatch.setattr(history_seal, "lock_portfolio_account", AsyncMock())
+    history = AsyncMock()
+    monkeypatch.setattr(history_seal, "_seal_manual_scope", history)
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(account_id=account_id)),
+        scalar=AsyncMock(
+            side_effect=[
+                "on" if fault == "readonly" else "off",
+                "repeatable read" if fault == "isolation" else "read committed",
+            ]
+        ),
+    )
+    run_ids = (
+        (UUID(int=4),)
+        if fault == "run"
+        else (run_id, UUID(int=4))
+        if fault == "multiple_runs"
+        else (run_id,)
+    )
+    with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"):
+        await history_seal.seal_failed_research(
+            session,
+            account_id=account_id,
+            cycle_id=cycle_id,
+            run_ids=run_ids,
+            now=datetime(2026, 10, 16, 14, tzinfo=UTC),
+            accept_unknown_usage=True,
+            same_day=True,
+            expired_attempt=fault == "expired",
+            with_reviewed_independent_history=True,
+        )
+    history.assert_not_awaited()
+
+
 def test_docker_top_uses_pid_column_required_by_docker_daemon(monkeypatch):
     def execute(command, **kwargs):
         if command[0] == "/bin/ps":
