@@ -71,6 +71,8 @@ async def test_final_source_read_wait_cannot_send_expired_headers(monkeypatch, e
 
         async def scalar(self, statement, params=None):
             sql = str(statement)
+            if "original.account_id" in sql:
+                return None
             if statement is inputs._LATEST:
                 return snapshot
             if "clock_timestamp" in sql:
