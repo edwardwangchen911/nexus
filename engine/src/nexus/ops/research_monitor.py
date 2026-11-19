@@ -338,6 +338,7 @@ async def refresh_configured_observations(
         if isinstance(item, dict) and item.get("instrument_id") and item.get("candidate_hints"):
             candidate_hints[UUID(str(item["instrument_id"]))] = tuple(item["candidate_hints"])
     results: dict[str, dict[str, object]] = {}
+    bridge_unconfirmed = False
     # SEC first; the final L1 capture keeps quotes fresh for the independent scan.
     for source, refresh in (
         ("disclosure", refresh_disclosure_observations),
@@ -353,10 +354,15 @@ async def refresh_configured_observations(
                 repo_root=repo_root,
                 **({"candidate_hints": candidate_hints} if source == "disclosure" else {}),
             )
-            if source == "disclosure" and results[source].get("status") in {
-                "refreshed",
-                "unchanged",
-            }:
+        except Exception:
+            results[source] = {
+                "status": "unknown",
+                "error_code": "MONITOR_OBSERVATION_REFRESH_FAILED",
+                "provider_requests": None,
+                "model_requests": 0,
+            }
+        if source == "disclosure" and results[source].get("status") in {"refreshed", "unchanged"}:
+            try:
                 from nexus.monitoring.durable_sec_host import prepare_registered_research
 
                 results[source]["research_bridge"] = await prepare_registered_research(
@@ -365,13 +371,14 @@ async def refresh_configured_observations(
                     calendar_authority_id=calendar_authority_id,
                     scheduled_at=bucket,
                 )
-        except Exception:
-            results[source] = {
-                "status": "unknown",
-                "error_code": "MONITOR_OBSERVATION_REFRESH_FAILED",
-                "provider_requests": None,
-                "model_requests": 0,
-            }
+            except Exception:
+                # The refresh already finished. An unconfirmed preparation
+                # must still block readiness without replacing the source result.
+                bridge_unconfirmed = True
+                results[source]["research_bridge"] = {
+                    "status": "unknown",
+                    "reason": "SEC_RESEARCH_BRIDGE_UNCONFIRMED",
+                }
     request_counts = [value.get("provider_requests") for value in results.values()]
     request_counts.append(candidates.get("provider_requests"))
     known_requests = all(type(value) is int and value >= 0 for value in request_counts)
@@ -384,18 +391,19 @@ async def refresh_configured_observations(
         "market_closed",
         "missed_bucket",
     }
-    status = (
-        "refreshed"
-        if all(value.get("status") in ready_statuses for value in results.values())
-        else "partial"
+    incomplete_sources = tuple(
+        source for source, value in results.items() if value.get("status") not in ready_statuses
     )
+    if bridge_unconfirmed:
+        incomplete_sources += ("research_bridge",)
     return {
         **fixed,
-        "status": status,
+        "status": "partial" if incomplete_sources else "refreshed",
         "scheduled_at": bucket.isoformat(),
         "reconciliation": reconciled,
         "official_candidates": candidates,
         "sources": results,
+        "incomplete_sources": incomplete_sources,
         "provider_requests": sum(value for value in request_counts if isinstance(value, int))
         if known_requests
         else None,

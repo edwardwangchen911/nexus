@@ -211,7 +211,10 @@ async def test_observation_preparation_has_separate_deadline_and_never_steals_sc
         buckets.append(bucket)
         prepared.set()
         await release.wait()
-        return {"status": "partial"}
+        return {
+            "status": "partial",
+            "incomplete_sources": ("research_bridge", "private-provider-secret"),
+        }
 
     async def scan():
         scanned.set()
@@ -228,6 +231,7 @@ async def test_observation_preparation_has_separate_deadline_and_never_steals_sc
     assert deadlines == [240.0, 8.0]
     assert buckets == [NOW.replace(minute=NOW.minute // 5 * 5, second=0, microsecond=0)]
     assert monitor.last_diagnostic == "MONITOR_OBSERVATIONS_INCOMPLETE"
+    assert monitor.diagnostic_sources == ("research_bridge",)
 
 
 @pytest.mark.asyncio
