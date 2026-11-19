@@ -16,16 +16,23 @@ class DurableSecCoverageDetails(MonitoringViewModel):
 
 
 class DurableSecCheckView(MonitoringViewModel):
+    # Earlier API versions omit the new readback fields.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=False)
+
     scheduled_at: datetime
     checked_at: datetime
     result: Literal["true", "false", "unknown"]
     coverage: Literal["complete", "partial", "unknown"]
-    interval_start: datetime | None = None
-    interval_end: datetime | None = None
+    interval_start: datetime | None
+    interval_end: datetime | None
+    evaluation_version: Literal["accepted_cutoff_v1"] | None = None
+    source_received_at: datetime | None = None
+    accepted_complete_through_at: datetime | None = None
     reason: (
         Literal[
             "evidence_unverified",
             "coverage_incomplete",
+            "accepted_cutoff_unproven",
             "coverage_conflict",
             "source_stale",
             "source_invalid",
@@ -34,8 +41,8 @@ class DurableSecCheckView(MonitoringViewModel):
             "rule_inactive",
         ]
         | None
-    ) = None
-    coverage_details: DurableSecCoverageDetails | None = None
+    )
+    coverage_details: DurableSecCoverageDetails | None
 
 
 class DurableSecNoticeView(MonitoringViewModel):

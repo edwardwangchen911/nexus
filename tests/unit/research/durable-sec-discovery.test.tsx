@@ -27,6 +27,23 @@ describe("durable SEC discovery facts", () => {
     expect(screen.getByText(/独立可证的新增仍会单独核验/)).toBeVisible();
     expect(screen.queryByText(/完整覆盖区间未发现新公告/)).not.toBeInTheDocument();
   });
+  it("shows a verified capture and a missing acceptance cutoff separately", () => {
+    render(<DurableSecDiscovery discovery={{ ...view, latest_check: {
+      ...view.latest_check!, result: "unknown", reason: "accepted_cutoff_unproven",
+      evaluation_version: "accepted_cutoff_v1", source_received_at: at,
+      accepted_complete_through_at: null,
+    } }} />);
+    expect(screen.getByText(/SEC 原件收到时间/)).toBeVisible();
+    expect(screen.getByText(/尚无完整受理截止证明/)).toBeVisible();
+    expect(screen.queryByText(/完整覆盖区间未发现新公告/)).not.toBeInTheDocument();
+  });
+  it("labels a historical negative without presenting it as current coverage", () => {
+    render(<DurableSecDiscovery discovery={{ ...view, latest_check: {
+      ...view.latest_check!, result: "false", coverage: "complete",
+    } }} />);
+    expect(screen.getByText(/历史记录（按旧口径）/)).toBeVisible();
+    expect(screen.getByText(/当前受理区间完整性未知/)).toBeVisible();
+  });
   it("mounts active discovery beside an expired research plan without granting admission", () => {
     render(<ResearchPanel state="partial" admission={null} submitting={false} notice={null} replay={true} onRefresh={vi.fn()} onRun={vi.fn()}
       research={researchData({ durable_disclosure: view, disclosure_monitoring: disclosureMonitoring({ state: "expired" }) })} />);

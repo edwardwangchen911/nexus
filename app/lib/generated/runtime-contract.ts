@@ -3933,6 +3933,18 @@ export const runtimeContractSchemas = {
   "DurableSecCheckView": {
     "additionalProperties": false,
     "properties": {
+      "accepted_complete_through_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Accepted Complete Through At"
+      },
       "checked_at": {
         "format": "date-time",
         "title": "Checked At",
@@ -3956,6 +3968,18 @@ export const runtimeContractSchemas = {
             "type": "null"
           }
         ]
+      },
+      "evaluation_version": {
+        "anyOf": [
+          {
+            "const": "accepted_cutoff_v1",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Evaluation Version"
       },
       "interval_end": {
         "anyOf": [
@@ -3987,6 +4011,7 @@ export const runtimeContractSchemas = {
             "enum": [
               "evidence_unverified",
               "coverage_incomplete",
+              "accepted_cutoff_unproven",
               "coverage_conflict",
               "source_stale",
               "source_invalid",
@@ -4015,6 +4040,18 @@ export const runtimeContractSchemas = {
         "format": "date-time",
         "title": "Scheduled At",
         "type": "string"
+      },
+      "source_received_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Received At"
       }
     },
     "required": [

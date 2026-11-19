@@ -2800,6 +2800,8 @@ export interface components {
         };
         /** DurableSecCheckView */
         DurableSecCheckView: {
+            /** Accepted Complete Through At */
+            accepted_complete_through_at?: string | null;
             /**
              * Checked At
              * Format: date-time
@@ -2811,12 +2813,14 @@ export interface components {
              */
             coverage: "complete" | "partial" | "unknown";
             coverage_details: components["schemas"]["DurableSecCoverageDetails"] | null;
+            /** Evaluation Version */
+            evaluation_version?: "accepted_cutoff_v1" | null;
             /** Interval End */
             interval_end: string | null;
             /** Interval Start */
             interval_start: string | null;
             /** Reason */
-            reason: ("evidence_unverified" | "coverage_incomplete" | "coverage_conflict" | "source_stale" | "source_invalid" | "time_invalid" | "history_invalid" | "rule_inactive") | null;
+            reason: ("evidence_unverified" | "coverage_incomplete" | "accepted_cutoff_unproven" | "coverage_conflict" | "source_stale" | "source_invalid" | "time_invalid" | "history_invalid" | "rule_inactive") | null;
             /**
              * Result
              * @enum {string}
@@ -2827,6 +2831,8 @@ export interface components {
              * Format: date-time
              */
             scheduled_at: string;
+            /** Source Received At */
+            source_received_at?: string | null;
         };
         /** DurableSecCoverageDetails */
         DurableSecCoverageDetails: {
