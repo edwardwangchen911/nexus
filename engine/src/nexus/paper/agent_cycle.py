@@ -463,9 +463,8 @@ async def reserve_schwab_agent_paper_trigger(
     )
     if inserted:
         from nexus.paper.manual_request import (
-            require_no_running_manual_request,
             require_preparing_manual_request,
-            require_settled_account_cycle_history,
+            require_scheduled_account_available,
         )
 
         if manual_request_id is not None:
@@ -481,13 +480,13 @@ async def reserve_schwab_agent_paper_trigger(
                 now=now,
             )
         else:
-            await require_no_running_manual_request(
-                session, account_id=account_id, current_trigger_key=claim_key
+            await require_scheduled_account_available(
+                session,
+                account_id=account_id,
+                trigger_key=claim_key,
+                formal_stage_capacity=formal_stage_capacity,
+                now=now,
             )
-            if formal_stage_capacity:
-                await require_settled_account_cycle_history(
-                    session, account_id=account_id, now=now, allow_scheduled_completion=True
-                )
         from nexus.agents.persistence import _lock_budget_day
         from nexus.paper.formal_budget_protection import _validate_binding, latest_binding
 
@@ -1585,9 +1584,8 @@ async def _start_cycle(
         ):
             raise ValueError("AGENT_PAPER_VERSION_AUTHORITY_INVALID")
     from nexus.paper.manual_request import (
-        require_no_running_manual_request,
         require_preparing_manual_request,
-        require_settled_account_cycle_history,
+        require_scheduled_account_available,
     )
 
     manual = None
@@ -1604,15 +1602,12 @@ async def _start_cycle(
             now=authority.decision_time,
         )
     else:
-        await require_no_running_manual_request(
+        await require_scheduled_account_available(
             session,
             account_id=authority.account_id,
-            current_trigger_key=decision_slot_at.isoformat(),
+            trigger_key=decision_slot_at.isoformat(),
+            formal_stage_capacity=formal_stage_capacity,
         )
-        if formal_stage_capacity:
-            await require_settled_account_cycle_history(
-                session, account_id=authority.account_id, allow_scheduled_completion=True
-            )
     projection = await load_paper_projection(
         session, account_id=authority.account_id, as_of=authority.decision_time
     )
