@@ -13,6 +13,7 @@ from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_candidate import require_candidate_consumer_profile
+from nexus.agents.portfolio_synthesis_contracts import PortfolioSynthesisInputV1
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.paper import (
     AgentPaperActivationResultResponse,
@@ -112,6 +113,7 @@ from nexus.persistence.models.agent_versions import (
 )
 from nexus.persistence.models.agents import (
     AgentPortfolioSynthesisOutputRecord,
+    AgentPortfolioSynthesisRunRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
@@ -401,7 +403,6 @@ class PaperReadService:
         )
         if cycle is None:
             return None
-        cycle_response = await self._agent_cycle(cycle)
         try:
             batch_authority = await load_candidate_batch_authority(
                 self._session,
@@ -409,9 +410,7 @@ class PaperReadService:
                 read_as_of=self._request_time,
             )
             synthesis_authority = await load_synthesis_read_authority(
-                self._session,
-                cycle=cycle,
-                read_as_of=self._request_time,
+                self._session, cycle=cycle, read_as_of=self._request_time
             )
         except ValueError as error:
             raise NexusError(
@@ -429,7 +428,9 @@ class PaperReadService:
                 batch_hash=batch_authority.batch_hash,
                 as_of=batch_authority.created_at,
             )
-        security_research = await self._portfolio_security_research(synthesis_authority)
+        security_research = await self._portfolio_security_research(
+            None if synthesis_authority is None else synthesis_authority.frozen
+        )
         synthesis = self._portfolio_synthesis(synthesis_authority)
         decision = await self._session.scalar(
             select(StrategyDecisionRecord).where(
@@ -441,6 +442,17 @@ class PaperReadService:
         proposal = await self._portfolio_proposal(decision)
         active_target = await self._current_target_summary(cycle.account_id)
         latest_event = await self._latest_cycle_event(cycle.id)
+        blocker = self._cycle_blocker(
+            event=latest_event,
+            synthesis_output=(None if synthesis_authority is None else synthesis_authority.output),
+            decision=decision,
+        )
+        cycle_response = await self._agent_cycle(
+            cycle,
+            deferred_research=security_research
+            if latest_event.result_code == "PORTFOLIO_ASSESSMENT_DEFERRED"
+            else None,
+        )
         activation_event = await self._cycle_activation_event(cycle.id)
         activation_facts = (
             {}
@@ -530,13 +542,7 @@ class PaperReadService:
                 batch=batch,
                 strict_identity=cycle.candidate_batch_id is not None,
             ),
-            blocker=self._cycle_blocker(
-                event=latest_event,
-                synthesis_output=(
-                    None if synthesis_authority is None else synthesis_authority.output
-                ),
-                decision=decision,
-            ),
+            blocker=blocker,
             blocking_plan=blocking_plan,
             plan_summary=plan_summary,
         )
@@ -582,13 +588,65 @@ class PaperReadService:
             ),
         )
 
-    async def _portfolio_security_research(
-        self, authority: SynthesisReadAuthority | None
+    async def _deferred_security_research(
+        self,
+        cycle: AgentPaperCycleRecord,
+        event: AgentPaperCycleEventRecord,
+        decision: StrategyDecisionRecord | None,
     ) -> tuple[AgentPaperSecurityResearchResponse, ...]:
-        if authority is None:
+        from nexus.agents.portfolio_synthesis_persistence import load_frozen_synthesis_authority
+
+        # The immutable closeout event already required a settled synthesis and
+        # the exact output. The summary reads its frozen input and saved sources.
+        pair = (
+            await self._session.execute(
+                select(AgentPortfolioSynthesisRunRecord, AgentPortfolioSynthesisOutputRecord)
+                .join(
+                    AgentPortfolioSynthesisOutputRecord,
+                    AgentPortfolioSynthesisOutputRecord.run_id
+                    == AgentPortfolioSynthesisRunRecord.id,
+                )
+                .where(
+                    AgentPortfolioSynthesisRunRecord.cycle_id == cycle.id,
+                    AgentPortfolioSynthesisRunRecord.status == "completed",
+                    AgentPortfolioSynthesisRunRecord.settled_cost_usd.is_not(None),
+                    AgentPortfolioSynthesisRunRecord.created_at <= event.occurred_at,
+                    AgentPortfolioSynthesisOutputRecord.created_at <= event.occurred_at,
+                )
+            )
+        ).one_or_none()
+        self._cycle_blocker(
+            event=event,
+            synthesis_output=None if pair is None else pair[1],
+            decision=decision,
+        )
+        assert pair is not None
+        run, _ = pair
+        try:
+            frozen = await load_frozen_synthesis_authority(self._session, run)
+            if (
+                frozen.account_id != cycle.account_id
+                or frozen.portfolio_id != cycle.portfolio_id
+                or frozen.candidate_batch_id != cycle.candidate_batch_id
+                or frozen.decision_time != cycle.decision_time
+                or frozen.admitted_at > event.occurred_at
+            ):
+                raise ValueError("PORTFOLIO_SYNTHESIS_AUTHORITY_CONFLICT")
+        except ValueError as error:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The deferred research sources are incomplete.",
+                status_code=409,
+            ) from error
+        return await self._portfolio_security_research(frozen)
+
+    async def _portfolio_security_research(
+        self, frozen: PortfolioSynthesisInputV1 | None
+    ) -> tuple[AgentPaperSecurityResearchResponse, ...]:
+        if frozen is None:
             return ()
         results = []
-        for source in authority.frozen.security_outputs:
+        for source in frozen.security_outputs:
             output = await self._session.get(AgentResearchOutputRecord, source.research_output_id)
             research = (
                 None
@@ -2031,6 +2089,8 @@ class PaperReadService:
     async def _agent_cycle(
         self,
         cycle: AgentPaperCycleRecord,
+        *,
+        deferred_research: tuple[AgentPaperSecurityResearchResponse, ...] | None = None,
     ) -> AgentPaperCycleResponse:
         event = await self._session.scalar(
             select(AgentPaperCycleEventRecord)
@@ -2176,6 +2236,19 @@ class PaperReadService:
                     job_status_by_instrument[run.instrument_id] = "running"
                 else:
                     job_status_by_instrument[run.instrument_id] = "queued"
+        deferred_sources: dict[UUID, AgentPaperSecurityResearchResponse] = {}
+        if event.result_code == "PORTFOLIO_ASSESSMENT_DEFERRED":
+            if deferred_research is None:
+                deferred_research = await self._deferred_security_research(cycle, event, decision)
+            deferred_sources = {row.instrument_id: row for row in deferred_research}
+            if len(deferred_sources) != len(deferred_research) or deferred_sources.keys() != {
+                candidate.instrument_id for candidate in manifest
+            }:
+                raise NexusError(
+                    ErrorCode.DATA_PARTIAL,
+                    "The deferred research sources are incomplete.",
+                    status_code=409,
+                )
         candidates = []
         for candidate in manifest:
             instrument_id = candidate.instrument_id
@@ -2183,12 +2256,18 @@ class PaperReadService:
             output, binding = bound if bound is not None else (None, None)
             intent = output.intent if output is not None and isinstance(output.intent, dict) else {}
             stance = intent.get("stance")
+            intent_hash = None if binding is None else binding.intent_hash
+            output_id = None if output is None else output.id
+            if source := deferred_sources.get(instrument_id):
+                stance = source.stance
+                intent_hash = source.intent_hash
+                output_id = source.research_output_id
             candidates.append(
                 AgentPaperCandidateResponse(
                     instrument_id=instrument_id,
                     symbol=candidate.symbol,
                     selection_reasons=(candidate.inclusion_reason,),
-                    research_status="completed" if bound is not None else "pending",
+                    research_status="completed" if output_id is not None else "pending",
                     research_job_status=cast(
                         Literal[
                             "queued", "running", "succeeded", "failed", "skipped", "dead_letter"
@@ -2206,8 +2285,8 @@ class PaperReadService:
                         Literal["increase", "reduce", "maintain", "none"] | None,
                         None if binding is None else binding.sizing_action,
                     ),
-                    intent_hash=None if binding is None else binding.intent_hash,
-                    output_id=None if output is None else output.id,
+                    intent_hash=intent_hash,
+                    output_id=output_id,
                     rejection_code=None,
                 )
             )
