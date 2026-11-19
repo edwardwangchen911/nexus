@@ -224,6 +224,7 @@ async def test_only_ended_owned_read_is_a_safe_deadline(monkeypatch, failure):
         "unknown",
         "due_failed",
         "publish_failed",
+        "pause_guard_rejected",
         "monitor_unknown",
         "deferred_wrong_job",
         "callbacks_missing",
@@ -285,6 +286,7 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
         attempts += 1
         logs.append("peek")
         if attempts <= 2:
+            host.probe_stage("independent_proof")
             elapsed += 15
             timer.reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
@@ -333,6 +335,8 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
 
     async def record(notice):
         logs.append("pause" if notice else "ready")
+        if notice and finish == "pause_guard_rejected":
+            raise ValueError("HOST_READ_PROBE_STATE_INVALID")
         if (notice and finish == "publish_failed") or (
             notice is None and finish == "resume_publish_failed"
         ):
@@ -391,6 +395,7 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
         "monitor_unknown": "pause_monitor_confirmation",
         "pause_heartbeat_failed": "pause_heartbeat",
         "publish_failed": "pause_record",
+        "pause_guard_rejected": "pause_record",
         "resume_monitor_unknown": "resume_monitor_confirmation",
         "resume_heartbeat_failed": "resume_heartbeat",
         "resume_publish_failed": "resume_record",
@@ -399,5 +404,21 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
         diagnostic = json.loads(capsys.readouterr().err)
         assert diagnostic["inspection_site"] == "pending_work"
         assert diagnostic.get("pending_probe_step") == failure_steps[finish], diagnostic
+        if finish in {
+            "callbacks_missing",
+            "monitor_unknown",
+            "pause_heartbeat_failed",
+            "publish_failed",
+            "pause_guard_rejected",
+        }:
+            deadline = diagnostic["pending_read_deadline"]
+            assert deadline["stage"] == "independent_proof"
+            assert 0 <= deadline["stage_ms"] <= deadline["elapsed_ms"]
+        else:
+            assert "pending_read_deadline" not in diagnostic
+        if finish == "pause_guard_rejected":
+            assert diagnostic["pending_probe_code"] == "HOST_READ_PROBE_STATE_INVALID"
+        else:
+            assert "pending_probe_code" not in diagnostic
         assert "commit unconfirmed" not in json.dumps(diagnostic)
         assert "private heartbeat failure" not in json.dumps(diagnostic)
