@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 from helpers.current_identity import archives
 from helpers.deferred_monitor_guards import validate_pending_monitor_guards
 from helpers.research_snapshots import seed_filing
@@ -41,6 +42,12 @@ from nexus.settings import EngineSettings
 from sqlalchemy import event, func, literal, select
 from unit.market.test_object_store import FakeS3Client
 
+BASE_READ_ERRORS = {
+    "missing_base_version": "NoSuchVersion",
+    "missing_base_key": "NoSuchKey",
+    "base_access_denied": "AccessDenied",
+}
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -63,6 +70,7 @@ from unit.market.test_object_store import FakeS3Client
         "closed_during_import",
         "existing_incomplete",
         "unsafe_parent",
+        *BASE_READ_ERRORS,
     ],
 )
 async def test_formal_batch_preparation_once_without_cycle_or_order(
@@ -401,8 +409,31 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                 return result
 
             monkeypatch.setattr(indexes, "persist_index_archive", fail_second)
+        if case in BASE_READ_ERRORS:
+            async with factory() as session:
+                base = (
+                    await session.scalars(
+                        select(DataSnapshot).where(
+                            DataSnapshot.source == "current_listing_revision",
+                            DataSnapshot.payload["instrument_id"].astext == str(AAPL_ID),
+                        )
+                    )
+                ).one()
+                target_uri = base.payload["artifacts"][0]["uri"]
+            read_raw = store.read_raw
+
+            async def read_base(key, *, uri):
+                if uri == target_uri:
+                    raise ClientError({"Error": {"Code": BASE_READ_ERRORS[case]}}, "GetObject")
+                return await read_raw(key, uri=uri)
+
+            monkeypatch.setattr(store, "read_raw", read_base)
         if case == "unsafe_parent":
             with pytest.raises(ValueError, match="AGENT_PAPER_IDENTITY_DIRECTORY_INVALID"):
+                await identity.prepare_agent_paper_identity_once(settings, **args)
+            result = "unavailable"
+        elif case == "base_access_denied":
+            with pytest.raises(ClientError, match="AccessDenied"):
                 await identity.prepare_agent_paper_identity_once(settings, **args)
             result = "unavailable"
         else:
@@ -427,7 +458,9 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             for line in capsys.readouterr().err.splitlines()
             if line.startswith('{"event": "agent_paper_preparation_unavailable"')
         ]
-        if not success and case not in {"unsafe_parent", "scheduled_reuse_prior_cycle"}:
+        if case == "base_access_denied":
+            assert not diagnostics
+        elif not success and case not in {"unsafe_parent", "scheduled_reuse_prior_cycle"}:
             assert len(diagnostics) == 1
             assert diagnostics[0]["failure_phase"] == "research_identity"
             assert (
@@ -443,8 +476,12 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
                     "closed_during_collect": "readback",
                     "closed_during_import": "import",
                     "existing_incomplete": "archive",
+                    "missing_base_version": "scope",
+                    "missing_base_key": "scope",
                 }[case]
             )
+            if case in BASE_READ_ERRORS:
+                assert diagnostics[0]["failure_code"] == "IDENTITY_BASE_MISSING"
 
         async def index_facts():
             async with factory() as session:
@@ -472,7 +509,7 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
             assert len(first) == {"ready": 2, "index_interrupted": 1, "index_inapplicable": 0}[case]
             if case != "ready":
                 assert diagnostics and all(d["failure_phase"] == "sec_index" for d in diagnostics)
-        if case != "unsafe_parent":
+        if case not in {"unsafe_parent", *BASE_READ_ERRORS}:
             assert await identity.prepare_agent_paper_identity_once(settings, **args) == (
                 "ready" if success or case == "scheduled_reuse_prior_cycle" else "unavailable"
             )
@@ -485,7 +522,13 @@ async def test_formal_batch_preparation_once_without_cycle_or_order(
         assert len(calls) == (
             0
             if case
-            in ("closed_window", "existing_incomplete", "unsafe_parent", "scheduled_after_slot")
+            in {
+                "closed_window",
+                "existing_incomplete",
+                "unsafe_parent",
+                "scheduled_after_slot",
+                *BASE_READ_ERRORS,
+            }
             else 1
             if case == "source_failure"
             else 6
