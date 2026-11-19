@@ -12,6 +12,7 @@ import httpx
 import pytest
 from helpers.database_clock import is_fixture_clock_read
 from helpers.durable_session_inputs import (
+    append_prior_session_daily,
     append_session_fresh_inputs,
 )
 from helpers.durable_test_clock import DisposableClock
@@ -27,6 +28,7 @@ from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.monitoring import (
     MonitorIncrement,
     MonitorPlan,
@@ -44,15 +46,81 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
+async def collect_fixture_filing(settings, store, capture_id, event, tmp_path, monkeypatch):
+    from nexus.ops import monitor_content_local
+    from nexus.ops.research_monitor import parser
+
+    accession = event.entry["accession_number"]
+    originals = filing.archive(tmp_path / f"edge-{accession}", event.entry)
+    private = tmp_path / f"collection-{accession}"
+    private.mkdir(mode=0o700)
+    requested = []
+
+    async def sec_transport(_transport, request):
+        name = request.url.path.rsplit("/", 1)[-1]
+        receipt = json.loads((originals / f"{name}.receipt.json").read_bytes())
+        assert request.method == "GET" and str(request.url) == receipt["source_url"]
+        requested.append(name)
+        return httpx.Response(200, content=(originals / name).read_bytes())
+
+    with monkeypatch.context() as capture_scope:
+        capture_scope.setattr(httpx.AsyncHTTPTransport, "handle_async_request", sec_transport)
+        capture_scope.setattr(monitor_content_local, "_store", lambda *_: store)
+        args = parser().parse_args(
+            [
+                "collect-content",
+                "--index-snapshot-id",
+                str(capture_id),
+                "--accession",
+                accession,
+                "--archive-dir",
+                str(private / "originals"),
+            ]
+        )
+        args._sec_contact = "fixture@example.invalid"
+        result = await run(settings, args)
+    assert requested == [f"{accession}-index.html", event.entry["primary_document"], "ex99.htm"]
+    assert result["status"] == "created" and result["provider_requests"] == 3
+    assert result["model_requests"] == 0 and result["job_created"] is False
+    return result
+
+
+async def accept_fixture_notices(database_url, day, event_ids):
+    from integration.test_bark_outbox_pg import _decrypted_bark_notification
+    from integration.test_research_monitor_notification_pg import settings as bark_settings
+    from nexus.notifications.worker import run_bark_worker
+
+    delivered = []
+
+    def accept(request):
+        delivered.append(_decrypted_bark_notification(request)["id"])
+        return httpx.Response(200, json={"code": 200})
+
+    settings = bark_settings(database_url).model_copy(update={"activated_at": day})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(accept)) as client:
+        for expected in (1, 1, 0):
+            assert (
+                await run_bark_worker(
+                    settings,
+                    run_forever=False,
+                    client=client,
+                    clock=lambda: day + timedelta(seconds=1),
+                )
+                == expected
+            )
+    assert sorted(delivered) == sorted(f"sec-discovery:{event_id}" for event_id in event_ids)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "resolution", ("addressed", "unresolved", "absent", "issue", "adopted_graphic")
+    "resolution", ("addressed", "unresolved", "absent", "issue", "adopted_graphic", "collected")
 )
 async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
     migrated_database_url, monkeypatch, tmp_path, resolution
 ):
     adopted_graphic = resolution == "adopted_graphic"
-    if adopted_graphic:
+    collected = resolution == "collected"
+    if adopted_graphic or collected:
         resolution = "addressed"
     from helpers import disclosure_observations as reader
 
@@ -162,7 +230,18 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
         async with factory.begin() as db:
             plan = await db.scalar(select(MonitorPlan).where(MonitorPlan.kind == "disclosure"))
             rule = await durable.enable_rule(db, account_id=pointer.account_id, plan_id=plan.id)
-        day = at + timedelta(minutes=20)
+            if collected:
+                db.add_all(
+                    ExchangeCalendarSessionRecord(
+                        calendar_authority_id=CALENDAR_ID,
+                        session=session.date(),
+                        decision_at=session.replace(hour=21),
+                        market_open_at=session.replace(hour=14, minute=30),
+                        market_close_at=session.replace(hour=21),
+                    )
+                    for session in sessions
+                )
+        day = (sessions[-1] if collected else at) + timedelta(minutes=20)
         captured["clock"][0] = day
         async with factory.begin() as db:
             await controller.set(db, day, running=False, refresh_defaults=True)
@@ -174,6 +253,10 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             )
         for instrument in candidate_scope.instrument_ids:
             await append_session_fresh_inputs(factory, instrument, day, decision_session=day.date())
+            if collected:
+                await append_prior_session_daily(
+                    factory, monkeypatch, instrument, sessions[0].date()
+                )
         price = await current_record(factory)
         model_id = await register(factory, price)
         settings = settings.model_copy(
@@ -202,14 +285,14 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             "filingDate": [day.date().isoformat()],
             "primaryDocument": ["foundation.htm"],
         }
-        if resolution == "issue":
+        if resolution == "issue" or collected:
             recent = document["filings"]["recent"]
             for key, value in {
                 "accessionNumber": "0000123456-26-000098",
                 "form": "8-K",
                 "acceptanceDateTime": day.isoformat(),
                 "filingDate": day.date().isoformat(),
-                "primaryDocument": "unavailable.htm",
+                "primaryDocument": "second.htm" if collected else "unavailable.htm",
             }.items():
                 recent[key].append(value)
         directory = (tmp_path / "baseline/directory.json").read_bytes()
@@ -257,6 +340,17 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                     == f"sec:{rule.issuer_cik}:{entry['accession_number']}",
                 )
             )
+            second_event = (
+                await db.scalar(
+                    select(SecDiscoveryEvent).where(
+                        SecDiscoveryEvent.rule_id == rule.id,
+                        SecDiscoveryEvent.event_key
+                        == f"sec:{rule.issuer_cik}:0000123456-26-000098",
+                    )
+                )
+                if collected
+                else None
+            )
         if resolution == "addressed":
             # Rejected before FK/audit completion; no fake receipt is persisted.
             insert_attempt = text("""INSERT INTO sec_durable_daily_event_receipts
@@ -286,7 +380,24 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                         assert rejected.value.orig.sqlstate == "23514"
                         assert code in str(rejected.value)
         monkeypatch.setattr(filing, "AT", day - timedelta(seconds=8))
-        if adopted_graphic:
+        if collected:
+            from nexus.ops.research_monitor import parser
+
+            assert plan.valid_until <= day
+            with pytest.raises(ValueError, match="MONITOR_AWAITING_RECONCILIATION"):
+                await run(
+                    settings,
+                    parser().parse_args(["prepare-sec-event-research", "--rule-id", str(rule.id)]),
+                )
+            assert second_event is not None
+            imported = await collect_fixture_filing(
+                settings, store, capture.id, event, tmp_path, monkeypatch
+            )
+            await collect_fixture_filing(
+                settings, store, capture.id, second_event, tmp_path, monkeypatch
+            )
+            await accept_fixture_notices(url, day, (event.id, second_event.id))
+        elif adopted_graphic:
             from helpers.filing_relations import assert_relation_cli
 
             imported = await assert_relation_cli(
@@ -371,9 +482,12 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             assert paper.get("pending_durable_sec") is not None, paper.get(
                 "pending_durable_sec_gap"
             )
-            assert [x["event_id"] for x in paper["pending_durable_sec"]["events"]] == [
-                str(event.id)
-            ]
+            expected_events = {str(event.id)}
+            if second_event is not None:
+                expected_events.add(str(second_event.id))
+            assert {
+                x["event_id"] for x in paper["pending_durable_sec"]["events"]
+            } == expected_events
             if resolution == "issue":
                 assert [x["event_key"] for x in paper["pending_durable_sec"]["issues"]] == [
                     f"sec:{rule.issuer_cik}:0000123456-26-000098"
@@ -426,6 +540,15 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                                 }
                             ],
                         }
+                        if second_event is not None:
+                            role["durable_sec_pending_proposal"]["items"].append(
+                                {
+                                    "event_id": str(second_event.id),
+                                    "status": "unresolved",
+                                    "rationale": "The second filing's impact is unresolved.",
+                                    "citations": [reference],
+                                }
+                            )
             elif payload["stage"] == "critique":
                 for role in body["roles"]:
                     role["durable_sec_pending_review"] = {
@@ -500,7 +623,7 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             )
         await run(settings, argparse.Namespace(action="reconcile"))
         async with factory() as db:
-            from nexus.api.durable_sec import read_event_research_status
+            from nexus.api.durable_sec import _read_notice, read_event_research_status
 
             read_at = await db.scalar(select(func.clock_timestamp()))
             rows = tuple(await db.scalars(select(SecDurableDailyEventReceipt)))
@@ -512,6 +635,16 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
             else:
                 assert not rows
                 assert await read_event_research_status(db, event, read_at) == "no_receipt"
+            if second_event is not None:
+                assert await read_event_research_status(db, second_event, read_at) == "no_receipt"
+                for discovered_event in (event, second_event):
+                    notice = await _read_notice(db, discovered_event, read_at)
+                    assert notice is not None
+                    assert (notice.status, notice.attempt_count, notice.server_result) == (
+                        "published",
+                        1,
+                        "accepted",
+                    )
             from nexus.monitoring.durable_sec_daily import freeze_durable_sec_pending
 
             pending, gap = await freeze_durable_sec_pending(
@@ -522,10 +655,13 @@ async def test_unbound_foundation_normal_sol_daily_addressed_receipt(
                 assert tuple(x.event_key for x in gap.issues) == (
                     f"sec:{rule.issuer_cik}:0000123456-26-000098",
                 )
+            elif second_event is not None:
+                assert gap is None and pending is not None
+                assert tuple(x.event_id for x in pending.events) == (second_event.id,)
             else:
                 assert gap is None
                 assert (pending is None) is (resolution == "addressed")
-            if pending is not None:
+            if pending is not None and second_event is None:
                 assert tuple(x.event_id for x in pending.events) == (event.id,)
             assert not tuple(await db.scalars(select(MonitorIncrement)))
             assert await db.scalar(select(func.count()).select_from(OutboxEvent)) == notices
