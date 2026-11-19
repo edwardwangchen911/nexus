@@ -2211,12 +2211,13 @@ def _emit_agent_paper_unknown_failure(
     error: Exception | None = None,
     inspection_site: str | None = None,
     pending_probe_step: _PendingProbeStep | None = None,
+    pending_read_deadline: ReadProbeDeadline | None = None,
 ) -> None:
     """Best-effort safe stage evidence for one fail-closed unknown result."""
     if stage not in {"execute", "heartbeat", "inspect", "planner"}:
         stage = "unknown"
     try:
-        payload = {
+        payload: dict[str, object] = {
             "error_code": "AGENT_PAPER_LOOP_RESULT_UNKNOWN",
             "event": "agent_paper_loop_failure",
             "failure_stage": stage,
@@ -2237,6 +2238,24 @@ def _emit_agent_paper_unknown_failure(
                 PENDING_WORK_PHASES,
             )
             from nexus.ops.pending_probe import STAGES
+
+            if (
+                pending_read_deadline is not None
+                and pending_read_deadline.stage in STAGES
+                and 0 <= pending_read_deadline.stage_ms <= pending_read_deadline.elapsed_ms
+            ):
+                payload["pending_read_deadline"] = {
+                    "stage": pending_read_deadline.stage,
+                    "stage_ms": pending_read_deadline.stage_ms,
+                    "elapsed_ms": pending_read_deadline.elapsed_ms,
+                }
+            if (
+                pending_probe_step
+                in {_PendingProbeStep.PAUSE_RECORD, _PendingProbeStep.RESUME_RECORD}
+                and isinstance(error, ValueError)
+                and error.args == ("HOST_READ_PROBE_STATE_INVALID",)
+            ):
+                payload["pending_probe_code"] = "HOST_READ_PROBE_STATE_INVALID"
 
             candidate: BaseException | None = error
             seen: set[int] = set()
@@ -2372,6 +2391,7 @@ async def run_foreground_loop(
         error: Exception | None = None,
         inspection_site: str | None = None,
         pending_probe_step: _PendingProbeStep | None = None,
+        pending_read_deadline: ReadProbeDeadline | None = None,
     ) -> AgentPaperLoopAction:
         _emit_agent_paper_unknown_failure(
             stage,
@@ -2379,6 +2399,7 @@ async def run_foreground_loop(
             error=error,
             inspection_site=inspection_site,
             pending_probe_step=pending_probe_step,
+            pending_read_deadline=pending_read_deadline,
         )
         return AgentPaperLoopAction.STOP_RESULT_UNKNOWN
 
@@ -2413,11 +2434,13 @@ async def run_foreground_loop(
                     must_probe = True
                     continue
                 probe_step = None
+                read_deadline = None
                 try:
                     result = await bounded_probe(
                         wake_for_pending_work, asyncio.timeout(interval_seconds)
                     )
                     if isinstance(result, ReadProbeDeadline):
+                        read_deadline = result
                         paused = True
                         probe_step = (
                             _PendingProbeStep.CALLBACKS_UNAVAILABLE
@@ -2456,6 +2479,7 @@ async def run_foreground_loop(
                         error=error,
                         inspection_site="pending_work",
                         pending_probe_step=probe_step,
+                        pending_read_deadline=read_deadline,
                     )
             if (
                 wall_started_at is not None
