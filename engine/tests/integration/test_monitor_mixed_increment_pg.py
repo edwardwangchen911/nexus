@@ -84,6 +84,7 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     accepted_unknown_root=None,
     forward=False,
 ):
+    native_unknown = accepted_unknown_root is not None
     frozen_without_price = unknown == "superseded_unfrozen_price"
     if frozen_without_price:
         unknown = "sec_only"
@@ -224,13 +225,39 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
                 market_close_at=monday.replace(hour=20),
             )
         )
-    settings = settings.model_copy(
-        update={
-            "agent_paper_formal_model_config_id": parent.model_config_id,
-            "agent_runtime_mode": AgentRuntimeMode.CODEX_SDK,
-            "agent_paper_cycle_enabled": True,
-        }
-    )
+    if not native_unknown:
+        settings = settings.model_copy(
+            update={
+                "agent_paper_formal_model_config_id": parent.model_config_id,
+                "agent_runtime_mode": AgentRuntimeMode.CODEX_SDK,
+                "agent_paper_cycle_enabled": True,
+            }
+        )
+    else:
+        import httpx
+        from helpers.durable_test_clock import DisposableClock
+        from integration.test_sol_profile_pg import current_record, register
+        from pydantic import SecretStr
+
+        async def forbid_real_http(*_args, **_kwargs):
+            raise AssertionError("only the isolated Responses transport is permitted")
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbid_real_http)
+        clock = DisposableClock(migrated_database_url)
+        async with factory.begin() as session:
+            await clock.set(session, later)
+        price = await current_record(factory)
+        model_id = await register(factory, price)
+        settings = settings.model_copy(
+            update={
+                "agent_paper_formal_model_config_id": model_id,
+                "agent_runtime_mode": AgentRuntimeMode.RESPONSES,
+                "openai_api_key": SecretStr("sk-proj-" + "synthetic-only" * 5),
+                "openai_extraction_model": "gpt-6.1-sol",
+                "openai_reasoning_model": "gpt-6.1-sol",
+                "agent_paper_cycle_enabled": True,
+            }
+        )
     args = argparse.Namespace(
         action="admit-batch",
         batch_id=batch_id,
@@ -386,12 +413,7 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     stages = []
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def tracked(payload, **kwargs):
-        wire = _restore_view(payload)
-        stages.append(wire["stage"])
-        if unknown is False and wire["stage"] == "research":
-            entered.set()
-            await release.wait()
+    def assert_frozen_inputs(wire):
         security = wire["frozen_inputs"]["security_snapshot"]
         assert security["purpose"] == "monitor_increment_v2"
         context = next(
@@ -406,6 +428,14 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             for content in context["materials"]["contents"]
             for document in content["archive"]["documents"]
         )
+
+    async def tracked(payload, **kwargs):
+        wire = _restore_view(payload)
+        stages.append(wire["stage"])
+        if unknown is False and wire["stage"] == "research":
+            entered.set()
+            await release.wait()
+        assert_frozen_inputs(wire)
         if unknown is True and wire["stage"] == "critique":
             raise TimeoutError("controlled mixed unknown usage")
         from helpers.mixed_stage import add_mixed_fields
@@ -426,7 +456,24 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             row["vote"] = "oppose"
         return json.dumps(body), usage
 
-    monkeypatch.setattr(codex_staged, "invoke_codex", tracked)
+    if not native_unknown:
+        monkeypatch.setattr(codex_staged, "invoke_codex", tracked)
+    else:
+        from helpers.mixed_stage import add_mixed_fields
+        from integration.test_sol_native_stage_pg import install_sol_http
+        from nexus.monitoring.durable_sec_permission import has_sec_dependencies
+
+        async with factory() as session:
+            assert await has_sec_dependencies(session, member.run_id)
+
+        async def lose_critique_response(wire):
+            assert_frozen_inputs(wire)
+            if wire["stage"] == "critique":
+                raise httpx.ReadTimeout("controlled mixed unknown usage")
+
+        stages, clients = install_sol_http(
+            monkeypatch, store, model_response=add_mixed_fields, on_request=lose_critique_response
+        )
     if unknown == "tokenizer_missing":
         from nexus.agents import codex_token_budget
 
@@ -513,6 +560,8 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
     assert stages == (
         ["research", "critique"] if unknown is True else ["research", "critique", "synthesis"]
     )
+    if native_unknown:
+        assert all(client.is_closed for client in clients)
     assert not await run_agent_worker_once(
         settings, job_ids=(member.job_id,), formal_stage_capacity=True
     )
@@ -537,6 +586,20 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         await assert_shared_day_preserved(
             session, budgets_before, budget_day, shared_before, reservation
         )
+        if native_unknown:
+            from nexus.agents.research_stages.proof import read_terminal_proof
+            from nexus.agents.research_stages.protocol import stage_evidence, usage_known
+            from nexus.persistence.models.agents import AgentModelConfigRecord
+
+            proof = await read_terminal_proof(session, run_id=child.id, now=captured["clock"][0])
+            assert proof is not None and proof.cleanup_confirmed and not proof.known
+            evidence = await stage_evidence(session, child.id)
+            assert len(evidence) == 2
+            research, critique = evidence
+            model = await session.get(AgentModelConfigRecord, child.model_config_id)
+            assert model is not None
+            assert research["stage"] == 1 and usage_known((research,), model=model)
+            assert critique["stage"] == 2 and critique["response_hash"] is None
         assert settings.agent_daily_budget_usd == Decimal("3.00")
         if independent:
             from nexus.agents.research_only import require_formal_research

@@ -74,6 +74,10 @@ def test_independent_acceptance_cli_requires_explicit_proof_and_consent():
 async def test_independent_acceptance_preserves_native_facts_and_history_gates(
     migrated_database_url, monkeypatch, tmp_path, case
 ):
+    if case == "mixed_increment_unknown":
+        from helpers.durable_test_clock import DisposableClock
+
+        migrated_database_url = DisposableClock.uncached_url(migrated_database_url)
     controlled_sdk(monkeypatch)
     captured = advancing_formal_clock(monkeypatch)
     create, run = codex_sdk.AsyncCodex, candidates.run_agent_worker_once
@@ -720,6 +724,8 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
                 assert await independent_unknown_accepted(
                     session, row=row, now=captured["clock"][0]
                 )
+                with pytest.raises(ValueError, match="INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"):
+                    await require_independent_execution_open(session, request_id=row.id)
                 with pytest.raises(ValueError, match="MONITOR_ACCOUNT_BUSY_OR_UNKNOWN"):
                     await require_manual_account_available(
                         session,
