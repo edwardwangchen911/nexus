@@ -210,8 +210,11 @@ async def _expired_proof(session: Any, **kwargs: Any) -> Any:
 async def _history_proof(session: Any, **kwargs: Any) -> Any:
     from nexus.jobs.models import job_input_hash
 
-    native = await history_seal._legacy_proof(session, **kwargs)
-    proof = await read_terminal_proof(session, run_id=kwargs["run_id"], now=kwargs["now"])
+    native, proof = await history_seal._legacy_proof(session, **kwargs)
+    # Recovery's read-only observation can use the proof just validated for
+    # these exact facts. Retain the second observation during writable closeout.
+    if not (kwargs.get("read_only", False) and history_seal.reuse_recovery_terminal_proof.get()):
+        proof = await read_terminal_proof(session, run_id=kwargs["run_id"], now=kwargs["now"])
     if proof is None:
         return native
     if proof.known or not proof.cleanup_confirmed:

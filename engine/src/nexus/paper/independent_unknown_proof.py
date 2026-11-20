@@ -7,6 +7,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.jobs.models import job_input_hash
+from nexus.ops.pending_probe import probe_independent_proof_step
 from nexus.paper.manual_request import read_manual_request
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 
@@ -43,6 +44,7 @@ async def independent_unknown_proof(
     session: AsyncSession, *, row: ManualPaperRequest, now: datetime, zero_stage: bool = False
 ) -> dict[str, object]:
     """Validate native financial closure and bind all current facts, including absence."""
+    probe_independent_proof_step("request_binding")
     view = await read_manual_request(session, row)
     if (
         (row.contract_version, row.mode) not in {(3, "research_and_monitor"), (4, "research_only")}
@@ -67,6 +69,7 @@ async def independent_unknown_proof(
     if not unknown:
         raise ValueError(BLOCKED)
     # This is only a financial/cleanup proof, not an admission exemption.
+    probe_independent_proof_step("terminal_proof")
     disposition: dict[str, object] = {}
     if zero_stage:
         from nexus.paper.zero_stage_disposition import proof
@@ -87,6 +90,7 @@ async def independent_unknown_proof(
                 allow_unknown_usage=True,
             ):
                 raise ValueError(BLOCKED)
+    probe_independent_proof_step("fact_digests")
     params = {
         "request": row.id,
         "runs": [m.run_id for m in view.research.members],
@@ -119,6 +123,7 @@ async def independent_unknown_proof(
     if row.contract_version == 4:
         from nexus.paper.single_sol_disposition import single_sol_history
 
+        probe_independent_proof_step("single_sol_history")
         extra["single_sol"] = await single_sol_history(session, row, view.research)
     return {
         **extra,

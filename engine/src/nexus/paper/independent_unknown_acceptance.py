@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.audit.canonical import AuditChainInput, audit_event_hash, canonical_audit_event
 from nexus.audit.service import append_audit_event
 from nexus.jobs.models import job_input_hash
+from nexus.ops.pending_probe import probe_independent_proof_step
 from nexus.paper.independent_unknown_proof import (
     BLOCKED,
     FACT_FILTERS,
@@ -90,6 +91,7 @@ async def _validate(
     now: datetime,
     admission: bool = True,
 ) -> str:
+    probe_independent_proof_step("read_scope")
     if admission and await session.scalar(text("SHOW transaction_isolation")) != "read committed":
         raise ValueError(BLOCKED)
     # Native late observation/verification/cleanup writers hold this scope.
@@ -115,6 +117,7 @@ async def _validate(
     proof = await independent_unknown_proof(
         session, row=row, now=now, zero_stage=schema == ZERO_STAGE_SCHEMA
     )
+    probe_independent_proof_step("audit_chain")
     digest = job_input_hash(proof)
     payload = {**proof, "proof_hash": digest}
     canonical = canonical_audit_event(
@@ -164,6 +167,7 @@ async def read_independent_disposition(
 async def independent_unknown_accepted(
     session: AsyncSession, row: ManualPaperRequest, *, now: datetime
 ) -> bool:
+    probe_independent_proof_step("audit_records")
     audits = await _audits(session, row.id)
     if not audits:
         return False
