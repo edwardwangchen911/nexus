@@ -9,10 +9,57 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from helpers.current_identity import filing, profile
+from nexus.market import current_identity as identity
 from nexus.ops import agent_paper_loop as loop
 from nexus.ops import manual_paper_host as host
 from nexus.paper import formal_intraday_intent
 from nexus.settings import EngineSettings
+
+
+@pytest.mark.asyncio
+async def test_pending_probe_reuses_cover_syntax_and_rechecks_identity(monkeypatch):
+    sec_raw = filing().replace(b"<html ", f'<html data-cache-case="{uuid4()}" '.encode())
+    fmp_raw = profile()
+    feed = identity._Cover.feed
+    parsed = []
+
+    def count_feed(parser, raw):
+        parsed.append(raw)
+        feed(parser, raw)
+
+    monkeypatch.setattr(identity._Cover, "feed", count_feed)
+    session = SimpleNamespace(execute=AsyncMock(), info={})
+
+    @asynccontextmanager
+    async def begin():
+        yield session
+
+    factory = SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())})
+    monkeypatch.setattr(host, "session_factory", lambda _: factory)
+    monkeypatch.setattr(host, "artifact_read_scope", lambda _: nullcontext())
+    monkeypatch.setattr(host, "evidence_read_scope", lambda _: nullcontext())
+    monkeypatch.setattr(formal_intraday_intent, "due_intent", AsyncMock(return_value=None))
+
+    async def peek(*args, **kwargs):
+        identity.parse_current_common_stock(symbol="AAPL", fmp_raw=fmp_raw, sec_raw=sec_raw)
+
+    monkeypatch.setattr(host, "peek_manual_request", peek)
+    account = uuid4()
+    settings = EngineSettings.for_test().model_copy(
+        update={"agent_paper_manual_enabled": True, "agent_paper_account_id": account}
+    )
+
+    assert not await host.manual_work_pending(settings, account_id=account)
+    assert not await host.manual_work_pending(settings, account_id=account)
+    assert len(parsed) == 1
+    fmp_raw = fmp_raw.replace(b"USD", b"EUR")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_INVALID"):
+        await host.manual_work_pending(settings, account_id=account)
+    assert len(parsed) == 1
+    assert [str(call.args[0]) for call in session.execute.await_args_list] == [
+        "SET TRANSACTION READ ONLY"
+    ] * 3
 
 
 @pytest.mark.asyncio

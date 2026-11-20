@@ -457,7 +457,7 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
                 from nexus.paper.formal_intraday_intent import due_intent
 
                 with (
-                    identity_parse_scope(),
+                    identity_parse_scope(reuse_cover_parses=True),
                     identity_source_parse_scope(),
                     artifact_read_scope(session),
                     evidence_read_scope(session),
