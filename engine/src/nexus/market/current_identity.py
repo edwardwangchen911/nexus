@@ -1124,10 +1124,10 @@ def _shared_cover(key: str) -> _Cover | None:
         if entry is None:
             return None
         _COVER_PARSES.move_to_end(key)
-        return deepcopy(entry[0])
+        return entry[0]
 
 
-def _remember_cover(key: str, parser: _Cover) -> None:
+def _remember_cover(key: str, parser: _Cover, snapshot: _Cover | None) -> None:
     global _COVER_PARSE_SIZE
     size = _tree_bytes(vars(parser), set()) + sys.getsizeof(parser) + sys.getsizeof(key)
     if size > _COVER_PARSE_BYTES or _COVER_PARSE_ENTRIES < 1:
@@ -1142,7 +1142,7 @@ def _remember_cover(key: str, parser: _Cover) -> None:
         ):
             _, (_, removed) = _COVER_PARSES.popitem(last=False)
             _COVER_PARSE_SIZE -= removed
-        _COVER_PARSES[key] = (deepcopy(parser), size)
+        _COVER_PARSES[key] = (snapshot if snapshot is not None else deepcopy(parser), size)
         _COVER_PARSE_SIZE += size
 
 
@@ -1264,19 +1264,23 @@ def _parse_sec_cover(sec_raw: bytes, *, use_cache: bool = True) -> _Cover:
     if cache is not None and cache.active and cache.reuse_cover_parses:
         shared = _shared_cover(key)
         if shared is not None:
+            # Both caches may retain the same private tree. The resolver gets
+            # its own copy and cannot mutate either cache through it.
             if len(cache.covers) < 16:
-                cache.covers[key] = deepcopy(shared)
-            return shared
+                cache.covers[key] = shared
+            return deepcopy(shared)
     parser = _Cover(dual_listing=True, hidden_listing=True)
     parser.feed(sec_raw.decode("utf-8-sig"))
     parser.close()
     if parser.stack or parser.active or parser.parents or parser.context:
         raise invalid()
     if cache is not None and cache.active:
+        snapshot = None
         if len(cache.covers) < 16:
-            cache.covers[key] = deepcopy(parser)
+            snapshot = deepcopy(parser)
+            cache.covers[key] = snapshot
         if cache.reuse_cover_parses:
-            _remember_cover(key, parser)
+            _remember_cover(key, parser, snapshot)
     return parser
 
 

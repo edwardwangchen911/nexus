@@ -45,6 +45,29 @@ def test_cover_reuse_is_opt_in_and_returns_independent_trees():
         identity._parse_sec_cover(raw[:-10])
 
 
+def test_cover_reuse_needs_one_tree_copy_per_resolver(monkeypatch):
+    raw = filing().replace(b"<html ", b'<html data-cache-case="single-copy" ')
+    copy = identity.deepcopy
+    copied = []
+
+    def count_copy(value):
+        if isinstance(value, identity._Cover):
+            copied.append(value)
+        return copy(value)
+
+    monkeypatch.setattr(identity, "deepcopy", count_copy)
+    for _ in range(3):
+        with identity.identity_parse_scope(reuse_cover_parses=True):
+            before = len(copied)
+            isolated = identity._parse_sec_cover(raw)
+            assert len(copied) == before + 1
+            first_value = isolated.facts[0]["value"]
+            assert first_value != "mutated"
+            isolated.facts[0]["value"] = "mutated"
+            assert identity._parse_sec_cover(raw).facts[0]["value"] == first_value
+            assert len(copied) == before + 2
+
+
 def test_default_and_custom_policy_paths_do_not_use_shared_parses(monkeypatch):
     calls = []
     feed = identity._Cover.feed
