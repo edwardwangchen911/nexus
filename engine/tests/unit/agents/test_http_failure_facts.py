@@ -70,6 +70,11 @@ async def test_http_rejection_keeps_allowlisted_cause_without_body_or_credential
     [
         ("pre_send", "pre_send", "local_guard"),
         ("connect", "send", "connection"),
+        ("proxy", "send", "connection"),
+        ("read", "send", "connection"),
+        ("write", "send", "connection"),
+        ("timeout", "send", "timeout"),
+        ("protocol", "send", "transport_protocol"),
         ("truncated", "stream", "stream_protocol"),
     ],
 )
@@ -82,10 +87,19 @@ async def test_http_failure_phase_is_observed_not_guessed_from_generic_sdk_code(
             raise ProtocolRejected("PLATFORM_HTTP_STOPPED_OR_CREDENTIAL_CHANGED")
         return credential
 
+    errors = {
+        "connect": httpx.ConnectError,
+        "proxy": httpx.ProxyError,
+        "read": httpx.ReadError,
+        "write": httpx.WriteError,
+        "timeout": httpx.ReadTimeout,
+        "protocol": httpx.RemoteProtocolError,
+    }
+
     def handle(request):
         sent.append(True)
-        if case == "connect":
-            raise httpx.ConnectError("PRIVATE_SENTINEL", request=request)
+        if error := errors.get(case):
+            raise error("PRIVATE_SENTINEL", request=request)
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},

@@ -114,7 +114,7 @@ def _kind(error: BaseException, phase: HttpFailurePhase) -> HttpFailureKind:
         return "http_status"
     if isinstance(error, TimeoutError | httpx.TimeoutException):
         return "timeout"
-    if isinstance(error, httpx.ConnectError):
+    if isinstance(error, httpx.NetworkError | httpx.ProxyError):
         return "connection"
     if isinstance(error, httpx.ProtocolError):
         return "transport_protocol"
