@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -24,6 +26,7 @@ from nexus.monitoring.storage import lock_security
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.ops.monitor_batch_prepare import _archive_root
 from nexus.ops.monitor_content_local import _contact
+from nexus.ops.preparation_diagnostics import exception_code
 from nexus.ops.research_identity_local import IdentityCollectionFailure, SecDirectoryInBucket
 from nexus.ops.sec_index_local import collect_index
 from nexus.paper.account_transaction_turn import account_transaction_turn
@@ -274,6 +277,29 @@ def _request_count(archive: Path, *, listed_history: bool = False) -> int | None
         return None
 
 
+_RefreshPoint = Literal["scope", "claim", "collect", "receipt", "failure_receipt", "cleanup"]
+
+
+def _report_refresh_failure(scheduled_at: datetime, point: _RefreshPoint, error: Exception) -> None:
+    try:
+        print(
+            json.dumps(
+                {
+                    "event": "research.monitor.disclosure_refresh_failed",
+                    "scheduled_at": scheduled_at.isoformat(),
+                    "failure_point": point,
+                    "failure_code": exception_code(error),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        # Logging must never change the source outcome or transaction cleanup.
+        pass
+
+
 async def refresh_disclosure_observations(
     settings: EngineSettings,
     *,
@@ -316,6 +342,7 @@ async def refresh_disclosure_observations(
     items: list[dict[str, object]] = []
     requests: int | None = 0
     in_flight = False
+    point: _RefreshPoint = "scope"
     try:
         async with asyncio.timeout(TOTAL_TIMEOUT_SECONDS):
             async with account_transaction_turn(settings), factory() as session, session.begin():
@@ -332,6 +359,7 @@ async def refresh_disclosure_observations(
                 SecDirectoryInBucket(scheduled_at) if len(instruments) > 1 else None
             )
             for instrument in instruments:
+                point = "claim"
                 try:
                     async with (
                         account_transaction_turn(settings),
@@ -349,7 +377,8 @@ async def refresh_disclosure_observations(
                             contact=contact,
                             candidate_keys=(candidate_hints or {}).get(instrument, ()),
                         )
-                except ValueError:
+                except ValueError as error:
+                    _report_refresh_failure(scheduled_at, point, error)
                     items.append({"status": "unknown", "reason": "SEC_BASELINE_SCOPE_UNAVAILABLE"})
                     continue
                 if claim is None:
@@ -360,6 +389,7 @@ async def refresh_disclosure_observations(
                 archive = Path(str(claim["archive_dir"]))
                 in_flight = True
                 result_ready = False
+                point = "collect"
                 try:
                     async with _client() as client:
                         if claim.get("durable_sec") is True:
@@ -382,6 +412,7 @@ async def refresh_disclosure_observations(
                                 client=client,
                                 listed_history=claim.get("listed_history") is True,
                             )
+                    point = "receipt"
                     async with (
                         account_transaction_turn(settings),
                         factory() as session,
@@ -453,6 +484,8 @@ async def refresh_disclosure_observations(
                     # acknowledgement even when the driver does not wrap it.
                     if result_ready:
                         raise
+                    _report_refresh_failure(scheduled_at, point, error)
+                    point = "failure_receipt"
                     # A terminal identity failure cannot have reached the later
                     # listed-history collector. Its own receipt already has the full count.
                     count = (
@@ -491,7 +524,8 @@ async def refresh_disclosure_observations(
                 )
                 items.append(item)
                 in_flight = False
-    except TimeoutError:
+    except TimeoutError as error:
+        _report_refresh_failure(scheduled_at, point, error)
         return _result(
             "unknown", reason="SEC_INDEX_REFRESH_TIMEOUT", provider_requests=None, items=items
         )
@@ -499,6 +533,8 @@ async def refresh_disclosure_observations(
         missed = (
             isinstance(error, ValueError) and str(error) == "MONITOR_REFRESH_BUCKET_UNAVAILABLE"
         )
+        if not missed:
+            _report_refresh_failure(scheduled_at, point, error)
         return _result(
             "missed_bucket" if missed else "unknown",
             reason="MONITOR_REFRESH_BUCKET_UNAVAILABLE"
@@ -508,7 +544,11 @@ async def refresh_disclosure_observations(
             items=items,
         )
     finally:
-        await factory.kw["bind"].dispose()
+        try:
+            await factory.kw["bind"].dispose()
+        except Exception as error:
+            _report_refresh_failure(scheduled_at, "cleanup", error)
+            raise
     statuses = {item["status"] for item in items}
     if "already_claimed" in statuses or "unknown" in statuses:
         status = "unknown"
