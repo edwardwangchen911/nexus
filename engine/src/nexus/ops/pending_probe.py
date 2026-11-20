@@ -18,6 +18,17 @@ STAGES = frozenset(
         "native_claims",
     }
 )
+INDEPENDENT_PROOF_STEPS = frozenset(
+    {
+        "audit_records",
+        "read_scope",
+        "request_binding",
+        "terminal_proof",
+        "fact_digests",
+        "single_sol_history",
+        "audit_chain",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +45,7 @@ class ProbeTrace:
     closed_cancel: asyncio.CancelledError | None = None
     interrupted: ReadProbeDeadline | None = None
     started: float = field(default_factory=monotonic)
+    independent_proof_step: str | None = None
 
 
 trace: ContextVar[ProbeTrace | None] = ContextVar("pending_probe", default=None)
@@ -44,6 +56,13 @@ def probe_stage(stage: str) -> None:
     if current is not None:
         current.stage = stage
         current.since = monotonic()
+        current.independent_proof_step = None
+
+
+def probe_independent_proof_step(step: str) -> None:
+    current = trace.get()
+    if current is not None and current.stage == "independent_proof":
+        current.independent_proof_step = step
 
 
 async def bounded_probe(

@@ -1,5 +1,6 @@
 """The terminal reader validates one owner without repeating frozen context reads."""
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,6 +16,57 @@ from nexus.persistence.models.runtime import Job
 
 class ReachedAccounting(Exception):
     pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_only", [True, False])
+@pytest.mark.parametrize("recovery_scope", [True, False])
+async def test_history_seal_uses_current_terminal_proof_for_its_audit(
+    monkeypatch, read_only, recovery_scope
+):
+    from nexus.agents.research_stages import public
+    from nexus.jobs.models import job_input_hash
+    from nexus.paper import history_seal
+
+    run_id = uuid4()
+    now = datetime(2026, 11, 16, tzinfo=UTC)
+    session = object()
+    original = {"fact_hash": "native", "usage": "unknown"}
+    terminal = proof.TerminalProof(run_id, False, False, True, False, "evidence", "cleanup")
+    refreshed = proof.TerminalProof(run_id, False, False, True, False, "new evidence", "cleanup")
+    verify = AsyncMock(return_value=(original, terminal))
+    verify_again = AsyncMock(return_value=refreshed)
+    monkeypatch.setattr(history_seal, "_legacy_proof", verify)
+    monkeypatch.setattr(public, "read_terminal_proof", verify_again)
+    args = {"cycle_id": uuid4(), "run_id": run_id, "now": now, "read_only": read_only}
+
+    scope = history_seal.recovery_terminal_proof_scope() if recovery_scope else nullcontext()
+    with scope:
+        observed = await public._history_proof(session, **args)
+
+    verify.assert_awaited_once_with(session, **args)
+    reuse = recovery_scope and read_only
+    if reuse:
+        verify_again.assert_not_awaited()
+    else:
+        verify_again.assert_awaited_once_with(session, run_id=run_id, now=now)
+    assert not history_seal.reuse_recovery_terminal_proof.get()
+    expected = terminal if reuse else refreshed
+    assert observed == {
+        "usage": "unknown",
+        "staged_protocol": "research-stages-v1",
+        "stage_chain_hash": expected.evidence_hash,
+        "cleanup_hash": expected.cleanup_hash,
+        "fact_hash": job_input_hash(
+            {
+                "native_fact_hash": original["fact_hash"],
+                "stage_chain_hash": expected.evidence_hash,
+                "cleanup_hash": expected.cleanup_hash,
+                "protocol": "research-stages-v1",
+                "run_id": str(run_id),
+            }
+        ),
+    }
 
 
 class Rows:

@@ -105,6 +105,81 @@ def test_pending_diagnostic_rejects_non_allowlisted_phase(capsys, phase):
     assert "pending_work_phase" not in json.loads(captured)
 
 
+def test_pending_diagnostic_rejects_non_allowlisted_proof_step(capsys):
+    error = ValueError("private-code")
+    error._nexus_pending_work_phase = "manual_requests"
+    error._nexus_pending_read_stage = "independent_proof"
+    error._nexus_pending_independent_proof_step = "private-step"
+    loop._emit_agent_paper_unknown_failure(
+        "inspect", datetime.now(UTC), error=error, inspection_site="pending_work"
+    )
+    captured = capsys.readouterr().err
+    assert "private-" not in captured
+    assert "pending_independent_proof_step" not in json.loads(captured)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["audit_records", "read_scope", "audit_chain"])
+async def test_pending_independent_rejection_keeps_its_safe_step(monkeypatch, capsys, step):
+    from nexus.ops.pending_probe import bounded_probe
+    from nexus.paper import independent_unknown_acceptance as acceptance
+
+    row = SimpleNamespace(id=uuid4(), contract_version=3)
+    audit = SimpleNamespace(
+        schema_version=acceptance.SCHEMA,
+        event_seq=1,
+        occurred_at=datetime.now(UTC),
+        actor_id="private-audit-actor",
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "_audits",
+        AsyncMock(return_value=[audit, audit] if step == "audit_records" else [audit]),
+    )
+    monkeypatch.setattr(acceptance, "independent_unknown_proof", AsyncMock(return_value={}))
+    isolation = "repeatable read" if step == "read_scope" else "read committed"
+    session = SimpleNamespace(
+        execute=AsyncMock(),
+        info={},
+        scalar=AsyncMock(side_effect=[isolation, "on", None]),
+    )
+
+    @asynccontextmanager
+    async def begin():
+        yield session
+
+    monkeypatch.setattr(
+        host,
+        "session_factory",
+        lambda _: SimpleNamespace(begin=begin, kw={"bind": SimpleNamespace(dispose=AsyncMock())}),
+    )
+    monkeypatch.setattr(host, "artifact_read_scope", lambda _: nullcontext())
+    monkeypatch.setattr(host, "evidence_read_scope", lambda _: nullcontext())
+
+    async def peek(session, **kwargs):
+        host.probe_stage("independent_proof")
+        return await acceptance.independent_unknown_accepted(session, row, now=datetime.now(UTC))
+
+    monkeypatch.setattr(host, "peek_manual_request", peek)
+    account = uuid4()
+    settings = EngineSettings.for_test().model_copy(
+        update={"agent_paper_manual_enabled": True, "agent_paper_account_id": account}
+    )
+    with pytest.raises(ValueError, match=acceptance.BLOCKED) as raised:
+        await bounded_probe(
+            lambda: host.manual_work_pending(settings, account_id=account), asyncio.timeout(None)
+        )
+    loop._emit_agent_paper_unknown_failure(
+        "inspect", datetime.now(UTC), error=raised.value, inspection_site="pending_work"
+    )
+    captured = capsys.readouterr().err
+    diagnostic = json.loads(captured)
+    assert diagnostic["pending_read_stage"] == "independent_proof"
+    assert diagnostic["pending_independent_proof_step"] == step
+    assert diagnostic["pending_work_code"] == acceptance.BLOCKED
+    assert "private-audit-actor" not in captured
+
+
 @pytest.mark.asyncio
 async def test_pending_cleanup_failure_records_cleanup_not_original_read(monkeypatch):
     original = ValueError("private-original")

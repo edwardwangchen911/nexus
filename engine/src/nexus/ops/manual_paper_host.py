@@ -392,6 +392,7 @@ PENDING_WORK_PHASES = frozenset(
 PENDING_WORK_KINDS = MANUAL_TRIGGER_KINDS | frozenset(
     {"connection_refused", "connection_reset", "os_error", "cancelled"}
 )
+PENDING_WORK_CODES = MANUAL_TRIGGER_CODES | frozenset({"INDEPENDENT_UNKNOWN_ACCEPTANCE_BLOCKED"})
 
 
 def _mark_pending_failure(error: BaseException, phase: str) -> None:
@@ -422,11 +423,17 @@ def _mark_pending_failure(error: BaseException, phase: str) -> None:
             )
             setattr(error, "_nexus_pending_work_kind", kind)
             # Only a closed vocabulary crosses the public log boundary.
-            if isinstance(error, ValueError) and str(error) in MANUAL_TRIGGER_CODES:
+            if isinstance(error, ValueError) and str(error) in PENDING_WORK_CODES:
                 setattr(error, "_nexus_pending_work_code", str(error))
             current = trace.get()
             if current is not None:
                 setattr(error, "_nexus_pending_read_stage", current.stage)
+                if phase == "manual_requests" and current.stage == "independent_proof":
+                    setattr(
+                        error,
+                        "_nexus_pending_independent_proof_step",
+                        current.independent_proof_step,
+                    )
     except Exception:
         # Diagnostics must never replace the original failure or cancellation.
         return

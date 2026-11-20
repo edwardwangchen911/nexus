@@ -1,5 +1,7 @@
 """Explicit legacy failure disposition; usage and budget facts remain unknown."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -7,9 +9,12 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -43,6 +48,9 @@ from nexus.persistence.models.manual_paper import ManualPaperRequest
 from nexus.persistence.models.paper import AgentPaperCycleEventRecord, AgentPaperCycleRecord
 from nexus.persistence.models.runtime import AuditEvent, Job, JobAttempt, JobLease
 
+if TYPE_CHECKING:
+    from nexus.agents.research_stages.proof import TerminalProof
+
 _ACTION = "paper.legacy_research.sealed"
 _SCHEMA = "paper_legacy_seal_v1"
 _SAME_DAY_SCHEMA = "paper_same_day_close_v1"
@@ -69,6 +77,18 @@ _DESKTOP_PARENT = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 _DESKTOP_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
 _DESKTOP_NODE = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
 _MACOS_DOCKER_CLI = Path("/Applications/Docker.app/Contents/Resources/bin/docker")
+reuse_recovery_terminal_proof: ContextVar[bool] = ContextVar(
+    "reuse_recovery_terminal_proof", default=False
+)
+
+
+@contextmanager
+def recovery_terminal_proof_scope() -> Iterator[None]:
+    token = reuse_recovery_terminal_proof.set(True)
+    try:
+        yield
+    finally:
+        reuse_recovery_terminal_proof.reset(token)
 
 
 class ResearchProcessDiagnosticError(ValueError):
@@ -609,7 +629,7 @@ async def _legacy_proof(
     same_day: bool = False,
     expired_attempt: bool = False,
     read_only: bool = False,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], TerminalProof | None]:
     cycle = await session.get(AgentPaperCycleRecord, cycle_id)
     if (
         cycle is None
@@ -833,7 +853,7 @@ async def _legacy_proof(
         or any(output.status != "failed" or output.intent is not None for output in outputs)
     ):
         raise ValueError(_BLOCKED)
-    return {
+    facts: dict[str, object] = {
         **(
             {"closure_policy": "same_day_expired_attempt_v1"}
             if expired_attempt
@@ -866,6 +886,7 @@ async def _legacy_proof(
             }
         ),
     }
+    return facts, stage_proof
 
 
 async def legacy_research_sealed(

@@ -145,7 +145,10 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                 # Existing acceptance/seal and consumed-lease proofs remain authoritative.
                 # Never replace them with a blanket historical cost/lease predicate.
                 stage, started = "account_occupancy", monotonic_ns()
+                from nexus.paper.history_seal import recovery_terminal_proof_scope
+
                 with (
+                    recovery_terminal_proof_scope(),
                     identity_parse_scope(),
                     identity_source_parse_scope(),
                     artifact_read_scope(session),
