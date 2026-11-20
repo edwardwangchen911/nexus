@@ -469,7 +469,7 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
         async def lose_critique_response(wire):
             assert_frozen_inputs(wire)
             if wire["stage"] == "critique":
-                raise httpx.ReadTimeout("controlled mixed unknown usage")
+                raise httpx.ReadError("PRIVATE_TRANSPORT_DETAIL")
 
         stages, clients = install_sol_http(
             monkeypatch, store, model_response=add_mixed_fields, on_request=lose_critique_response
@@ -587,12 +587,30 @@ async def test_sealed_price_and_two_filings_admit_one_single_stock_job_and_three
             session, budgets_before, budget_day, shared_before, reservation
         )
         if native_unknown:
+            from nexus.agents.committee import StageFailureDiagnostic
             from nexus.agents.research_stages.proof import read_terminal_proof
             from nexus.agents.research_stages.protocol import stage_evidence, usage_known
-            from nexus.persistence.models.agents import AgentModelConfigRecord
+            from nexus.persistence.models.agents import (
+                AgentModelConfigRecord,
+                AgentResearchOutputRecord,
+            )
 
             proof = await read_terminal_proof(session, run_id=child.id, now=captured["clock"][0])
             assert proof is not None and proof.cleanup_confirmed and not proof.known
+            output = await session.scalar(
+                select(AgentResearchOutputRecord).where(
+                    AgentResearchOutputRecord.run_id == child.id,
+                    AgentResearchOutputRecord.status == "failed",
+                )
+            )
+            assert output is not None
+            diagnostic = StageFailureDiagnostic.model_validate(output.payload["diagnostic"])
+            facts = diagnostic.http_failure_facts
+            assert diagnostic.stage == "critique" and facts is not None
+            assert facts.phase == "send" and facts.error_kind == "connection"
+            assert facts.send_started and not facts.headers_received
+            assert facts.http_status is None and facts.cleanup_confirmed
+            assert "PRIVATE_TRANSPORT_DETAIL" not in json.dumps(output.payload)
             evidence = await stage_evidence(session, child.id)
             assert len(evidence) == 2
             research, critique = evidence
