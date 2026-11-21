@@ -583,34 +583,75 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             assert choose_loop_action(inspected) == AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
             assert await facts(factory) == before
             if case == "readonly_manual_queue":
+                from botocore.exceptions import EndpointConnectionError, ReadTimeoutError
                 from nexus.agents.research_stages import proof
+                from nexus.market.object_store import ProviderObjectIOUnavailable
+                from nexus.monitoring import disclosure_context
                 from nexus.ops.agent_paper_loop import _emit_agent_paper_unknown_failure
                 from nexus.ops.pending_probe import bounded_probe
+
+                async def pending_diagnostic():
+                    with pytest.raises(ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN") as exc:
+                        await bounded_probe(
+                            lambda: manual_work_pending(host_settings, account_id=row.account_id),
+                            asyncio.timeout(None),
+                        )
+                    pending_output = capsys.readouterr()
+                    assert "private-baseline-canary" not in pending_output.out
+                    assert "private-baseline-canary" not in pending_output.err
+                    _emit_agent_paper_unknown_failure(
+                        "inspect", idle.now, error=exc.value, inspection_site="pending_work"
+                    )
+                    message = capsys.readouterr().err
+                    assert "private-baseline-canary" not in message
+                    diagnostic = json.loads(message)
+                    assert diagnostic["pending_independent_proof_step"] == "terminal_proof"
+                    assert diagnostic["pending_work_kind"] == "validation"
+                    return diagnostic.get("pending_terminal_proof_step")
 
                 diagnostics = []
                 for reader, result in (("job_lease_consumed", False), ("stage_evidence", [])):
                     with monkeypatch.context() as fault:
                         rejected = AsyncMock(return_value=result)
                         fault.setattr(proof, reader, rejected)
-                        with pytest.raises(
-                            ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
-                        ) as exc:
-                            await bounded_probe(
-                                lambda: manual_work_pending(
-                                    host_settings, account_id=row.account_id
-                                ),
-                                asyncio.timeout(None),
-                            )
+                        diagnostics.append(await pending_diagnostic())
                         rejected.assert_awaited_once()
-                    capsys.readouterr()
-                    _emit_agent_paper_unknown_failure(
-                        "inspect", idle.now, error=exc.value, inspection_site="pending_work"
-                    )
-                    diagnostic = json.loads(capsys.readouterr().err)
-                    assert diagnostic["pending_independent_proof_step"] == "terminal_proof"
-                    assert diagnostic["pending_work_kind"] == "validation"
-                    diagnostics.append(diagnostic.get("pending_terminal_proof_step"))
                 assert diagnostics == ["lease_attempt", "stage_evidence"]
+
+                endpoint = "http://private-baseline-canary.example"
+                baseline_failures = (
+                    (
+                        EndpointConnectionError(endpoint_url=endpoint),
+                        "sec_baseline_storage_connection",
+                    ),
+                    (ReadTimeoutError(endpoint_url=endpoint), "sec_baseline_storage_read_timeout"),
+                    (
+                        ProviderObjectIOUnavailable("OBJECT_IO_DEADLINE_EXCEEDED"),
+                        "sec_baseline_storage_unavailable",
+                    ),
+                    (
+                        ProviderObjectIOUnavailable("OBJECT_IO_SATURATED"),
+                        "sec_baseline_storage_unavailable",
+                    ),
+                    (None, "sec_baseline_rejected"),
+                )
+                make_store = disclosure_context.configured_exhibit_store
+                for failure, step in baseline_failures:
+                    with monkeypatch.context() as fault:
+                        read_original = AsyncMock(
+                            side_effect=failure, return_value=b"private-baseline-canary"
+                        )
+
+                        def store_with_failed_read(session):
+                            store = make_store(session)
+                            fault.setattr(store, "read_raw", read_original)
+                            return store
+
+                        fault.setattr(
+                            disclosure_context, "configured_exhibit_store", store_with_failed_read
+                        )
+                        assert await pending_diagnostic() == step
+                        read_original.assert_awaited_once()
                 assert await facts(factory) == before
                 assert not await manual_work_pending(host_settings, account_id=row.account_id)
             if case == "readonly_manual_queue_late":

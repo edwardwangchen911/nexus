@@ -4,13 +4,16 @@ from datetime import datetime
 from typing import Literal, Self
 from uuid import UUID
 
+from botocore import exceptions as store_errors  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
+from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.monitoring.sec_index_reader import read_monitor_index
+from nexus.ops.pending_probe import probe_terminal_proof_step
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.research.durable_sec_index_storage import SOURCE as DURABLE_SOURCE
 from nexus.research.durable_sec_index_storage import DurableIndexCapture
@@ -161,7 +164,7 @@ async def validate_disclosure_baseline(
         if not context.ready:
             return True
         assert context.baseline is not None
-        return context.baseline == await _exact_baseline(
+        observed = await _exact_baseline(
             session,
             snapshot_id=context.baseline.snapshot_id,
             instrument_id=context.instrument_id,
@@ -169,5 +172,19 @@ async def validate_disclosure_baseline(
         )
     except SQLAlchemyError:
         raise
-    except Exception:
+    except store_errors.ReadTimeoutError:
+        probe_terminal_proof_step("sec_baseline_storage_read_timeout")
         return False
+    except (store_errors.ConnectionError, store_errors.ConnectionClosedError):
+        probe_terminal_proof_step("sec_baseline_storage_connection")
+        return False
+    except ProviderObjectIOUnavailable:
+        probe_terminal_proof_step("sec_baseline_storage_unavailable")
+        return False
+    except Exception:
+        probe_terminal_proof_step("sec_baseline_rejected")
+        return False
+    if observed != context.baseline:
+        probe_terminal_proof_step("sec_baseline_rejected")
+        return False
+    return True
