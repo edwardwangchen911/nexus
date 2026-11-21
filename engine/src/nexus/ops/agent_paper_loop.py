@@ -2237,7 +2237,11 @@ def _emit_agent_paper_unknown_failure(
                 PENDING_WORK_KINDS,
                 PENDING_WORK_PHASES,
             )
-            from nexus.ops.pending_probe import INDEPENDENT_PROOF_STEPS, STAGES
+            from nexus.ops.pending_probe import (
+                INDEPENDENT_PROOF_STEPS,
+                STAGES,
+                TERMINAL_PROOF_STEPS,
+            )
 
             if (
                 pending_read_deadline is not None
@@ -2277,6 +2281,15 @@ def _emit_agent_paper_unknown_failure(
                         value = getattr(candidate, attribute, None)
                         if isinstance(value, str) and value in allowed:
                             payload[key] = value
+                    terminal_step = getattr(candidate, "_nexus_pending_terminal_proof_step", None)
+                    if (
+                        pending_phase == "manual_requests"
+                        and payload.get("pending_read_stage") == "independent_proof"
+                        and payload.get("pending_independent_proof_step") == "terminal_proof"
+                        and isinstance(terminal_step, str)
+                        and terminal_step in TERMINAL_PROOF_STEPS
+                    ):
+                        payload["pending_terminal_proof_step"] = terminal_step
                     break
                 candidate = candidate.__cause__ or candidate.__context__
         if action is not None:

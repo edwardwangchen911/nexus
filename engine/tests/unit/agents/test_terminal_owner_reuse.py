@@ -182,9 +182,12 @@ async def test_public_route_still_rejects_each_owner_binding_mismatch(monkeypatc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["formal", "independent"])
-@pytest.mark.parametrize("owner_fault", [None, "scope", "kind", "run", "job", "version", "native"])
+@pytest.mark.parametrize(
+    "owner_fault", [None, "scope", "kind", "run", "job", "version", "native", "missing_lease"]
+)
 async def test_public_member_runs_canonical_owner_validation_once(monkeypatch, kind, owner_fault):
     from nexus.agents.research_stages import public
+    from nexus.ops.pending_probe import ProbeTrace, trace
 
     run_id, job_id, scope_id = uuid4(), uuid4(), uuid4()
     now = datetime(2026, 11, 16, tzinfo=UTC)
@@ -228,6 +231,8 @@ async def test_public_member_runs_canonical_owner_validation_once(monkeypatch, k
             return run if model is AgentResearchRunRecord else job
 
         async def scalars(self, statement):
+            if owner_fault == "missing_lease" and "FROM job_leases" in str(statement):
+                return Rows([])
             return Rows([job])
 
     owner = AsyncMock(
@@ -241,28 +246,37 @@ async def test_public_member_runs_canonical_owner_validation_once(monkeypatch, k
     monkeypatch.setattr(
         platform_stage_accounting,
         "read_stage_accounting_model",
-        AsyncMock(side_effect=ReachedAccounting),
+        AsyncMock(return_value=object())
+        if owner_fault == "missing_lease"
+        else AsyncMock(side_effect=ReachedAccounting),
     )
     member = SimpleNamespace(run_id=run_id, job_id=job_id)
-    with pytest.raises(
-        ReachedAccounting if owner_fault is None else (ValueError, ProtocolRejected)
-    ):
-        if kind == "independent":
-            await public._research_settled(
-                Session(),
-                row=SimpleNamespace(id=scope_id),
-                view=SimpleNamespace(members=(member,)),
-                now=now,
-            )
-        else:
-            await public._selected_member_settled(
-                Session(),
-                owner_id=scope_id,
-                kind=kind,
-                member=member,
-                now=now,
-                allow_unknown_usage=False,
-            )
+    probe = ProbeTrace(stage="independent_proof", independent_proof_step="terminal_proof")
+    token = trace.set(probe)
+    try:
+        with pytest.raises(
+            ReachedAccounting if owner_fault is None else (ValueError, ProtocolRejected)
+        ):
+            if kind == "independent":
+                await public._research_settled(
+                    Session(),
+                    row=SimpleNamespace(id=scope_id),
+                    view=SimpleNamespace(members=(member,)),
+                    now=now,
+                )
+            else:
+                await public._selected_member_settled(
+                    Session(),
+                    owner_id=scope_id,
+                    kind=kind,
+                    member=member,
+                    now=now,
+                    allow_unknown_usage=False,
+                )
+        if owner_fault == "missing_lease":
+            assert probe.terminal_proof_step == "lease_attempt"
+    finally:
+        trace.reset(token)
     assert owner.await_count == (0 if owner_fault in {"run", "job", "version", "native"} else 1)
 
 
@@ -358,6 +372,37 @@ async def test_zero_stage_requires_the_original_route_for_all_three_members(
         expected_owner=(row.id, "independent"),
         expected_job_id=members[0].job_id,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_shape", [False, True])
+async def test_zero_stage_disposition_has_its_own_probe_step(monkeypatch, invalid_shape):
+    from nexus.ops.pending_probe import ProbeTrace, probe_terminal_proof_step, trace
+    from nexus.paper import zero_stage_disposition as disposition
+
+    row = SimpleNamespace(id=uuid4(), contract_version=3, mode="research_and_monitor")
+    members = [
+        SimpleNamespace(run_id=uuid4(), job_id=uuid4(), usage_known=known)
+        for known in (False, True, True)
+    ]
+    view = SimpleNamespace(
+        status="unknown",
+        research=SimpleNamespace(members=members if not invalid_shape else []),
+    )
+
+    async def terminal(*args, **kwargs):
+        probe_terminal_proof_step("cleanup")
+        return None
+
+    monkeypatch.setattr(disposition, "read_terminal_proof", terminal)
+    probe = ProbeTrace(stage="independent_proof", independent_proof_step="terminal_proof")
+    token = trace.set(probe)
+    try:
+        with pytest.raises(ValueError, match=disposition.BLOCKED):
+            await disposition.proof(object(), row=row, view=view, now=datetime.now(UTC))
+        assert probe.terminal_proof_step == "member_disposition"
+    finally:
+        trace.reset(token)
 
 
 @pytest.mark.asyncio

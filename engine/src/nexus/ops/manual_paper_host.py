@@ -434,6 +434,10 @@ def _mark_pending_failure(error: BaseException, phase: str) -> None:
                         "_nexus_pending_independent_proof_step",
                         current.independent_proof_step,
                     )
+                    if current.independent_proof_step == "terminal_proof":
+                        setattr(
+                            error, "_nexus_pending_terminal_proof_step", current.terminal_proof_step
+                        )
     except Exception:
         # Diagnostics must never replace the original failure or cancellation.
         return

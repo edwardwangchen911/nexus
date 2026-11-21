@@ -10,6 +10,7 @@ from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.agents.research_stages.protocol import ProtocolRejected
 from nexus.agents.research_stages.routes import owner, selected_route
 from nexus.monitoring import admission
+from nexus.ops.pending_probe import probe_terminal_proof_step
 from nexus.paper import (
     history_seal,
     manual_cancel,
@@ -286,6 +287,7 @@ async def _selected_member_settled(
     from nexus.agents.research_stages.routes import VERSION, _selected_route_row
     from nexus.paper.research_failure import require_unused_research_member_closed
 
+    probe_terminal_proof_step("member_route")
     # Resolve the original route facts first. Staged members validate their
     # owner once in the canonical proof, with these caller constraints intact.
     route = await _selected_route_row(session, member.job_id)
@@ -336,6 +338,7 @@ async def _selected_member_settled(
         )
     except ProtocolRejected:
         raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN") from None
+    probe_terminal_proof_step("member_disposition")
     if (
         proof is None
         or (

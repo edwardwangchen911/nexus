@@ -29,6 +29,20 @@ INDEPENDENT_PROOF_STEPS = frozenset(
         "audit_chain",
     }
 )
+TERMINAL_PROOF_STEPS = frozenset(
+    {
+        "member_route",
+        "terminal_record",
+        "owner_binding",
+        "job_reservation",
+        "lease_attempt",
+        "stage_evidence",
+        "accounting",
+        "closed_output",
+        "cleanup",
+        "member_disposition",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,7 @@ class ProbeTrace:
     interrupted: ReadProbeDeadline | None = None
     started: float = field(default_factory=monotonic)
     independent_proof_step: str | None = None
+    terminal_proof_step: str | None = None
 
 
 trace: ContextVar[ProbeTrace | None] = ContextVar("pending_probe", default=None)
@@ -57,12 +72,20 @@ def probe_stage(stage: str) -> None:
         current.stage = stage
         current.since = monotonic()
         current.independent_proof_step = None
+        current.terminal_proof_step = None
 
 
 def probe_independent_proof_step(step: str) -> None:
     current = trace.get()
     if current is not None and current.stage == "independent_proof":
         current.independent_proof_step = step
+        current.terminal_proof_step = None
+
+
+def probe_terminal_proof_step(step: str) -> None:
+    current = trace.get()
+    if current is not None and current.independent_proof_step == "terminal_proof":
+        current.terminal_proof_step = step
 
 
 async def bounded_probe(
