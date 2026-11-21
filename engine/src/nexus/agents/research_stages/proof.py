@@ -23,6 +23,7 @@ from nexus.agents.research_stages.routes import _selected_route_for_owner, owner
 from nexus.jobs.models import JOB_PRIORITIES, JobKeyV1, JobType, canonical_job_key, job_input_hash
 from nexus.jobs.repository import job_lease_consumed
 from nexus.monitoring import admission
+from nexus.ops.pending_probe import probe_terminal_proof_step
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentResearchEventRecord,
@@ -65,6 +66,7 @@ async def read_terminal_proof(
     A result is neither host-exit evidence nor permission to accept unknown effects.
     Late diagnostic rows cannot retroactively enlarge the terminal's proof.
     """
+    probe_terminal_proof_step("terminal_record")
     invalid = "STAGED_TERMINAL_PROOF_INVALID"
     if await session.scalar(text("SELECT to_regclass('research_stage_member')")) is None:
         return None
@@ -99,6 +101,7 @@ async def read_terminal_proof(
     )
     if terminal is None or terminal["closed_at"] > now:
         raise ProtocolRejected(invalid)
+    probe_terminal_proof_step("owner_binding")
     run = await session.get(AgentResearchRunRecord, run_id)
     jobs = tuple(
         await session.scalars(select(Job).where(Job.payload["run_id"].astext == str(run_id)))
@@ -119,20 +122,25 @@ async def read_terminal_proof(
         raise ProtocolRejected(invalid)
     from nexus.agents.platform_stage_accounting import read_stage_accounting_model
 
+    probe_terminal_proof_step("job_reservation")
     model = await read_stage_accounting_model(session, run.model_config_id)
     budget = await session.scalar(
         select(AgentDailyBudgetReservationRecord).where(
             AgentDailyBudgetReservationRecord.run_id == run.id
         )
     )
+    probe_terminal_proof_step("lease_attempt")
     leases = tuple(await session.scalars(select(JobLease).where(JobLease.job_id == job.id)))
     attempts = tuple(await session.scalars(select(JobAttempt).where(JobAttempt.job_id == job.id)))
+    probe_terminal_proof_step("job_reservation")
+    if model is None or budget is None:
+        raise ProtocolRejected(invalid)
+    probe_terminal_proof_step("lease_attempt")
+    if len(leases) != 1 or len(attempts) != 1:
+        raise ProtocolRejected(invalid)
+    probe_terminal_proof_step("job_reservation")
     if (
-        model is None
-        or budget is None
-        or len(leases) != 1
-        or len(attempts) != 1
-        or model.config_hash != run.model_hash
+        model.config_hash != run.model_hash
         or model.version != run.pricing_version
         or budget.pricing_version != run.pricing_version
         or budget.reserved_usd != run.reserved_cost_usd
@@ -172,6 +180,7 @@ async def read_terminal_proof(
         )
     ):
         raise ProtocolRejected(invalid)
+    probe_terminal_proof_step("lease_attempt")
     lease, attempt = leases[0], attempts[0]
     if (
         job.started_at != lease.acquired_at
@@ -201,6 +210,7 @@ async def read_terminal_proof(
         session, job=job, lease=lease, now=now
     ):
         raise ProtocolRejected(invalid)
+    probe_terminal_proof_step("stage_evidence")
     auths = (
         (
             await session.execute(
@@ -275,6 +285,7 @@ async def read_terminal_proof(
         require_platform_stage_cost,
     )
 
+    probe_terminal_proof_step("accounting")
     platform = is_platform_stage_model(model)
     accounting = platform_accounting_for_model(model, rows) if platform else None
     known = terminal["known"]
@@ -364,6 +375,7 @@ async def read_terminal_proof(
             # Unknown-history acceptance cannot waive a separately known cost
             # overrun, including after the original reservation's business day.
             raise ProtocolRejected(invalid)
+    probe_terminal_proof_step("closed_output")
     if orphan or not auths:
         outputs = tuple(
             await session.scalars(
@@ -412,6 +424,7 @@ async def read_terminal_proof(
     # Financial membership stays frozen; lifecycle may gain a later, immutable
     # confirmation from the exact original authorization. As-of filtering also
     # pins historical seal readback to the facts available at that seal.
+    probe_terminal_proof_step("cleanup")
     cleanup_rows = list(
         (
             await session.execute(

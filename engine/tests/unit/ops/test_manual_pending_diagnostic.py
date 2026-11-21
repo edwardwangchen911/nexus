@@ -152,17 +152,26 @@ def test_pending_diagnostic_rejects_non_allowlisted_phase(capsys, phase):
     assert "pending_work_phase" not in json.loads(captured)
 
 
-def test_pending_diagnostic_rejects_non_allowlisted_proof_step(capsys):
+@pytest.mark.parametrize(
+    ("parent", "detail"),
+    [("private-step", "lease_attempt"), ("terminal_proof", "private-detail")],
+)
+def test_pending_diagnostic_rejects_non_allowlisted_proof_step(capsys, parent, detail):
     error = ValueError("private-code")
     error._nexus_pending_work_phase = "manual_requests"
     error._nexus_pending_read_stage = "independent_proof"
-    error._nexus_pending_independent_proof_step = "private-step"
+    error._nexus_pending_independent_proof_step = parent
+    error._nexus_pending_terminal_proof_step = detail
     loop._emit_agent_paper_unknown_failure(
         "inspect", datetime.now(UTC), error=error, inspection_site="pending_work"
     )
     captured = capsys.readouterr().err
     assert "private-" not in captured
-    assert "pending_independent_proof_step" not in json.loads(captured)
+    diagnostic = json.loads(captured)
+    assert diagnostic.get("pending_independent_proof_step") == (
+        None if parent == "private-step" else parent
+    )
+    assert "pending_terminal_proof_step" not in diagnostic
 
 
 @pytest.mark.asyncio

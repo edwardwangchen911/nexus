@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.research_stages.proof import read_terminal_proof
 from nexus.agents.research_stages.public import _selected_member_settled
+from nexus.ops.pending_probe import probe_terminal_proof_step
 from nexus.paper.manual_request import ManualRequestView
 from nexus.persistence.models.manual_paper import ManualPaperRequest
 
@@ -32,6 +33,7 @@ async def selected(session: AsyncSession, row: ManualPaperRequest) -> bool:
 async def proof(
     session: AsyncSession, *, row: ManualPaperRequest, view: ManualRequestView, now: datetime
 ) -> dict[str, object]:
+    probe_terminal_proof_step("member_disposition")
     if (row.contract_version, row.mode, view.status) != (3, "research_and_monitor", "unknown"):
         raise ValueError(BLOCKED)
     if view.research is None or len(view.research.members) != 3:
@@ -48,6 +50,7 @@ async def proof(
         expected_owner=(row.id, "independent"),
         expected_job_id=target.job_id,
     )
+    probe_terminal_proof_step("member_disposition")
     if (
         terminal is None
         or not terminal.empty_authorizations

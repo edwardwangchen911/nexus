@@ -1,9 +1,11 @@
 """Normal v3 maintenance accepts occupancy, never unknown usage or old execution."""
 
 import asyncio
+import json
 from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from helpers import disclosure_observations
@@ -72,7 +74,7 @@ def test_independent_acceptance_cli_requires_explicit_proof_and_consent():
 )
 @pytest.mark.asyncio
 async def test_independent_acceptance_preserves_native_facts_and_history_gates(
-    migrated_database_url, monkeypatch, tmp_path, case
+    migrated_database_url, monkeypatch, tmp_path, case, capsys
 ):
     if case == "mixed_increment_unknown":
         from helpers.durable_test_clock import DisposableClock
@@ -580,6 +582,37 @@ async def test_independent_acceptance_preserves_native_facts_and_history_gates(
             # of stopping on the already-accepted historical unknown.
             assert choose_loop_action(inspected) == AgentPaperLoopAction.STOP_CALENDAR_UNAVAILABLE
             assert await facts(factory) == before
+            if case == "readonly_manual_queue":
+                from nexus.agents.research_stages import proof
+                from nexus.ops.agent_paper_loop import _emit_agent_paper_unknown_failure
+                from nexus.ops.pending_probe import bounded_probe
+
+                diagnostics = []
+                for reader, result in (("job_lease_consumed", False), ("stage_evidence", [])):
+                    with monkeypatch.context() as fault:
+                        rejected = AsyncMock(return_value=result)
+                        fault.setattr(proof, reader, rejected)
+                        with pytest.raises(
+                            ValueError, match="MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+                        ) as exc:
+                            await bounded_probe(
+                                lambda: manual_work_pending(
+                                    host_settings, account_id=row.account_id
+                                ),
+                                asyncio.timeout(None),
+                            )
+                        rejected.assert_awaited_once()
+                    capsys.readouterr()
+                    _emit_agent_paper_unknown_failure(
+                        "inspect", idle.now, error=exc.value, inspection_site="pending_work"
+                    )
+                    diagnostic = json.loads(capsys.readouterr().err)
+                    assert diagnostic["pending_independent_proof_step"] == "terminal_proof"
+                    assert diagnostic["pending_work_kind"] == "validation"
+                    diagnostics.append(diagnostic.get("pending_terminal_proof_step"))
+                assert diagnostics == ["lease_attempt", "stage_evidence"]
+                assert await facts(factory) == before
+                assert not await manual_work_pending(host_settings, account_id=row.account_id)
             if case == "readonly_manual_queue_late":
                 await late_observation()
                 after_late = await facts(factory)
