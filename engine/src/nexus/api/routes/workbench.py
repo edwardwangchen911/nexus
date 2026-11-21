@@ -14,6 +14,7 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.portfolios import _utc_now
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.workbench import WorkbenchEnvelope
+from nexus.paper.history_seal import terminal_proof_read_scope
 from nexus.settings import EngineSettings
 from nexus.workbench.read_service import WorkbenchReadService
 from nexus.workbench.snapshot_rows import snapshot_rows
@@ -35,7 +36,8 @@ async def workbench_read_session(
     async with factory() as session, session.begin():
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         async with snapshot_rows(session):
-            yield session
+            with terminal_proof_read_scope(session):
+                yield session
 
 
 @router.get(
