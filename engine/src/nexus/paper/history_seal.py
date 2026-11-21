@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
@@ -76,6 +76,20 @@ _DESKTOP_CHILD = (
 _DESKTOP_PARENT = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 _DESKTOP_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
 _DESKTOP_NODE = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
+_DESKTOP_APERITIF = (
+    "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/"
+    "Versions/158.0.8127.37/Helpers/Codex (Aperitif).app/Contents/MacOS/Codex (Aperitif)"
+)
+# NEXUS-APERITIF-RECOVERY-20261121-R1 pins the observed arm64 code objects.
+# An application update requires a new review, even if the installation paths match.
+_APERITIF_CODE_IDENTITIES = {
+    _DESKTOP_CHILD: ("codex", "9aca7e9e8b34af80dec29d17468073b262c26cbb"),
+    _DESKTOP_APERITIF: ("com.openai.codex.helper", "bb8eeee22cd0fa7d12768e3817290e4598fd4ef3"),
+    _DESKTOP_PARENT: ("com.openai.codex", "b5215002d934d1b51fa2dba60375f702e4789f28"),
+}
+_APERITIF_TEAM = "2DC432GLL2"
+_FileIdentity = tuple[int, int, int, int, int]
+_ProcessMapping = tuple[str, _FileIdentity, _FileIdentity]
 _MACOS_DOCKER_CLI = Path("/Applications/Docker.app/Contents/Resources/bin/docker")
 terminal_proof_read_session: ContextVar[AsyncSession | None] = ContextVar(
     "terminal_proof_read_session", default=None
@@ -99,6 +113,7 @@ class ResearchProcessDiagnosticError(ValueError):
         {
             "HOST_SNAPSHOT_UNCONFIRMED",
             "HOST_MAPPING_UNCONFIRMED",
+            "HOST_SIGNATURE_UNCONFIRMED",
             "HOST_IDENTITY_UNCONFIRMED",
             "HOST_CHANGED_DURING_CHECK",
             "CONTAINER_LIST_UNCONFIRMED",
@@ -135,11 +150,15 @@ class ResearchProcessDiagnosticError(ValueError):
                 result["diagnostic_reason"] = self.reason
                 for key, value, allowed in (
                     ("chain", self.chain, {"direct", "nested"}),
-                    ("hop", self.hop, {"candidate", "repl", "node", "ancestor_codex", "desktop"}),
+                    (
+                        "hop",
+                        self.hop,
+                        {"candidate", "repl", "node", "ancestor_codex", "desktop", "aperitif"},
+                    ),
                     (
                         "observed",
                         self.observed,
-                        {"codex", "chatgpt", "repl", "node", "other", "missing"},
+                        {"codex", "chatgpt", "repl", "node", "aperitif", "other", "missing"},
                     ),
                 ):
                     if isinstance(value, str) and value in allowed:
@@ -165,6 +184,63 @@ def require_formal_recovery_processes_quiescent() -> None:
     _require_research_processes_quiescent(formal_recovery=True)
 
 
+def _aperitif_file_identity(path: Path) -> _FileIdentity:
+    if not path.is_absolute() or path.resolve(strict=True) != path:
+        raise ValueError("noncanonical process mapping")
+    info = path.stat(follow_symlinks=False)
+    return info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size
+
+
+def _aperitif_process_mapping(raw: str, pid: int, executable: str) -> _ProcessMapping:
+    header, *records = raw.split("\0\n")
+    if header != f"p{pid}" or not records or records[-1] != "":
+        raise ResearchProcessDiagnosticError("HOST_MAPPING_UNCONFIRMED")
+
+    mapped = []
+    directories = []
+    try:
+        for record in records[:-1]:
+            kind, *fields = record.split("\0")
+            names = [field[1:] for field in fields if field.startswith("n")]
+            if kind != "fcwd" and (kind != "ftxt" or executable not in names):
+                continue
+            (name,) = names
+            (device,) = [int(field[1:], 16) for field in fields if field.startswith("D")]
+            (inode,) = [int(field[1:]) for field in fields if field.startswith("i")]
+            path = Path(name)
+            identity = _aperitif_file_identity(path)
+            if str(path) != name or identity[:2] != (device, inode):
+                raise ValueError("process mapping changed")
+            if kind == "fcwd":
+                if any(part.startswith("nexus-codex-") for part in path.parts):
+                    raise ValueError("research working directory")
+                directories.append((name, identity))
+            else:
+                mapped.append(identity)
+        (executable_identity,) = mapped
+        ((cwd, directory_identity),) = directories
+    except (OSError, RuntimeError, ValueError):
+        raise ResearchProcessDiagnosticError("HOST_MAPPING_UNCONFIRMED") from None
+    return cwd, executable_identity, directory_identity
+
+
+def _verify_aperitif_process(
+    output: Callable[[list[str]], str], pid: int, executable: str
+) -> _ProcessMapping:
+    command = ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt,cwd", "-F0pfDin"]
+    mapping = _aperitif_process_mapping(output(command), pid, executable)
+    identifier, cdhash = _APERITIF_CODE_IDENTITIES[executable]
+    requirement = (
+        f'-R=anchor apple generic and identifier "{identifier}" and '
+        f'certificate leaf[subject.OU] = "{_APERITIF_TEAM}" and cdhash H"{cdhash}"'
+    )
+    for subject in (str(pid), executable):
+        output(["/usr/bin/codesign", "--verify", "--strict", requirement, subject])
+    if _aperitif_process_mapping(output(command), pid, executable) != mapping:
+        raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
+    return mapping
+
+
 def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
     """Inspect process identity and executable mappings; never argv or credentials."""
 
@@ -174,13 +250,15 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
             if command[0] == "/bin/ps"
             else "HOST_MAPPING_UNCONFIRMED"
             if command[0] == "/usr/sbin/lsof"
+            else "HOST_SIGNATURE_UNCONFIRMED"
+            if command[0] == "/usr/bin/codesign"
             else "CONTAINER_LIST_UNCONFIRMED"
             if command[1] == "ps"
             else "CONTAINER_PROCESSES_UNCONFIRMED"
         )
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, UnicodeError):
             raise ResearchProcessDiagnosticError(code) from None
         if result.returncode != 0:
             raise ResearchProcessDiagnosticError(code)
@@ -227,14 +305,19 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
     host = snapshot()
     desktop = candidates(host)
     verified: set[int] = set()
+    aperitif: dict[int, tuple[str, _ProcessMapping]] = {}
     for pid in desktop:
         parent = host.get(host[pid][0])
         ancestor = None if parent is None else host.get(parent[0])
+        aperitif_chain = formal_recovery and parent is not None and parent[3] == _DESKTOP_APERITIF
         chain: tuple[str, ...]
         roles: tuple[str, ...]
         if parent is not None and parent[3] == _DESKTOP_PARENT:
             chain = (_DESKTOP_CHILD, _DESKTOP_PARENT)
             roles = ("candidate", "desktop")
+        elif aperitif_chain:
+            chain = (_DESKTOP_CHILD, _DESKTOP_APERITIF, _DESKTOP_PARENT)
+            roles = ("candidate", "aperitif", "desktop")
         elif (
             formal_recovery
             and parent is not None
@@ -258,6 +341,7 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
                     _DESKTOP_PARENT: "chatgpt",
                     _DESKTOP_REPL: "repl",
                     _DESKTOP_NODE: "node",
+                    _DESKTOP_APERITIF: "aperitif",
                 }.get(row[3], "other")
             )
 
@@ -279,7 +363,11 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
             if row[3] != executable:
                 raise identity_error("EXECUTABLE_MISMATCH")
             ancestors.add(pid)
-            if pid not in verified:
+            if aperitif_chain:
+                if pid not in aperitif:
+                    aperitif[pid] = (executable, _verify_aperitif_process(output, pid, executable))
+                verified.add(pid)
+            elif pid not in verified:
                 files = mappings(pid)
                 if (
                     executable not in files["txt"]
@@ -290,7 +378,7 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
                     raise ResearchProcessDiagnosticError("HOST_MAPPING_UNCONFIRMED")
                 verified.add(pid)
             pid = row[0]
-    if desktop:
+    if desktop and not aperitif:
         after = snapshot()
         if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):
             raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
@@ -330,6 +418,13 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
                 or "codex_cli_bin" in parts[1]
             ):
                 raise ResearchProcessDiagnosticError("CONTAINER_PROCESSES_UNCONFIRMED")
+    if aperitif:
+        for pid, (executable, before) in aperitif.items():
+            if _verify_aperitif_process(output, pid, executable) != before:
+                raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
+        after = snapshot()
+        if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):
+            raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
 
 
 def _row_hash(row: Base) -> str:

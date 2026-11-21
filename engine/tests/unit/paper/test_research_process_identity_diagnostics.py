@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,210 @@ _DESKTOP = (
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 )
 _BIRTH = "Mon Oct 12 10:00:00 2026"
+_APERITIF = (
+    "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/"
+    "Versions/158.0.8127.37/Helpers/Codex (Aperitif).app/Contents/MacOS/Codex (Aperitif)"
+)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "valid",
+        "maintenance",
+        "wrong_installation",
+        "wrong_version",
+        "inserted_parent",
+        "wrong_uid",
+        "bad_live_signature",
+        "bad_disk_signature",
+        "signature_timeout",
+        "wrong_inode",
+        "wrong_device",
+        "duplicate_mapping",
+        "changed_inode",
+        "second_signature_failure",
+        "changed_cwd",
+        "research_cwd",
+        "unconfirmed_cwd",
+        "replaced_process",
+        "changed_parent",
+        "additional_codex",
+        "codex_after_container_check",
+        "missing_containers",
+        "container_codex",
+    ],
+)
+def test_aperitif_is_verified_only_by_normal_formal_process_gate(monkeypatch, scenario):
+    from nexus.ops.agent_paper_recovery import require_recovery_process_quiescence
+
+    paths = {
+        201: _DESKTOP,
+        202: _APERITIF,
+        203: history_seal._DESKTOP_PARENT,
+    }
+    if scenario == "wrong_installation":
+        paths[202] = _APERITIF.replace("/Applications/", "/tmp/Applications/")
+    if scenario == "wrong_version":
+        paths[202] = _APERITIF.replace("158.0.8127.37", "158.0.8127.38")
+    pids = {201: 202, 202: 203, 203: 1}
+    if scenario == "inserted_parent":
+        pids[202] = 204
+        pids[204] = 203
+        paths[204] = "/usr/bin/sh"
+    if scenario == "additional_codex":
+        pids[205] = 1
+        paths[205] = "/tmp/extra/codex"
+
+    inode_by_path = {path: 1000 + pid for pid, path in paths.items()}
+    inode_by_path.update(
+        {
+            "/Users/test/workbench": 4001,
+            "/Users/test/other": 4002,
+            "/private/tmp/nexus-codex-job": 4003,
+        }
+    )
+    identifiers = {
+        _DESKTOP: ("codex", "9aca7e9e8b34af80dec29d17468073b262c26cbb"),
+        _APERITIF: ("com.openai.codex.helper", "bb8eeee22cd0fa7d12768e3817290e4598fd4ef3"),
+        history_seal._DESKTOP_PARENT: (
+            "com.openai.codex",
+            "b5215002d934d1b51fa2dba60375f702e4789f28",
+        ),
+    }
+    snapshots = 0
+    container_checks = 0
+    mapping_reads = {}
+    signatures = []
+
+    def execute(command, **kwargs):
+        nonlocal snapshots, container_checks
+        if command[0] == "/bin/ps":
+            snapshots += 1
+            lines = []
+            for pid, path in paths.items():
+                parent = (
+                    401
+                    if scenario == "changed_parent" and snapshots > 1 and pid == 202
+                    else pids[pid]
+                )
+                birth = (
+                    "Mon Oct 12 10:00:01 2026"
+                    if scenario == "replaced_process" and snapshots > 1 and pid == 201
+                    else _BIRTH
+                )
+                owner = os.getuid() + (scenario == "wrong_uid")
+                lines.append(f"{pid} {parent} {owner} {birth} {path}")
+            if scenario == "codex_after_container_check" and snapshots == 2:
+                assert container_checks == 1
+                lines.append(f"205 1 {os.getuid()} {_BIRTH} /tmp/late/codex")
+            result = "\n".join(lines)
+        elif command[0] == "/usr/sbin/lsof":
+            pid = int(command[command.index("-p") + 1])
+            if command[-1] == "-Fpfn":
+                result = f"p{pid}\nftxt\nn{paths[pid]}\nfcwd\nn/\n"
+            else:
+                assert command[-1] == "-F0pfDin"
+                mapping_reads[pid] = mapping_reads.get(pid, 0) + 1
+                inode = inode_by_path[paths[pid]]
+                if pid == 202 and (
+                    scenario == "wrong_inode"
+                    or scenario == "changed_inode"
+                    and mapping_reads[pid] > 1
+                ):
+                    inode += 1
+                cwd = "/Users/test/workbench"
+                if scenario == "changed_cwd" and pid == 202 and mapping_reads[pid] > 1:
+                    cwd = "/Users/test/other"
+                if scenario == "research_cwd" and pid == 202:
+                    cwd = "/private/tmp/nexus-codex-job"
+                cwd_record = f"fcwd\0D0x11\0i{inode_by_path[cwd]}\0n{cwd}\0\n"
+                if scenario == "unconfirmed_cwd" and pid == 202:
+                    cwd_record = ""
+                device = "0x12" if pid == 202 and scenario == "wrong_device" else "0x11"
+                executable_record = f"ftxt\0D{device}\0i{inode}\0n{paths[pid]}\0\n"
+                if scenario == "duplicate_mapping" and pid == 202:
+                    executable_record *= 2
+                result = f"p{pid}\0\n{executable_record}{cwd_record}"
+        elif command[0] == "/usr/bin/codesign":
+            assert command[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
+            subject = command[-1]
+            path = paths[int(subject)] if subject.isdecimal() else subject
+            identifier, digest = identifiers[path]
+            requirement = command[-2]
+            assert "anchor apple generic" in requirement
+            assert f'identifier "{identifier}"' in requirement
+            assert 'certificate leaf[subject.OU] = "2DC432GLL2"' in requirement
+            assert f'cdhash H"{digest}"' in requirement
+            signatures.append(subject)
+            if path == _APERITIF:
+                if scenario == "signature_timeout":
+                    raise subprocess.TimeoutExpired(command, timeout=kwargs["timeout"])
+                if scenario == "second_signature_failure" and signatures.count(subject) == 2:
+                    return subprocess.CompletedProcess(command, 1, "", "/private/canary")
+                if (scenario == "bad_live_signature" and subject.isdecimal()) or (
+                    scenario == "bad_disk_signature" and not subject.isdecimal()
+                ):
+                    return subprocess.CompletedProcess(command, 1, "", "/private/canary")
+            result = ""
+        elif command[1] == "ps":
+            result = "" if scenario == "missing_containers" else "abc123\n"
+        else:
+            container_checks += 1
+            result = "PID COMMAND\n1 python\n"
+            if scenario == "container_codex":
+                result += "2 codex\n"
+        return subprocess.CompletedProcess(command, 0, result, "")
+
+    def identity(path):
+        return (17, inode_by_path[str(path)], 100, 200, 300)
+
+    monkeypatch.setattr(history_seal.subprocess, "run", execute)
+    monkeypatch.setattr(history_seal, "_aperitif_file_identity", identity, raising=False)
+    if scenario == "valid":
+        require_recovery_process_quiescence()
+        assert snapshots == 2 and container_checks == 1
+        assert mapping_reads == {201: 4, 202: 4, 203: 4}
+        assert set(signatures) == {"201", "202", "203", *paths.values()}
+        assert all(signatures.count(subject) == 2 for subject in signatures)
+    else:
+        check = require_recovery_process_quiescence
+        if scenario == "maintenance":
+            check = history_seal.require_research_processes_quiescent
+        with pytest.raises(history_seal.ResearchProcessDiagnosticError) as error:
+            check()
+        assert "canary" not in json.dumps(error.value.safe_diagnostics())
+        if scenario in {"wrong_inode", "wrong_device", "duplicate_mapping", "unconfirmed_cwd"}:
+            assert error.value.code == "HOST_MAPPING_UNCONFIRMED"
+        if scenario in {
+            "bad_live_signature",
+            "bad_disk_signature",
+            "signature_timeout",
+            "second_signature_failure",
+        }:
+            assert error.value.code == "HOST_SIGNATURE_UNCONFIRMED"
+        if scenario == "missing_containers":
+            assert error.value.code == "CONTAINER_LIST_UNCONFIRMED"
+        if scenario == "container_codex":
+            assert error.value.code == "CONTAINER_PROCESSES_UNCONFIRMED"
+        if scenario == "codex_after_container_check":
+            assert error.value.code == "HOST_CHANGED_DURING_CHECK"
+        if scenario == "maintenance":
+            assert not signatures
+
+
+def test_aperitif_mapping_rejects_relative_paths_and_symlinks(tmp_path):
+    target = tmp_path / "target"
+    target.write_bytes(b"file")
+    alias = tmp_path / "alias"
+    alias.symlink_to(target)
+    assert history_seal._aperitif_file_identity(target.resolve())[:2] == (
+        target.stat().st_dev,
+        target.stat().st_ino,
+    )
+    for path in (Path("target"), alias.resolve().parent / alias.name):
+        with pytest.raises(ValueError, match="noncanonical process mapping"):
+            history_seal._aperitif_file_identity(path)
 
 
 @pytest.mark.parametrize(
