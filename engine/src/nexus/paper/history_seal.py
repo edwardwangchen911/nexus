@@ -77,18 +77,19 @@ _DESKTOP_PARENT = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 _DESKTOP_REPL = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
 _DESKTOP_NODE = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
 _MACOS_DOCKER_CLI = Path("/Applications/Docker.app/Contents/Resources/bin/docker")
-reuse_recovery_terminal_proof: ContextVar[bool] = ContextVar(
-    "reuse_recovery_terminal_proof", default=False
+terminal_proof_read_session: ContextVar[AsyncSession | None] = ContextVar(
+    "terminal_proof_read_session", default=None
 )
 
 
 @contextmanager
-def recovery_terminal_proof_scope() -> Iterator[None]:
-    token = reuse_recovery_terminal_proof.set(True)
+def terminal_proof_read_scope(session: AsyncSession) -> Iterator[None]:
+    """Reuse the already validated terminal proof for this read-only session."""
+    token = terminal_proof_read_session.set(session)
     try:
         yield
     finally:
-        reuse_recovery_terminal_proof.reset(token)
+        terminal_proof_read_session.reset(token)
 
 
 class ResearchProcessDiagnosticError(ValueError):

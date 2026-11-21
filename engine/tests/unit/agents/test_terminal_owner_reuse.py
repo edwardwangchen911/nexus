@@ -20,9 +20,9 @@ class ReachedAccounting(Exception):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("read_only", [True, False])
-@pytest.mark.parametrize("recovery_scope", [True, False])
+@pytest.mark.parametrize("scope_owner", [None, "current", "different"])
 async def test_history_seal_uses_current_terminal_proof_for_its_audit(
-    monkeypatch, read_only, recovery_scope
+    monkeypatch, read_only, scope_owner
 ):
     from nexus.agents.research_stages import public
     from nexus.jobs.models import job_input_hash
@@ -40,17 +40,23 @@ async def test_history_seal_uses_current_terminal_proof_for_its_audit(
     monkeypatch.setattr(public, "read_terminal_proof", verify_again)
     args = {"cycle_id": uuid4(), "run_id": run_id, "now": now, "read_only": read_only}
 
-    scope = history_seal.recovery_terminal_proof_scope() if recovery_scope else nullcontext()
+    scope = (
+        nullcontext()
+        if scope_owner is None
+        else history_seal.terminal_proof_read_scope(
+            session if scope_owner == "current" else object()
+        )
+    )
     with scope:
         observed = await public._history_proof(session, **args)
 
     verify.assert_awaited_once_with(session, **args)
-    reuse = recovery_scope and read_only
+    reuse = scope_owner == "current" and read_only
     if reuse:
         verify_again.assert_not_awaited()
     else:
         verify_again.assert_awaited_once_with(session, run_id=run_id, now=now)
-    assert not history_seal.reuse_recovery_terminal_proof.get()
+    assert history_seal.terminal_proof_read_session.get() is None
     expected = terminal if reuse else refreshed
     assert observed == {
         "usage": "unknown",

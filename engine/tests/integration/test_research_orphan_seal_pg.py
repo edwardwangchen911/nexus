@@ -308,6 +308,27 @@ async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
                     assert data["status"] == expected_status and data["execution_locked"]
         finally:
             await application.state.session_factory.kw["bind"].dispose()
+        if case == "late_fact":
+            from contextlib import asynccontextmanager
+            from unittest.mock import AsyncMock
+
+            from nexus.agents.research_stages import public
+            from nexus.api.routes.workbench import workbench_read_session
+            from nexus.workbench.activity_read import _cycle_settled
+
+            with monkeypatch.context() as probe:
+                repeated = AsyncMock(wraps=public.read_terminal_proof)
+                probe.setattr(public, "read_terminal_proof", repeated)
+                async with asynccontextmanager(workbench_read_session)(sessions) as read_session:
+                    assert await _cycle_settled(read_session, cycle.id, now)
+                target_calls = [
+                    call.kwargs
+                    for call in repeated.await_args_list
+                    if call.kwargs["run_id"] == run.id
+                ]
+                (target_call,) = target_calls
+                assert target_call["expected_owner"] == (cycle.id, "formal")
+                assert target_call["expected_job_id"] == job.id
         async with sessions.begin() as session:
             assert await original_facts(session) == before
             assert (
@@ -372,6 +393,8 @@ async def test_orphan_normal_seal_closes_manual_and_admits_fresh_request(
                     await history_seal.legacy_research_sealed(
                         session, cycle_id=cycle.id, run_id=run.id, now=now
                     )
+            async with asynccontextmanager(workbench_read_session)(sessions) as read_session:
+                assert not await _cycle_settled(read_session, cycle.id, now)
         from nexus.jobs.manual_retry import ManualRetryError, retry_manual_safe_job
         from nexus.jobs.repository import LeaseLostError, checkpoint_job, execute_and_finalize_job
 
