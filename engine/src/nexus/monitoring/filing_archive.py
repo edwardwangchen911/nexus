@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.audit.service import append_audit_event
 from nexus.domain.time import require_utc
 from nexus.monitoring.filing_content import (
+    MAX_DOCUMENTS,
     FilingDocument,
     document_inventory,
     filing_root,
@@ -344,11 +345,49 @@ async def read_filing_content(
             or document.entry.model_dump() not in [entry.model_dump() for entry in index.entries]
         ):
             return None
+        artifact_ids = {
+            binding.artifact_id for bindings in document.originals.values() for binding in bindings
+        }
+        registrations = {}
+        if (
+            artifact_ids
+            and len(artifact_ids) <= 2 * (MAX_DOCUMENTS + 2)
+            and not (session.new or session.dirty or session.deleted)
+        ):
+            # Artifact registrations are immutable. Scalar rows leave the ORM
+            # identity map untouched for callers with their own mapped state.
+            registrations = {
+                record.id: record
+                for record in await session.execute(
+                    select(
+                        DataArtifact.id,
+                        DataArtifact.uri,
+                        DataArtifact.sha256,
+                        DataArtifact.byte_size,
+                        DataArtifact.source,
+                        DataArtifact.created_at,
+                        DataArtifact.observed_at,
+                        DataArtifact.available_at,
+                        DataArtifact.received_at,
+                    ).where(DataArtifact.id.in_(artifact_ids))
+                )
+            }
         originals = {}
         for name, bindings in document.originals.items():
             pair = []
             for binding in bindings:
-                artifact = await session.get(DataArtifact, binding.artifact_id)
+                # A store read awaits caller code, which can change session state.
+                registration = registrations.get(binding.artifact_id)
+                artifact = (
+                    await session.get(DataArtifact, binding.artifact_id)
+                    if registration is None
+                    or session.new
+                    or session.dirty
+                    or session.deleted
+                    or session.identity_key(DataArtifact, binding.artifact_id)
+                    in session.identity_map
+                    else registration
+                )
                 if (
                     artifact is None
                     or (artifact.uri, artifact.sha256, artifact.byte_size)

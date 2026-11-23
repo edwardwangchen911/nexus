@@ -19,7 +19,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.monitoring import MonitorObservationBatch
 from nexus.persistence.models.runtime import Job
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 
 def archive(root, entry, *, extra=False, exhibit_text="", sec_display=False):
@@ -202,6 +202,35 @@ async def test_normal_content_entry_binds_all_exact_events_and_preserves_old_cut
                     )
                     is None
                 )
+                saved = await session.get(DataSnapshot, UUID(imported["snapshot_id"]))
+                artifact_ids = {
+                    UUID(binding["artifact_id"])
+                    for pair in saved.payload["originals"].values()
+                    for binding in pair
+                }
+                reads = []
+
+                def record_filing_artifacts(conn, cursor, sql, params, context, many):
+                    if "FROM data_artifacts" in sql:
+                        selected = artifact_ids.intersection(params)
+                        if selected:
+                            reads.append(selected)
+
+                engine = factory.kw["bind"].sync_engine
+                event.listen(engine, "before_cursor_execute", record_filing_artifacts)
+                try:
+                    assert (
+                        await read_filing_content(
+                            session,
+                            snapshot_id=saved.id,
+                            as_of=captured["clock"][0],
+                        )
+                        is not None
+                    )
+                finally:
+                    event.remove(engine, "before_cursor_execute", record_filing_artifacts)
+                assert len(artifact_ids) > 1
+                assert reads == [artifact_ids]
         repeated = await run(
             settings,
             argparse.Namespace(
