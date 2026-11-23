@@ -62,6 +62,7 @@ async def _inputs(
     now: datetime,
     *,
     current_eligibility: bool = True,
+    classify_expired_capture: bool = False,
 ) -> BatchInputs:
     from nexus.agents.codex_formal_stage import require_formal_stage_model_profile
     from nexus.agents.paper_context import AgentPaperResearchContext
@@ -93,6 +94,8 @@ async def _inputs(
     qualified_sources: dict[UUID, QualifiedSource] = {}
     contents = []
     missing: list[str] = []
+    expired_capture = None
+    expired_members = 0
     for trigger_id in batch.trigger_ids:
         trigger = await session.get(MonitorTrigger, UUID(trigger_id))
         check = None if trigger is None else await session.get(MonitorCheck, trigger.check_id)
@@ -225,11 +228,30 @@ async def _inputs(
             raise MaterialGap("SEC_MONITOR_DOCUMENT_FORMAT_UNSUPPORTED") from None
         entry = SecIndexEntry.model_validate(metadata.model_dump())
         if check.observation.get("policy") == "durable_sec_research_binding_v1":
-            from nexus.monitoring.durable_sec_research import read_binding_observation
-
-            saved = await read_binding_observation(
-                session, check=check, plan=plan, current_eligibility=current_eligibility, now=now
+            from nexus.monitoring.durable_sec_research import (
+                CurrentSecCaptureExpired,
+                read_binding_observation,
             )
+
+            try:
+                saved = await read_binding_observation(
+                    session,
+                    check=check,
+                    plan=plan,
+                    current_eligibility=current_eligibility,
+                    now=now,
+                )
+            except CurrentSecCaptureExpired as error:
+                if not classify_expired_capture:
+                    raise
+                if expired_capture is not None and (
+                    error.capture_id != expired_capture.capture_id
+                    or error.rule_id != expired_capture.rule_id
+                ):
+                    raise ValueError(str(error)) from None
+                saved = error.observation
+                expired_capture = error
+                expired_members += 1
             if saved != check.observation or trigger.event_key != saved["event_key"]:
                 raise MaterialGap("MONITOR_CONTEXT_INVALID")
             issuer_cik = trigger.event_key.split(":")[1]
@@ -290,6 +312,18 @@ async def _inputs(
         if len(identities) != 1:
             raise MaterialGap("MONITOR_CONTENT_CONFLICT")
         contents.append(valid[0])
+    if expired_capture is not None:
+        from nexus.monitoring.durable_sec_host import latest_capture
+        from nexus.monitoring.durable_sec_storage import _time
+        from nexus.persistence.models.sec_monitor import SecMonitorRule
+
+        rule = await session.get(SecMonitorRule, expired_capture.rule_id)
+        if rule is None or expired_members != len(batch.trigger_ids):
+            raise ValueError(str(expired_capture))
+        latest = await latest_capture(session, rule, await _time(session))
+        if latest is None or latest.id != expired_capture.capture_id:
+            raise ValueError(str(expired_capture))
+        raise expired_capture
     if missing:
         raise MaterialGap("MONITOR_CONTENT_MISSING", len(missing), tuple(sorted(missing)))
     return BatchInputs(
@@ -354,7 +388,7 @@ async def prepare_batch_inputs(
             "content_count": len(value.contents),
         }
     try:
-        value = await _inputs(session, batch, now)
+        value = await _inputs(session, batch, now, classify_expired_capture=True)
     except MaterialGap as error:
         return {
             **fixed,

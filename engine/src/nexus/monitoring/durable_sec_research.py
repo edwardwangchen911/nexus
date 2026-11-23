@@ -22,6 +22,7 @@ from nexus.persistence.models.monitoring import (
     MonitorPlan,
     MonitorTrigger,
 )
+from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryCheck,
     SecDiscoveryEvent,
@@ -38,6 +39,17 @@ from nexus.research.sec_exhibit_storage import configured_exhibit_store
 POLICY = "durable_sec_research_binding_v1"
 ROUTING = "durable_research_v2"
 INVALID = "DURABLE_SEC_RESEARCH_EVIDENCE_INVALID"
+_CAPTURE_MAX_AGE = timedelta(seconds=300)
+
+
+class CurrentSecCaptureExpired(ValueError):
+    """The latest verified capture still has the exact event but is too old."""
+
+    def __init__(self, observation: dict[str, object], *, capture_id: UUID, rule_id: UUID) -> None:
+        super().__init__(INVALID)
+        self.observation = observation
+        self.capture_id = capture_id
+        self.rule_id = rule_id
 
 
 def verify_event_evidence(event: Any, capture: Any, *, now: datetime) -> SecIndexEntry:
@@ -48,7 +60,7 @@ def verify_event_evidence(event: Any, capture: Any, *, now: datetime) -> SecInde
     if (
         current.instrument_id != event.instrument_id
         or event.event_key != f"sec:{current.issuer_cik}:{entry.accession_number}"
-        or not timedelta(0) <= now - require_utc(current.received_at) <= timedelta(seconds=300)
+        or not timedelta(0) <= now - require_utc(current.received_at) <= _CAPTURE_MAX_AGE
         or any(issue.accession_number == entry.accession_number for issue in capture.issues)
         or tuple(
             item for item in current.entries if item.accession_number == entry.accession_number
@@ -128,6 +140,17 @@ async def read_binding_observation(
     if row.revision != binding.capture_hash:
         raise ValueError(INVALID)
     entry = verify_event_evidence(event, capture, now=binding.bound_at)
+    observation = {
+        "policy": POLICY,
+        "binding_id": str(binding.id),
+        "event_id": str(event.id),
+        "rule_id": str(event.rule_id),
+        "event_key": event.event_key,
+        "current_snapshot_id": str(row.id),
+        "current_hash": row.revision,
+        "received_at": capture.index.received_at.isoformat(),
+        "entry": entry.model_dump(mode="json"),
+    }
     if current_eligibility:
         from nexus.monitoring.durable_sec_host import current_identity, latest_capture
         from nexus.monitoring.durable_sec_refreeze import require_current_batch
@@ -160,18 +183,27 @@ async def read_binding_observation(
         newest = await latest_capture(session, rule, checked_now)
         if newest is None or newest.id != latest.id:
             raise ValueError(INVALID)
+        received_at = require_utc(current_capture.index.received_at)
+        if checked_now - received_at > _CAPTURE_MAX_AGE:
+            # Validate the archived content at its own receipt time to
+            # distinguish an exact stale capture from changed evidence.
+            verify_event_evidence(event, current_capture, now=received_at)
+            if (
+                await session.scalar(
+                    select(SecDisclosureKeyConflict.id)
+                    .where(
+                        SecDisclosureKeyConflict.account_id == event.account_id,
+                        SecDisclosureKeyConflict.instrument_id == event.instrument_id,
+                        SecDisclosureKeyConflict.event_key == event.event_key,
+                    )
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise ValueError(INVALID)
+            raise CurrentSecCaptureExpired(observation, capture_id=latest.id, rule_id=rule.id)
         verify_event_evidence(event, current_capture, now=checked_now)
-    return {
-        "policy": POLICY,
-        "binding_id": str(binding.id),
-        "event_id": str(event.id),
-        "rule_id": str(event.rule_id),
-        "event_key": event.event_key,
-        "current_snapshot_id": str(row.id),
-        "current_hash": row.revision,
-        "received_at": capture.index.received_at.isoformat(),
-        "entry": entry.model_dump(mode="json"),
-    }
+    return observation
 
 
 async def prepare_durable_sec_research_batch(
@@ -273,7 +305,7 @@ async def prepare_durable_sec_research_batch(
     if (capture.index.instrument_id, capture.index.issuer_cik) != (
         rule.instrument_id,
         rule.issuer_cik,
-    ) or not timedelta(0) <= now - capture.index.received_at <= timedelta(seconds=300):
+    ) or not timedelta(0) <= now - capture.index.received_at <= _CAPTURE_MAX_AGE:
         raise ValueError(INVALID)
     superseded = set(
         await session.scalars(
