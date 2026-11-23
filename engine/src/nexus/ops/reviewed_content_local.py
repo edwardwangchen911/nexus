@@ -35,6 +35,7 @@ async def inspect_reviewed_content(
                 "0136_sec_adopted_content",
                 "0137_linear_json_canonical",
                 "0138_sec_accepted_cutoff",
+                "0139_sec_audit_lookup",
             }:
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
             now = await db.scalar(text("SELECT clock_timestamp()"))
