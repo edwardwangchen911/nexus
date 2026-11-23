@@ -32,13 +32,19 @@ async def test_deferred_discovery_audit_uses_indexed_check_lookup(
             rule_id = rule.id
         async with factory.begin() as session:
             now = await session.scalar(text("SELECT clock_timestamp()"))
-            check = await durable.record_discovery(
-                session,
-                account_id=pointer.account_id,
-                rule_id=rule_id,
-                capture_id=None,
-                scheduled_at=now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0),
-            )
+
+            async def scan_time(_session):
+                return now
+
+            with monkeypatch.context() as frozen_clock:
+                frozen_clock.setattr(durable, "_time", scan_time)
+                check = await durable.record_discovery(
+                    session,
+                    account_id=pointer.account_id,
+                    rule_id=rule_id,
+                    capture_id=None,
+                    scheduled_at=now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0),
+                )
             assert check.result == "unknown"
             # An indexable predicate must avoid a sequential scan even when the
             # small test relation would normally be cheaper to scan.
