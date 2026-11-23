@@ -54,6 +54,8 @@ class ReadProbeDeadline:
     stage: str
     stage_ms: int
     elapsed_ms: int
+    independent_proof_step: str | None = None
+    terminal_proof_step: str | None = None
 
 
 @dataclass

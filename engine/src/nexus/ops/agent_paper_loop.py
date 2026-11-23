@@ -2248,11 +2248,26 @@ def _emit_agent_paper_unknown_failure(
                 and pending_read_deadline.stage in STAGES
                 and 0 <= pending_read_deadline.stage_ms <= pending_read_deadline.elapsed_ms
             ):
-                payload["pending_read_deadline"] = {
+                deadline_detail: dict[str, str | int] = {
                     "stage": pending_read_deadline.stage,
                     "stage_ms": pending_read_deadline.stage_ms,
                     "elapsed_ms": pending_read_deadline.elapsed_ms,
                 }
+                proof_step = pending_read_deadline.independent_proof_step
+                terminal_step = pending_read_deadline.terminal_proof_step
+                if (
+                    pending_read_deadline.stage == "independent_proof"
+                    and proof_step is not None
+                    and proof_step in INDEPENDENT_PROOF_STEPS
+                ):
+                    deadline_detail["independent_proof_step"] = proof_step
+                    if (
+                        proof_step == "terminal_proof"
+                        and terminal_step is not None
+                        and terminal_step in TERMINAL_PROOF_STEPS
+                    ):
+                        deadline_detail["terminal_proof_step"] = terminal_step
+                payload["pending_read_deadline"] = deadline_detail
             if (
                 pending_probe_step
                 in {_PendingProbeStep.PAUSE_RECORD, _PendingProbeStep.RESUME_RECORD}

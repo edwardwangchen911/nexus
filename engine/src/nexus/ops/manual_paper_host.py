@@ -484,6 +484,8 @@ async def manual_work_pending(settings: EngineSettings, *, account_id: UUID) -> 
                         current.stage,
                         int((end - current.since) * 1000),
                         int((end - current.started) * 1000),
+                        independent_proof_step=current.independent_proof_step,
+                        terminal_proof_step=current.terminal_proof_step,
                     )
                 _mark_pending_failure(error, phase)
                 raise

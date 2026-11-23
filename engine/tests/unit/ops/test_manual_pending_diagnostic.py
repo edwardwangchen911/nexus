@@ -13,6 +13,7 @@ from helpers.current_identity import filing, profile
 from nexus.market import current_identity as identity
 from nexus.ops import agent_paper_loop as loop
 from nexus.ops import manual_paper_host as host
+from nexus.ops.pending_probe import probe_independent_proof_step, probe_terminal_proof_step
 from nexus.paper import formal_intraday_intent
 from nexus.settings import EngineSettings
 
@@ -418,6 +419,12 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
         logs.append("peek")
         if attempts <= 2:
             host.probe_stage("independent_proof")
+            probe_independent_proof_step("terminal_proof")
+            probe_terminal_proof_step(
+                "sec_baseline_storage_read_timeout"
+                if finish == "pause_guard_rejected"
+                else "private-deadline-field"
+            )
             elapsed += 15
             timer.reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
@@ -545,6 +552,11 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
             deadline = diagnostic["pending_read_deadline"]
             assert deadline["stage"] == "independent_proof"
             assert 0 <= deadline["stage_ms"] <= deadline["elapsed_ms"]
+            assert deadline["independent_proof_step"] == "terminal_proof"
+            if finish == "pause_guard_rejected":
+                assert deadline["terminal_proof_step"] == "sec_baseline_storage_read_timeout"
+            else:
+                assert "terminal_proof_step" not in deadline
         else:
             assert "pending_read_deadline" not in diagnostic
         if finish == "pause_guard_rejected":
@@ -553,3 +565,4 @@ async def test_recovery_reinspects_new_day_before_one_dispatch(monkeypatch, caps
             assert "pending_probe_code" not in diagnostic
         assert "commit unconfirmed" not in json.dumps(diagnostic)
         assert "private heartbeat failure" not in json.dumps(diagnostic)
+        assert "private-deadline-field" not in json.dumps(diagnostic)
