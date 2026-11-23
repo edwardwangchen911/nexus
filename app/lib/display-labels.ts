@@ -89,7 +89,7 @@ const reasons: Record<string, string> = {
   CURRENCY_EXPOSURE_REQUIRES_IDENTITIES: "计算币种占比需要标的币种资料",
   staged_action_semantics_unverified: "角色表态尚不能确定投资方向或证据缺口是否解决",
   model_stage_allowance_exhausted: "研究阶段达到既定用量、调用次数或时间上限，未继续调用模型",
-  model_usage_uncertain: "部分模型调用未返回用量",
+  model_usage_uncertain: "部分模型调用的用量未能核验",
   model_output_limit_reached: "模型达到输出上限，未返回完整研究结果",
   model_research_stopped: "模型研究已停止，具体停止原因未分类",
   model_execution_failed: "模型执行未完成，具体原因尚未确认",
