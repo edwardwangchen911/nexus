@@ -9807,6 +9807,7 @@ export interface operations {
             };
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
             };
@@ -12297,6 +12298,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
             };
