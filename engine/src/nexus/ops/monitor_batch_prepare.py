@@ -38,6 +38,7 @@ from nexus.settings import EngineSettings
 CLAIM = "research.monitor.material_collection_claimed"
 RESULT = "research.monitor.material_preparation_result"
 SCHEMA = "monitor_batch_prepare_v1"
+_ACCOUNT_BUSY = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
 
 
 def _result(
@@ -93,6 +94,21 @@ async def _history(
                 "unknown",
             }:
                 return True, None
+            if "deferred_before_collection" in payload and (
+                claims
+                or (latest is not None and latest.get("deferred_before_collection") is not True)
+                or row.actor_id != "research-monitor"
+                or payload.get("deferred_before_collection") is not True
+                or payload.get("status") != "blocked"
+                or payload.get("reason") != _ACCOUNT_BUSY
+                or any(
+                    type(payload.get(key)) is not int or payload[key] != 0
+                    for key in ("provider_requests", "model_requests")
+                )
+                or payload.get("job_created") is not False
+                or payload.get("execution_locked") is not True
+            ):
+                return True, None
             settled.add(operation)
             latest = payload
     return bool(claims - settled), latest
@@ -127,7 +143,13 @@ async def inspect_batch_preparation(session: AsyncSession, batch_id: UUID) -> st
             if await read_batch_inputs(session, snapshot_id=row.id, as_of=now) is not None
             else "blocked"
         )
-    return "blocked" if latest is not None and latest.get("status") == "blocked" else "pending"
+    if (
+        latest is not None
+        and latest.get("status") == "blocked"
+        and latest.get("deferred_before_collection") is not True
+    ):
+        return "blocked"
+    return "pending"
 
 
 async def confirm_batch_preparation(
@@ -331,20 +353,28 @@ async def prepare_pending_batch(
                 _contact(sec_contact or "")
                 archive = _archive_root(repo_root) / str(operation)
             except ValueError as error:
-                code = (
-                    str(error)
-                    if str(error)
-                    in {
+                code = str(error)
+                if code == _ACCOUNT_BUSY:
+                    result = _result(batch_id, "blocked", code)
+                    open_claim, latest = await _history(session, batch)
+                    if (
+                        state == "pending"
+                        and not open_claim
+                        and (latest is None or latest.get("deferred_before_collection") is True)
+                    ):
+                        # Only a batch with no prior attempt can wait for a later tick.
+                        result["deferred_before_collection"] = True
+                else:
+                    if code not in {
                         "MONITOR_PENDING_OVERFLOW",
                         "MONITOR_SCOPE_INVALID",
                         "MONITOR_TRIGGER_UNAVAILABLE",
                         "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN",
                         "SEC_MONITOR_CONTACT_REQUIRED",
                         "MONITOR_COLLECTION_DIRECTORY_INVALID",
-                    }
-                    else "MONITOR_PREPARATION_INELIGIBLE"
-                )
-                result = _result(batch_id, "blocked", code)
+                    }:
+                        code = "MONITOR_PREPARATION_INELIGIBLE"
+                    result = _result(batch_id, "blocked", code)
                 await _record(session, batch, operation, result, now)
                 return result
             await append_audit_event(

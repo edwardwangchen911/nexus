@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from uuid import UUID
 
 import httpx
@@ -10,6 +11,7 @@ from integration.test_candidate_multistock_path import _set_test_insert_clock
 from integration.test_monitor_batches_pg import installed
 from integration.test_monitor_increment_pg import append_fresh_inputs
 from nexus.monitoring.batches import scan_stock_batch
+from nexus.persistence.models.monitoring import MonitorTrigger
 from nexus.persistence.models.runtime import AuditEvent, Job, JobLease
 from sqlalchemy import func, select
 
@@ -341,28 +343,85 @@ async def test_source_overflow_and_existing_unknown_account_cannot_claim_collect
 
 
 @pytest.mark.asyncio
-async def test_success_status_without_consumed_fence_still_blocks_before_collection(
+async def test_account_preflight_rechecks_after_lease_expiry_before_first_collection(
     migrated_database_url, monkeypatch, tmp_path
 ):
+    from helpers.paper_batch import CALENDAR_ID
     from nexus.jobs import repository
-    from nexus.ops.monitor_batch_prepare import prepare_pending_batch
+    from nexus.ops import monitor_batch_prepare as preparation
+    from nexus.ops.monitor_dispatch import dispatch_configured_once
 
     factory, settings, store, captured, batch_id, jobs = await setup(
         migrated_database_url, monkeypatch, tmp_path, before_lease_expiry=True
     )
-    calls = mocked_collector(monkeypatch, store, captured)
-
-    async def unproven(*args, **kwargs):
-        return False
-
-    monkeypatch.setattr(repository, "job_lease_consumed", unproven)
     try:
-        result = await prepare_pending_batch(
-            settings, batch_id=batch_id, repo_root=tmp_path, sec_contact="test@example.invalid"
+        async with factory() as session:
+            trigger_id = await session.scalar(
+                select(MonitorTrigger.id)
+                .where(MonitorTrigger.batch_id == batch_id)
+                .order_by(MonitorTrigger.id)
+                .limit(1)
+            )
+            lease_expiry = await session.scalar(select(func.max(JobLease.expires_at)))
+        assert trigger_id is not None
+        assert captured["clock"][0] < lease_expiry
+        dispatch = partial(
+            dispatch_configured_once,
+            settings,
+            trigger_id=trigger_id,
+            calendar_authority_id=CALENDAR_ID,
+            repo_root=tmp_path,
+            sec_contact="test@example.invalid",
         )
+        calls = mocked_collector(monkeypatch, store, captured)
+
+        async def unproven(*args, **kwargs):
+            return False
+
+        with monkeypatch.context() as proof:
+            proof.setattr(repository, "job_lease_consumed", unproven)
+            result = await dispatch()
         assert result["status"] == "blocked" and not calls
+        assert result["reason"] == "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+        assert result["deferred_before_collection"] is True
         assert result["provider_requests"] == result["model_requests"] == 0
         async with factory() as session:
+            assert await preparation.inspect_batch_preparation(session, batch_id) == "pending"
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(AuditEvent.action == preparation.CLAIM)
+                )
+                == 0
+            )
+            assert await session.scalar(select(func.count()).select_from(Job)) == jobs
+        assert await preparation.confirm_batch_preparation(
+            settings, account_id=settings.agent_paper_account_id, batch_id=batch_id
+        )
+        assert (await dispatch())["status"] == "checked" and not calls
+        captured["clock"][0] = max(
+            captured["clock"][0] + timedelta(minutes=5), lease_expiry + timedelta(seconds=1)
+        )
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        later = await dispatch()
+        assert later["status"] == "preparing" and later["provider_requests"] == len(calls) == 2
+
+        async def account_unavailable(*args, **kwargs):
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+        captured["clock"][0] += timedelta(minutes=5)
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        with monkeypatch.context() as proof:
+            proof.setattr(preparation, "require_manual_account_available", account_unavailable)
+            blocked_after_collection = await dispatch()
+        assert blocked_after_collection["status"] == "blocked"
+        assert "deferred_before_collection" not in blocked_after_collection
+        captured["clock"][0] += timedelta(minutes=5)
+        await _set_test_insert_clock(factory, captured["clock"][0])
+        assert (await dispatch())["status"] == "blocked" and len(calls) == 2
+        async with factory() as session:
+            assert await preparation.inspect_batch_preparation(session, batch_id) == "blocked"
             assert await session.scalar(select(func.count()).select_from(Job)) == jobs
     finally:
         await factory.kw["bind"].dispose()
