@@ -75,6 +75,7 @@ class DurableSecEventView(MonitoringViewModel):
     accepted_at: datetime
     first_seen_at: datetime
     metadata_status: Literal["recorded", "conflict"]
+    event_id: UUID | None = None
     notice: DurableSecNoticeView | None = None
     research_status: DurableSecResearchStatus | None = None
 

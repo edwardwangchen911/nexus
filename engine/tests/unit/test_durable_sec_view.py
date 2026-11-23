@@ -99,6 +99,7 @@ def event():
         effective_at=NOW - timedelta(hours=2),
     )
     row = SecDiscoveryEvent(
+        id=uuid4(),
         account_id=policy.account_id,
         instrument_id=policy.instrument_id,
         event_key="sec:0000123456:0000123456-26-000099",
@@ -125,6 +126,7 @@ def test_first_seen_is_not_acceptance_and_conflict_stays_visible():
 def test_event_can_show_persisted_research_without_relabeling_discovery():
     row, policy = event()
     view = project_event(row, policy, NOW, conflict=True, research_status="increment_failed")
+    assert view.event_id == row.id
     assert view.research_status == "increment_failed"
     assert view.metadata_status == "conflict" and view.notice is None
 

@@ -176,6 +176,7 @@ def project_event(
         raise ValueError("DURABLE_SEC_VIEW_INVALID")
     return DurableSecEventView.model_validate(
         {
+            "event_id": row.id,
             "event_key": row.event_key,
             "form": entry.form,
             "accepted_at": entry.accepted_at,

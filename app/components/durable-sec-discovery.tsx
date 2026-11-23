@@ -3,6 +3,7 @@ import { formatDisplayTime } from "../lib/display-format";
 import { Badge } from "./ui/badge";
 
 type View = components["schemas"]["DurableSecView"];
+type DailyProposal = components["schemas"]["DurableSecPendingProposal"];
 type Notice = components["schemas"]["DurableSecNoticeView"];
 type ResearchStatus = NonNullable<components["schemas"]["DurableSecEventView"]["research_status"]>;
 const states = { active: "规则已启用", paused: "规则已暂停", revoked: "规则已撤销", unknown: "规则状态待核验" } as const;
@@ -73,8 +74,12 @@ function NoticeReceipt({ notice }: { notice: Notice }): React.ReactElement {
   </>;
 }
 
-export function DurableSecDiscovery({ discovery }: { discovery: View }): React.ReactElement {
+export function DurableSecDiscovery({ discovery, dailyProposal }: {
+  discovery: View;
+  dailyProposal?: DailyProposal | null;
+}): React.ReactElement {
   const check = discovery.latest_check;
+  const dailyReviews = new Map(dailyProposal?.items.map((item) => [item.event_id, item]));
   return <section className="decision-card" aria-label="长期 SEC 公告发现">
     <header className="decision-card__heading"><div><p className="eyebrow">独立于研究有效期 · 只读记录</p><h2>长期 SEC 公告发现</h2></div><Badge>{states[discovery.state]}</Badge></header>
     <p>公告发现规则不随旧研究计划到期；规则已启用不代表宿主当前在线。</p>
@@ -101,13 +106,20 @@ export function DurableSecDiscovery({ discovery }: { discovery: View }): React.R
       </div> : null}
     </section> : <p>尚无可核验的已保存检查；不表示没有公告。</p>}
     <p>共保存 {discovery.event_count} 项新增公告{discovery.event_count > 5 ? "，仅显示最近 5 项" : ""}。首次发现时间不等于公告发布时间；生效前的旧公告不作为新增。</p>
-    {discovery.events.map((event) => <article className="decision-card__section" key={event.event_key}>
-      <h3>{event.form} · {event.event_key.split(":").at(-1)}</h3>
-      <dl className="decision-card__versions"><div><dt>SEC 接受时间</dt><dd>{formatDisplayTime(event.accepted_at)}</dd></div><div><dt>首次发现时间</dt><dd>{formatDisplayTime(event.first_seen_at)}</dd></div></dl>
-      {event.metadata_status === "conflict" ? <p>公告元数据出现冲突，后续处理状态待核验。</p> : null}
-      {event.research_status ? <p>{researchStatuses[event.research_status]}</p> : null}
-      {event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>}
-    </article>)}
+    {discovery.events.map((event) => {
+      const review = event.event_id ? dailyReviews.get(event.event_id) : undefined;
+      return <article className="decision-card__section" key={event.event_key}>
+        <h3>{event.form} · {event.event_key.split(":").at(-1)}</h3>
+        <dl className="decision-card__versions"><div><dt>SEC 接受时间</dt><dd>{formatDisplayTime(event.accepted_at)}</dd></div><div><dt>首次发现时间</dt><dd>{formatDisplayTime(event.first_seen_at)}</dd></div></dl>
+        {event.metadata_status === "conflict" ? <p>公告元数据出现冲突，后续处理状态待核验。</p> : null}
+        {review && (review.status === "unresolved" || review.status === "addressed") ? <>
+          <p>本次日研判断 · {review.status === "unresolved" ? "未决" : "已回答"}</p>
+          <p>{review.rationale}</p>
+        </> : null}
+        {event.research_status ? <p>{researchStatuses[event.research_status]}</p> : null}
+        {event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>}
+      </article>;
+    })}
     <p role="note">公告发现不代表通知已送达或研究已完成。研究有效期、旧事件一次限制、每日增量名额与未知费用仍独立核验；本区不表示可以发起研究或交易，交易保持锁定。</p>
   </section>;
 }

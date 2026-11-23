@@ -4110,6 +4110,18 @@ export const runtimeContractSchemas = {
         "title": "Accepted At",
         "type": "string"
       },
+      "event_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Event Id"
+      },
       "event_key": {
         "title": "Event Key",
         "type": "string"

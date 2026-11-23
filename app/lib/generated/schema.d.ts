@@ -2850,6 +2850,8 @@ export interface components {
              * Format: date-time
              */
             accepted_at: string;
+            /** Event Id */
+            event_id?: string | null;
             /** Event Key */
             event_key: string;
             /**
