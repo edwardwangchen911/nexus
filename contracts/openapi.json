@@ -4447,6 +4447,18 @@
             "title": "Accepted At",
             "type": "string"
           },
+          "event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
           "event_key": {
             "title": "Event Key",
             "type": "string"
@@ -21914,6 +21926,22 @@
               ],
               "title": "X-Nexus-Sec-Research-View"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Event-Id-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Event-Id-View"
+            }
           }
         ],
         "responses": {
@@ -25386,6 +25414,22 @@
                 }
               ],
               "title": "X-Nexus-Sec-Research-View"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Event-Id-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Event-Id-View"
             }
           }
         ],

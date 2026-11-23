@@ -2850,6 +2850,8 @@ export interface components {
              * Format: date-time
              */
             accepted_at: string;
+            /** Event Id */
+            event_id?: string | null;
             /** Event Key */
             event_key: string;
             /**
@@ -9805,6 +9807,7 @@ export interface operations {
             };
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
             };
@@ -12295,6 +12298,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
             };

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DurableSecDiscovery } from "../../../app/components/durable-sec-discovery";
 import { ResearchPanel } from "../../../app/(protected)/research/[instrumentId]/page";
@@ -17,6 +17,7 @@ const view: components["schemas"]["DurableSecView"] = {
 describe("durable SEC discovery facts", () => {
   it("accepts discovery events from an engine without notification readback", () => {
     expect(runtimeContractSchemas.DurableSecEventView.required).not.toContain("notice");
+    expect(runtimeContractSchemas.DurableSecEventView.required).not.toContain("event_id");
     render(<DurableSecDiscovery discovery={view} />);
     expect(screen.getByText("暂无可核验通知记录。")).toBeVisible();
   });
@@ -75,6 +76,25 @@ describe("durable SEC discovery facts", () => {
   it("keeps metadata conflict visible", () => {
     render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], metadata_status: "conflict" }] }} />);
     expect(screen.getByText(/公告元数据出现冲突/)).toBeVisible();
+  });
+  it.each([["unresolved", "未决"], ["addressed", "已回答"]] as const)("shows the original %s daily review on its exact event", (status, label) => {
+    const eventId = "00000000-0000-4000-8000-000000000099";
+    const otherId = "00000000-0000-4000-8000-000000000098";
+    const rationale = "调查的经营和财务影响仍缺乏证据。";
+    const review = { context_hash: "a".repeat(64), items: [{ event_id: eventId, status, rationale, evidence_refs: [] }] };
+    const event = view.events[0];
+    const discovery: components["schemas"]["DurableSecView"] = { ...view, event_count: 3, events: [
+      { ...event, event_id: otherId, event_key: "sec:0000123456:0000123456-26-000098" },
+      { ...event, event_id: eventId, research_status: "bound" },
+      { ...event, event_key: "sec:0000123456:0000123456-26-000097" },
+    ] };
+    const research = researchData({ intent: { ...researchData().intent, durable_sec_pending_proposal: review }, durable_disclosure: discovery });
+    render(<ResearchPanel state="ready" admission={null} submitting={false} notice={null} replay={true} onRefresh={vi.fn()} onRun={vi.fn()} research={research} />);
+    const card = screen.getByRole("heading", { name: "8-K · 0000123456-26-000099" }).closest("article")!;
+    expect(within(card).getByText(`本次日研判断 · ${label}`)).toBeVisible();
+    expect(within(card).getByText(rationale)).toBeVisible();
+    expect(within(card).getByText("已关联增量材料，暂无逐事件处理回执。")).toBeVisible();
+    expect(screen.getAllByText(rationale)).toHaveLength(1);
   });
   it.each([
     ["increment_failed", "原增量研究失败，暂无逐事件处理回执。"],

@@ -46,6 +46,7 @@ export async function engineFetch<Path extends InternalPath>(target: EngineTarge
     if (method === "GET") {
       headers.set("X-Nexus-SEC-Notice-View", "1");
       headers.set("X-Nexus-SEC-Research-View", "1");
+      headers.set("X-Nexus-SEC-Event-Id-View", "1");
     }
   }
   const protectedHeaders = createEngineHmacHeaders({ keyId: config.keyId, secret: config.secret, method, pathAndQuery: resolved.pathAndQuery, timestamp: Math.floor(Date.now() / 1000), nonce: uuidv7(), actorId: init.actor.userId, requestId: init.actor.requestId || uuidv7(), body });

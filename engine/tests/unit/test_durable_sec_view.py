@@ -1,9 +1,14 @@
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
 from nexus.api.durable_sec import project_check, project_event, read_event_research_status
+from nexus.api.routes.research import _research_wire
+from nexus.api.schemas.agents import ResearchRunEnvelope, ResearchRunResponse
+from nexus.api.schemas.durable_sec import DurableSecView
+from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.monitoring.durable_sec_contracts import DurableSecPolicy
 from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
 from nexus.persistence.models.sec_monitor import SecDiscoveryCheck, SecDiscoveryEvent
@@ -99,6 +104,7 @@ def event():
         effective_at=NOW - timedelta(hours=2),
     )
     row = SecDiscoveryEvent(
+        id=uuid4(),
         account_id=policy.account_id,
         instrument_id=policy.instrument_id,
         event_key="sec:0000123456:0000123456-26-000099",
@@ -125,8 +131,30 @@ def test_first_seen_is_not_acceptance_and_conflict_stays_visible():
 def test_event_can_show_persisted_research_without_relabeling_discovery():
     row, policy = event()
     view = project_event(row, policy, NOW, conflict=True, research_status="increment_failed")
+    assert view.event_id == row.id
     assert view.research_status == "increment_failed"
     assert view.metadata_status == "conflict" and view.notice is None
+
+
+def test_event_id_is_only_sent_to_an_opted_in_reader():
+    row, policy = event()
+    view = DurableSecView(
+        observed_at=NOW,
+        rule_id=uuid4(),
+        state="active",
+        event_count=1,
+        events=(project_event(row, policy, NOW, conflict=False),),
+    )
+    envelope = ResearchRunEnvelope.model_construct(
+        data=ResearchRunResponse.model_construct(durable_disclosure=view),
+        meta=SuccessMetaResponse(request_id=uuid4(), as_of=NOW),
+    )
+    prior = _research_wire(envelope, "1", include_sec_notices=True, include_sec_research=True)
+    assert "event_id" not in json.loads(prior.body)["data"]["durable_disclosure"]["events"][0]
+    current = _research_wire(envelope, "1", include_sec_event_ids=True)
+    entry = json.loads(current.body)["data"]["durable_disclosure"]["events"][0]
+    assert entry["event_id"] == str(row.id)
+    assert "notice" not in entry and "research_status" not in entry
 
 
 @pytest.mark.asyncio

@@ -175,6 +175,7 @@ def _research_wire(
     headers: dict[str, str] | None = None,
     include_sec_notices: bool = False,
     include_sec_research: bool = False,
+    include_sec_event_ids: bool = False,
 ) -> JSONResponse:
     # A previous BFF rejects unknown keys. Negotiate the additive fields so
     # either service can roll back independently, including the create receipt.
@@ -191,6 +192,8 @@ def _research_wire(
                 event.pop("notice", None)
             if not include_sec_research:
                 event.pop("research_status", None)
+            if not include_sec_event_ids:
+                event.pop("event_id", None)
     return JSONResponse(
         status_code=status,
         headers=headers,
@@ -282,6 +285,7 @@ async def get_research_run(
     monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     sec_notice_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Notice-View")] = None,
     sec_research_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Research-View")] = None,
+    sec_event_id_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Event-Id-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -305,6 +309,7 @@ async def get_research_run(
         monitor_view,
         include_sec_notices=sec_notice_view == "1",
         include_sec_research=sec_research_view == "1",
+        include_sec_event_ids=sec_event_id_view == "1",
     )
 
 
@@ -324,6 +329,7 @@ async def get_instrument_research(
     monitor_view: Annotated[str | None, Header(alias="X-Nexus-Monitor-View")] = None,
     sec_notice_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Notice-View")] = None,
     sec_research_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Research-View")] = None,
+    sec_event_id_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Event-Id-View")] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -370,6 +376,7 @@ async def get_instrument_research(
         monitor_view,
         include_sec_notices=sec_notice_view == "1",
         include_sec_research=sec_research_view == "1",
+        include_sec_event_ids=sec_event_id_view == "1",
     )
 
 
