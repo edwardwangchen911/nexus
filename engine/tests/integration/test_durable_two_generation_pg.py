@@ -62,6 +62,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
         "send_refusal",
         "stage2_refusal",
         "host_handoff",
+        "sec_expired_before_material",
+        "sec_conflicting_before_material",
         "sec_expired",
         "sec_refresh_on_dispatch",
         "sec_refresh_unavailable",
@@ -76,6 +78,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
         "send-refusal",
         "stage2-refusal",
         "host-open-handoff",
+        "sec-expires-before-material",
+        "sec-conflicting-before-material",
         "sec-expires-in-queue",
         "sec-refresh-before-first-claim",
         "sec-refresh-unavailable-no-claim",
@@ -418,6 +422,14 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 primary_document=f"event-{index + 1}.htm",
             )
             entries.append(entry)
+            if budget_pressure == "sec_conflicting_before_material":
+                entries.append(
+                    {
+                        **entry,
+                        "accession_number": "0000123456-26-000099",
+                        "primary_document": "second-event.htm",
+                    }
+                )
             document = json.loads((tmp_path / "baseline/AAPL-submissions.json").read_bytes())
             document["filings"]["recent"] = {
                 "accessionNumber": [x["accession_number"] for x in entries],
@@ -440,8 +452,8 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                     )
                 ).encode()
 
-            async with factory() as db, db.begin():
-                capture, _ = await persist_durable_index_archive(
+            async def save_capture(db, submissions):
+                stored, _ = await persist_durable_index_archive(
                     db,
                     store,
                     identity_snapshot_id=rule.identity_snapshot_id,
@@ -452,11 +464,18 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                         ),
                     ),
                     submissions=(
-                        raw,
-                        receipt(raw, f"https://data.sec.gov/submissions/CIK{rule.issuer_cik}.json"),
+                        submissions,
+                        receipt(
+                            submissions,
+                            f"https://data.sec.gov/submissions/CIK{rule.issuer_cik}.json",
+                        ),
                     ),
                     now=controller.now(),
                 )
+                return stored
+
+            async with factory() as db, db.begin():
+                capture = await save_capture(db, raw)
             async with factory() as db, db.begin():
                 check = await durable.record_discovery(
                     db,
@@ -481,7 +500,8 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                 assert batch is not None
                 binding = await db.scalar(
                     select(SecEventResearchBinding).where(
-                        SecEventResearchBinding.batch_id == batch.id
+                        SecEventResearchBinding.batch_id == batch.id,
+                        SecEventResearchBinding.event_id == event.id,
                     )
                 )
                 assert binding.event_id == event.id and binding.plan_id == plan_ids[-1]
@@ -495,6 +515,104 @@ async def test_two_ordinary_ny_sessions_complete_native_settlement_and_successor
                     archive_dir=filing.archive(tmp_path / f"event-{index}", event.entry),
                 ),
             )
+            if budget_pressure in {
+                "sec_expired_before_material",
+                "sec_conflicting_before_material",
+            }:
+                from nexus.ops import monitor_batch_prepare as preparation
+                from nexus.ops.monitor_dispatch import dispatch_configured_once
+                from nexus.persistence.models.monitoring import MonitorTrigger
+                from nexus.persistence.models.runtime import AuditEvent
+
+                conflicting = budget_pressure == "sec_conflicting_before_material"
+                if conflicting:
+                    assert len(batch.trigger_ids) == 2
+                    received += timedelta(seconds=1)
+                    async with factory.begin() as db:
+                        await controller.set(db, received, running=False, refresh_defaults=True)
+                        later = await db.get(MonitorTrigger, UUID(batch.trigger_ids[1]))
+                        assert later is not None
+                        altered = json.loads(raw)
+                        recent = altered["filings"]["recent"]
+                        changed = recent["accessionNumber"].index(later.event_key.rsplit(":", 1)[1])
+                        recent["primaryDocument"][changed] = "different.htm"
+                        await save_capture(db, json.dumps(altered).encode())
+                expired_at = received + timedelta(seconds=301)
+                async with factory.begin() as db:
+                    await controller.set(db, expired_at, running=False, refresh_defaults=True)
+                    jobs = await db.scalar(select(func.count()).select_from(Job))
+                options = dict(
+                    trigger_id=UUID(batch.trigger_ids[0]),
+                    calendar_authority_id=CALENDAR_ID,
+                    repo_root=tmp_path,
+                    prepare_materials_only=True,
+                )
+                declined = await dispatch_configured_once(settings, **options)
+                assert declined["status"] == "blocked", declined
+                assert declined["provider_requests"] == declined["model_requests"] == 0
+                if conflicting:
+                    assert declined["reason"] == "MONITOR_PREPARATION_INELIGIBLE"
+                    assert "deferred_before_collection" not in declined
+                    async with factory.begin() as db:
+                        assert (
+                            await preparation.inspect_batch_preparation(db, batch.id) == "blocked"
+                        )
+                        assert await db.scalar(select(func.count()).select_from(Job)) == jobs
+                    return
+                assert declined["reason"] == "DURABLE_SEC_CURRENT_CAPTURE_EXPIRED", declined
+                assert "deferred_before_collection" not in declined
+                assert (await dispatch_configured_once(settings, **options))["status"] == "checked"
+                async with factory.begin() as db:
+                    assert await preparation.inspect_batch_preparation(db, batch.id) == "pending"
+                    received = expired_at + timedelta(minutes=5)
+                    await controller.set(db, received, running=False, refresh_defaults=True)
+                async with factory.begin() as db:
+                    latest = await save_capture(db, raw)
+                    checked = await durable.record_discovery(
+                        db,
+                        account_id=pointer.account_id,
+                        rule_id=rule.id,
+                        capture_id=latest.id,
+                        scheduled_at=received.replace(minute=received.minute // 5 * 5, second=0),
+                    )
+                    assert checked.result != "true"
+
+                async def account_unavailable(*args, **kwargs):
+                    raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+
+                with monkeypatch.context() as hold:
+                    hold.setattr(
+                        preparation, "require_manual_account_available", account_unavailable
+                    )
+                    blocked = await dispatch_configured_once(settings, **options)
+                assert blocked["status"] == "blocked"
+                assert blocked["reason"] == "MONITOR_ACCOUNT_WAIT_AFTER_SEC_EXPIRY"
+                assert "deferred_before_collection" not in blocked
+                assert blocked["provider_requests"] == blocked["model_requests"] == 0
+                async with factory.begin() as db:
+                    assert await preparation.inspect_batch_preparation(db, batch.id) == "pending"
+                    next_bucket = (received + timedelta(minutes=5)).replace(second=0, microsecond=0)
+                    await controller.set(db, next_bucket, running=False, refresh_defaults=True)
+                prepared = await dispatch_configured_once(settings, **options)
+                assert prepared["status"] == "prepared", prepared
+                assert prepared["provider_requests"] == prepared["model_requests"] == 0
+                async with factory() as db:
+                    assert await db.scalar(select(func.count()).select_from(Job)) == jobs
+                    assert await db.scalar(select(func.count()).select_from(OutboxEvent)) == notices
+                    assert (
+                        await db.scalar(select(func.count()).select_from(SecNotificationClaim))
+                        == claims
+                    )
+                    assert not await db.scalar(
+                        select(AuditEvent.id).where(
+                            AuditEvent.action == preparation.CLAIM,
+                            AuditEvent.payload["batch_id"].astext == str(batch.id),
+                        )
+                    )
+                    assert not await db.scalar(
+                        select(MonitorIncrement.id).where(MonitorIncrement.batch_id == batch.id)
+                    )
+                return
             material = await run(
                 settings, argparse.Namespace(action="prepare-batch", batch_id=batch.id)
             )

@@ -39,6 +39,9 @@ CLAIM = "research.monitor.material_collection_claimed"
 RESULT = "research.monitor.material_preparation_result"
 SCHEMA = "monitor_batch_prepare_v1"
 _ACCOUNT_BUSY = "MANUAL_ACCOUNT_BUSY_OR_UNKNOWN"
+_SEC_CAPTURE_EXPIRED = "DURABLE_SEC_CURRENT_CAPTURE_EXPIRED"
+_ACCOUNT_WAIT_AFTER_SEC_EXPIRY = "MONITOR_ACCOUNT_WAIT_AFTER_SEC_EXPIRY"
+_SEC_DEFERRAL_REASONS = (_SEC_CAPTURE_EXPIRED, _ACCOUNT_WAIT_AFTER_SEC_EXPIRY)
 
 
 def _result(
@@ -54,6 +57,13 @@ def _result(
         "execution_locked": True,
         **extra,
     }
+
+
+def _deferred_preflight(payload: dict[str, object] | None) -> bool:
+    return payload is not None and (
+        payload.get("deferred_before_collection") is True
+        or payload.get("reason") in _SEC_DEFERRAL_REASONS
+    )
 
 
 async def _history(
@@ -94,13 +104,26 @@ async def _history(
                 "unknown",
             }:
                 return True, None
-            if "deferred_before_collection" in payload and (
+            account_deferral = "deferred_before_collection" in payload
+            reason = payload.get("reason")
+            sec_deferral = reason in _SEC_DEFERRAL_REASONS
+            if (account_deferral or sec_deferral) and (
                 claims
-                or (latest is not None and latest.get("deferred_before_collection") is not True)
+                or (latest is not None and not _deferred_preflight(latest))
                 or row.actor_id != "research-monitor"
-                or payload.get("deferred_before_collection") is not True
                 or payload.get("status") != "blocked"
-                or payload.get("reason") != _ACCOUNT_BUSY
+                or (
+                    account_deferral
+                    and (
+                        payload.get("deferred_before_collection") is not True
+                        or reason != _ACCOUNT_BUSY
+                    )
+                )
+                or (sec_deferral and batch.routing_version != "durable_research_v2")
+                or (
+                    reason == _ACCOUNT_WAIT_AFTER_SEC_EXPIRY
+                    and (latest is None or latest.get("reason") not in _SEC_DEFERRAL_REASONS)
+                )
                 or any(
                     type(payload.get(key)) is not int or payload[key] != 0
                     for key in ("provider_requests", "model_requests")
@@ -143,11 +166,7 @@ async def inspect_batch_preparation(session: AsyncSession, batch_id: UUID) -> st
             if await read_batch_inputs(session, snapshot_id=row.id, as_of=now) is not None
             else "blocked"
         )
-    if (
-        latest is not None
-        and latest.get("status") == "blocked"
-        and latest.get("deferred_before_collection") is not True
-    ):
+    if latest is not None and latest.get("status") == "blocked" and not _deferred_preflight(latest):
         return "blocked"
     return "pending"
 
@@ -353,17 +372,29 @@ async def prepare_pending_batch(
                 _contact(sec_contact or "")
                 archive = _archive_root(repo_root) / str(operation)
             except ValueError as error:
+                from nexus.monitoring.durable_sec_research import CurrentSecCaptureExpired
+
                 code = str(error)
-                if code == _ACCOUNT_BUSY:
-                    result = _result(batch_id, "blocked", code)
+                expired_capture = isinstance(error, CurrentSecCaptureExpired)
+                if code == _ACCOUNT_BUSY or expired_capture:
                     open_claim, latest = await _history(session, batch)
-                    if (
+                    can_defer = (
                         state == "pending"
                         and not open_claim
-                        and (latest is None or latest.get("deferred_before_collection") is True)
-                    ):
-                        # Only a batch with no prior attempt can wait for a later tick.
-                        result["deferred_before_collection"] = True
+                        and (latest is None or _deferred_preflight(latest))
+                    )
+                    if expired_capture:
+                        # Older readers can retain this receipt as an ordinary blocked result.
+                        code = (
+                            _SEC_CAPTURE_EXPIRED if can_defer else "MONITOR_PREPARATION_INELIGIBLE"
+                        )
+                    result = _result(batch_id, "blocked", code)
+                    if can_defer and code == _ACCOUNT_BUSY:
+                        if latest is not None and latest.get("reason") in _SEC_DEFERRAL_REASONS:
+                            # Keep the remainder of this prefix readable as blocked on rollback.
+                            result["reason"] = _ACCOUNT_WAIT_AFTER_SEC_EXPIRY
+                        else:
+                            result["deferred_before_collection"] = True
                 else:
                     if code not in {
                         "MONITOR_PENDING_OVERFLOW",
