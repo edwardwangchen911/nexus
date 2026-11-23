@@ -43,7 +43,7 @@ test("normal lookup and research page preserve budgeted owner and unknown protec
   await expect(candidate).toBeVisible();
   await expect(candidate).not.toContainText("原因不可核验");
   if (saved.outcome === "output_limit") await expect(candidate).toContainText("模型达到输出上限，未返回完整研究结果");
-  if (saved.outcome === "timeout") await expect(candidate).toContainText("部分模型调用未返回用量");
+  if (saved.outcome === "timeout") await expect(candidate).toContainText("部分模型调用的用量未能核验");
   await page.screenshot({ path: path.join(directory!, "workspace.png"), fullPage: true });
   const research = page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/research-runs/${saved.run_id}`);
   await page.getByRole("link", { name: "查看第 1 只证券研究" }).click();
@@ -58,7 +58,7 @@ test("normal lookup and research page preserve budgeted owner and unknown protec
   const panel = page.getByRole("region", { name: "个股研究证据页" });
   await expect(panel).toBeVisible();
   if (saved.outcome === "output_limit") await expect(panel).toContainText("模型达到输出上限，未返回完整研究结果");
-  if (saved.outcome === "timeout") await expect(panel).toContainText("部分模型调用未返回用量");
+  if (saved.outcome === "timeout") await expect(panel).toContainText("部分模型调用的用量未能核验");
   const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/research-runs/${saved.run_id}`);
   await page.getByRole("button", { name: "重新读取" }).click();
   expect((await (await refreshed).json()).data.run_id).toBe(saved.run_id);

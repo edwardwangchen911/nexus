@@ -3,7 +3,7 @@
 import { formatDisplayTime } from "../lib/display-format";
 
 import { formatMetric } from "../lib/display-format";
-import { statusLabel, reasonText, operatorLabel, signalLabel } from "../lib/display-labels";
+import { statusLabel, reasonLabel, reasonText, operatorLabel, signalLabel } from "../lib/display-labels";
 import { FileSearch, ShieldAlert } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -68,7 +68,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
           模型来源：Codex SDK · 使用 ChatGPT 套餐额度，不按 API 美元费用结算。
           输入 / 输出 tokens：{research.input_tokens ?? "未知"} / {research.output_tokens ?? "未知"}。
           {research.abstention_reason === "model_usage_uncertain"
-            ? " 部分模型调用未返回用量；上述仅为已知下限，不会自动重试。"
+            ? ` ${reasonLabel(research.abstention_reason)}；上述仅为已知下限，不会自动重试。`
             : null}
           仅生成研究，交易保持锁定。
         </p>

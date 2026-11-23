@@ -24,7 +24,7 @@ const candidate = () => ({ instrument_id: instrumentId, symbol: "AAPL", run_id: 
 });
 
 it.each([
-  ["model_usage_uncertain", "部分模型调用未返回用量"],
+  ["model_usage_uncertain", "部分模型调用的用量未能核验"],
   ["model_output_limit_reached", "模型达到输出上限，未返回完整研究结果"],
   ["model_research_stopped", "模型研究已停止，具体停止原因未分类"],
 ])("shows verified model failure %s without an unverified-code fallback", (reason, expected) => {

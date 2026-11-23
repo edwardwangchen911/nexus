@@ -288,7 +288,7 @@ describe("research evidence docket", () => {
       input_tokens: 300, output_tokens: 80, abstention_reason: "model_usage_uncertain",
       failed_stage_input: { stage: "critique", request_hash: "b".repeat(64), frozen_inputs_hash: "c".repeat(64) },
     })} admission={null} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
-    expect(screen.getByText(/仅为已知下限，不会自动重试/)).toBeVisible();
+    expect(screen.getByText(/部分模型调用的用量未能核验；上述仅为已知下限，不会自动重试/)).toBeVisible();
     fireEvent.click(screen.getByText("失败调用的输入记录"));
     expect(screen.getByText("阶段：反证")).toBeVisible();
   });
@@ -437,7 +437,8 @@ describe("research evidence docket", () => {
 describe("saved experimental research stages", () => {
   it("shows critique lineage and retained stages after a terminal failure", () => {
     render(<DecisionCard research={researchData({
-      status: "failed", intent: null, abstention_reason: "model_usage_uncertain",
+      status: "failed", intent: null, billing_mode: "platform_responses", settled_cost_usd: null,
+      abstention_reason: "model_usage_uncertain",
       stage_trace: { evidence_hash: "a".repeat(64), status: "verified", stages: [
         { stage: "research", status: "complete", input_tokens: 100, output_tokens: 50, roles: [] },
         { stage: "critique", status: "partial", input_tokens: 80, output_tokens: 30, roles: [
@@ -446,6 +447,8 @@ describe("saved experimental research stages", () => {
         { stage: "synthesis", status: "unavailable", input_tokens: 0, output_tokens: 0, roles: [] },
       ] },
     })} />);
+    expect(screen.getByText(/部分模型调用的用量未能核验（model_usage_uncertain）/)).toBeVisible();
+    expect(screen.getByRole("note", { name: "个股模型用量" })).toHaveTextContent("费用尚未结算，预算保留");
     fireEvent.click(screen.getByText("反证 · 仅保存部分输出"));
     expect(screen.getByText("回应论点：多头 #1")).toBeVisible();
     expect(screen.getByText("缺少价格，无法验证估值。")).toBeVisible();
