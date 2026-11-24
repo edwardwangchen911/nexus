@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.api.durable_sec_collection import read_latest_sec_collection
 from nexus.api.research_disclosure_monitoring import _account
 from nexus.api.schemas.durable_sec import (
     DurableSecCheckView,
@@ -428,6 +429,7 @@ async def read_durable_sec_view(
     now: datetime,
     include_notice: bool = False,
     include_research: bool = False,
+    include_collection: bool = False,
 ) -> DurableSecView | None:
     now = require_utc(now)
     account_id = await _account(session, run, now)
@@ -442,7 +444,17 @@ async def read_durable_sec_view(
     )
     if rule is None:
         return None
-    unknown = DurableSecView(observed_at=now, rule_id=rule.id, state="unknown")
+    unknown = DurableSecView(
+        observed_at=now,
+        rule_id=rule.id,
+        state="unknown",
+        effective_at=None,
+        forms=(),
+        latest_check=None,
+        event_count=0,
+        events=(),
+        execution_locked=True,
+    )
     state = await session.scalar(
         select(SecMonitorRuleState)
         .where(
@@ -471,6 +483,9 @@ async def read_durable_sec_view(
         )
         if policy.effective_at > now:
             return unknown
+        if include_collection:
+            collection = await read_latest_sec_collection(session, rule, now)
+            unknown = unknown.model_copy(update={"latest_collection": collection})
         check = await session.scalar(
             select(SecDiscoveryCheck)
             .where(
@@ -536,8 +551,10 @@ async def read_durable_sec_view(
                 "effective_at": policy.effective_at,
                 "forms": policy.forms,
                 "latest_check": project_check(check, now) if check else None,
+                "latest_collection": unknown.latest_collection,
                 "event_count": count or 0,
                 "events": events,
+                "execution_locked": True,
             }
         )
     except ValueError:

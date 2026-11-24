@@ -74,11 +74,18 @@ function NoticeReceipt({ notice }: { notice: Notice }): React.ReactElement {
   </>;
 }
 
+const collectionStatuses = {
+  archived: "SEC 索引原件已归档",
+  failed: "采集失败",
+  unknown: "采集结果待核验",
+} as const;
+
 export function DurableSecDiscovery({ discovery, dailyProposal }: {
   discovery: View;
   dailyProposal?: DailyProposal | null;
 }): React.ReactElement {
   const check = discovery.latest_check;
+  const collection = discovery.latest_collection;
   const dailyReviews = new Map(dailyProposal?.items.map((item) => [item.event_id, item]));
   return <section className="decision-card" aria-label="长期 SEC 公告发现">
     <header className="decision-card__heading"><div><p className="eyebrow">独立于研究有效期 · 只读记录</p><h2>长期 SEC 公告发现</h2></div><Badge>{states[discovery.state]}</Badge></header>
@@ -88,6 +95,15 @@ export function DurableSecDiscovery({ discovery, dailyProposal }: {
       <div><dt>公告和通知读取时点</dt><dd>{formatDisplayTime(discovery.observed_at)}</dd></div>
       <div><dt>公告类型</dt><dd>{discovery.forms.length ? discovery.forms.join(" · ") : "待核验"}</dd></div>
     </dl>
+    {collection ? <section className="decision-card__section" aria-label="最近 SEC 采集回执">
+      <h3>最近 SEC 采集回执</h3>
+      <p>{collectionStatuses[collection.status]}</p>
+      <dl className="decision-card__versions">
+        <div><dt>计划采集时间</dt><dd>{formatDisplayTime(collection.scheduled_at)}</dd></div>
+        <div><dt>领取时间</dt><dd>{formatDisplayTime(collection.claimed_at)}</dd></div>
+        {collection.finished_at ? <div><dt>回执时间</dt><dd>{formatDisplayTime(collection.finished_at)}</dd></div> : null}
+      </dl>
+    </section> : null}
     {check ? <section className="decision-card__section" aria-label="最近公告发现检查">
       <h3>最近已保存检查</h3>
       {!check.evaluation_version && check.coverage === "complete" ? <>

@@ -4067,6 +4067,50 @@ export const runtimeContractSchemas = {
     "title": "DurableSecCheckView",
     "type": "object"
   },
+  "DurableSecCollectionView": {
+    "additionalProperties": false,
+    "properties": {
+      "claimed_at": {
+        "format": "date-time",
+        "title": "Claimed At",
+        "type": "string"
+      },
+      "finished_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Finished At"
+      },
+      "scheduled_at": {
+        "format": "date-time",
+        "title": "Scheduled At",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "archived",
+          "failed",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "scheduled_at",
+      "claimed_at",
+      "finished_at",
+      "status"
+    ],
+    "title": "DurableSecCollectionView",
+    "type": "object"
+  },
   "DurableSecCoverageDetails": {
     "additionalProperties": false,
     "properties": {
@@ -4356,13 +4400,11 @@ export const runtimeContractSchemas = {
         "title": "Effective At"
       },
       "event_count": {
-        "default": 0,
         "minimum": 0,
         "title": "Event Count",
         "type": "integer"
       },
       "events": {
-        "default": [],
         "items": {
           "$ref": "#/components/schemas/DurableSecEventView"
         },
@@ -4372,12 +4414,10 @@ export const runtimeContractSchemas = {
       },
       "execution_locked": {
         "const": true,
-        "default": true,
         "title": "Execution Locked",
         "type": "boolean"
       },
       "forms": {
-        "default": [],
         "items": {
           "enum": [
             "8-K",
@@ -4392,6 +4432,16 @@ export const runtimeContractSchemas = {
         "anyOf": [
           {
             "$ref": "#/components/schemas/DurableSecCheckView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "latest_collection": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DurableSecCollectionView"
           },
           {
             "type": "null"

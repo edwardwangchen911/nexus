@@ -7,7 +7,7 @@ import pytest
 from nexus.api.durable_sec import project_check, project_event, read_event_research_status
 from nexus.api.routes.research import _research_wire
 from nexus.api.schemas.agents import ResearchRunEnvelope, ResearchRunResponse
-from nexus.api.schemas.durable_sec import DurableSecView
+from nexus.api.schemas.durable_sec import DurableSecCollectionView, DurableSecView
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.monitoring.durable_sec_contracts import DurableSecPolicy
 from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
@@ -142,17 +142,27 @@ def test_event_id_is_only_sent_to_an_opted_in_reader():
         observed_at=NOW,
         rule_id=uuid4(),
         state="active",
+        effective_at=policy.effective_at,
+        forms=policy.forms,
+        latest_check=None,
         event_count=1,
         events=(project_event(row, policy, NOW, conflict=False),),
+        execution_locked=True,
+        latest_collection=DurableSecCollectionView(
+            scheduled_at=NOW, claimed_at=NOW, finished_at=NOW, status="failed"
+        ),
     )
     envelope = ResearchRunEnvelope.model_construct(
         data=ResearchRunResponse.model_construct(durable_disclosure=view),
         meta=SuccessMetaResponse(request_id=uuid4(), as_of=NOW),
     )
     prior = _research_wire(envelope, "1", include_sec_notices=True, include_sec_research=True)
-    assert "event_id" not in json.loads(prior.body)["data"]["durable_disclosure"]["events"][0]
-    current = _research_wire(envelope, "1", include_sec_event_ids=True)
-    entry = json.loads(current.body)["data"]["durable_disclosure"]["events"][0]
+    prior_view = json.loads(prior.body)["data"]["durable_disclosure"]
+    assert "event_id" not in prior_view["events"][0] and "latest_collection" not in prior_view
+    current = _research_wire(envelope, "1", include_sec_event_ids=True, include_sec_collection=True)
+    current_view = json.loads(current.body)["data"]["durable_disclosure"]
+    assert current_view["latest_collection"]["status"] == "failed"
+    entry = current_view["events"][0]
     assert entry["event_id"] == str(row.id)
     assert "notice" not in entry and "research_status" not in entry
 

@@ -4404,6 +4404,50 @@
         "title": "DurableSecCheckView",
         "type": "object"
       },
+      "DurableSecCollectionView": {
+        "additionalProperties": false,
+        "properties": {
+          "claimed_at": {
+            "format": "date-time",
+            "title": "Claimed At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "scheduled_at": {
+            "format": "date-time",
+            "title": "Scheduled At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "archived",
+              "failed",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scheduled_at",
+          "claimed_at",
+          "finished_at",
+          "status"
+        ],
+        "title": "DurableSecCollectionView",
+        "type": "object"
+      },
       "DurableSecCoverageDetails": {
         "additionalProperties": false,
         "properties": {
@@ -4693,13 +4737,11 @@
             "title": "Effective At"
           },
           "event_count": {
-            "default": 0,
             "minimum": 0,
             "title": "Event Count",
             "type": "integer"
           },
           "events": {
-            "default": [],
             "items": {
               "$ref": "#/components/schemas/DurableSecEventView"
             },
@@ -4709,12 +4751,10 @@
           },
           "execution_locked": {
             "const": true,
-            "default": true,
             "title": "Execution Locked",
             "type": "boolean"
           },
           "forms": {
-            "default": [],
             "items": {
               "enum": [
                 "8-K",
@@ -4729,6 +4769,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/DurableSecCheckView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_collection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableSecCollectionView"
               },
               {
                 "type": "null"
@@ -21944,6 +21994,22 @@
               ],
               "title": "X-Nexus-Sec-Event-Id-View"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Collection-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Collection-View"
+            }
           }
         ],
         "responses": {
@@ -25432,6 +25498,22 @@
                 }
               ],
               "title": "X-Nexus-Sec-Event-Id-View"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Collection-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Collection-View"
             }
           }
         ],
