@@ -234,9 +234,15 @@ def _check_schema_binding(evidence, state, pointer):
 
 
 def validate_target_readiness(service, root, state, checked):
-    target = _target(_bound_proof(root, state))
+    proof = _bound_proof(root, state)
+    target = _target(proof)
     expected = state["schema"] if target is None else target["schema"]
-    if checked.get("status") != "ready" or checked.get("migration_head") != expected:
+    original_mode = proof.get("observed_readiness", {}).get("status", "ready")
+    if checked.get("status") != original_mode or checked.get("migration_head") != expected:
+        _reject("BUSINESS_BLOCKED")
+    if original_mode == "monitor_only" and (
+        checked.get("paid_dispatch_ready") is not False or target is not None
+    ):
         _reject("BUSINESS_BLOCKED")
     if target is not None and service._checkout_revision(root) != target["revision"]:
         _reject("BINDING_CHANGED")
@@ -540,11 +546,21 @@ def publish_exit(
     price_target=None,
     source_environment=None,
 ):
+    monitor_only = readiness.get("status") == "monitor_only"
     if (
-        readiness.get("status") != "ready"
+        (
+            readiness.get("status") != "ready"
+            and not (monitor_only and readiness.get("paid_dispatch_ready") is False)
+        )
         or readiness.get("blocking_codes") != []
         or readiness.get("execution_locked") is not True
         or readiness.get("external_requests") != 0
+    ):
+        _reject("BUSINESS_BLOCKED")
+    if monitor_only and (
+        "pending_attempt" in capture["producer"]
+        or price_target is not None
+        or capture["producer"]["schema"] != readiness.get("migration_head")
     ):
         _reject("BUSINESS_BLOCKED")
     if "pending_attempt" in capture["producer"]:

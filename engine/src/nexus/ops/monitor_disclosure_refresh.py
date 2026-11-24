@@ -122,11 +122,15 @@ async def _claim(
     repo_root: Path,
     contact: str | None,
     candidate_keys: tuple[str, ...] = (),
+    restricted_worker: str | None = None,
 ) -> dict[str, object] | None:
     now, instruments = await _scope(session, settings, account_id, calendar_id, scheduled)
-    from nexus.paper.host_probe_state import require_host_admitting
+    from nexus.paper.host_probe_state import require_host_admitting, require_monitor_only_capture
 
-    await require_host_admitting(session, account_id)
+    if restricted_worker is None:
+        await require_host_admitting(session, account_id)
+    else:
+        await require_monitor_only_capture(session, account_id, restricted_worker)
     if instrument_id not in instruments:
         return None
     await lock_security(session, account_id=account_id, instrument_id=instrument_id)
@@ -143,6 +147,8 @@ async def _claim(
             contact=contact,
             candidate_keys=candidate_keys,
         )
+    if restricted_worker is not None:
+        return None
     plan = await session.scalar(
         select(MonitorPlan)
         .where(
@@ -310,6 +316,7 @@ async def refresh_disclosure_observations(
     repo_root: Path,
     candidate_hints: dict[UUID, tuple[str, ...]] | None = None,
     only_instrument: UUID | None = None,
+    restricted_worker: str | None = None,
 ) -> dict[str, object]:
     """Refresh exact installed issuers once; failures never authorize research or execution."""
     if (
@@ -376,6 +383,11 @@ async def refresh_disclosure_observations(
                             repo_root=repo_root,
                             contact=contact,
                             candidate_keys=(candidate_hints or {}).get(instrument, ()),
+                            **(
+                                {"restricted_worker": restricted_worker}
+                                if restricted_worker is not None
+                                else {}
+                            ),
                         )
                 except ValueError as error:
                     _report_refresh_failure(scheduled_at, point, error)

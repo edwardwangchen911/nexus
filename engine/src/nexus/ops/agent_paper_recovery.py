@@ -11,12 +11,13 @@ from sqlalchemy.exc import DBAPIError
 from nexus.agents.platform_native import native_runtime_matches
 from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.agents.research_usage import require_research_accounting_clear
+from nexus.backtest.universe import universe_definition_parse_scope
 from nexus.market.current_identity import identity_parse_scope
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.paper.manual_host_exit import valid_host_exit
-from nexus.paper.manual_request import require_manual_account_available
+from nexus.paper.manual_request import inspect_recovery_terminal_holds
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord
@@ -77,6 +78,7 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
     code = None
     diagnostic: dict[str, object] = {}
     budget_scope: dict[str, object] | None = None
+    monitor_only = False
     deadline = None
     stage, started = "configuration", monotonic_ns()
     try:
@@ -153,13 +155,15 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     identity_source_parse_scope(),
                     artifact_read_scope(session),
                     evidence_read_scope(session),
+                    universe_definition_parse_scope(),
                 ):
-                    await require_manual_account_available(
-                        session,
-                        account_id=account.id,
-                        now=now,
-                        allow_scheduled_completion=True,
-                        read_only=True,
+                    monitor_only = bool(
+                        await inspect_recovery_terminal_holds(
+                            session,
+                            account_id=account.id,
+                            now=now,
+                            read_only=True,
+                        )
                     )
                 # Experimental runs have no business request to enumerate above.
                 # Known-but-unsettled costs still prohibit resuming new work.
@@ -194,7 +198,8 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
             await factory.kw["bind"].dispose()
     return {
         **diagnostic,
-        "status": "ready" if code is None else "blocked",
+        "status": ("monitor_only" if monitor_only else "ready") if code is None else "blocked",
+        "paid_dispatch_ready": code is None and not monitor_only,
         "blocking_codes": [] if code is None else [code],
         "checked_at": checked_at.isoformat(),
         "execution_locked": True,

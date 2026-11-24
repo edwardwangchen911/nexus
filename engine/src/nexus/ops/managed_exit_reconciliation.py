@@ -142,7 +142,10 @@ def reconcile_managed_exit(
                     _price_target(settings, source, env_file, target_model_config_id, capture)
                 )
             readiness = asyncio.run(recovery.inspect_recovery_readiness(settings))
-            if readiness.get("status") != "ready":
+            if readiness.get("status") != "ready" and not (
+                readiness.get("status") == "monitor_only"
+                and readiness.get("paid_dispatch_ready") is False
+            ):
                 codes = readiness.get("blocking_codes")
                 return blocked(
                     [

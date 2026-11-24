@@ -185,14 +185,16 @@ class WorkbenchReadService:
         if heads != (CURRENT_MIGRATION_HEAD,):
             compatibility.status = "incompatible"
             classification = "incompatible"
+        hold_reason = None
         if classification == "fresh":
             from nexus.paper.host_probe_state import latest_probe_state
 
             state = await latest_probe_state(self._session, account_id)
             if state and state.consecutive:
                 classification = "degraded"
+                hold_reason = state.reason
         reasons = {
-            "degraded": "READ_PROBE_DEADLINE",
+            "degraded": hold_reason,
             "missing": "HEARTBEAT_MISSING",
             "unavailable": "HEARTBEAT_INVALID",
             "stale": "HEARTBEAT_STALE",

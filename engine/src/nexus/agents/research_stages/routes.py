@@ -14,8 +14,8 @@ from nexus.agents.codex_formal_stage import formal_stage_job_qualified
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.paper_context import (
     FrozenAgentPaperContextStatus,
+    _validate_frozen_paper_binding,
     read_agent_paper_research_context,
-    revalidate_frozen_agent_paper_context,
 )
 from nexus.agents.research_stages.protocol import (
     ProtocolRejected,
@@ -105,8 +105,8 @@ async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) ->
         if (
             cycle is None
             or run.actor_id != "local-agent-paper-cycle"
-            or await revalidate_frozen_agent_paper_context(
-                session, run=run, evidence_records=tuple(evidence)
+            or await _validate_frozen_paper_binding(
+                session, run=run, context=paper, evidence_records=tuple(evidence)
             )
             != FrozenAgentPaperContextStatus.VALID
         ):

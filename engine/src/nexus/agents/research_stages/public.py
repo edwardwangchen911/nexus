@@ -361,30 +361,29 @@ async def _selected_member_settled(
 
 
 async def _cycle_settled(session: Any, **kwargs: Any) -> Any:
-    await manual_request._legacy_require_cycle_jobs_settled(session, **kwargs)
-    if await session.scalar(text("SELECT to_regclass('research_stage_route')")) is None:
+    run_ids = await manual_request._legacy_require_cycle_jobs_settled(session, **kwargs)
+    if (
+        not run_ids
+        or await session.scalar(text("SELECT to_regclass('research_stage_route')")) is None
+    ):
         return
     from types import SimpleNamespace
 
-    from nexus.persistence.models.paper import AgentPaperCycleEventRecord
-
-    events = await session.scalars(
-        select(AgentPaperCycleEventRecord).where(
-            AgentPaperCycleEventRecord.cycle_id == kwargs["cycle_id"]
-        )
+    jobs = await session.scalars(
+        select(Job).where(Job.payload["run_id"].astext.in_([str(run_id) for run_id in run_ids]))
     )
-    run_ids = {
-        UUID(str(run)) for event in events for run in event.fact_ids.get("research_run_ids", [])
-    }
+    by_run: dict[str, list[Job]] = {}
+    for job in jobs:
+        by_run.setdefault(str(job.payload["run_id"]), []).append(job)
     for run_id in run_ids:
-        job = (
-            await session.scalars(select(Job).where(Job.payload["run_id"].astext == str(run_id)))
-        ).one()
+        matched = by_run.get(str(run_id), [])
+        if len(matched) != 1:
+            raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
         await _selected_member_settled(
             session,
             owner_id=kwargs["cycle_id"],
             kind="formal",
-            member=SimpleNamespace(run_id=run_id, job_id=job.id),
+            member=SimpleNamespace(run_id=run_id, job_id=matched[0].id),
             now=kwargs["now"],
             allow_unknown_usage=True,
         )

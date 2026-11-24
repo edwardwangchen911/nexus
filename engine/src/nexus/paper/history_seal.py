@@ -19,6 +19,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_formal_stage import formal_preparation_model_matches
@@ -1192,3 +1193,49 @@ async def _proof(
             read_only=read_only,
         ),
     )
+
+
+async def prove_recovery_terminal_hold(
+    session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime, read_only: bool
+) -> None:
+    """Prove stopped native execution without accepting or settling its usage."""
+    from nexus.paper.manual_request import manual_request_for_cycle
+
+    if await manual_request_for_cycle(session, cycle_id=cycle_id) is not None:
+        raise ValueError(_BLOCKED)
+    statement = """
+        SELECT s.id FROM research_stage_scope s
+        WHERE s.id=:cycle AND s.cycle_id=s.id AND s.stopped
+          AND s.request_id IS NULL AND s.increment_id IS NULL AND s.comparison_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM research_stage_member m
+              JOIN research_stage_route r USING (run_id, job_id, scope_id)
+              JOIN jobs j ON j.id=m.job_id
+              WHERE m.scope_id=s.id AND m.run_id=:run AND r.kind='formal'
+                AND jsonb_typeof(r.platform_binding)='object' AND j.status='failed'
+          )
+    """
+    try:
+        scope = await session.scalar(
+            text(statement if read_only else statement + " FOR UPDATE NOWAIT"),
+            {"cycle": cycle_id, "run": run_id},
+        )
+    except DBAPIError as error:
+        if getattr(error.orig, "sqlstate", None) == "55P03":
+            raise ValueError(_BLOCKED) from None
+        raise
+    if scope != cycle_id:
+        raise ValueError(_BLOCKED)
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if cycle is None:
+        raise ValueError(_BLOCKED)
+    proof = await _proof(
+        session,
+        cycle_id=cycle_id,
+        run_id=run_id,
+        now=now,
+        same_day=cycle.decision_time.date() == now.date(),
+        read_only=read_only,
+    )
+    if proof.get("usage") != "unknown" or proof.get("staged_protocol") != "research-stages-v1":
+        raise ValueError(_BLOCKED)

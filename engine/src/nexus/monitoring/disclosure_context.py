@@ -87,17 +87,20 @@ async def _exact_baseline(
         if row.source == DURABLE_SOURCE
         else IndexCapture.model_validate(row.payload)
     )
-    for binding in capture.originals:
-        artifact = await session.get(DataArtifact, binding.artifact_id)
-        if (
-            artifact is None
-            or max(
+    original_ids = {binding.artifact_id for binding in capture.originals}
+    if original_ids:
+        artifacts = (
+            await session.scalars(select(DataArtifact).where(DataArtifact.id.in_(original_ids)))
+        ).all()
+        if len(artifacts) != len(original_ids) or any(
+            max(
                 artifact.observed_at,
                 artifact.available_at,
                 artifact.received_at,
                 artifact.created_at,
             )
             > as_of
+            for artifact in artifacts
         ):
             raise ValueError("SEC_BASELINE_INVALID")
     return FrozenDisclosureBaseline(
