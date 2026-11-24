@@ -4,7 +4,7 @@ import json
 import shutil
 from datetime import timedelta
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -13,11 +13,13 @@ from nexus.api.durable_sec import read_durable_sec_view
 from nexus.api.routes.research import _research_wire
 from nexus.api.schemas.agents import ResearchRunEnvelope, ResearchRunResponse
 from nexus.api.schemas.integrations import SuccessMetaResponse
+from nexus.audit.service import append_audit_event
 from nexus.monitoring import durable_sec_host as host
 from nexus.monitoring import durable_sec_storage as durable
 from nexus.monitoring.batches import scan_stock_batch
 from nexus.notifications.worker import load_bark_worker_settings, run_bark_worker
 from nexus.ops.durable_sec_index_local import import_durable_index
+from nexus.ops.monitor_disclosure_refresh import CLAIM, FEED, RESULT, SCHEMA
 from nexus.ops.sec_index_local import import_index
 from nexus.outbox.failure import read_delivery_failure
 from nexus.persistence.models.agents import AgentResearchRunRecord
@@ -27,6 +29,31 @@ from nexus.persistence.models.sec_monitor import SecDiscoveryEvent, SecNotificat
 from nexus.research.durable_sec_index_storage import read_durable_index_capture
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
+
+
+async def _collection_claim(session, rule, identity_id, now):
+    return await append_audit_event(
+        session,
+        actor_id="research-monitor",
+        action=CLAIM,
+        schema_version=SCHEMA,
+        occurred_at=now,
+        payload={
+            "operation_id": str(uuid4()),
+            "account_id": str(rule.account_id),
+            "instrument_id": str(rule.instrument_id),
+            "rule_id": str(rule.id),
+            "durable_sec": True,
+            "identity_snapshot_id": str(identity_id),
+            "issuer_cik": rule.issuer_cik,
+            "feed": FEED,
+            "listed_history": False,
+            "scheduled_at": now.replace(
+                minute=now.minute // 5 * 5, second=0, microsecond=0
+            ).isoformat(),
+            "archive_dir": "/private/fixture-only",
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -171,11 +198,32 @@ async def test_durable_sec_api_projection_outlives_anchor_without_research_autho
             assert await session.scalar(select(func.count()).select_from(SecDiscoveryEvent)) == 1
             assert await session.scalar(select(func.count()).select_from(SecNotificationClaim)) == 1
             assert await session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
+            collection_claim = await _collection_claim(
+                session, rule, capture.index.identity_snapshot_id, now
+            )
+            await append_audit_event(
+                session,
+                actor_id="research-monitor",
+                action=RESULT,
+                schema_version=SCHEMA,
+                occurred_at=now,
+                payload={
+                    **collection_claim.payload,
+                    "status": "refreshed",
+                    "snapshot_id": str(row.id),
+                    "snapshot_hash": row.revision,
+                    "provider_requests": 2,
+                },
+            )
         async with factory() as session, session.begin():
             run = await session.get(AgentResearchRunRecord, pointer.source_run_id)
             now = await session.scalar(text("SELECT pg_catalog.clock_timestamp()"))
-            view = await read_durable_sec_view(session, run, now=now, include_notice=True)
+            view = await read_durable_sec_view(
+                session, run, now=now, include_notice=True, include_collection=True
+            )
             assert view is not None and view.state == "active"
+            assert view.latest_collection is not None
+            assert view.latest_collection.status == "archived"
             assert view.latest_check.result == "true" and view.latest_check.coverage == "partial"
             assert view.latest_check.evaluation_version == "accepted_cutoff_v1"
             assert view.latest_check.source_received_at == received

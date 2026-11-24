@@ -15,6 +15,19 @@ const view: components["schemas"]["DurableSecView"] = {
     accepted_at: "2026-11-17T01:00:00Z", first_seen_at: at, metadata_status: "recorded" }],
 };
 describe("durable SEC discovery facts", () => {
+  it("shows capture failure without changing the previously saved discovery", () => {
+    const discovery = { ...view, observed_at: "2026-11-17T03:06:00Z", latest_collection: {
+      scheduled_at: "2026-11-17T03:05:00Z", claimed_at: "2026-11-17T03:05:01Z",
+      finished_at: "2026-11-17T03:05:31Z", status: "failed" as const,
+    } };
+    expect(runtimeContractSchemas.DurableSecView.required).not.toContain("latest_collection");
+    render(<DurableSecDiscovery discovery={discovery} />);
+    expect(within(screen.getByRole("region", { name: "最近 SEC 采集回执" }))
+      .getByText("采集失败")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "最近公告发现检查" }))
+      .getByText(/新公告 · 部分覆盖/)).toBeVisible();
+  });
+
   it("accepts discovery events from an engine without notification readback", () => {
     expect(runtimeContractSchemas.DurableSecEventView.required).not.toContain("notice");
     expect(runtimeContractSchemas.DurableSecEventView.required).not.toContain("event_id");

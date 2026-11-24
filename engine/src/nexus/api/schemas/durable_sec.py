@@ -80,13 +80,24 @@ class DurableSecEventView(MonitoringViewModel):
     research_status: DurableSecResearchStatus | None = None
 
 
+class DurableSecCollectionView(MonitoringViewModel):
+    scheduled_at: datetime
+    claimed_at: datetime
+    finished_at: datetime | None
+    status: Literal["archived", "failed", "unknown"]
+
+
 class DurableSecView(MonitoringViewModel):
+    # Collection readback is negotiated independently of the existing discovery fields.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=False)
+
     observed_at: datetime
     rule_id: UUID
     state: Literal["active", "paused", "revoked", "unknown"]
-    effective_at: datetime | None = None
-    forms: tuple[Literal["8-K", "8-K/A"], ...] = ()
-    latest_check: DurableSecCheckView | None = None
-    event_count: int = Field(default=0, ge=0)
-    events: tuple[DurableSecEventView, ...] = Field(default=(), max_length=5)
-    execution_locked: Literal[True] = True
+    effective_at: datetime | None
+    forms: tuple[Literal["8-K", "8-K/A"], ...]
+    latest_check: DurableSecCheckView | None
+    event_count: int = Field(ge=0)
+    events: tuple[DurableSecEventView, ...] = Field(max_length=5)
+    execution_locked: Literal[True]
+    latest_collection: DurableSecCollectionView | None = None

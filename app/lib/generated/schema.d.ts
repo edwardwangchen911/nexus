@@ -2834,6 +2834,26 @@ export interface components {
             /** Source Received At */
             source_received_at?: string | null;
         };
+        /** DurableSecCollectionView */
+        DurableSecCollectionView: {
+            /**
+             * Claimed At
+             * Format: date-time
+             */
+            claimed_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "archived" | "failed" | "unknown";
+        };
         /** DurableSecCoverageDetails */
         DurableSecCoverageDetails: {
             /** Coverage Start Known */
@@ -2933,28 +2953,19 @@ export interface components {
         DurableSecView: {
             /** Effective At */
             effective_at: string | null;
-            /**
-             * Event Count
-             * @default 0
-             */
+            /** Event Count */
             event_count: number;
-            /**
-             * Events
-             * @default []
-             */
+            /** Events */
             events: components["schemas"]["DurableSecEventView"][];
             /**
              * Execution Locked
-             * @default true
              * @constant
              */
             execution_locked: true;
-            /**
-             * Forms
-             * @default []
-             */
+            /** Forms */
             forms: ("8-K" | "8-K/A")[];
             latest_check: components["schemas"]["DurableSecCheckView"] | null;
+            latest_collection?: components["schemas"]["DurableSecCollectionView"] | null;
             /**
              * Observed At
              * Format: date-time
@@ -9807,6 +9818,7 @@ export interface operations {
             };
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Collection-View"?: string | null;
                 "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
@@ -12298,6 +12310,7 @@ export interface operations {
             query?: never;
             header?: {
                 "X-Nexus-Monitor-View"?: string | null;
+                "X-Nexus-SEC-Collection-View"?: string | null;
                 "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
