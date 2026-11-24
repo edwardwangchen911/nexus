@@ -389,6 +389,26 @@ async def require_manual_account_state_available(
     read_only: bool = False,
 ) -> None:
     """Account state gates independent of native claim acceptance checks."""
+    await _require_account_state(
+        session,
+        account_id=account_id,
+        now=now,
+        excluding_request_id=excluding_request_id,
+        allow_scheduled_completion=allow_scheduled_completion,
+        read_only=read_only,
+    )
+
+
+async def _require_account_state(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    now: datetime,
+    excluding_request_id: UUID | None = None,
+    allow_scheduled_completion: bool,
+    read_only: bool,
+    terminal_holds: list[UUID] | None = None,
+) -> None:
     await lock_portfolio_account(session, account_id)
     from nexus.monitoring.admission import require_monitor_account_available
 
@@ -402,6 +422,7 @@ async def require_manual_account_state_available(
         now=now,
         allow_scheduled_completion=allow_scheduled_completion,
         read_only=read_only,
+        _terminal_holds=terminal_holds,
     )
     projection = await load_paper_projection(session, account_id=account_id, as_of=now)
     await require_no_unknown_cancel_requests(session, account_id=account_id, as_of=now)
@@ -458,23 +479,25 @@ async def require_settled_account_cycle_history(
     now: datetime | None = None,
     allow_scheduled_completion: bool = False,
     read_only: bool = False,
+    _terminal_holds: list[UUID] | None = None,
 ) -> None:
     """Share historical research safety without changing entry scheduling priority."""
     await lock_portfolio_account(session, account_id)
     if now is None:
         now = await _database_now(session)
-    cycles = (
-        await session.scalars(
-            select(AgentPaperCycleRecord.id).where(AgentPaperCycleRecord.account_id == account_id)
+    latest_status = (
+        select(AgentPaperCycleEventRecord.to_status)
+        .where(AgentPaperCycleEventRecord.cycle_id == AgentPaperCycleRecord.id)
+        .order_by(AgentPaperCycleEventRecord.sequence.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    cycles = await session.execute(
+        select(AgentPaperCycleRecord.id, latest_status).where(
+            AgentPaperCycleRecord.account_id == account_id
         )
-    ).all()
-    for cycle_id in cycles:
-        status = await session.scalar(
-            select(AgentPaperCycleEventRecord.to_status)
-            .where(AgentPaperCycleEventRecord.cycle_id == cycle_id)
-            .order_by(AgentPaperCycleEventRecord.sequence.desc())
-            .limit(1)
-        )
+    )
+    for cycle_id, status in cycles:
         if status not in {"completed", "unavailable", "failed"}:
             # Scheduled execution has no manual finalization event. Preserve
             # its existing deterministic completion projection without writing
@@ -494,13 +517,45 @@ async def require_settled_account_cycle_history(
                 or detail.cycle.result_code != "PAPER_CYCLE_COMPLETED"
             ):
                 raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
-        await _require_cycle_jobs_settled(
-            session,
-            cycle_id=cycle_id,
-            now=now,
-            allow_accepted_synthesis=True,
-            read_only=read_only,
-        )
+        if _terminal_holds is None:
+            await _require_cycle_jobs_settled(
+                session,
+                cycle_id=cycle_id,
+                now=now,
+                allow_accepted_synthesis=True,
+                read_only=read_only,
+            )
+        else:
+            await _require_cycle_jobs_settled(
+                session,
+                cycle_id=cycle_id,
+                now=now,
+                allow_accepted_synthesis=True,
+                read_only=read_only,
+                terminal_holds=_terminal_holds,
+            )
+
+
+async def inspect_recovery_terminal_holds(
+    session: AsyncSession, *, account_id: UUID, now: datetime, read_only: bool
+) -> tuple[UUID, ...]:
+    """Classify only a stopped natural execution. This grants no paid permission."""
+    from nexus.paper.preparation_unknown_ack import require_acknowledged_native_claims
+
+    await lock_portfolio_account(session, account_id)
+    holds: list[UUID] = []
+    await _require_account_state(
+        session,
+        account_id=account_id,
+        now=now,
+        allow_scheduled_completion=True,
+        read_only=read_only,
+        terminal_holds=holds,
+    )
+    await require_acknowledged_native_claims(
+        session, account_id=account_id, now=now, excluding_request_id=None
+    )
+    return tuple(holds)
 
 
 async def admit_manual_request(
@@ -739,7 +794,8 @@ async def _legacy_require_cycle_jobs_settled(
     require_no_live_lease: bool = True,
     allow_accepted_synthesis: bool = False,
     read_only: bool = False,
-) -> None:
+    terminal_holds: list[UUID] | None = None,
+) -> set[UUID]:
     """A terminal cycle cannot hide a queued job, lease, or unknown model usage."""
     events = (
         await session.scalars(
@@ -800,9 +856,21 @@ async def _legacy_require_cycle_jobs_settled(
         if not await legacy_research_sealed(
             session, cycle_id=cycle_id, run_id=candidate_run.id, now=now, read_only=read_only
         ):
+            if terminal_holds is not None:
+                from nexus.paper.history_seal import prove_recovery_terminal_hold
+
+                await prove_recovery_terminal_hold(
+                    session,
+                    cycle_id=cycle_id,
+                    run_id=candidate_run.id,
+                    now=now,
+                    read_only=read_only,
+                )
+                terminal_holds.append(candidate_run.id)
+                continue
             raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
     if not runs:
-        return
+        return run_ids
     jobs = (
         await session.scalars(
             select(Job).where(
@@ -872,6 +940,7 @@ async def _legacy_require_cycle_jobs_settled(
                 or not await job_lease_consumed(session, job=job, lease=lease, now=now)
             ):
                 raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+    return run_ids
 
 
 async def _database_now(session: AsyncSession) -> datetime:
@@ -1215,6 +1284,7 @@ async def _require_cycle_jobs_settled(
     require_no_live_lease: bool = True,
     allow_accepted_synthesis: bool = False,
     read_only: bool = False,
+    terminal_holds: list[UUID] | None = None,
 ) -> None:
     from nexus.agents.research_stages.public import _cycle_settled
 
@@ -1225,4 +1295,5 @@ async def _require_cycle_jobs_settled(
         require_no_live_lease=require_no_live_lease,
         allow_accepted_synthesis=allow_accepted_synthesis,
         read_only=read_only,
+        **({"terminal_holds": terminal_holds} if terminal_holds is not None else {}),
     )

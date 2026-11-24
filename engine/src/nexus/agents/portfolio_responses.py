@@ -248,6 +248,15 @@ class NativePortfolioTransport:
                     }:
                         raise _ScopeRejected(str(error)) from error
                     raise
+                from nexus.paper.host_probe_state import HostSendBlocked, require_host_send
+
+                account_id = self.settings.agent_paper_account_id
+                if account_id is None:
+                    raise _ScopeRejected(INVALID_PROOF)
+                try:
+                    await require_host_send(session, account_id)
+                except HostSendBlocked as error:
+                    raise _ScopeRejected(str(error)) from error
             elif phase == "terminal" and await read_receipt(session, job.id, "cleanup") is not None:
                 raise ValueError("PORTFOLIO_PLATFORM_LATE_TERMINAL")
             else:

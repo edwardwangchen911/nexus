@@ -14,8 +14,8 @@ from nexus.agents.codex_formal_stage import formal_stage_job_qualified
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.paper_context import (
     FrozenAgentPaperContextStatus,
+    _validate_frozen_paper_binding,
     read_agent_paper_research_context,
-    revalidate_frozen_agent_paper_context,
 )
 from nexus.agents.research_stages.protocol import (
     ProtocolRejected,
@@ -32,6 +32,47 @@ from nexus.persistence.models.paper import AgentPaperCycleRecord
 from nexus.persistence.models.runtime import Job
 
 VERSION = "research-stages-v1"
+
+
+async def stage_send_account(session: AsyncSession, run_id: UUID) -> UUID | None:
+    """Resolve the immutable stage route to its persisted owner, independent of settings."""
+    from nexus.paper.host_probe_state import INVALID, HostSendBlocked
+
+    rows = (
+        await session.execute(
+            text("""
+        SELECT r.kind, coalesce(c.account_id, p.account_id, i.account_id) AS account_id,
+               r.job_id, r.scope_id
+        FROM research_stage_route r
+        LEFT JOIN agent_paper_cycles c ON r.kind='formal' AND r.scope_id=c.id
+        LEFT JOIN manual_paper_requests p ON r.kind='independent' AND r.scope_id=p.id
+        LEFT JOIN research_monitor_increments i ON r.kind='increment' AND r.scope_id=i.id
+        WHERE r.run_id=:run
+        """),
+            {"run": run_id},
+        )
+    ).all()
+    if len(rows) != 1:
+        raise HostSendBlocked(INVALID)
+    kind, account_id, job_id, scope_id = rows[0]
+    if kind == "comparison" and account_id is None:
+        from nexus.agents.comparison_routes import comparison_owner
+
+        run = await session.get(AgentResearchRunRecord, run_id)
+        job = await session.get(Job, job_id)
+        try:
+            if (
+                run is not None
+                and job is not None
+                and (await comparison_owner(session, run, job) == scope_id)
+            ):
+                return None
+        except ValueError as error:
+            raise HostSendBlocked(INVALID) from error
+        raise HostSendBlocked(INVALID)
+    if kind not in {"formal", "independent", "increment"} or not isinstance(account_id, UUID):
+        raise HostSendBlocked(INVALID)
+    return account_id
 
 
 async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) -> tuple[UUID, str]:
@@ -105,8 +146,8 @@ async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) ->
         if (
             cycle is None
             or run.actor_id != "local-agent-paper-cycle"
-            or await revalidate_frozen_agent_paper_context(
-                session, run=run, evidence_records=tuple(evidence)
+            or await _validate_frozen_paper_binding(
+                session, run=run, context=paper, evidence_records=tuple(evidence)
             )
             != FrozenAgentPaperContextStatus.VALID
         ):

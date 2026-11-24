@@ -166,6 +166,21 @@ describe("decision-first trading workbench", () => {
     }
   });
 
+  it("accepts a fresh capture-only host and displays its intake hold", async () => {
+    const payload = readyPayload();
+    payload.data.loop.status = "degraded";
+    payload.data.loop.reason_code = "RESEARCH_SETTLEMENT_HOLD";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => (
+      String(input) === "/api/v1/workbench"
+        ? Response.json(payload)
+        : Response.json({ data: managementSummary, meta: meta() })
+    )));
+    render(<WorkspacePage />);
+
+    expect(await screen.findByText("宿主在线，仅采集 SEC 原件。历史用量仍待结算，付费研究和通知已禁止。")).toBeVisible();
+    expect(screen.getByText("实盘锁定")).toBeVisible();
+  });
+
   it("retains valid facts when refresh fails and marks them stale", async () => {
     const workbenchRead = vi.fn()
       .mockResolvedValueOnce(Response.json(readyPayload()))

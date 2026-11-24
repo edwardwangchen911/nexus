@@ -302,17 +302,18 @@ async def test_recovery_reads_versioned_identity_once_and_rechecks_the_next_acti
         return b"changed" if corrupt else data
 
     monkeypatch.setattr(store, "read_raw", read_raw)
-    original_check = recovery.require_manual_account_available
+    original_check = recovery.inspect_recovery_terminal_holds
 
     async def historical_identity(session, **kwargs):
-        await original_check(session, **kwargs)
+        holds = await original_check(session, **kwargs)
         for _ in range(2):
             if not await read_identity_bindings(
                 session, instrument_id=instruments[0], as_of=kwargs["now"]
             ):
                 raise ValueError("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN")
+        return holds
 
-    monkeypatch.setattr(recovery, "require_manual_account_available", historical_identity)
+    monkeypatch.setattr(recovery, "inspect_recovery_terminal_holds", historical_identity)
     try:
         event.listen(Engine, "before_cursor_execute", query)
         try:

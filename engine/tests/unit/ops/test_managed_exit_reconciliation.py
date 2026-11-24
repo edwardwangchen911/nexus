@@ -12,7 +12,7 @@ from nexus.ops import agent_paper_loop as loop
 from nexus.ops import agent_paper_recovery as recovery
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 
 def settings():
@@ -109,6 +109,67 @@ def test_reconciliation_keeps_both_locks_through_capture_canonical_check_and_pub
     assert result["status"] == ("eligible_at_check" if check_only else "reconciled")
     assert result["execution_locked"] is True and result["external_requests"] == 0
     assert "private" not in result
+
+
+@pytest.mark.parametrize("fault", [None, "ready", "changed_origin", "unquiet"])
+def test_monitor_replacement_requires_the_same_origin_and_denied_readiness(
+    boundaries, monkeypatch, tmp_path, fault
+):
+    from datetime import UTC, datetime
+
+    adapter, service, helper, config, ready, events = boundaries
+    config = config.model_copy(update={"agent_runtime_mode": AgentRuntimeMode.RESPONSES})
+    attempt = {"id": str(UUID(int=7)), "runtime_mode": "monitor_only", "revision": "a" * 40}
+    capture = {
+        "producer": {"active_attempt": attempt, "schema": CURRENT_MIGRATION_HEAD},
+        "reconciliation_revision": "a" * 40,
+    }
+    manager = SimpleNamespace(read=lambda _: {"attempt": None, "active_attempt": attempt})
+    monkeypatch.setattr(service, "_recovery_module", lambda: manager)
+    monkeypatch.setattr(helper, "capture_exit", lambda *_: capture)
+    monkeypatch.setattr(helper, "monitor_replacement_exited_at", lambda *_: 500, raising=False)
+
+    async def origin(_settings, prior, *, expected=None, exited_at=None):
+        assert prior == attempt and exited_at == datetime.fromtimestamp(500, tz=UTC)
+        events.append("old_origin")
+        if fault == "changed_origin" and expected is not None:
+            raise ValueError("private-origin-detail")
+        return SimpleNamespace(digest="b" * 64)
+
+    def quiet():
+        events.append("restricted_process_check")
+        if fault == "unquiet":
+            raise ValueError("private-process-detail")
+
+    async def inspect(_settings):
+        events.append("canonical")
+        ready.update(
+            status="ready" if fault == "ready" else "monitor_only",
+            paid_dispatch_ready=fault == "ready",
+            scope_hash=adapter.manual_host_scope(config),
+        )
+        return ready
+
+    def publish(*_args, **kwargs):
+        assert kwargs["monitor_only_origin"] == "b" * 64
+        events.append("publish")
+        return {"status": "eligible_at_check"}
+
+    monkeypatch.setattr(recovery, "inspect_monitor_replacement", origin)
+    monkeypatch.setattr(recovery, "require_monitor_replacement_process_quiescence", quiet)
+    monkeypatch.setattr(recovery, "inspect_recovery_readiness", inspect)
+    monkeypatch.setattr(helper, "publish_exit", publish)
+    result = adapter.reconcile_managed_exit(
+        config,
+        repo_root=tmp_path,
+        env_file=tmp_path / "env",
+        project="nexus-fosun-live",
+        check_only=True,
+    )
+    assert "quiescence" not in events
+    assert ("publish" in events) is (fault is None)
+    assert result["status"] == ("eligible_at_check" if fault is None else "blocked")
+    assert "private" not in json.dumps(result)
 
 
 @pytest.mark.parametrize(
@@ -246,13 +307,14 @@ def test_actual_canonical_entry_is_read_only_and_commits_before_publish(
         return SimpleNamespace(account_id=config.agent_paper_account_id, created_at=at)
 
     async def admit(*a, **kw):
-        assert kw["read_only"] is True and kw["allow_scheduled_completion"] is True
+        assert kw["read_only"] is True and kw["account_id"] == config.agent_paper_account_id
         events.append("canonical_account_admission")
+        return ()
 
     monkeypatch.setattr(recovery, "session_factory", lambda _: Factory())
     monkeypatch.setattr(recovery, "PaperReadService", Read)
     monkeypatch.setattr(recovery, "load_agent_paper_candidate_batch", batch)
-    monkeypatch.setattr(recovery, "require_manual_account_available", admit)
+    monkeypatch.setattr(recovery, "inspect_recovery_terminal_holds", admit)
     # Real canonical returns a newly built result, not the fixture's shared dict.
     helper = boundaries[2]
 

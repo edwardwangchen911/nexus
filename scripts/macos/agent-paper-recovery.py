@@ -207,15 +207,32 @@ def engine_check(service, root, env_file, argument):
     return value
 
 
+def ready_to_start(check):
+    return check.get("status") == "ready" or (
+        check.get("status") == "monitor_only"
+        and check.get("paid_dispatch_ready") is False
+        and check.get("execution_locked") is True
+        and check.get("external_requests") == 0
+    )
+
+
 def healthy(service, root, env_file):
     value = engine_check(service, root, env_file, "--service-status")
-    verified = (
-        value.get("heartbeat", {}).get("status") == "fresh"
-        and value.get("heartbeat", {}).get("release_revision") == service._checkout_revision(root)
-        and isinstance(value.get("heartbeat", {}).get("migration_head"), str)
-        and value.get("preflight", {}).get("status") == "ready"
+    heartbeat = value.get("heartbeat", {})
+    denied_but_live = (
+        value.get("runtime_ready") is True
+        and heartbeat.get("intake_hold_current") is True
+        and heartbeat.get("dispatch_ready") is False
+        and heartbeat.get("dispatch_reason")
+        in {"READ_PROBE_DEADLINE", "READ_PROBE_PAUSE_UNCONFIRMED", "RESEARCH_SETTLEMENT_HOLD"}
     )
-    return value["heartbeat"] if verified else None
+    verified = (
+        heartbeat.get("status") == "fresh"
+        and heartbeat.get("release_revision") == service._checkout_revision(root)
+        and isinstance(heartbeat.get("migration_head"), str)
+        and (value.get("preflight", {}).get("status") == "ready" or denied_but_live)
+    )
+    return heartbeat if verified else None
 
 
 def install(service, root, env_file, project):
@@ -386,7 +403,7 @@ def enable(service, root, env_file, project, *, report=True):
         ):
             raise ValueError("AGENT_PAPER_RECOVERY_BINDING_CHANGED")
         checked = engine_check(service, root, env_file, "--service-recovery-check")
-        if checked.get("status") != "ready":
+        if not ready_to_start(checked):
             raise ValueError("AGENT_PAPER_RECOVERY_DEPENDENCY_BLOCKED")
         if not isinstance(checked.get("migration_head"), str):
             raise ValueError("AGENT_PAPER_RECOVERY_DEPENDENCY_BLOCKED")
@@ -716,6 +733,16 @@ def recover(service, root, env_file, project, *, report=True):
         if not verified:
             state["healthy_since"] = None
             return finish("RUNNING_UNVERIFIED")
+        current_attempt = state.get("attempt") or state.get("active_attempt") or {}
+        if (current_attempt.get("runtime_mode") == "monitor_only") != (
+            verified.get("dispatch_reason") == "RESEARCH_SETTLEMENT_HOLD"
+        ):
+            return finish("RUNNING_UNVERIFIED")
+        if current_attempt.get("runtime_mode") == "monitor_only" and (
+            verified.get("intake_hold_attempt_id") != current_attempt.get("id")
+            or verified.get("migration_head") != state.get("schema")
+        ):
+            return finish("RUNNING_UNVERIFIED")
         if state.get("attempt") is not None and state.get("exit_reconciliation") is not None:
             service._reconciliation_module().archive_consumed(
                 root,
@@ -736,7 +763,9 @@ def recover(service, root, env_file, project, *, report=True):
             state["healthy_since"] = now
         elif now - since >= 600:
             state["failure_streak"] = 0
-        return finish("HEALTHY")
+        return finish(
+            "DEGRADED_INTAKE_BLOCKED" if verified.get("dispatch_ready") is False else "HEALTHY"
+        )
     if last_exit == 75:
         state["unconfirmed_exit"] = {
             "boot": current_boot,
@@ -825,7 +854,7 @@ def recover(service, root, env_file, project, *, report=True):
         check = engine_check(service, root, env_file, "--service-recovery-check")
     except (OSError, ValueError, subprocess.SubprocessError):
         return finish("INSPECTION_UNAVAILABLE")
-    if check.get("status") != "ready" or check.get("migration_head") != state["schema"]:
+    if not ready_to_start(check) or check.get("migration_head") != state["schema"]:
         return finish("BUSINESS_OR_DEPENDENCY_BLOCKED")
     if reconciled:
         if read(root) != state:
@@ -875,6 +904,8 @@ def recover(service, root, env_file, project, *, report=True):
         "generation": state["generation"],
         "revision": state["revision"],
     }
+    if check.get("status") == "monitor_only":
+        attempt["runtime_mode"] = "monitor_only"
     if reconciled:
         pointer = state["exit_reconciliation"]
         attempt["exit_reconciliation_sha256"] = pointer["evidence_sha256"]

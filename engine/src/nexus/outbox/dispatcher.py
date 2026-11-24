@@ -13,13 +13,14 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
-from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure
+from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure, PublisherSendHeld
 from nexus.outbox.models import OutboxDeliveryIdentity, OutboxMessage
 from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
 
 Clock = Callable[[], datetime]
 AfterPublish = Callable[[OutboxMessage], Awaitable[None]]
+ClaimGuard = Callable[[AsyncSession, OutboxEvent], Awaitable[bool]]
 
 
 class OutboxLeaseLostError(RuntimeError):
@@ -104,6 +105,7 @@ async def _claim(
     event_keys: Sequence[tuple[str, str]] | None,
     created_at_or_after: datetime | None,
     claim_condition: ColumnElement[bool] | None = None,
+    claim_guard: ClaimGuard | None = None,
 ) -> _ClaimedOutbox | None:
     conditions = [
         OutboxEvent.status == "queued",
@@ -126,14 +128,24 @@ async def _claim(
         )
     if created_at_or_after is not None:
         conditions.append(OutboxEvent.created_at >= created_at_or_after)
-    event = await session.scalar(
+    candidates = (
         select(OutboxEvent)
         .where(*conditions)
         .order_by(OutboxEvent.available_at, OutboxEvent.created_at, OutboxEvent.id)
         .with_for_update(skip_locked=True)
         .limit(1)
     )
-    if event is None:
+    skipped: list[UUID] = []
+    for _ in range(100):
+        event = await session.scalar(
+            candidates.where(OutboxEvent.id.not_in(skipped)) if skipped else candidates
+        )
+        if event is None:
+            return None
+        if claim_guard is None or await claim_guard(session, event):
+            break
+        skipped.append(event.id)
+    else:
         return None
     lease_token = new_uuid7()
     event.status = "delivering"
@@ -220,7 +232,7 @@ async def _fail(
     now: datetime,
     error_code: str,
     retryable: bool,
-    failure: PublisherFailure | None = None,
+    failure: PublisherFailure | PublisherSendHeld | None = None,
 ) -> None:
     event, attempt = await _lock_claim(session, claim=claim, now=now)
     attempt.outcome = "failed"
@@ -235,7 +247,26 @@ async def _fail(
         event.dead_lettered_at = now
     await session.flush()
 
-    if failure is not None:
+    if isinstance(failure, PublisherSendHeld):
+        await append_audit_event(
+            session,
+            actor_id="outbox-dispatcher",
+            action="outbox.delivery.send_held",
+            schema_version="outbox_send_held_v1",
+            occurred_at=now,
+            payload={
+                "account_id": str(failure.account_id),
+                "event_id": str(claim.event_id),
+                "attempt_no": claim.attempt_no,
+                "lease_token": str(claim.lease_token),
+                "worker_id": claim.worker_id,
+                "state_hash": failure.state_hash,
+                "state_sequence": failure.sequence,
+                "stage": "before_send",
+                "transport_entered": False,
+            },
+        )
+    elif failure is not None:
         await append_audit_event(
             session,
             actor_id="outbox-dispatcher",
@@ -262,6 +293,7 @@ async def dispatch_outbox_once(
     raise_publisher_errors: bool = False,
     created_at_or_after: datetime | None = None,
     claim_condition: ColumnElement[bool] | None = None,
+    claim_guard: ClaimGuard | None = None,
 ) -> bool:
     """Dispatch at most one event and durably record its delivery attempt."""
     worker_id = _worker_id(worker_id)
@@ -283,6 +315,7 @@ async def dispatch_outbox_once(
             event_keys=(tuple(sorted(registry.keys)) if claim_registered_only else None),
             created_at_or_after=created_at_or_after,
             claim_condition=claim_condition,
+            claim_guard=claim_guard,
         )
     if claim is None:
         return False
@@ -316,9 +349,13 @@ async def dispatch_outbox_once(
                     session,
                     claim=claim,
                     now=_utc(clock(), field="clock"),
-                    error_code="PUBLISHER_FAILED",
+                    error_code="PUBLISHER_SEND_HELD"
+                    if isinstance(error, PublisherSendHeld)
+                    else "PUBLISHER_FAILED",
                     retryable=True,
-                    failure=error if isinstance(error, PublisherFailure) else None,
+                    failure=error
+                    if isinstance(error, PublisherFailure | PublisherSendHeld)
+                    else None,
                 )
         except OutboxLeaseLostError:
             pass

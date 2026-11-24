@@ -44,6 +44,8 @@ export function ReadinessSummary({ workbench }: { workbench: Workbench }): React
         : compatibility?.status === "compatible" ? "代码提交、迁移与心跳报告匹配" : "兼容状态未知"}</dd></div>
     </dl>
     {readiness ? <p>已保存阶段：{stages[readiness.stage]} · <code>{readiness.reason_code}</code></p> : null}
+    {loop.reason_code === "READ_PROBE_PAUSE_UNCONFIRMED" ? <p>宿主仍在线。历史暂停未获确认，已禁止新任务。</p> : null}
+    {loop.reason_code === "RESEARCH_SETTLEMENT_HOLD" ? <p>宿主在线，仅采集 SEC 原件。历史用量仍待结算，付费研究和通知已禁止。</p> : null}
     {readiness?.blocker === "research_not_actionable" ? <p>现有记录只证明研究未通过交易准入；不据此推断具体资料缺口，也不等同于已形成充分证据的不调整结论。</p> : null}
     {readiness?.reason_code === "OPEN_ORDER_EXISTS" ? <p>已有订单尚未完成，等待原订单的执行结果。</p> : null}
     {!workbench.latest_cycle && readiness?.reason_code === "SCHWAB_L1_INCOMPLETE" ? <p>自然启动已记录行情准备失败，尚未形成研究周期；不能据此推断授权过期或行情源的具体原因。静态资料齐备不代表远端授权及窗口行情已核验，原失败请求不会因刷新页面而重放。</p> : null}

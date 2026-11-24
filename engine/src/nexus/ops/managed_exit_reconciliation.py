@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import re
 import sys
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from types import ModuleType
@@ -20,7 +21,7 @@ from nexus.paper.manual_entry import manual_host_scope
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 _PREFIX = "AGENT_PAPER_EXIT_RECONCILIATION_"
 _CODES = frozenset(
@@ -46,6 +47,38 @@ def _load_service(root: Path) -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def published_monitor_replacement(
+    settings: EngineSettings, repo_root: Path, env_file: Path
+) -> tuple[dict[str, object], str] | None:
+    state_path = repo_root / ".secrets/nexus-agent-paper/recovery.json"
+    if not state_path.is_file():
+        return None
+    service = _load_service(repo_root)
+    manager = service._recovery_module()
+    helper = service._reconciliation_module()
+    state = manager.read(repo_root)
+    if state is None or state.get("exit_reconciliation") is None:
+        return None
+    origin = helper.monitor_replacement_origin(repo_root, state, settings.release_revision)
+    if origin is None:
+        return None
+    project = "nexus-fosun-live"
+    status, exit_code = service._launchctl_inspection("launchctl", repo_root, env_file, project)
+    if not helper.qualified_exit(
+        service,
+        manager,
+        repo_root,
+        env_file,
+        project,
+        state,
+        status,
+        exit_code,
+        allow_retirement_pending=True,
+    ):
+        raise ValueError(_PREFIX + "SCOPE_INVALID")
+    return origin
 
 
 def reconcile_managed_exit(
@@ -92,11 +125,41 @@ def reconcile_managed_exit(
         ):
             allowed |= helper_codes
         with service._service_control_lock(), acquire_agent_paper_lock():
-            failure = _PREFIX + "PROCESS_UNCONFIRMED"
-            recovery.require_recovery_process_quiescence()
-            failure = _PREFIX + "UNAVAILABLE"
             manager = service._recovery_module()
+            old_attempt = None
+            origin_digest = None
+            exited_at = None
+            if (
+                project == "nexus-fosun-live"
+                and target_model_config_id is None
+                and record_original_nvda_proof is None
+                and settings.agent_runtime_mode is AgentRuntimeMode.RESPONSES
+            ):
+                state = manager.read(repo_root)
+                if state is not None and state.get("attempt") is None:
+                    active = state.get("active_attempt")
+                    if isinstance(active, dict) and active.get("runtime_mode") == "monitor_only":
+                        old_attempt = active
+            failure = _PREFIX + "PROCESS_UNCONFIRMED"
+            if old_attempt is None:
+                recovery.require_recovery_process_quiescence()
+            failure = _PREFIX + "UNAVAILABLE"
             capture = helper.capture_exit(service, manager, repo_root, env_file, project)
+            if old_attempt is not None:
+                if (
+                    capture["producer"].get("active_attempt") != old_attempt
+                    or capture["producer"].get("schema") != CURRENT_MIGRATION_HEAD
+                    or capture.get("reconciliation_revision") != settings.release_revision
+                ):
+                    raise ValueError(_PREFIX + "SCOPE_INVALID")
+                exited_at = datetime.fromtimestamp(
+                    helper.monitor_replacement_exited_at(repo_root, capture), tz=UTC
+                )
+                origin_digest = asyncio.run(
+                    recovery.inspect_monitor_replacement(settings, old_attempt, exited_at=exited_at)
+                ).digest
+                failure = _PREFIX + "PROCESS_UNCONFIRMED"
+                recovery.require_monitor_replacement_process_quiescence()
             if record_original_nvda_proof is not None:
                 from nexus.ops.manual_paper import _require_maintenance_code
                 from nexus.ops.monitor_occupancy_local import record_for_managed_exit
@@ -142,7 +205,15 @@ def reconcile_managed_exit(
                     _price_target(settings, source, env_file, target_model_config_id, capture)
                 )
             readiness = asyncio.run(recovery.inspect_recovery_readiness(settings))
-            if readiness.get("status") != "ready":
+            if old_attempt is not None and (
+                readiness.get("status") != "monitor_only"
+                or readiness.get("paid_dispatch_ready") is not False
+            ):
+                raise ValueError(_PREFIX + "BUSINESS_BLOCKED")
+            if readiness.get("status") != "ready" and not (
+                readiness.get("status") == "monitor_only"
+                and readiness.get("paid_dispatch_ready") is False
+            ):
                 codes = readiness.get("blocking_codes")
                 return blocked(
                     [
@@ -163,7 +234,15 @@ def reconcile_managed_exit(
             ):
                 raise ValueError(_PREFIX + "SCOPE_INVALID")
             failure = _PREFIX + "PROCESS_UNCONFIRMED"
-            recovery.require_recovery_process_quiescence()
+            if old_attempt is None:
+                recovery.require_recovery_process_quiescence()
+            else:
+                recovery.require_monitor_replacement_process_quiescence()
+                asyncio.run(
+                    recovery.inspect_monitor_replacement(
+                        settings, old_attempt, expected=origin_digest, exited_at=exited_at
+                    )
+                )
             failure = _PREFIX + "UNAVAILABLE"
             published = helper.publish_exit(
                 service,
@@ -174,6 +253,7 @@ def reconcile_managed_exit(
                 capture=capture,
                 readiness=readiness,
                 check_only=check_only,
+                **({"monitor_only_origin": origin_digest} if origin_digest is not None else {}),
                 **(
                     {"price_target": target, "source_environment": source}
                     if target is not None

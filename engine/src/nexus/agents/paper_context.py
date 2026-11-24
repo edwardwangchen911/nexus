@@ -545,13 +545,26 @@ async def revalidate_frozen_agent_paper_context(
     evidence_records: tuple[ResearchEvidenceRef, ...],
 ) -> FrozenAgentPaperContextStatus:
     """Require the exact context evidence frozen into this run, if present."""
-    context_records = tuple(record for record in evidence_records if record.source == SOURCE)
     context = await read_agent_paper_research_context(
         session,
         snapshot_id=run.data_snapshot_id,
         instrument_id=run.instrument_id,
         as_of=run.decision_time,
     )
+    return await _validate_frozen_paper_binding(
+        session, run=run, context=context, evidence_records=evidence_records
+    )
+
+
+async def _validate_frozen_paper_binding(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    context: tuple[AgentPaperResearchContext, ResearchEvidenceRef] | None,
+    evidence_records: tuple[ResearchEvidenceRef, ...],
+) -> FrozenAgentPaperContextStatus:
+    """Bind this call's fully verified context to the exact run and cycle evidence."""
+    context_records = tuple(record for record in evidence_records if record.source == SOURCE)
     if not context_records and context is None:
         return FrozenAgentPaperContextStatus.MISSING
     if context is None:

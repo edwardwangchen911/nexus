@@ -19,6 +19,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.codex_formal_stage import formal_preparation_model_matches
@@ -184,6 +185,11 @@ def require_formal_recovery_processes_quiescent() -> None:
     _require_research_processes_quiescent(formal_recovery=True)
 
 
+def require_monitor_replacement_processes_quiescent() -> None:
+    """Recognize signed desktop helpers independently of their release."""
+    _require_research_processes_quiescent(formal_recovery=True, monitor_replacement=True)
+
+
 def _aperitif_file_identity(path: Path) -> _FileIdentity:
     if not path.is_absolute() or path.resolve(strict=True) != path:
         raise ValueError("noncanonical process mapping")
@@ -225,15 +231,21 @@ def _aperitif_process_mapping(raw: str, pid: int, executable: str) -> _ProcessMa
 
 
 def _verify_aperitif_process(
-    output: Callable[[list[str]], str], pid: int, executable: str
+    output: Callable[[list[str]], str],
+    pid: int,
+    executable: str,
+    *,
+    release_independent: bool = False,
 ) -> _ProcessMapping:
     command = ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt,cwd", "-F0pfDin"]
     mapping = _aperitif_process_mapping(output(command), pid, executable)
-    identifier, cdhash = _APERITIF_CODE_IDENTITIES[executable]
+    identifier, cdhash = _APERITIF_CODE_IDENTITIES.get(executable, ("com.openai.codex.helper", ""))
     requirement = (
         f'-R=anchor apple generic and identifier "{identifier}" and '
-        f'certificate leaf[subject.OU] = "{_APERITIF_TEAM}" and cdhash H"{cdhash}"'
+        f'certificate leaf[subject.OU] = "{_APERITIF_TEAM}"'
     )
+    if not release_independent:
+        requirement += f' and cdhash H"{cdhash}"'
     for subject in (str(pid), executable):
         output(["/usr/bin/codesign", "--verify", "--strict", requirement, subject])
     if _aperitif_process_mapping(output(command), pid, executable) != mapping:
@@ -241,7 +253,9 @@ def _verify_aperitif_process(
     return mapping
 
 
-def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
+def _require_research_processes_quiescent(
+    *, formal_recovery: bool, monitor_replacement: bool = False
+) -> None:
     """Inspect process identity and executable mappings; never argv or credentials."""
 
     def output(command: list[str]) -> str:
@@ -309,14 +323,27 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
     for pid in desktop:
         parent = host.get(host[pid][0])
         ancestor = None if parent is None else host.get(parent[0])
-        aperitif_chain = formal_recovery and parent is not None and parent[3] == _DESKTOP_APERITIF
+        aperitif_path = None if parent is None else parent[3]
+        aperitif_chain = formal_recovery and (
+            aperitif_path == _DESKTOP_APERITIF
+            or monitor_replacement
+            and aperitif_path is not None
+            and re.fullmatch(
+                re.escape(_DESKTOP_APERITIF).replace(
+                    re.escape("158.0.8127.37"), r"[0-9]+(?:\.[0-9]+)+"
+                ),
+                aperitif_path,
+            )
+            is not None
+        )
         chain: tuple[str, ...]
         roles: tuple[str, ...]
         if parent is not None and parent[3] == _DESKTOP_PARENT:
             chain = (_DESKTOP_CHILD, _DESKTOP_PARENT)
             roles = ("candidate", "desktop")
         elif aperitif_chain:
-            chain = (_DESKTOP_CHILD, _DESKTOP_APERITIF, _DESKTOP_PARENT)
+            assert aperitif_path is not None
+            chain = (_DESKTOP_CHILD, aperitif_path, _DESKTOP_PARENT)
             roles = ("candidate", "aperitif", "desktop")
         elif (
             formal_recovery
@@ -363,9 +390,14 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
             if row[3] != executable:
                 raise identity_error("EXECUTABLE_MISMATCH")
             ancestors.add(pid)
-            if aperitif_chain:
+            if aperitif_chain or monitor_replacement and len(chain) == 2:
                 if pid not in aperitif:
-                    aperitif[pid] = (executable, _verify_aperitif_process(output, pid, executable))
+                    aperitif[pid] = (
+                        executable,
+                        _verify_aperitif_process(
+                            output, pid, executable, release_independent=monitor_replacement
+                        ),
+                    )
                 verified.add(pid)
             elif pid not in verified:
                 files = mappings(pid)
@@ -420,7 +452,12 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
                 raise ResearchProcessDiagnosticError("CONTAINER_PROCESSES_UNCONFIRMED")
     if aperitif:
         for pid, (executable, before) in aperitif.items():
-            if _verify_aperitif_process(output, pid, executable) != before:
+            if (
+                _verify_aperitif_process(
+                    output, pid, executable, release_independent=monitor_replacement
+                )
+                != before
+            ):
                 raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
         after = snapshot()
         if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):
@@ -1192,3 +1229,49 @@ async def _proof(
             read_only=read_only,
         ),
     )
+
+
+async def prove_recovery_terminal_hold(
+    session: AsyncSession, *, cycle_id: UUID, run_id: UUID, now: datetime, read_only: bool
+) -> None:
+    """Prove stopped native execution without accepting or settling its usage."""
+    from nexus.paper.manual_request import manual_request_for_cycle
+
+    if await manual_request_for_cycle(session, cycle_id=cycle_id) is not None:
+        raise ValueError(_BLOCKED)
+    statement = """
+        SELECT s.id FROM research_stage_scope s
+        WHERE s.id=:cycle AND s.cycle_id=s.id AND s.stopped
+          AND s.request_id IS NULL AND s.increment_id IS NULL AND s.comparison_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM research_stage_member m
+              JOIN research_stage_route r USING (run_id, job_id, scope_id)
+              JOIN jobs j ON j.id=m.job_id
+              WHERE m.scope_id=s.id AND m.run_id=:run AND r.kind='formal'
+                AND jsonb_typeof(r.platform_binding)='object' AND j.status='failed'
+          )
+    """
+    try:
+        scope = await session.scalar(
+            text(statement if read_only else statement + " FOR UPDATE NOWAIT"),
+            {"cycle": cycle_id, "run": run_id},
+        )
+    except DBAPIError as error:
+        if getattr(error.orig, "sqlstate", None) == "55P03":
+            raise ValueError(_BLOCKED) from None
+        raise
+    if scope != cycle_id:
+        raise ValueError(_BLOCKED)
+    cycle = await session.get(AgentPaperCycleRecord, cycle_id)
+    if cycle is None:
+        raise ValueError(_BLOCKED)
+    proof = await _proof(
+        session,
+        cycle_id=cycle_id,
+        run_id=run_id,
+        now=now,
+        same_day=cycle.decision_time.date() == now.date(),
+        read_only=read_only,
+    )
+    if proof.get("usage") != "unknown" or proof.get("staged_protocol") != "research-stages-v1":
+        raise ValueError(_BLOCKED)

@@ -11,11 +11,12 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import monotonic_ns
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
+from nexus.paper.host_probe_state import MonitorReplacement
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.settings import EngineSettings
@@ -81,16 +82,77 @@ class RecoveryActivation:
         self.directory = repo_root / ".secrets/nexus-agent-paper"
         self.receipt_path = self.directory / f"recovery-activation-{attempt_id}.json"
         self.receipt: dict[str, object] | None = None
+        self._monitor_config_hash: str | None = None
+        self.monitor_replacement: MonitorReplacement | None = None
 
-    def _validate(
-        self, effective: EngineSettings, *, readiness: dict[str, object] | None = None
-    ) -> None:
-        value = _read(self.directory / "recovery.json")
-        attempt = value.get("attempt")
+    def verify_monitor_runtime(self) -> None:
+        """Keep the running restricted process bound to its exact managed activation."""
+        from nexus.agents.research_maintenance import require_research_open
+
+        require_research_open()
+        state = _read(self.directory / "recovery.json")
+        attempt = state.get("attempt") or state.get("active_attempt")
+        receipt = _read(self.receipt_path)
         if (
             self.directory.is_symlink()
             or self.env_file.is_symlink()
-            or value.get("version") != 1
+            or state.get("version") != 1
+            or state.get("desired") != "enabled"
+            or state.get("root") != str(self.root)
+            or state.get("env_file") != str(self.env_file)
+            or state.get("generation") != self.generation
+            or state.get("schema") != CURRENT_MIGRATION_HEAD
+            or state.get("revision") != self.settings.release_revision
+            or self._monitor_config_hash is None
+            or state.get("config_hash") != self._monitor_config_hash
+            or hashlib.sha256(self.env_file.read_bytes()).hexdigest() != self._monitor_config_hash
+            or not isinstance(attempt, dict)
+            or attempt.get("id") != self.attempt_id
+            or attempt.get("runtime_mode") != "monitor_only"
+            or attempt.get("generation") != self.generation
+            or attempt.get("boot") != _boot_id()
+            or receipt != self.receipt
+            or receipt.get("phase") != "activated"
+            or receipt.get("pid") != os.getpid()
+            or subprocess.check_output(
+                ("git", "-C", str(self.root), "rev-parse", "--verify", "HEAD"),
+                text=True,
+                timeout=5,
+            ).strip()
+            != self.settings.release_revision
+        ):
+            raise ValueError(_BLOCKED)
+        checkout = subprocess.run(
+            (
+                "git",
+                "-C",
+                str(self.root),
+                "diff",
+                "--quiet",
+                "HEAD",
+                "--",
+                "engine/src/nexus",
+                "scripts/macos/agent-paper-loop-service.py",
+                "scripts/macos/agent-paper-recovery.py",
+                "scripts/macos/agent-paper-reconciliation.py",
+            ),
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        if checkout.returncode != 0:
+            raise ValueError(_BLOCKED)
+
+    def _validate(
+        self, effective: EngineSettings, *, readiness: dict[str, object] | None = None
+    ) -> tuple[dict[str, object], str] | None:
+        if self.directory.is_symlink() or self.env_file.is_symlink():
+            raise ValueError(_BLOCKED)
+        value = _read(self.directory / "recovery.json")
+        config_hash = hashlib.sha256(self.env_file.read_bytes()).hexdigest()
+        attempt = value.get("attempt")
+        if (
+            value.get("version") != 1
             or value.get("desired") != "enabled"
             or value.get("root") != str(self.root)
             or value.get("env_file") != str(self.env_file)
@@ -98,7 +160,7 @@ class RecoveryActivation:
             or value.get("schema") != CURRENT_MIGRATION_HEAD
             or value.get("revision") != effective.release_revision
             or self.settings.release_revision != effective.release_revision
-            or value.get("config_hash") != hashlib.sha256(self.env_file.read_bytes()).hexdigest()
+            or value.get("config_hash") != config_hash
             or not isinstance(attempt, dict)
             or attempt.get("generation") != self.generation
             or attempt.get("id") != self.attempt_id
@@ -107,6 +169,14 @@ class RecoveryActivation:
             or manual_host_scope(self.settings) != manual_host_scope(effective)
         ):
             raise ValueError(_BLOCKED)
+        if readiness is not None:
+            mode = attempt.get("runtime_mode")
+            if mode not in (None, "monitor_only") or readiness.get("status") != (mode or "ready"):
+                raise ValueError(_BLOCKED)
+            if mode == "monitor_only" and readiness.get("paid_dispatch_ready") is not False:
+                raise ValueError(_BLOCKED)
+            if mode == "monitor_only":
+                self._monitor_config_hash = config_hash
         if (
             attempt.get("exit_reconciliation_sha256") is not None
             or value.get("exit_reconciliation") is not None
@@ -121,6 +191,11 @@ class RecoveryActivation:
             helper.validate_activation_scope(
                 self.root, value, attempt, manual_host_scope(effective), readiness
             )
+            origin = helper.monitor_replacement_origin(
+                self.root, value, effective.release_revision, attempt=attempt
+            )
+            return cast("tuple[dict[str, object], str] | None", origin)
+        return None
 
     def _save(
         self,
@@ -175,9 +250,11 @@ class RecoveryActivation:
         pending.unlink()
         self.receipt = receipt
 
-    async def __call__(self, effective: EngineSettings) -> None:
+    async def __call__(self, effective: EngineSettings) -> Literal["monitor_only"] | None:
         from nexus.ops.agent_paper_recovery import (
+            inspect_monitor_replacement,
             inspect_recovery_readiness,
+            require_monitor_replacement_process_quiescence,
             require_recovery_process_quiescence,
         )
 
@@ -200,7 +277,12 @@ class RecoveryActivation:
             self._save("rejected", "PRE_ACTIVATION_REJECTED", diagnostic=diagnostic)
 
         try:
-            self._validate(effective)
+            origin = self._validate(effective)
+            require_process_quiet = (
+                require_recovery_process_quiescence
+                if origin is None
+                else require_monitor_replacement_process_quiescence
+            )
             descriptor = os.open(
                 self.receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
             )
@@ -222,20 +304,32 @@ class RecoveryActivation:
                 os.fsync(stream.fileno())
             started = monotonic_ns()
             try:
-                require_recovery_process_quiescence()
+                require_process_quiet()
             except (OSError, RuntimeError, ValueError):
                 reject("process_before_check", "PROCESS_QUIESCENCE_UNCONFIRMED", started)
                 raise ValueError(_BLOCKED) from None
             check_started = monotonic_ns()
             result = await inspect_recovery_readiness(effective)
-            self._validate(effective)
+            if self._validate(effective) != origin:
+                raise ValueError(_BLOCKED)
+            replacement = None
+            if origin is not None:
+                if (
+                    result.get("status") != "monitor_only"
+                    or result.get("paid_dispatch_ready") is not False
+                ):
+                    reject("readiness", "AGENT_PAPER_RECOVERY_UNAVAILABLE", check_started, result)
+                    raise ValueError(_BLOCKED)
+                replacement = await inspect_monitor_replacement(
+                    effective, origin[0], expected=origin[1]
+                )
             started = monotonic_ns()
             try:
-                require_recovery_process_quiescence()
+                require_process_quiet()
             except (OSError, RuntimeError, ValueError):
                 reject("process_after_check", "PROCESS_QUIESCENCE_UNCONFIRMED", started)
                 raise ValueError(_BLOCKED) from None
-            if result.get("status") != "ready":
+            if result.get("status") not in {"ready", "monitor_only"}:
                 reject("readiness", "AGENT_PAPER_RECOVERY_UNAVAILABLE", check_started, result)
                 raise ValueError(_BLOCKED)
             stage, started = "control_lock", monotonic_ns()
@@ -244,9 +338,11 @@ class RecoveryActivation:
                 # manager, which can hold its lock while dispatching this child.
                 with _service_control_lock(self.root):
                     stage, started = "identity_recheck", monotonic_ns()
-                    self._validate(effective, readiness=result)
+                    if self._validate(effective, readiness=result) != origin:
+                        raise ValueError(_BLOCKED)
                     stage, started = "activation_receipt", monotonic_ns()
                     self._save("activated", "READY")
+                    self.monitor_replacement = replacement
                     stage, started = "control_unlock", monotonic_ns()
             except (OSError, RuntimeError, ValueError) as error:
                 code = {
@@ -257,6 +353,7 @@ class RecoveryActivation:
                     code = "AGENT_PAPER_SERVICE_CONTROL_BUSY"
                 reject(stage, code, started)
                 raise ValueError(_BLOCKED) from None
+            return "monitor_only" if result.get("status") == "monitor_only" else None
         except (OSError, RuntimeError, ValueError, TypeError, KeyError):
             raise ValueError(_BLOCKED) from None
 

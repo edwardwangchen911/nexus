@@ -4,6 +4,7 @@ import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from time import monotonic_ns
+from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
@@ -11,12 +12,14 @@ from sqlalchemy.exc import DBAPIError
 from nexus.agents.platform_native import native_runtime_matches
 from nexus.agents.platform_profile import sol_business_model_matches
 from nexus.agents.research_usage import require_research_accounting_clear
+from nexus.backtest.universe import universe_definition_parse_scope
 from nexus.market.current_identity import identity_parse_scope
 from nexus.ops.agent_paper_once import _validate_local_database
 from nexus.paper.candidate_batch import load_agent_paper_candidate_batch
+from nexus.paper.host_probe_state import MonitorReplacement, monitor_only_origin_hash
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.paper.manual_host_exit import valid_host_exit
-from nexus.paper.manual_request import require_manual_account_available
+from nexus.paper.manual_request import inspect_recovery_terminal_holds
 from nexus.paper.read_service import PaperReadService
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord
@@ -53,6 +56,57 @@ def require_recovery_process_quiescence() -> None:
     require_formal_recovery_processes_quiescent()
 
 
+def require_monitor_replacement_process_quiescence() -> None:
+    from nexus.paper.history_seal import require_monitor_replacement_processes_quiescent
+
+    require_monitor_replacement_processes_quiescent()
+
+
+async def inspect_monitor_replacement(
+    settings: EngineSettings,
+    old_attempt: dict[str, object],
+    *,
+    expected: str | None = None,
+    exited_at: datetime | None = None,
+) -> MonitorReplacement:
+    from nexus.ops.agent_paper_loop import agent_paper_host_identity
+
+    account = settings.agent_paper_account_id
+    revision = old_attempt.get("revision")
+    if (
+        account is None
+        or not native_runtime_matches(settings)
+        or old_attempt.get("runtime_mode") != "monitor_only"
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+    ):
+        raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
+    _validate_local_database(settings.database_url)
+    attempt = UUID(str(old_attempt["id"]))
+    worker, version = agent_paper_host_identity(
+        settings.model_copy(update={"release_revision": revision}),
+        worker_id=f"agent-paper-loop-{attempt}",
+        account_id=account,
+    )
+    factory = session_factory(settings)
+    try:
+        async with asyncio.timeout(5), factory.begin() as session:
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            digest = await monitor_only_origin_hash(
+                session,
+                account_id=account,
+                operation_id=attempt,
+                worker=worker,
+                version=version,
+                exited_at=exited_at,
+            )
+        if expected is not None and digest != expected:
+            raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
+        return MonitorReplacement(attempt, worker, version, digest)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 def _recovery_model_matches(
     model: AgentModelConfigRecord | None, now: datetime, *, sol: bool
 ) -> bool:
@@ -77,6 +131,7 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
     code = None
     diagnostic: dict[str, object] = {}
     budget_scope: dict[str, object] | None = None
+    monitor_only = False
     deadline = None
     stage, started = "configuration", monotonic_ns()
     try:
@@ -153,13 +208,15 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
                     identity_source_parse_scope(),
                     artifact_read_scope(session),
                     evidence_read_scope(session),
+                    universe_definition_parse_scope(),
                 ):
-                    await require_manual_account_available(
-                        session,
-                        account_id=account.id,
-                        now=now,
-                        allow_scheduled_completion=True,
-                        read_only=True,
+                    monitor_only = bool(
+                        await inspect_recovery_terminal_holds(
+                            session,
+                            account_id=account.id,
+                            now=now,
+                            read_only=True,
+                        )
                     )
                 # Experimental runs have no business request to enumerate above.
                 # Known-but-unsettled costs still prohibit resuming new work.
@@ -194,7 +251,8 @@ async def inspect_recovery_readiness(settings: EngineSettings) -> dict[str, obje
             await factory.kw["bind"].dispose()
     return {
         **diagnostic,
-        "status": "ready" if code is None else "blocked",
+        "status": ("monitor_only" if monitor_only else "ready") if code is None else "blocked",
+        "paid_dispatch_ready": code is None and not monitor_only,
         "blocking_codes": [] if code is None else [code],
         "checked_at": checked_at.isoformat(),
         "execution_locked": True,

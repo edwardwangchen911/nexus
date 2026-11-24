@@ -382,7 +382,7 @@ async def run_agent_worker_once(
             preclaim_guard = guard_formal_pool
     research_executor = None
     if job_ids is not None and len(job_ids) == 1:
-        from nexus.agents.research_stages.routes import VERSION, selected_route
+        from nexus.agents.research_stages.routes import VERSION, selected_route, stage_send_account
 
         async with factory() as routing_session:
             stage_route = await selected_route(routing_session, job_ids[0])
@@ -427,6 +427,14 @@ async def run_agent_worker_once(
                         # Preclaim retained the funding locks. Time can advance while the
                         # heartbeat or Job is acquired: check again before the first attempt.
                         await require_single_sol_first_claim_window(session, owner)
+                from nexus.paper.host_probe_state import HostSendBlocked, require_host_send
+
+                try:
+                    account = await stage_send_account(session, stage_route["run_id"])
+                    if account is not None:
+                        await require_host_send(session, account)
+                except HostSendBlocked:
+                    return False
                 return True
 
             locked_guard = stage_locked_guard

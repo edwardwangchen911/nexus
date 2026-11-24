@@ -575,6 +575,22 @@ async def _run_synthesis_job_once(
             return False
         if isinstance(transport, NativePortfolioTransport):
             await transport.require_job(session, job, now)
+        from nexus.paper.host_probe_state import HostSendBlocked, require_host_send
+
+        account = await session.scalar(
+            select(AgentPaperCycleRecord.account_id)
+            .join(
+                AgentPortfolioSynthesisRunRecord,
+                AgentPortfolioSynthesisRunRecord.cycle_id == AgentPaperCycleRecord.id,
+            )
+            .where(AgentPortfolioSynthesisRunRecord.id == UUID(str(job.payload["run_id"])))
+        )
+        if account is None:
+            return False
+        try:
+            await require_host_send(session, account)
+        except HostSendBlocked:
+            return False
         return True
 
     async with factory.begin() as session:
@@ -715,6 +731,7 @@ async def _run_synthesis_job_once(
             "frozen_input": frozen.model_dump(mode="json"),
         }
         from nexus.monitoring.original_occupancy import require_for_account_send
+        from nexus.paper.host_probe_state import require_host_send
         from nexus.paper.routine_budget import require_native_new_send
 
         await require_for_account_send(
@@ -723,6 +740,7 @@ async def _run_synthesis_job_once(
             fenced_transport=isinstance(transport, NativePortfolioTransport),
         )
         await require_native_new_send(session, kind="synthesis", run_id=run.id)
+        await require_host_send(session, frozen.account_id)
         run.status = "running"
         await session.flush()
 

@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic as monotonic_clock
-from typing import TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -54,6 +54,7 @@ from nexus.ops.agent_paper_formal import (
     resolve_formal_host_cycle_profile,
 )
 from nexus.ops.agent_paper_identity import prepare_agent_paper_identity_once
+from nexus.ops.agent_paper_monitor_only import run_monitor_only
 from nexus.ops.agent_paper_once import (
     AgentPaperCollectWindowRequest,
     AgentPaperMarketSettings,
@@ -169,11 +170,14 @@ from nexus.research.fred_observations import FredVintageRequest
 from nexus.research.fred_storage import read_fred_observations
 from nexus.risk.query_authority_producer import inspect_query_authority_scope
 from nexus.settings import AgentRuntimeMode, EngineSettings
+
+if TYPE_CHECKING:
+    from nexus.paper.host_probe_state import ProbeState
 from nexus.worker import run_agent_worker_once
 
 
 class _RecoveryLoopArguments(TypedDict, total=False):
-    recovery_guard: Callable[[EngineSettings], Awaitable[None]]
+    recovery_guard: Callable[[EngineSettings], Awaitable[Literal["monitor_only"] | None]]
 
 
 _RELEASE_REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -853,6 +857,7 @@ async def heartbeat_agent_paper_loop(
     started_at: datetime,
     seen_at: datetime,
     account_id: UUID | None = None,
+    expected_hold: "ProbeState | None" = None,
 ) -> None:
     """Persist one Agent paper-loop liveness fact without changing business state."""
     if not settings.database_url:
@@ -871,6 +876,26 @@ async def heartbeat_agent_paper_loop(
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory.begin() as session:
+            if expected_hold is not None:
+                from nexus.paper.host_probe_state import (
+                    MonitorOnlyState,
+                    latest_probe_state,
+                    require_monitor_only_capture,
+                )
+                from nexus.paper.target_service import lock_portfolio_account
+
+                if (
+                    account_id is None
+                    or expected_hold.worker != worker_id
+                    or not expected_hold.consecutive
+                    or expected_hold.version != process_version
+                ):
+                    raise ValueError("HOST_READ_PROBE_STATE_INVALID")
+                await lock_portfolio_account(session, account_id)
+                if await latest_probe_state(session, account_id) != expected_hold:
+                    raise ValueError("HOST_READ_PROBE_STATE_INVALID")
+                if isinstance(expected_hold, MonitorOnlyState):
+                    await require_monitor_only_capture(session, account_id, worker_id)
             await upsert_worker_heartbeat(
                 session,
                 queue=QueueName.AGENT_PAPER,
@@ -2379,7 +2404,7 @@ async def run_foreground_loop(
     wake_for_pending_work: Callable[[], Awaitable[bool]] | None = None,
     monitor_busy: Callable[[], bool] = lambda: False,
     kick_monitor: Callable[[datetime], None] = lambda _: None,
-    record_probe: Callable[[ReadProbeDeadline | None], Awaitable[None]] | None = None,
+    record_probe: Callable[[ReadProbeDeadline | None], Awaitable[bool | None]] | None = None,
     read_initial_pause: Callable[[], Awaitable[bool]] | None = None,
     monitor_confirmed: Callable[[], bool] = lambda: True,
     deferred_lease_remaining: Callable[[FormalStageGrantBusy], Awaitable[float]] | None = None,
@@ -2438,6 +2463,7 @@ async def run_foreground_loop(
 
     recovery_inspect = False
     paused = False
+    confirmed_after_write_error = False
 
     async def wait_before_reinspection(
         *,
@@ -2446,7 +2472,7 @@ async def run_foreground_loop(
         elapsed_by_monotonic: bool,
     ) -> AgentPaperLoopAction | None:
         """Wait until due, but break early when wall time jumps across the target."""
-        nonlocal paused, recovery_inspect
+        nonlocal paused, recovery_inspect, confirmed_after_write_error
         must_probe = paused
         remaining = max(0.0, (wait_until - snapshot_now).total_seconds())
         deadline = monotonic() + remaining
@@ -2460,6 +2486,10 @@ async def run_foreground_loop(
                 seen_at = await persist_heartbeat()
             except Exception as error:
                 return stop_unknown("heartbeat", error=error)
+            if confirmed_after_write_error:
+                # The original denial is durable. Keep serving heartbeat without
+                # publishing an automatic resume after an uncertain write.
+                continue
             if wake_for_pending_work is not None:
                 # Already-started monitoring retains its original bounds. A deferred
                 # inspection cannot establish that no work is pending.
@@ -2486,7 +2516,7 @@ async def run_foreground_loop(
                         await persist_heartbeat()
                         probe_step = _PendingProbeStep.PAUSE_RECORD
                         async with asyncio.timeout(interval_seconds):
-                            await record_probe(result)
+                            confirmed_after_write_error = await record_probe(result) is True
                         probe_step = _PendingProbeStep.PAUSE_HEARTBEAT
                         await persist_heartbeat()
                         paused = must_probe = True
@@ -2969,7 +2999,8 @@ async def run_local_agent_paper_loop(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], datetime] = _utc_now,
     monotonic: Callable[[], float] = monotonic_clock,
-    recovery_guard: Callable[[EngineSettings], Awaitable[None]] | None = None,
+    recovery_guard: Callable[[EngineSettings], Awaitable[Literal["monitor_only"] | None]]
+    | None = None,
 ) -> AgentPaperLoopAction:
     """Run the concrete local loop through persisted inspection and scoped actions."""
     from nexus.agents.research_maintenance import require_research_open
@@ -3002,8 +3033,7 @@ async def run_local_agent_paper_loop(
     worker_id = f"agent-paper-loop-{new_uuid7()}"
     started_at = clock()
     with acquire_agent_paper_lock():
-        if recovery_guard is not None:
-            await recovery_guard(settings)
+        runtime_mode = await recovery_guard(settings) if recovery_guard is not None else None
         shutdown = asyncio.Event()
 
         async def wait_sleep(seconds: float) -> None:
@@ -3040,6 +3070,28 @@ async def run_local_agent_paper_loop(
                 if str(error) == "AGENT_PAPER_CALENDAR_AUTHORITY_MISMATCH":
                     return AgentPaperLoopAction.STOP_CALENDAR_AUTHORITY_MISMATCH
                 raise
+
+            if runtime_mode == "monitor_only":
+                attempt = getattr(recovery_guard, "attempt_id", None)
+                return await run_monitor_only(
+                    settings,
+                    account_id=account_id,
+                    calendar_authority_id=calendar_authority_id,
+                    repo_root=repo_root,
+                    env_file=env_file,
+                    operation_id=UUID(attempt) if isinstance(attempt, str) else None,
+                    verify_activation=getattr(recovery_guard, "verify_monitor_runtime", None),
+                    **(
+                        {"replacement": replacement}
+                        if (replacement := getattr(recovery_guard, "monitor_replacement", None))
+                        is not None
+                        else {}
+                    ),
+                    started_at=started_at,
+                    clock=clock,
+                    shutdown=shutdown,
+                    wait_sleep=wait_sleep,
+                )
 
             from nexus.monitoring.host import PriceMonitorCoordinator
             from nexus.ops.research_monitor import refresh_host_observations, scan_host_once
@@ -3246,6 +3298,8 @@ async def run_local_agent_paper_loop(
                     host_prepared_market_open_at = snapshot.market_open_at
                 return result
 
+            confirmed_hold: ProbeState | None = None
+
             async def heartbeat(seen_at: datetime) -> None:
                 await heartbeat_agent_paper_loop(
                     settings,
@@ -3253,6 +3307,7 @@ async def run_local_agent_paper_loop(
                     account_id=account_id,
                     started_at=started_at,
                     seen_at=seen_at,
+                    **({"expected_hold": confirmed_hold} if confirmed_hold is not None else {}),
                 )
                 report_monitor_diagnostic()
 
@@ -3275,10 +3330,11 @@ async def run_local_agent_paper_loop(
                     return True
                 return False
 
-            from nexus.paper.host_probe_state import publish_probe_state
+            from nexus.paper.host_probe_state import publish_and_confirm_probe_state
             from nexus.persistence.session import session_factory
 
-            async def record_probe(deadline: ReadProbeDeadline | None) -> None:
+            async def record_probe(deadline: ReadProbeDeadline | None) -> bool:
+                nonlocal confirmed_hold
                 if account_id is None:
                     raise ValueError("HOST_READ_PROBE_STATE_INVALID")
                 worker, version = agent_paper_host_identity(
@@ -3286,15 +3342,15 @@ async def run_local_agent_paper_loop(
                 )
                 factory = session_factory(settings)
                 try:
-                    async with factory.begin() as session:
-                        await publish_probe_state(
-                            session,
-                            account_id=account_id,
-                            worker=worker,
-                            started=started_at,
-                            version=version,
-                            deadline=deadline,
-                        )
+                    confirmed_hold = await publish_and_confirm_probe_state(
+                        factory,
+                        account_id=account_id,
+                        worker=worker,
+                        started=started_at,
+                        version=version,
+                        deadline=deadline,
+                    )
+                    return confirmed_hold is not None
                 finally:
                     await factory.kw["bind"].dispose()
 
@@ -5464,12 +5520,24 @@ async def read_agent_paper_service_heartbeat(
                 now, heartbeat = row
                 result = _classify_agent_paper_service_heartbeat(now, heartbeat)
                 if account_id is not None and result["status"] == "fresh":
-                    from nexus.paper.host_probe_state import latest_probe_state
+                    from nexus.paper.host_probe_state import (
+                        MonitorOnlyState,
+                        latest_probe_state,
+                        verify_monitor_only_binding,
+                    )
 
                     state = await latest_probe_state(session, account_id)
                     result["dispatch_ready"] = not (state and state.consecutive)
-                    if not result["dispatch_ready"]:
-                        result["dispatch_reason"] = "READ_PROBE_DEADLINE"
+                    if state is not None and state.consecutive:
+                        result["dispatch_reason"] = state.reason
+                        result["intake_hold_current"] = (
+                            state.worker == heartbeat.worker_id
+                            and state.version == heartbeat.process_version
+                            and state.started == heartbeat.started_at.astimezone(UTC).isoformat()
+                        )
+                        if isinstance(state, MonitorOnlyState):
+                            await verify_monitor_only_binding(session, state)
+                            result["intake_hold_attempt_id"] = state.operation_id
                 return result
         finally:
             await engine.dispose()
@@ -5603,18 +5671,40 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.service_recovery_check:
             from nexus.ops.agent_paper_recovery import (
+                inspect_monitor_replacement,
                 inspect_recovery_readiness,
+                require_monitor_replacement_process_quiescence,
                 require_recovery_process_quiescence,
             )
+            from nexus.ops.managed_exit_reconciliation import published_monitor_replacement
 
             failure_code = "AGENT_PAPER_RECOVERY_SCOPE_INVALID"
             try:
                 recovery_settings = _FileEngineSettings.model_validate(environment)
                 failure_code = "AGENT_PAPER_RECOVERY_PROCESS_UNCONFIRMED"
                 with acquire_agent_paper_lock():
-                    require_recovery_process_quiescence()
+                    assert env_file is not None
+                    origin = published_monitor_replacement(recovery_settings, root, env_file)
+                    if origin is None:
+                        require_recovery_process_quiescence()
+                    else:
+                        require_monitor_replacement_process_quiescence()
+                        asyncio.run(
+                            inspect_monitor_replacement(
+                                recovery_settings, origin[0], expected=origin[1]
+                            )
+                        )
                     failure_code = "AGENT_PAPER_RECOVERY_UNAVAILABLE"
                     result = asyncio.run(inspect_recovery_readiness(recovery_settings))
+                    if origin is not None:
+                        if (
+                            result.get("status") != "monitor_only"
+                            or result.get("paid_dispatch_ready") is not False
+                            or published_monitor_replacement(recovery_settings, root, env_file)
+                            != origin
+                        ):
+                            raise ValueError(failure_code)
+                        result["monitor_only_origin"] = origin[1]
             except Exception as error:
                 if (
                     isinstance(error, RuntimeError)
@@ -5629,7 +5719,7 @@ def main(argv: list[str] | None = None) -> int:
                     "external_requests": 0,
                 }
             print(json.dumps(result, sort_keys=True))
-            return 0 if result["status"] == "ready" else 1
+            return 0 if result["status"] in {"ready", "monitor_only"} else 1
         if args.service_startup_preflight:
             try:
                 result = agent_paper_service_startup_preflight(environment, repo_root=root)
@@ -5674,6 +5764,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 except Exception:
                     heartbeat = {"status": "unavailable"}
+                runtime_ready = (
+                    result.get("status") == "ready" and heartbeat.get("status") == "fresh"
+                )
                 if heartbeat.get("dispatch_ready") is False:
                     existing_codes = result.get("blocking_codes")
                     result = {
@@ -5686,7 +5779,12 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 print(
                     json.dumps(
-                        {"heartbeat": heartbeat, "preflight": result, "execution_locked": True},
+                        {
+                            "heartbeat": heartbeat,
+                            "preflight": result,
+                            "runtime_ready": runtime_ready,
+                            "execution_locked": True,
+                        },
                         sort_keys=True,
                     )
                 )

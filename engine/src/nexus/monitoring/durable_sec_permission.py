@@ -85,12 +85,22 @@ class SecRequestFence:
         return sec or occupancy
 
     async def acquire(self, request: Any) -> None:
+        from nexus.agents.research_stages.routes import stage_send_account
+        from nexus.paper.host_probe_state import check_host_send_state, require_host_send
+
         session = self.factory()
         self.session = session
         try:
             await session.begin()
             active = await self._validate(session)
-            if not active:
+            account = (
+                self.account_id
+                if self.run_id is None
+                else await stage_send_account(session, self.run_id)
+            )
+            if account is not None:
+                await require_host_send(session, account)
+            if not active and account is None:
                 await self.release()
                 return
             original = request.extensions.get("trace")
@@ -125,6 +135,8 @@ class SecRequestFence:
                         raise ValueError("SEC_RESEARCH_PERMISSION_INVALID")
                     self._require_deadline()
                     await self._validate(self.session)
+                    if account is not None:
+                        await check_host_send_state(self.session, account)
                     self._require_deadline()
 
             request.extensions["trace"] = traced

@@ -47,11 +47,19 @@ _APERITIF = (
         "codex_after_container_check",
         "missing_containers",
         "container_codex",
+        "replacement_wrong_version",
+        "replacement_bad_live_signature",
+        "replacement_container_codex",
     ],
 )
 def test_aperitif_is_verified_only_by_normal_formal_process_gate(monkeypatch, scenario):
-    from nexus.ops.agent_paper_recovery import require_recovery_process_quiescence
+    from nexus.ops.agent_paper_recovery import (
+        require_monitor_replacement_process_quiescence,
+        require_recovery_process_quiescence,
+    )
 
+    replacement = scenario.startswith("replacement_")
+    scenario = scenario.removeprefix("replacement_")
     paths = {
         201: _DESKTOP,
         202: _APERITIF,
@@ -144,12 +152,15 @@ def test_aperitif_is_verified_only_by_normal_formal_process_gate(monkeypatch, sc
             assert command[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
             subject = command[-1]
             path = paths[int(subject)] if subject.isdecimal() else subject
-            identifier, digest = identifiers[path]
+            identifier, digest = identifiers.get(path, ("com.openai.codex.helper", ""))
             requirement = command[-2]
             assert "anchor apple generic" in requirement
             assert f'identifier "{identifier}"' in requirement
             assert 'certificate leaf[subject.OU] = "2DC432GLL2"' in requirement
-            assert f'cdhash H"{digest}"' in requirement
+            if replacement:
+                assert "cdhash" not in requirement
+            else:
+                assert f'cdhash H"{digest}"' in requirement
             signatures.append(subject)
             if path == _APERITIF:
                 if scenario == "signature_timeout":
@@ -175,14 +186,18 @@ def test_aperitif_is_verified_only_by_normal_formal_process_gate(monkeypatch, sc
 
     monkeypatch.setattr(history_seal.subprocess, "run", execute)
     monkeypatch.setattr(history_seal, "_aperitif_file_identity", identity, raising=False)
-    if scenario == "valid":
-        require_recovery_process_quiescence()
+    check = (
+        require_monitor_replacement_process_quiescence
+        if replacement
+        else require_recovery_process_quiescence
+    )
+    if scenario == "valid" or replacement and scenario == "wrong_version":
+        check()
         assert snapshots == 2 and container_checks == 1
         assert mapping_reads == {201: 4, 202: 4, 203: 4}
         assert set(signatures) == {"201", "202", "203", *paths.values()}
         assert all(signatures.count(subject) == 2 for subject in signatures)
     else:
-        check = require_recovery_process_quiescence
         if scenario == "maintenance":
             check = history_seal.require_research_processes_quiescent
         with pytest.raises(history_seal.ResearchProcessDiagnosticError) as error:

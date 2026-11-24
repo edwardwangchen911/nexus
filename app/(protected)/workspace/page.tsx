@@ -148,11 +148,12 @@ function deriveState(workbench: WorkbenchPayload["data"]): WorkbenchPageState {
 function isWorkbenchPayload(value: unknown): value is WorkbenchPayload {
   if (!isPlain(value) || !isPlain(value.data) || !isPlain(value.meta)) return false;
   const data = value.data;
-  const loopReasons = [null, "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE", "HEARTBEAT_INVALID", "READ_PROBE_DEADLINE"];
+  const degradedReasons = ["READ_PROBE_DEADLINE", "READ_PROBE_PAUSE_UNCONFIRMED", "RESEARCH_SETTLEMENT_HOLD"];
+  const loopReasons = [null, "HEARTBEAT_MISSING", "HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE", "HEARTBEAT_INVALID", ...degradedReasons];
   if (data.mode !== "internal_paper" || data.execution_locked !== true
     || !isPlain(data.loop) || !["online", "offline", "unknown", "degraded"].includes(String(data.loop.status))
     || !loopReasons.includes(data.loop.reason_code as null | string)
-    || (data.loop.status === "degraded" && data.loop.reason_code !== "READ_PROBE_DEADLINE")
+    || (data.loop.status === "degraded" && !degradedReasons.includes(String(data.loop.reason_code)))
     || (data.loop.status === "online" && data.loop.reason_code !== null)
     || (data.loop.status === "unknown" && !["HEARTBEAT_MISSING", "HEARTBEAT_INVALID"].includes(String(data.loop.reason_code)))
     || (data.loop.status === "offline" && !["HEARTBEAT_STALE", "HEARTBEAT_INCOMPATIBLE"].includes(String(data.loop.reason_code)))

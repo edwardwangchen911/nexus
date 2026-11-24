@@ -1,14 +1,26 @@
-"""Pause-aware notice delivery; only security/rule locks span the bounded HTTP send."""
+"""Pause-aware notice delivery with bounded security, rule, and send locks."""
 
-from sqlalchemy import String, and_, exists, or_, select, text
+from uuid import UUID
+
+from sqlalchemy import String, and_, exists, func, or_, select, text, union_all
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.monitoring.storage import lock_security
 from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotification
+from nexus.notifications.research_monitor import RESEARCH_MONITOR_EVENT
+from nexus.notifications.research_monitor_batch import RESEARCH_MONITOR_BATCH_EVENT
+from nexus.outbox.failure import PublisherSendHeld
 from nexus.outbox.models import OutboxMessage, Publisher
-from nexus.persistence.models.monitoring import MonitorTrigger
-from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
+from nexus.paper.host_probe_state import (
+    ROUTE,
+    SCHEMA,
+    HostSendBlocked,
+    HostSendHeld,
+    require_host_send,
+)
+from nexus.persistence.models.monitoring import MonitorObservationBatch, MonitorTrigger
+from nexus.persistence.models.runtime import IdempotencyRecord, OutboxDeliveryAttempt, OutboxEvent
 from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryEvent,
@@ -19,7 +31,41 @@ from nexus.persistence.models.sec_monitor import (
 )
 
 
-def notice_claim_condition() -> ColumnElement[bool]:
+def _held_notice(
+    owner: type[SecNotificationClaim] | type[MonitorTrigger] | type[MonitorObservationBatch],
+) -> ColumnElement[bool]:
+    value = IdempotencyRecord.response_payload["consecutive"]
+    latest_is_open = (
+        select(
+            func.coalesce(
+                and_(
+                    IdempotencyRecord.schema_version == SCHEMA,
+                    func.jsonb_typeof(value) == "number",
+                    value.astext == "0",
+                ),
+                False,
+            )
+        )
+        .where(
+            IdempotencyRecord.route == ROUTE,
+            IdempotencyRecord.actor_id == func.concat("host-read-probe:", owner.account_id),
+        )
+        .order_by(IdempotencyRecord.created_at.desc(), IdempotencyRecord.id.desc())
+        .limit(1)
+        .correlate(owner)
+        .scalar_subquery()
+    )
+    return exists(
+        select(owner.id)
+        .where(
+            owner.outbox_id == OutboxEvent.id,
+            ~func.coalesce(latest_is_open, True),
+        )
+        .correlate(OutboxEvent)
+    )
+
+
+def notice_claim_condition(*, check_host: bool = True) -> ColumnElement[bool]:
     latest = (
         select(SecMonitorRuleState.state)
         .where(SecMonitorRuleState.rule_id == SecMonitorRule.id)
@@ -135,14 +181,57 @@ def notice_claim_condition() -> ColumnElement[bool]:
         .where(SecNotificationClaim.outbox_id == OutboxEvent.id)
         .correlate(OutboxEvent)
     )
+    held = (
+        tuple(
+            ~_held_notice(model)
+            for model in (SecNotificationClaim, MonitorTrigger, MonitorObservationBatch)
+        )
+        if check_host
+        else ()
+    )
     return and_(
         ~blocked,
         ~conflicted_claim,
         ~conflicted_legacy,
         ~legacy_revision,
         ~claim_revision,
+        *held,
         or_(and_(durable, exact), and_(~durable, or_(claimed, ~legacy_scope))),
     )
+
+
+async def _notice_send_accounts(session: AsyncSession, event: OutboxEvent) -> set[UUID]:
+    claims = select(SecNotificationClaim.account_id).where(
+        SecNotificationClaim.outbox_id == event.id
+    )
+    disclosure = select(MonitorTrigger.account_id).where(
+        MonitorTrigger.outbox_id == event.id, MonitorTrigger.kind == "disclosure"
+    )
+    accounts = set(await session.scalars(union_all(claims, disclosure)))
+    key = event.event_type, event.schema_version
+    if key in {RESEARCH_MONITOR_EVENT, RESEARCH_MONITOR_BATCH_EVENT}:
+        owner = MonitorTrigger if key == RESEARCH_MONITOR_EVENT else MonitorObservationBatch
+        account = await session.scalar(
+            select(owner.account_id).where(
+                owner.id == event.aggregate_id, owner.outbox_id == event.id
+            )
+        )
+        if account is None:
+            raise HostSendBlocked("RESEARCH_NOTICE_ACCOUNT_UNCONFIRMED")
+        accounts.add(account)
+    if key == DURABLE_SEC_EVENT and not accounts:
+        raise HostSendBlocked("RESEARCH_NOTICE_ACCOUNT_UNCONFIRMED")
+    return accounts
+
+
+async def notice_claim_guard(session: AsyncSession, event: OutboxEvent) -> bool:
+    """A queue row is not a claim until its current persisted owner permits it."""
+    try:
+        for account_id in sorted(await _notice_send_accounts(session, event)):
+            await require_host_send(session, account_id)
+    except HostSendBlocked:
+        return False
+    return True
 
 
 class DurableSecPublisher:
@@ -206,7 +295,7 @@ class DurableSecPublisher:
                     OutboxEvent.id == message.event_id,
                     OutboxEvent.status == "delivering",
                     OutboxEvent.available_at > text("pg_catalog.clock_timestamp()"),
-                    notice_claim_condition(),
+                    notice_claim_condition(check_host=False),
                 )
                 .with_for_update(of=OutboxEvent)
                 .execution_options(populate_existing=True)
@@ -227,6 +316,15 @@ class DurableSecPublisher:
                 value = DurableSecNotification.model_validate(message.payload)
                 if value.discovery_id != message.aggregate_id:
                     raise ValueError("DURABLE_SEC_NOTICE_INVALID")
-            # No account or budget lock is acquired here. Pause takes the same
-            # security/rule locks, so its commit orders before or after this send.
+            try:
+                for account_id in sorted(await _notice_send_accounts(session, row)):
+                    await require_host_send(session, account_id)
+            except HostSendHeld as error:
+                raise PublisherSendHeld(
+                    account_id=error.account_id,
+                    state_hash=error.state_hash,
+                    sequence=error.sequence,
+                ) from error
+            # Existing security/rule locks still order rule changes. The send
+            # lock is separate from the account and budget transaction locks.
             await self.publisher(message)
