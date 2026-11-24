@@ -3081,6 +3081,12 @@ async def run_local_agent_paper_loop(
                     env_file=env_file,
                     operation_id=UUID(attempt) if isinstance(attempt, str) else None,
                     verify_activation=getattr(recovery_guard, "verify_monitor_runtime", None),
+                    **(
+                        {"replacement": replacement}
+                        if (replacement := getattr(recovery_guard, "monitor_replacement", None))
+                        is not None
+                        else {}
+                    ),
                     started_at=started_at,
                     clock=clock,
                     shutdown=shutdown,
@@ -5665,18 +5671,40 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.service_recovery_check:
             from nexus.ops.agent_paper_recovery import (
+                inspect_monitor_replacement,
                 inspect_recovery_readiness,
+                require_monitor_replacement_process_quiescence,
                 require_recovery_process_quiescence,
             )
+            from nexus.ops.managed_exit_reconciliation import published_monitor_replacement
 
             failure_code = "AGENT_PAPER_RECOVERY_SCOPE_INVALID"
             try:
                 recovery_settings = _FileEngineSettings.model_validate(environment)
                 failure_code = "AGENT_PAPER_RECOVERY_PROCESS_UNCONFIRMED"
                 with acquire_agent_paper_lock():
-                    require_recovery_process_quiescence()
+                    assert env_file is not None
+                    origin = published_monitor_replacement(recovery_settings, root, env_file)
+                    if origin is None:
+                        require_recovery_process_quiescence()
+                    else:
+                        require_monitor_replacement_process_quiescence()
+                        asyncio.run(
+                            inspect_monitor_replacement(
+                                recovery_settings, origin[0], expected=origin[1]
+                            )
+                        )
                     failure_code = "AGENT_PAPER_RECOVERY_UNAVAILABLE"
                     result = asyncio.run(inspect_recovery_readiness(recovery_settings))
+                    if origin is not None:
+                        if (
+                            result.get("status") != "monitor_only"
+                            or result.get("paid_dispatch_ready") is not False
+                            or published_monitor_replacement(recovery_settings, root, env_file)
+                            != origin
+                        ):
+                            raise ValueError(failure_code)
+                        result["monitor_only_origin"] = origin[1]
             except Exception as error:
                 if (
                     isinstance(error, RuntimeError)

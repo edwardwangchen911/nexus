@@ -16,6 +16,7 @@ from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
+from nexus.paper.host_probe_state import MonitorReplacement
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.settings import EngineSettings
@@ -82,6 +83,7 @@ class RecoveryActivation:
         self.receipt_path = self.directory / f"recovery-activation-{attempt_id}.json"
         self.receipt: dict[str, object] | None = None
         self._monitor_config_hash: str | None = None
+        self.monitor_replacement: MonitorReplacement | None = None
 
     def verify_monitor_runtime(self) -> None:
         """Keep the running restricted process bound to its exact managed activation."""
@@ -143,7 +145,7 @@ class RecoveryActivation:
 
     def _validate(
         self, effective: EngineSettings, *, readiness: dict[str, object] | None = None
-    ) -> None:
+    ) -> tuple[dict[str, object], str] | None:
         if self.directory.is_symlink() or self.env_file.is_symlink():
             raise ValueError(_BLOCKED)
         value = _read(self.directory / "recovery.json")
@@ -189,6 +191,11 @@ class RecoveryActivation:
             helper.validate_activation_scope(
                 self.root, value, attempt, manual_host_scope(effective), readiness
             )
+            origin = helper.monitor_replacement_origin(
+                self.root, value, effective.release_revision, attempt=attempt
+            )
+            return cast("tuple[dict[str, object], str] | None", origin)
+        return None
 
     def _save(
         self,
@@ -245,7 +252,9 @@ class RecoveryActivation:
 
     async def __call__(self, effective: EngineSettings) -> Literal["monitor_only"] | None:
         from nexus.ops.agent_paper_recovery import (
+            inspect_monitor_replacement,
             inspect_recovery_readiness,
+            require_monitor_replacement_process_quiescence,
             require_recovery_process_quiescence,
         )
 
@@ -268,7 +277,12 @@ class RecoveryActivation:
             self._save("rejected", "PRE_ACTIVATION_REJECTED", diagnostic=diagnostic)
 
         try:
-            self._validate(effective)
+            origin = self._validate(effective)
+            require_process_quiet = (
+                require_recovery_process_quiescence
+                if origin is None
+                else require_monitor_replacement_process_quiescence
+            )
             descriptor = os.open(
                 self.receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
             )
@@ -290,16 +304,28 @@ class RecoveryActivation:
                 os.fsync(stream.fileno())
             started = monotonic_ns()
             try:
-                require_recovery_process_quiescence()
+                require_process_quiet()
             except (OSError, RuntimeError, ValueError):
                 reject("process_before_check", "PROCESS_QUIESCENCE_UNCONFIRMED", started)
                 raise ValueError(_BLOCKED) from None
             check_started = monotonic_ns()
             result = await inspect_recovery_readiness(effective)
-            self._validate(effective)
+            if self._validate(effective) != origin:
+                raise ValueError(_BLOCKED)
+            replacement = None
+            if origin is not None:
+                if (
+                    result.get("status") != "monitor_only"
+                    or result.get("paid_dispatch_ready") is not False
+                ):
+                    reject("readiness", "AGENT_PAPER_RECOVERY_UNAVAILABLE", check_started, result)
+                    raise ValueError(_BLOCKED)
+                replacement = await inspect_monitor_replacement(
+                    effective, origin[0], expected=origin[1]
+                )
             started = monotonic_ns()
             try:
-                require_recovery_process_quiescence()
+                require_process_quiet()
             except (OSError, RuntimeError, ValueError):
                 reject("process_after_check", "PROCESS_QUIESCENCE_UNCONFIRMED", started)
                 raise ValueError(_BLOCKED) from None
@@ -312,9 +338,11 @@ class RecoveryActivation:
                 # manager, which can hold its lock while dispatching this child.
                 with _service_control_lock(self.root):
                     stage, started = "identity_recheck", monotonic_ns()
-                    self._validate(effective, readiness=result)
+                    if self._validate(effective, readiness=result) != origin:
+                        raise ValueError(_BLOCKED)
                     stage, started = "activation_receipt", monotonic_ns()
                     self._save("activated", "READY")
+                    self.monitor_replacement = replacement
                     stage, started = "control_unlock", monotonic_ns()
             except (OSError, RuntimeError, ValueError) as error:
                 code = {

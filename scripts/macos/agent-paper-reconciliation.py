@@ -73,13 +73,34 @@ def _reject(suffix):
 def _target(evidence):
     if (
         type(evidence.get("version")) is not int
-        or evidence["version"] not in {1, 2, 3, 4}
+        or evidence["version"] not in {1, 2, 3, 4, 5}
         or evidence.get("historical_effects") != "not_determined"
         or evidence.get("business_disposition") != "unchanged"
         or evidence.get("execution_locked") is not True
         or evidence.get("replay_authorized") is not False
     ):
         _reject("PROOF_INVALID")
+    if evidence["version"] == 5:
+        capture = evidence.get("capture", {})
+        producer = capture.get("producer", {})
+        observed = evidence.get("observed_readiness", {})
+        if (
+            "recovery_target" in evidence
+            or "pending_attempt" in producer
+            or producer.get("active_attempt", {}).get("runtime_mode") != "monitor_only"
+            or type(capture.get("exit_code")) is not int
+            or capture["exit_code"] in {0, 75}
+            or not re.fullmatch(r"[0-9a-f]{40}", str(capture.get("reconciliation_revision")))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("monitor_only_origin")))
+            or observed.get("status") != "monitor_only"
+            or observed.get("paid_dispatch_ready") is not False
+            or observed.get("migration_head") != producer.get("schema")
+            or observed.get("blocking_codes") != []
+            or observed.get("execution_locked") is not True
+            or observed.get("external_requests") != 0
+        ):
+            _reject("PROOF_INVALID")
+        return None
     if evidence["version"] == 4:
         target = evidence.get("recovery_target")
         capture = evidence.get("capture", {})
@@ -244,6 +265,11 @@ def validate_target_readiness(service, root, state, checked):
         checked.get("paid_dispatch_ready") is not False or target is not None
     ):
         _reject("BUSINESS_BLOCKED")
+    if proof["version"] == 5 and (
+        checked.get("monitor_only_origin") != proof["monitor_only_origin"]
+        or checked.get("scope_hash") != proof["observed_readiness"].get("scope_hash")
+    ):
+        _reject("BINDING_CHANGED")
     if target is not None and service._checkout_revision(root) != target["revision"]:
         _reject("BINDING_CHANGED")
     if target is not None and "config_hash" in target:
@@ -406,6 +432,23 @@ def capture_exit(service, recovery, root, env_file, project):
     }
 
 
+def monitor_replacement_exited_at(root, capture):
+    producer = capture["producer"]
+    attempt = producer["active_attempt"]
+    path = root / ".secrets/nexus-agent-paper" / f"recovery-activation-{UUID(attempt['id'])}.json"
+    first = path.lstat()
+    receipt, digest = _read(path)
+    if (
+        attempt.get("runtime_mode") != "monitor_only"
+        or receipt.get("phase") != "exited"
+        or receipt.get("reason") != "unclassified"
+        or digest != producer["receipt_sha256"]
+        or _stable_stat(path.lstat()) != _stable_stat(first)
+    ):
+        _reject("BINDING_CHANGED")
+    return first.st_mtime
+
+
 def _proof_path(root, attempt_id):
     if str(UUID(attempt_id)) != attempt_id:
         _reject("PROOF_INVALID")
@@ -545,6 +588,7 @@ def publish_exit(
     check_only,
     price_target=None,
     source_environment=None,
+    monitor_only_origin=None,
 ):
     monitor_only = readiness.get("status") == "monitor_only"
     if (
@@ -562,6 +606,8 @@ def publish_exit(
         or price_target is not None
         or capture["producer"]["schema"] != readiness.get("migration_head")
     ):
+        _reject("BUSINESS_BLOCKED")
+    if monitor_only_origin is not None and not monitor_only:
         _reject("BUSINESS_BLOCKED")
     if "pending_attempt" in capture["producer"]:
         if price_target is not None:
@@ -628,7 +674,10 @@ def publish_exit(
         _reject("PROOF_INVALID")
     if existing:
         evidence, digest = _read_publication(target, capture, repair=False)
-        if _target(evidence) != recovery_target:
+        if (
+            _target(evidence) != recovery_target
+            or evidence.get("monitor_only_origin") != monitor_only_origin
+        ):
             _reject("SCHEMA_MISMATCH")
         _matching_pointer(state, attempt_id, digest)
     if price_target is not None:
@@ -651,8 +700,11 @@ def publish_exit(
         _sync(target)
         _sync(target.parent)
     else:
+        version = 4 if price_target is not None else 1 if recovery_target is None else 2
+        if monitor_only_origin is not None:
+            version = 5
         evidence = {
-            "version": 4 if price_target is not None else 1 if recovery_target is None else 2,
+            "version": version,
             "capture": capture,
             "observed_readiness": readiness,
             "historical_effects": "not_determined",
@@ -664,6 +716,8 @@ def publish_exit(
             evidence["source_environment_file"] = _source_environment_path(root, attempt_id).name
         if recovery_target is not None:
             evidence["recovery_target"] = recovery_target
+        if monitor_only_origin is not None:
+            evidence["monitor_only_origin"] = monitor_only_origin
         _target(evidence)
         _publish(target, evidence)
         _, digest = _read(target)
@@ -707,6 +761,10 @@ def qualified_exit(
     if pointer.get("consumed_by") is not None:
         return False
     _validate_original(root, state, pointer)
+    if evidence["version"] == 5 and (
+        service._checkout_revision(root) != evidence["capture"]["reconciliation_revision"]
+    ):
+        _reject("BINDING_CHANGED")
     if target is not None and service._checkout_revision(root) != target["revision"]:
         _reject("BINDING_CHANGED")
     capture = evidence.get("capture", {})
@@ -816,12 +874,34 @@ def _validate_consumption_binding(root, state, attempt):
     if attempt.get("old_instance") != state.get("instance"):
         _reject("BINDING_CHANGED")
     evidence = _validate_original(root, state, pointer)
+    if evidence["version"] == 5 and attempt.get("runtime_mode") != "monitor_only":
+        _reject("BINDING_CHANGED")
     target = _target(evidence)
     if target is not None and (
         attempt.get("revision") != target["revision"] or pointer.get("target_binding") is None
     ):
         _reject("BINDING_CHANGED")
     return target
+
+
+def monitor_replacement_origin(root, state, revision, *, attempt=None):
+    """Return evidence only from the exact same-schema restricted proof."""
+    pointer = state.get("exit_reconciliation")
+    if pointer is None:
+        return None
+    evidence = _bound_proof(root, state)
+    if evidence["version"] != 5:
+        return None
+    if attempt is None:
+        _validate_original(root, state, pointer)
+        if pointer.get("consumed_by") is not None:
+            _reject("BINDING_CHANGED")
+    else:
+        _validate_consumption_binding(root, state, attempt)
+    capture = evidence["capture"]
+    if capture.get("reconciliation_revision") != revision:
+        _reject("BINDING_CHANGED")
+    return capture["producer"]["active_attempt"], evidence["monitor_only_origin"]
 
 
 def validate_pending_activation(root, state, attempt):
@@ -1276,7 +1356,8 @@ def validate_unused_prior_boot(root, state, current_boot):
         return
     if current_boot == state["boot"] or state.get("attempt") is not None:
         _reject("STATE_INVALID")
-    _validate_original(root, state, pointer)
+    if _validate_original(root, state, pointer)["version"] == 5:
+        _reject("BINDING_CHANGED")
     return pointer
 
 

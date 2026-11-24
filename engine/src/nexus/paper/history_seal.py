@@ -185,6 +185,11 @@ def require_formal_recovery_processes_quiescent() -> None:
     _require_research_processes_quiescent(formal_recovery=True)
 
 
+def require_monitor_replacement_processes_quiescent() -> None:
+    """Recognize signed desktop helpers independently of their release."""
+    _require_research_processes_quiescent(formal_recovery=True, monitor_replacement=True)
+
+
 def _aperitif_file_identity(path: Path) -> _FileIdentity:
     if not path.is_absolute() or path.resolve(strict=True) != path:
         raise ValueError("noncanonical process mapping")
@@ -226,15 +231,21 @@ def _aperitif_process_mapping(raw: str, pid: int, executable: str) -> _ProcessMa
 
 
 def _verify_aperitif_process(
-    output: Callable[[list[str]], str], pid: int, executable: str
+    output: Callable[[list[str]], str],
+    pid: int,
+    executable: str,
+    *,
+    release_independent: bool = False,
 ) -> _ProcessMapping:
     command = ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt,cwd", "-F0pfDin"]
     mapping = _aperitif_process_mapping(output(command), pid, executable)
-    identifier, cdhash = _APERITIF_CODE_IDENTITIES[executable]
+    identifier, cdhash = _APERITIF_CODE_IDENTITIES.get(executable, ("com.openai.codex.helper", ""))
     requirement = (
         f'-R=anchor apple generic and identifier "{identifier}" and '
-        f'certificate leaf[subject.OU] = "{_APERITIF_TEAM}" and cdhash H"{cdhash}"'
+        f'certificate leaf[subject.OU] = "{_APERITIF_TEAM}"'
     )
+    if not release_independent:
+        requirement += f' and cdhash H"{cdhash}"'
     for subject in (str(pid), executable):
         output(["/usr/bin/codesign", "--verify", "--strict", requirement, subject])
     if _aperitif_process_mapping(output(command), pid, executable) != mapping:
@@ -242,7 +253,9 @@ def _verify_aperitif_process(
     return mapping
 
 
-def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
+def _require_research_processes_quiescent(
+    *, formal_recovery: bool, monitor_replacement: bool = False
+) -> None:
     """Inspect process identity and executable mappings; never argv or credentials."""
 
     def output(command: list[str]) -> str:
@@ -310,14 +323,27 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
     for pid in desktop:
         parent = host.get(host[pid][0])
         ancestor = None if parent is None else host.get(parent[0])
-        aperitif_chain = formal_recovery and parent is not None and parent[3] == _DESKTOP_APERITIF
+        aperitif_path = None if parent is None else parent[3]
+        aperitif_chain = formal_recovery and (
+            aperitif_path == _DESKTOP_APERITIF
+            or monitor_replacement
+            and aperitif_path is not None
+            and re.fullmatch(
+                re.escape(_DESKTOP_APERITIF).replace(
+                    re.escape("158.0.8127.37"), r"[0-9]+(?:\.[0-9]+)+"
+                ),
+                aperitif_path,
+            )
+            is not None
+        )
         chain: tuple[str, ...]
         roles: tuple[str, ...]
         if parent is not None and parent[3] == _DESKTOP_PARENT:
             chain = (_DESKTOP_CHILD, _DESKTOP_PARENT)
             roles = ("candidate", "desktop")
         elif aperitif_chain:
-            chain = (_DESKTOP_CHILD, _DESKTOP_APERITIF, _DESKTOP_PARENT)
+            assert aperitif_path is not None
+            chain = (_DESKTOP_CHILD, aperitif_path, _DESKTOP_PARENT)
             roles = ("candidate", "aperitif", "desktop")
         elif (
             formal_recovery
@@ -364,9 +390,14 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
             if row[3] != executable:
                 raise identity_error("EXECUTABLE_MISMATCH")
             ancestors.add(pid)
-            if aperitif_chain:
+            if aperitif_chain or monitor_replacement and len(chain) == 2:
                 if pid not in aperitif:
-                    aperitif[pid] = (executable, _verify_aperitif_process(output, pid, executable))
+                    aperitif[pid] = (
+                        executable,
+                        _verify_aperitif_process(
+                            output, pid, executable, release_independent=monitor_replacement
+                        ),
+                    )
                 verified.add(pid)
             elif pid not in verified:
                 files = mappings(pid)
@@ -421,7 +452,12 @@ def _require_research_processes_quiescent(*, formal_recovery: bool) -> None:
                 raise ResearchProcessDiagnosticError("CONTAINER_PROCESSES_UNCONFIRMED")
     if aperitif:
         for pid, (executable, before) in aperitif.items():
-            if _verify_aperitif_process(output, pid, executable) != before:
+            if (
+                _verify_aperitif_process(
+                    output, pid, executable, release_independent=monitor_replacement
+                )
+                != before
+            ):
                 raise ResearchProcessDiagnosticError("HOST_CHANGED_DURING_CHECK")
         after = snapshot()
         if candidates(after) != desktop or any(after.get(pid) != host[pid] for pid in verified):

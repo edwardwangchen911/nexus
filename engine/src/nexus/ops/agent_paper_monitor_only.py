@@ -18,7 +18,11 @@ from nexus.jobs.repository import upsert_worker_heartbeat
 from nexus.monitoring.host import PriceMonitorCoordinator
 from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
 from nexus.ops.preparation_diagnostics import exception_code
-from nexus.paper.host_probe_state import latest_probe_state, publish_monitor_only_start
+from nexus.paper.host_probe_state import (
+    MonitorReplacement,
+    latest_probe_state,
+    publish_monitor_only_start,
+)
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.paper.target_service import lock_portfolio_account
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
@@ -78,6 +82,7 @@ async def run_monitor_only(
     clock: Callable[[], datetime],
     shutdown: asyncio.Event,
     wait_sleep: Callable[[float], Awaitable[None]],
+    replacement: MonitorReplacement | None = None,
 ) -> "AgentPaperLoopAction":
     from nexus.ops.agent_paper_loop import (
         AgentPaperLoopAction,
@@ -140,6 +145,7 @@ async def run_monitor_only(
                     started=started_at,
                     version=version,
                     operation_id=operation_id,
+                    replacement=replacement,
                 )
         except Exception:
             if expected is None:

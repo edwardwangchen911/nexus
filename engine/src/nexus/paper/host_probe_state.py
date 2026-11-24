@@ -1,7 +1,7 @@
 """Host intake state, ordered with admissions by the existing account transaction lock."""
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, NamedTuple
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -69,6 +69,13 @@ class MonitorOnlyState(ProbeState):
     admitting: Literal[False]
 
 
+class MonitorReplacement(NamedTuple):
+    attempt: UUID
+    worker: str
+    version: str
+    digest: str
+
+
 def _actor(account_id: UUID) -> str:
     return f"host-read-probe:{account_id}"
 
@@ -132,6 +139,85 @@ async def latest_probe_state(session: AsyncSession, account_id: UUID) -> ProbeSt
         .execution_options(populate_existing=True)
     )
     return None if row is None else _validated(row)
+
+
+async def monitor_only_origin_hash(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    operation_id: UUID,
+    worker: str,
+    version: str,
+    exited_at: datetime | None = None,
+) -> str:
+    """Read the old monitoring denial and its last heartbeat without granting recovery."""
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+
+    if (
+        await session.scalar(text("SELECT version_num FROM alembic_version"))
+        != CURRENT_MIGRATION_HEAD
+    ):
+        raise ValueError(INVALID)
+    state = await latest_probe_state(session, account_id)
+    if (
+        not isinstance(state, MonitorOnlyState)
+        or state.operation_id != str(operation_id)
+        or state.worker != worker
+        or state.version != version
+    ):
+        raise ValueError(INVALID)
+    heartbeat = await session.scalar(
+        select(WorkerHeartbeat).where(
+            WorkerHeartbeat.queue == "agent_paper",
+            WorkerHeartbeat.worker_id == worker,
+        )
+    )
+    now = await session.scalar(select(func.clock_timestamp()))
+    if (
+        heartbeat is None
+        or not isinstance(now, datetime)
+        or heartbeat.started_at != datetime.fromisoformat(state.started)
+        or heartbeat.process_version != state.version
+        or heartbeat.migration_head != CURRENT_MIGRATION_HEAD
+        or not heartbeat.started_at <= heartbeat.seen_at <= now
+        or exited_at is not None
+        and heartbeat.seen_at > exited_at
+    ):
+        raise ValueError(INVALID)
+    outstanding_capture = await session.scalar(
+        text("""
+            SELECT EXISTS (
+                SELECT FROM audit_events claim
+                WHERE claim.action = 'research.monitor.disclosure_refresh_claimed'
+                  AND claim.payload->>'account_id' = :account
+                  AND claim.occurred_at >= :started
+                  AND NOT EXISTS (
+                      SELECT FROM audit_events result
+                      WHERE result.action = 'research.monitor.disclosure_refresh_result'
+                        AND result.payload->>'account_id' = :account
+                        AND result.payload->>'operation_id' = claim.payload->>'operation_id'
+                        AND result.occurred_at >= claim.occurred_at
+                  )
+            )
+            """),
+        {"account": str(account_id), "started": heartbeat.started_at},
+    )
+    if (
+        outstanding_capture is not False
+        or await session.scalar(
+            text(
+                "SELECT EXISTS (SELECT FROM outbox_delivery_attempts WHERE outcome = 'delivering')"
+            )
+        )
+        is not False
+    ):
+        raise ValueError(INVALID)
+    return job_input_hash(
+        {
+            "denial": state.model_dump(mode="json"),
+            "last_heartbeat": heartbeat.seen_at.astimezone(UTC).isoformat(),
+        }
+    )
 
 
 async def require_host_admitting(session: AsyncSession, account_id: UUID) -> None:
@@ -261,6 +347,7 @@ async def publish_monitor_only_start(
     started: datetime,
     version: str,
     operation_id: UUID,
+    replacement: MonitorReplacement | None = None,
 ) -> MonitorOnlyState:
     """Record the capability ceiling in the same transaction as the first heartbeat."""
     from nexus.agents.research_usage import require_research_accounting_clear
@@ -274,6 +361,18 @@ async def publish_monitor_only_start(
 
     await lock_portfolio_account(session, account_id)
     now = await _verified_host(session, worker=worker, started=started, version=version)
+    if (
+        replacement is not None
+        and await monitor_only_origin_hash(
+            session,
+            account_id=account_id,
+            operation_id=replacement.attempt,
+            worker=replacement.worker,
+            version=replacement.version,
+        )
+        != replacement.digest
+    ):
+        raise ValueError(INVALID)
     prior = await latest_probe_state(session, account_id)
     if prior is not None and (
         datetime.fromisoformat(prior.started) >= started
