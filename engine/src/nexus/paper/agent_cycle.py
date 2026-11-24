@@ -462,10 +462,13 @@ async def reserve_schwab_agent_paper_trigger(
         formal_model_hash=None if formal_model is None else formal_model.config_hash,
     )
     if inserted:
+        from nexus.paper.host_probe_state import require_host_admitting
         from nexus.paper.manual_request import (
             require_preparing_manual_request,
             require_scheduled_account_available,
         )
+
+        await require_host_admitting(session, account_id)
 
         if manual_request_id is not None:
             if manual_slot is None or manual_slot.date() != now.astimezone(UTC).date():

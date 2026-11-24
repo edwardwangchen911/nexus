@@ -58,6 +58,16 @@ class PublisherFailure(RuntimeError):
         return {"stage": _STAGES[reason], "reason": reason.value}
 
 
+class PublisherSendHeld(RuntimeError):
+    """This claim reached a local send guard before any provider call."""
+
+    def __init__(self, *, account_id: UUID, state_hash: str, sequence: int) -> None:
+        super().__init__("MANUAL_HOST_NOT_READY")
+        self.account_id = account_id
+        self.state_hash = state_hash
+        self.sequence = sequence
+
+
 async def read_delivery_failure(
     session: AsyncSession,
     *,

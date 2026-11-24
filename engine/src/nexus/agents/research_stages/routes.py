@@ -34,6 +34,33 @@ from nexus.persistence.models.runtime import Job
 VERSION = "research-stages-v1"
 
 
+async def stage_send_account(session: AsyncSession, run_id: UUID) -> UUID | None:
+    """Resolve the immutable stage route to its persisted owner, independent of settings."""
+    from nexus.paper.host_probe_state import INVALID, HostSendBlocked
+
+    rows = (
+        await session.execute(
+            text("""
+        SELECT r.kind, coalesce(c.account_id, p.account_id, i.account_id) AS account_id
+        FROM research_stage_route r
+        LEFT JOIN agent_paper_cycles c ON r.kind='formal' AND r.scope_id=c.id
+        LEFT JOIN manual_paper_requests p ON r.kind='independent' AND r.scope_id=p.id
+        LEFT JOIN research_monitor_increments i ON r.kind='increment' AND r.scope_id=i.id
+        WHERE r.run_id=:run
+        """),
+            {"run": run_id},
+        )
+    ).all()
+    if len(rows) != 1:
+        raise HostSendBlocked(INVALID)
+    kind, account_id = rows[0]
+    if kind == "comparison" and account_id is None:
+        return None
+    if kind not in {"formal", "independent", "increment"} or not isinstance(account_id, UUID):
+        raise HostSendBlocked(INVALID)
+    return account_id
+
+
 async def owner(session: AsyncSession, run: AgentResearchRunRecord, job: Job) -> tuple[UUID, str]:
     from nexus.agents.comparison_routes import comparison_owner
 

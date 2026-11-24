@@ -25,6 +25,21 @@ INVALID = "HOST_READ_PROBE_STATE_INVALID"
 PAUSED = "MANUAL_HOST_NOT_READY"
 
 
+class HostSendBlocked(ValueError):
+    """No new external call was authorized by the host's send boundary."""
+
+
+class HostSendHeld(HostSendBlocked):
+    def __init__(self, account_id: UUID, state: "ProbeState") -> None:
+        super().__init__(PAUSED)
+        self.account_id = account_id
+        self.state_hash = job_input_hash(state.model_dump(mode="json"))
+        self.sequence = state.total
+
+
+_SEND_SCOPE = "agent-paper-host-send:"
+
+
 class ProbeState(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
     worker: str
@@ -138,6 +153,30 @@ async def require_host_admitting(session: AsyncSession, account_id: UUID) -> Non
         raise ValueError(PAUSED)
 
 
+async def require_host_send(session: AsyncSession, account_id: UUID) -> None:
+    """Retain a shared hold through send submission without the portfolio lock."""
+    if (
+        await session.scalar(text("SHOW transaction_isolation")) != "read committed"
+        or await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:scope, 0))"),
+            {"scope": _SEND_SCOPE + str(account_id)},
+        )
+        is not True
+    ):
+        raise HostSendBlocked(INVALID)
+    await check_host_send_state(session, account_id)
+
+
+async def check_host_send_state(session: AsyncSession, account_id: UUID) -> None:
+    """Recheck the current marker after acquiring the shared send fence."""
+    try:
+        state = await latest_probe_state(session, account_id)
+    except ValueError as error:
+        raise HostSendBlocked(INVALID) from error
+    if state is not None and state.consecutive:
+        raise HostSendHeld(account_id, state)
+
+
 async def _verified_host(
     session: AsyncSession, *, worker: str, started: datetime, version: str
 ) -> datetime:
@@ -210,7 +249,7 @@ async def publish_probe_state(
             "consecutive": ((old.consecutive if same and old else 0) + 1) if deadline else 0,
         }
     )
-    await _store_state(session, account_id, state, SCHEMA, same=same)
+    await _store_state(session, account_id, state, SCHEMA, same=same, expected=old)
     return state
 
 
@@ -266,7 +305,7 @@ async def publish_monitor_only_start(
         recorded_at=now.astimezone(UTC).isoformat(),
         admitting=False,
     )
-    await _store_state(session, account_id, state, MONITOR_SCHEMA, same=False)
+    await _store_state(session, account_id, state, MONITOR_SCHEMA, same=False, expected=prior)
     return state
 
 
@@ -362,8 +401,22 @@ async def publish_and_confirm_probe_state(
 
 
 async def _store_state(
-    session: AsyncSession, account_id: UUID, state: ProbeState, schema: str, *, same: bool
+    session: AsyncSession,
+    account_id: UUID,
+    state: ProbeState,
+    schema: str,
+    *,
+    same: bool,
+    expected: ProbeState | None = None,
 ) -> None:
+    # Account writers acquire this last. Publishers holding the shared lock do
+    # not take the account lock or run provider cleanup inside the writer path.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+        {"scope": _SEND_SCOPE + str(account_id)},
+    )
+    if await latest_probe_state(session, account_id) != expected:
+        raise ValueError(INVALID)
     identity = state.model_dump(include={"worker", "started", "version"})
     worker = state.worker
     actor = _actor(account_id)
@@ -426,5 +479,5 @@ async def publish_probe_denial(
         pause_outcome=pause_outcome,
         admitting=False,
     )
-    await _store_state(session, account_id, state, DENY_SCHEMA, same=same)
+    await _store_state(session, account_id, state, DENY_SCHEMA, same=same, expected=old)
     return state

@@ -13,7 +13,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
-from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure
+from nexus.outbox.failure import FAILURE_ACTION, FAILURE_SCHEMA, PublisherFailure, PublisherSendHeld
 from nexus.outbox.models import OutboxDeliveryIdentity, OutboxMessage
 from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
@@ -220,7 +220,7 @@ async def _fail(
     now: datetime,
     error_code: str,
     retryable: bool,
-    failure: PublisherFailure | None = None,
+    failure: PublisherFailure | PublisherSendHeld | None = None,
 ) -> None:
     event, attempt = await _lock_claim(session, claim=claim, now=now)
     attempt.outcome = "failed"
@@ -235,7 +235,26 @@ async def _fail(
         event.dead_lettered_at = now
     await session.flush()
 
-    if failure is not None:
+    if isinstance(failure, PublisherSendHeld):
+        await append_audit_event(
+            session,
+            actor_id="outbox-dispatcher",
+            action="outbox.delivery.send_held",
+            schema_version="outbox_send_held_v1",
+            occurred_at=now,
+            payload={
+                "account_id": str(failure.account_id),
+                "event_id": str(claim.event_id),
+                "attempt_no": claim.attempt_no,
+                "lease_token": str(claim.lease_token),
+                "worker_id": claim.worker_id,
+                "state_hash": failure.state_hash,
+                "state_sequence": failure.sequence,
+                "stage": "before_send",
+                "transport_entered": False,
+            },
+        )
+    elif failure is not None:
         await append_audit_event(
             session,
             actor_id="outbox-dispatcher",
@@ -316,9 +335,13 @@ async def dispatch_outbox_once(
                     session,
                     claim=claim,
                     now=_utc(clock(), field="clock"),
-                    error_code="PUBLISHER_FAILED",
+                    error_code="PUBLISHER_SEND_HELD"
+                    if isinstance(error, PublisherSendHeld)
+                    else "PUBLISHER_FAILED",
                     retryable=True,
-                    failure=error if isinstance(error, PublisherFailure) else None,
+                    failure=error
+                    if isinstance(error, PublisherFailure | PublisherSendHeld)
+                    else None,
                 )
         except OutboxLeaseLostError:
             pass

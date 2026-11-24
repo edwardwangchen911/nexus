@@ -492,6 +492,15 @@ class StagedProtocol:
             if binding is not None:
                 columns += ",platform_binding"
                 values_sql += ",CAST(:platform_binding AS jsonb)"
+            from nexus.agents.research_stages.routes import stage_send_account
+            from nexus.paper.host_probe_state import HostSendBlocked, require_host_send
+
+            try:
+                account_id = await stage_send_account(session, run.id)
+                if account_id is not None:
+                    await require_host_send(session, account_id)
+            except HostSendBlocked as error:
+                raise ProtocolRejected(str(error)) from error
             now = current_authority()
             await session.execute(
                 text(f"INSERT INTO research_stage_authorization ({columns}) VALUES({values_sql})"),
