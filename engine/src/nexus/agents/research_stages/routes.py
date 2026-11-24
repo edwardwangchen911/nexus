@@ -41,7 +41,8 @@ async def stage_send_account(session: AsyncSession, run_id: UUID) -> UUID | None
     rows = (
         await session.execute(
             text("""
-        SELECT r.kind, coalesce(c.account_id, p.account_id, i.account_id) AS account_id
+        SELECT r.kind, coalesce(c.account_id, p.account_id, i.account_id) AS account_id,
+               r.job_id, r.scope_id
         FROM research_stage_route r
         LEFT JOIN agent_paper_cycles c ON r.kind='formal' AND r.scope_id=c.id
         LEFT JOIN manual_paper_requests p ON r.kind='independent' AND r.scope_id=p.id
@@ -53,9 +54,22 @@ async def stage_send_account(session: AsyncSession, run_id: UUID) -> UUID | None
     ).all()
     if len(rows) != 1:
         raise HostSendBlocked(INVALID)
-    kind, account_id = rows[0]
+    kind, account_id, job_id, scope_id = rows[0]
     if kind == "comparison" and account_id is None:
-        return None
+        from nexus.agents.comparison_routes import comparison_owner
+
+        run = await session.get(AgentResearchRunRecord, run_id)
+        job = await session.get(Job, job_id)
+        try:
+            if (
+                run is not None
+                and job is not None
+                and (await comparison_owner(session, run, job) == scope_id)
+            ):
+                return None
+        except ValueError as error:
+            raise HostSendBlocked(INVALID) from error
+        raise HostSendBlocked(INVALID)
     if kind not in {"formal", "independent", "increment"} or not isinstance(account_id, UUID):
         raise HostSendBlocked(INVALID)
     return account_id

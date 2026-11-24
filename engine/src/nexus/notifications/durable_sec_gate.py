@@ -1,6 +1,8 @@
 """Pause-aware notice delivery with bounded security, rule, and send locks."""
 
-from sqlalchemy import String, and_, exists, func, or_, select, text
+from uuid import UUID
+
+from sqlalchemy import String, and_, exists, func, or_, select, text, union_all
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -10,7 +12,13 @@ from nexus.notifications.research_monitor import RESEARCH_MONITOR_EVENT
 from nexus.notifications.research_monitor_batch import RESEARCH_MONITOR_BATCH_EVENT
 from nexus.outbox.failure import PublisherSendHeld
 from nexus.outbox.models import OutboxMessage, Publisher
-from nexus.paper.host_probe_state import ROUTE, SCHEMA, HostSendHeld, require_host_send
+from nexus.paper.host_probe_state import (
+    ROUTE,
+    SCHEMA,
+    HostSendBlocked,
+    HostSendHeld,
+    require_host_send,
+)
 from nexus.persistence.models.monitoring import MonitorObservationBatch, MonitorTrigger
 from nexus.persistence.models.runtime import IdempotencyRecord, OutboxDeliveryAttempt, OutboxEvent
 from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
@@ -192,6 +200,40 @@ def notice_claim_condition(*, check_host: bool = True) -> ColumnElement[bool]:
     )
 
 
+async def _notice_send_accounts(session: AsyncSession, event: OutboxEvent) -> set[UUID]:
+    claims = select(SecNotificationClaim.account_id).where(
+        SecNotificationClaim.outbox_id == event.id
+    )
+    disclosure = select(MonitorTrigger.account_id).where(
+        MonitorTrigger.outbox_id == event.id, MonitorTrigger.kind == "disclosure"
+    )
+    accounts = set(await session.scalars(union_all(claims, disclosure)))
+    key = event.event_type, event.schema_version
+    if key in {RESEARCH_MONITOR_EVENT, RESEARCH_MONITOR_BATCH_EVENT}:
+        owner = MonitorTrigger if key == RESEARCH_MONITOR_EVENT else MonitorObservationBatch
+        account = await session.scalar(
+            select(owner.account_id).where(
+                owner.id == event.aggregate_id, owner.outbox_id == event.id
+            )
+        )
+        if account is None:
+            raise HostSendBlocked("RESEARCH_NOTICE_ACCOUNT_UNCONFIRMED")
+        accounts.add(account)
+    if key == DURABLE_SEC_EVENT and not accounts:
+        raise HostSendBlocked("RESEARCH_NOTICE_ACCOUNT_UNCONFIRMED")
+    return accounts
+
+
+async def notice_claim_guard(session: AsyncSession, event: OutboxEvent) -> bool:
+    """A queue row is not a claim until its current persisted owner permits it."""
+    try:
+        for account_id in sorted(await _notice_send_accounts(session, event)):
+            await require_host_send(session, account_id)
+    except HostSendBlocked:
+        return False
+    return True
+
+
 class DurableSecPublisher:
     def __init__(self, factory: async_sessionmaker[AsyncSession], publisher: Publisher):
         self.factory, self.publisher = factory, publisher
@@ -274,21 +316,8 @@ class DurableSecPublisher:
                 value = DurableSecNotification.model_validate(message.payload)
                 if value.discovery_id != message.aggregate_id:
                     raise ValueError("DURABLE_SEC_NOTICE_INVALID")
-            accounts = {account_id for account_id, _ in scopes}
-            key = message.event_type, message.schema_version
-            if key in {RESEARCH_MONITOR_EVENT, RESEARCH_MONITOR_BATCH_EVENT}:
-                owner = MonitorTrigger if key == RESEARCH_MONITOR_EVENT else MonitorObservationBatch
-                account = await session.scalar(
-                    select(owner.account_id).where(
-                        owner.id == message.aggregate_id,
-                        owner.outbox_id == message.event_id,
-                    )
-                )
-                if account is None:
-                    raise ValueError("RESEARCH_NOTICE_ACCOUNT_UNCONFIRMED")
-                accounts.add(account)
             try:
-                for account_id in sorted(accounts):
+                for account_id in sorted(await _notice_send_accounts(session, row)):
                     await require_host_send(session, account_id)
             except HostSendHeld as error:
                 raise PublisherSendHeld(

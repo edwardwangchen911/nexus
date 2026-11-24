@@ -20,6 +20,7 @@ from nexus.persistence.models.runtime import OutboxDeliveryAttempt, OutboxEvent
 
 Clock = Callable[[], datetime]
 AfterPublish = Callable[[OutboxMessage], Awaitable[None]]
+ClaimGuard = Callable[[AsyncSession, OutboxEvent], Awaitable[bool]]
 
 
 class OutboxLeaseLostError(RuntimeError):
@@ -104,6 +105,7 @@ async def _claim(
     event_keys: Sequence[tuple[str, str]] | None,
     created_at_or_after: datetime | None,
     claim_condition: ColumnElement[bool] | None = None,
+    claim_guard: ClaimGuard | None = None,
 ) -> _ClaimedOutbox | None:
     conditions = [
         OutboxEvent.status == "queued",
@@ -126,14 +128,24 @@ async def _claim(
         )
     if created_at_or_after is not None:
         conditions.append(OutboxEvent.created_at >= created_at_or_after)
-    event = await session.scalar(
+    candidates = (
         select(OutboxEvent)
         .where(*conditions)
         .order_by(OutboxEvent.available_at, OutboxEvent.created_at, OutboxEvent.id)
         .with_for_update(skip_locked=True)
         .limit(1)
     )
-    if event is None:
+    skipped: list[UUID] = []
+    for _ in range(100):
+        event = await session.scalar(
+            candidates.where(OutboxEvent.id.not_in(skipped)) if skipped else candidates
+        )
+        if event is None:
+            return None
+        if claim_guard is None or await claim_guard(session, event):
+            break
+        skipped.append(event.id)
+    else:
         return None
     lease_token = new_uuid7()
     event.status = "delivering"
@@ -281,6 +293,7 @@ async def dispatch_outbox_once(
     raise_publisher_errors: bool = False,
     created_at_or_after: datetime | None = None,
     claim_condition: ColumnElement[bool] | None = None,
+    claim_guard: ClaimGuard | None = None,
 ) -> bool:
     """Dispatch at most one event and durably record its delivery attempt."""
     worker_id = _worker_id(worker_id)
@@ -302,6 +315,7 @@ async def dispatch_outbox_once(
             event_keys=(tuple(sorted(registry.keys)) if claim_registered_only else None),
             created_at_or_after=created_at_or_after,
             claim_condition=claim_condition,
+            claim_guard=claim_guard,
         )
     if claim is None:
         return False
