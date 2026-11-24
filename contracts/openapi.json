@@ -4538,6 +4538,16 @@
               }
             ]
           },
+          "preparation_rejection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableSecPreparationRejection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "research_status": {
             "anyOf": [
               {
@@ -4719,6 +4729,30 @@
           "items"
         ],
         "title": "DurableSecPendingProposal",
+        "type": "object"
+      },
+      "DurableSecPreparationRejection": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "enum": [
+              "ineligible",
+              "account_unavailable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "rejected_at": {
+            "format": "date-time",
+            "title": "Rejected At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rejected_at",
+          "reason"
+        ],
+        "title": "DurableSecPreparationRejection",
         "type": "object"
       },
       "DurableSecView": {
@@ -22010,6 +22044,22 @@
               ],
               "title": "X-Nexus-Sec-Collection-View"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Preparation-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Preparation-View"
+            }
           }
         ],
         "responses": {
@@ -25514,6 +25564,22 @@
                 }
               ],
               "title": "X-Nexus-Sec-Collection-View"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Nexus-SEC-Preparation-View",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Nexus-Sec-Preparation-View"
             }
           }
         ],

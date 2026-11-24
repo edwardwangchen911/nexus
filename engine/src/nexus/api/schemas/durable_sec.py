@@ -66,6 +66,11 @@ DurableSecResearchStatus = Literal[
 ]
 
 
+class DurableSecPreparationRejection(MonitoringViewModel):
+    rejected_at: datetime
+    reason: Literal["ineligible", "account_unavailable"]
+
+
 class DurableSecEventView(MonitoringViewModel):
     # Older API processes omit the optional readback fields.
     model_config = ConfigDict(json_schema_serialization_defaults_required=False)
@@ -78,6 +83,7 @@ class DurableSecEventView(MonitoringViewModel):
     event_id: UUID | None = None
     notice: DurableSecNoticeView | None = None
     research_status: DurableSecResearchStatus | None = None
+    preparation_rejection: DurableSecPreparationRejection | None = None
 
 
 class DurableSecCollectionView(MonitoringViewModel):

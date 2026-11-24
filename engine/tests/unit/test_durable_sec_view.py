@@ -7,7 +7,11 @@ import pytest
 from nexus.api.durable_sec import project_check, project_event, read_event_research_status
 from nexus.api.routes.research import _research_wire
 from nexus.api.schemas.agents import ResearchRunEnvelope, ResearchRunResponse
-from nexus.api.schemas.durable_sec import DurableSecCollectionView, DurableSecView
+from nexus.api.schemas.durable_sec import (
+    DurableSecCollectionView,
+    DurableSecPreparationRejection,
+    DurableSecView,
+)
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.monitoring.durable_sec_contracts import DurableSecPolicy
 from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
@@ -146,7 +150,18 @@ def test_event_id_is_only_sent_to_an_opted_in_reader():
         forms=policy.forms,
         latest_check=None,
         event_count=1,
-        events=(project_event(row, policy, NOW, conflict=False),),
+        events=(
+            project_event(
+                row,
+                policy,
+                NOW,
+                conflict=False,
+                research_status="bound",
+                preparation_rejection=DurableSecPreparationRejection(
+                    rejected_at=NOW, reason="ineligible"
+                ),
+            ),
+        ),
         execution_locked=True,
         latest_collection=DurableSecCollectionView(
             scheduled_at=NOW, claimed_at=NOW, finished_at=NOW, status="failed"
@@ -159,6 +174,13 @@ def test_event_id_is_only_sent_to_an_opted_in_reader():
     prior = _research_wire(envelope, "1", include_sec_notices=True, include_sec_research=True)
     prior_view = json.loads(prior.body)["data"]["durable_disclosure"]
     assert "event_id" not in prior_view["events"][0] and "latest_collection" not in prior_view
+    assert prior_view["events"][0]["research_status"] == "bound"
+    assert "preparation_rejection" not in prior_view["events"][0]
+    opted_in = _research_wire(
+        envelope, "1", include_sec_research=True, include_sec_preparation=True
+    )
+    opted_in_event = json.loads(opted_in.body)["data"]["durable_disclosure"]["events"][0]
+    assert opted_in_event["preparation_rejection"]["reason"] == "ineligible"
     current = _research_wire(envelope, "1", include_sec_event_ids=True, include_sec_collection=True)
     current_view = json.loads(current.body)["data"]["durable_disclosure"]
     assert current_view["latest_collection"]["status"] == "failed"

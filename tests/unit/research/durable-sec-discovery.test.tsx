@@ -118,6 +118,15 @@ describe("durable SEC discovery facts", () => {
     expect(screen.getByText(label)).toBeVisible();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+  it("shows the original preparation rejection without claiming a failed model run", () => {
+    const event = { ...view.events[0], research_status: "bound" as const,
+      preparation_rejection: { rejected_at: at, reason: "ineligible" as const } };
+    render(<DurableSecDiscovery discovery={{ ...view, events: [event] }} />);
+    expect(screen.getByText("原增量在准备阶段被拒，未创建研究任务。")).toBeVisible();
+    expect(screen.getByText("原回执未记录具体拦截条件。")).toBeVisible();
+    expect(screen.queryByText("已关联增量材料，暂无逐事件处理回执。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
   it("shows the original timeout as an unconfirmed server result with one attempt", () => {
     const id = "00000000-0000-4000-8000-000000000099";
     render(<DurableSecDiscovery discovery={{ ...view, events: [{ ...view.events[0], notice: {

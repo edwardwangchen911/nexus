@@ -4201,6 +4201,16 @@ export const runtimeContractSchemas = {
           }
         ]
       },
+      "preparation_rejection": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DurableSecPreparationRejection"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "research_status": {
         "anyOf": [
           {
@@ -4382,6 +4392,30 @@ export const runtimeContractSchemas = {
       "items"
     ],
     "title": "DurableSecPendingProposal",
+    "type": "object"
+  },
+  "DurableSecPreparationRejection": {
+    "additionalProperties": false,
+    "properties": {
+      "reason": {
+        "enum": [
+          "ineligible",
+          "account_unavailable"
+        ],
+        "title": "Reason",
+        "type": "string"
+      },
+      "rejected_at": {
+        "format": "date-time",
+        "title": "Rejected At",
+        "type": "string"
+      }
+    },
+    "required": [
+      "rejected_at",
+      "reason"
+    ],
+    "title": "DurableSecPreparationRejection",
     "type": "object"
   },
   "DurableSecView": {

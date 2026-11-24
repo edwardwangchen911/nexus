@@ -132,7 +132,15 @@ export function DurableSecDiscovery({ discovery, dailyProposal }: {
           <p>本次日研判断 · {review.status === "unresolved" ? "未决" : "已回答"}</p>
           <p>{review.rationale}</p>
         </> : null}
-        {event.research_status ? <p>{researchStatuses[event.research_status]}</p> : null}
+        {event.preparation_rejection ? <>
+          <p>原增量在准备阶段被拒，未创建研究任务。</p>
+          <p>{event.preparation_rejection.reason === "account_unavailable"
+            ? "当时账户占用或结算状态未核验通过。"
+            : "原回执未记录具体拦截条件。"}</p>
+          <p>原拒绝时间：<time dateTime={event.preparation_rejection.rejected_at}>
+            {formatDisplayTime(event.preparation_rejection.rejected_at)}
+          </time></p>
+        </> : event.research_status ? <p>{researchStatuses[event.research_status]}</p> : null}
         {event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>}
       </article>;
     })}

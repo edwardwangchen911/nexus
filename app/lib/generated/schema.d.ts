@@ -2890,6 +2890,7 @@ export interface components {
              */
             metadata_status: "recorded" | "conflict";
             notice?: components["schemas"]["DurableSecNoticeView"] | null;
+            preparation_rejection?: components["schemas"]["DurableSecPreparationRejection"] | null;
             /** Research Status */
             research_status?: ("no_receipt" | "bound" | "increment_failed" | "addressed_increment" | "addressed_daily" | "unverified") | null;
         };
@@ -2948,6 +2949,19 @@ export interface components {
             context_hash: string;
             /** Items */
             items: components["schemas"]["DurableSecPendingItem"][];
+        };
+        /** DurableSecPreparationRejection */
+        DurableSecPreparationRejection: {
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "ineligible" | "account_unavailable";
+            /**
+             * Rejected At
+             * Format: date-time
+             */
+            rejected_at: string;
         };
         /** DurableSecView */
         DurableSecView: {
@@ -9821,6 +9835,7 @@ export interface operations {
                 "X-Nexus-SEC-Collection-View"?: string | null;
                 "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
+                "X-Nexus-SEC-Preparation-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
             };
             path: {
@@ -12313,6 +12328,7 @@ export interface operations {
                 "X-Nexus-SEC-Collection-View"?: string | null;
                 "X-Nexus-SEC-Event-Id-View"?: string | null;
                 "X-Nexus-SEC-Notice-View"?: string | null;
+                "X-Nexus-SEC-Preparation-View"?: string | null;
                 "X-Nexus-SEC-Research-View"?: string | null;
             };
             path: {
