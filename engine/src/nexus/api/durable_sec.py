@@ -1,6 +1,7 @@
 """Read immutable discovery facts independently of the old research plan's TTL."""
 
 from datetime import datetime
+from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,7 @@ from nexus.api.schemas.durable_sec import (
     DurableSecCheckView,
     DurableSecEventView,
     DurableSecNoticeView,
+    DurableSecPreparationRejection,
     DurableSecResearchStatus,
     DurableSecView,
 )
@@ -20,7 +22,7 @@ from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotific
 from nexus.outbox.failure import FailureReason, read_delivery_failure
 from nexus.persistence.models.agents import AgentResearchEventRecord, AgentResearchRunRecord
 from nexus.persistence.models.monitoring import MonitorIncrement
-from nexus.persistence.models.runtime import Job, OutboxDeliveryAttempt, OutboxEvent
+from nexus.persistence.models.runtime import AuditEvent, Job, OutboxDeliveryAttempt, OutboxEvent
 from nexus.persistence.models.sec_daily import SecDurableDailyEventReceipt
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryCheck,
@@ -30,6 +32,7 @@ from nexus.persistence.models.sec_monitor import (
     SecMonitorRuleState,
     SecNotificationClaim,
 )
+from nexus.persistence.models.sec_refreeze import SecResearchBatchSupersession
 from nexus.persistence.models.sec_research import (
     SecEventConsumptionReceipt,
     SecEventResearchBinding,
@@ -164,6 +167,7 @@ def project_event(
     conflict: bool,
     notice: DurableSecNoticeView | None = None,
     research_status: DurableSecResearchStatus | None = None,
+    preparation_rejection: DurableSecPreparationRejection | None = None,
 ) -> DurableSecEventView:
     entry = SecIndexEntry.model_validate(row.entry)
     if (
@@ -185,6 +189,7 @@ def project_event(
             "metadata_status": "conflict" if conflict else "recorded",
             "notice": notice,
             "research_status": research_status,
+            "preparation_rejection": preparation_rejection,
         }
     )
 
@@ -325,9 +330,83 @@ async def _verified_research_binding(
 async def read_event_research_status(
     session: AsyncSession, event: SecDiscoveryEvent, now: datetime
 ) -> DurableSecResearchStatus:
+    status, _ = await _read_event_research(session, event, now)
+    return status
+
+
+async def _read_preparation_rejection(
+    session: AsyncSession, binding: SecEventResearchBinding, now: datetime
+) -> DurableSecPreparationRejection | None:
+    from nexus.ops.monitor_batch_prepare import CLAIM, RESULT, SCHEMA
+
+    # A lone pre-collection rejection can be read back without projecting a
+    # later attempt, inferring a run, or running today's preparation checks.
+    superseded = select(SecResearchBatchSupersession.id).where(
+        SecResearchBatchSupersession.old_batch_id == binding.batch_id,
+        SecResearchBatchSupersession.created_at <= now,
+    )
+    rows = (
+        await session.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.action.in_((CLAIM, RESULT)),
+                AuditEvent.payload["batch_id"].astext == str(binding.batch_id),
+                AuditEvent.created_at <= now,
+                AuditEvent.occurred_at <= now,
+                ~superseded.exists(),
+            )
+            .limit(2)
+        )
+    ).all()
+    if len(rows) != 1:
+        return None
+    receipt = rows[0]
+    payload = receipt.payload
+    if (
+        receipt.actor_id != "research-monitor"
+        or receipt.action != RESULT
+        or receipt.schema_version != SCHEMA
+        or receipt.occurred_at < binding.bound_at
+        or payload.get("account_id") != str(binding.account_id)
+        or payload.get("instrument_id") != str(binding.instrument_id)
+        or payload.get("status") != "blocked"
+        or "deferred_before_collection" in payload
+        or any(
+            type(payload.get(key)) is not int or payload[key] != 0
+            for key in ("provider_requests", "model_requests")
+        )
+        or payload.get("job_created") is not False
+        or payload.get("execution_locked") is not True
+    ):
+        return None
+    operation = payload.get("operation_id")
+    if not isinstance(operation, str):
+        return None
+    try:
+        if str(UUID(operation)) != operation:
+            return None
+    except ValueError:
+        return None
+    reason = payload.get("reason")
+    if reason == "MONITOR_PREPARATION_INELIGIBLE":
+        return DurableSecPreparationRejection(rejected_at=receipt.occurred_at, reason="ineligible")
+    if reason in ("MANUAL_ACCOUNT_BUSY_OR_UNKNOWN", "MONITOR_ACCOUNT_BUSY_OR_UNKNOWN"):
+        return DurableSecPreparationRejection(
+            rejected_at=receipt.occurred_at, reason="account_unavailable"
+        )
+    return None
+
+
+async def _read_event_research(
+    session: AsyncSession,
+    event: SecDiscoveryEvent,
+    now: datetime,
+    *,
+    include_preparation: bool = False,
+) -> tuple[DurableSecResearchStatus, DurableSecPreparationRejection | None]:
     """Project only saved research and per-event receipt facts for this exact event."""
     if max(event.created_at, event.first_seen_at) > now:
-        return "unverified"
+        return "unverified", None
     daily_receipt = await session.scalar(
         select(SecDurableDailyEventReceipt).where(
             SecDurableDailyEventReceipt.event_id == event.id,
@@ -352,11 +431,11 @@ async def read_event_research_status(
             or not event.first_seen_at <= daily_receipt.observed_at == daily_receipt.created_at
             or not await _audited(session, daily_receipt, now)
         ):
-            return "unverified"
-        return "addressed_daily"
+            return "unverified", None
+        return "addressed_daily", None
     if mirrored:
         if len(mirrored) != 1:
-            return "unverified"
+            return "unverified", None
         receipt = mirrored[0]
         matched = await session.get(SecEventResearchBinding, receipt.binding_id)
         if (
@@ -367,8 +446,10 @@ async def read_event_research_status(
             or not await _verified_research_binding(session, matched, event, now)
             or not await _audited(session, receipt, now)
         ):
-            return "unverified"
-        return "addressed_daily" if receipt.daily_receipt_id is not None else "addressed_increment"
+            return "unverified", None
+        return (
+            "addressed_daily" if receipt.daily_receipt_id is not None else "addressed_increment"
+        ), None
 
     bindings = (
         await session.scalars(
@@ -381,10 +462,10 @@ async def read_event_research_status(
         )
     ).all()
     if not bindings:
-        return "no_receipt"
+        return "no_receipt", None
     for binding in bindings:
         if not await _verified_research_binding(session, binding, event, now):
-            return "unverified"
+            return "unverified", None
     if len(bindings) == 1:
         linked = (
             await session.execute(
@@ -397,6 +478,8 @@ async def read_event_research_status(
                 )
             )
         ).one_or_none()
+        if linked is None and include_preparation:
+            return "bound", await _read_preparation_rejection(session, bindings[0], now)
         if linked is not None:
             increment, run, job = linked
             if (
@@ -406,7 +489,7 @@ async def read_event_research_status(
                 or job.payload != {"run_id": str(run.id)}
                 or max(run.created_at, job.created_at) > now
             ):
-                return "unverified"
+                return "unverified", None
             if run.status == job.status == "failed" and job.finished_at is not None:
                 terminal = await session.scalar(
                     select(AgentResearchEventRecord.state)
@@ -418,8 +501,8 @@ async def read_event_research_status(
                     .limit(1)
                 )
                 if terminal == "failed" and bindings[0].bound_at <= job.finished_at <= now:
-                    return "increment_failed"
-    return "bound"
+                    return "increment_failed", None
+    return "bound", None
 
 
 async def read_durable_sec_view(
@@ -430,6 +513,7 @@ async def read_durable_sec_view(
     include_notice: bool = False,
     include_research: bool = False,
     include_collection: bool = False,
+    include_preparation: bool = False,
 ) -> DurableSecView | None:
     now = require_utc(now)
     account_id = await _account(session, run, now)
@@ -529,6 +613,13 @@ async def read_durable_sec_view(
         for row in rows:
             if not await _audited(session, row, now):
                 return unknown
+            research_status, rejection = (
+                await _read_event_research(
+                    session, row, now, include_preparation=include_preparation
+                )
+                if include_research
+                else (None, None)
+            )
             events.append(
                 project_event(
                     row,
@@ -536,11 +627,8 @@ async def read_durable_sec_view(
                     now,
                     conflict=row.id in conflicts,
                     notice=await _read_notice(session, row, now) if include_notice else None,
-                    research_status=(
-                        await read_event_research_status(session, row, now)
-                        if include_research
-                        else None
-                    ),
+                    research_status=research_status,
+                    preparation_rejection=rejection,
                 )
             )
         return DurableSecView.model_validate(

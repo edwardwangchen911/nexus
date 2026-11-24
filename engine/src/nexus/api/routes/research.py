@@ -177,6 +177,7 @@ def _research_wire(
     include_sec_research: bool = False,
     include_sec_event_ids: bool = False,
     include_sec_collection: bool = False,
+    include_sec_preparation: bool = False,
 ) -> JSONResponse:
     # A previous BFF rejects unknown keys. Negotiate the additive fields so
     # either service can roll back independently, including the create receipt.
@@ -195,6 +196,8 @@ def _research_wire(
                 event.pop("notice", None)
             if not include_sec_research:
                 event.pop("research_status", None)
+            if not include_sec_preparation or not include_sec_research:
+                event.pop("preparation_rejection", None)
             if not include_sec_event_ids:
                 event.pop("event_id", None)
     return JSONResponse(
@@ -290,6 +293,9 @@ async def get_research_run(
     sec_research_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Research-View")] = None,
     sec_event_id_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Event-Id-View")] = None,
     sec_collection_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Collection-View")] = None,
+    sec_preparation_view: Annotated[
+        str | None, Header(alias="X-Nexus-SEC-Preparation-View")
+    ] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -308,6 +314,7 @@ async def get_research_run(
                 include_sec_notices=sec_notice_view == "1",
                 include_sec_research=sec_research_view == "1",
                 include_sec_collection=sec_collection_view == "1",
+                include_sec_preparation=sec_preparation_view == "1",
             ),
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
         ),
@@ -316,6 +323,7 @@ async def get_research_run(
         include_sec_research=sec_research_view == "1",
         include_sec_event_ids=sec_event_id_view == "1",
         include_sec_collection=sec_collection_view == "1",
+        include_sec_preparation=sec_preparation_view == "1",
     )
 
 
@@ -337,6 +345,9 @@ async def get_instrument_research(
     sec_research_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Research-View")] = None,
     sec_event_id_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Event-Id-View")] = None,
     sec_collection_view: Annotated[str | None, Header(alias="X-Nexus-SEC-Collection-View")] = None,
+    sec_preparation_view: Annotated[
+        str | None, Header(alias="X-Nexus-SEC-Preparation-View")
+    ] = None,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
@@ -378,6 +389,7 @@ async def get_instrument_research(
                 include_sec_notices=sec_notice_view == "1",
                 include_sec_research=sec_research_view == "1",
                 include_sec_collection=sec_collection_view == "1",
+                include_sec_preparation=sec_preparation_view == "1",
             ),
             meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
         ),
@@ -386,6 +398,7 @@ async def get_instrument_research(
         include_sec_research=sec_research_view == "1",
         include_sec_event_ids=sec_event_id_view == "1",
         include_sec_collection=sec_collection_view == "1",
+        include_sec_preparation=sec_preparation_view == "1",
     )
 
 
@@ -411,6 +424,7 @@ async def _hydrate_response(
     include_sec_notices: bool = False,
     include_sec_research: bool = False,
     include_sec_collection: bool = False,
+    include_sec_preparation: bool = False,
 ) -> ResearchRunResponse:
     with (
         identity_parse_scope(),
@@ -506,6 +520,7 @@ async def _hydrate_response(
                     include_notice=include_sec_notices,
                     include_research=include_sec_research,
                     include_collection=include_sec_collection,
+                    include_preparation=include_sec_preparation,
                 ),
                 "stage_trace": await read_stage_trace(session, run),
                 "inputs": await read_research_inputs(

@@ -4,6 +4,7 @@ import argparse
 import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select, text
@@ -136,6 +137,51 @@ async def test_ordinary_current_source_reaches_research_only_material_batch(
                 select(SecEventResearchBinding).where(SecEventResearchBinding.batch_id == batch_id)
             )
             event = await session.get(bridge.SecDiscoveryEvent, binding.event_id)
+        from nexus.api.durable_sec import read_durable_sec_view
+        from nexus.audit.service import append_audit_event
+        from nexus.ops.monitor_batch_prepare import RESULT, SCHEMA, _result
+
+        async with factory() as session, session.begin():
+            source = await session.get(AgentResearchRunRecord, binding.source_run_id)
+            rejection_at = await session.scalar(select(func.clock_timestamp()))
+            payload = {
+                **_result(batch_id, "blocked", "MONITOR_PREPARATION_INELIGIBLE"),
+                "operation_id": str(uuid4()),
+                "account_id": str(binding.account_id),
+                "instrument_id": str(binding.instrument_id),
+            }
+            for author in ("other-writer", "research-monitor"):
+                trial = await session.begin_nested()
+                await append_audit_event(
+                    session,
+                    actor_id=author,
+                    action=RESULT,
+                    schema_version=SCHEMA,
+                    payload=payload,
+                    occurred_at=rejection_at,
+                )
+                read_at = await session.scalar(select(func.clock_timestamp()))
+                view = await read_durable_sec_view(
+                    session, source, now=read_at, include_research=True, include_preparation=True
+                )
+                original = next(item for item in view.events if item.event_id == event.id)
+                assert original.research_status == "bound"
+                if author == "research-monitor":
+                    assert original.preparation_rejection.model_dump() == {
+                        "rejected_at": rejection_at,
+                        "reason": "ineligible",
+                    }
+                    earlier = await read_durable_sec_view(
+                        session,
+                        source,
+                        now=binding.bound_at,
+                        include_research=True,
+                        include_preparation=True,
+                    )
+                    assert earlier.events[0].preparation_rejection is None
+                else:
+                    assert original.preparation_rejection is None
+                await trial.rollback()
         monkeypatch.setattr(filing_fixture, "AT", datetime.now(UTC) - timedelta(seconds=8))
         archive = filing_fixture.archive(tmp_path / "filing", event.entry)
         captured["clock"][0] = datetime.now(UTC)
