@@ -288,19 +288,18 @@ _RefreshPoint = Literal["scope", "claim", "collect", "receipt", "failure_receipt
 
 def _report_refresh_failure(scheduled_at: datetime, point: _RefreshPoint, error: Exception) -> None:
     try:
-        print(
-            json.dumps(
-                {
-                    "event": "research.monitor.disclosure_refresh_failed",
-                    "scheduled_at": scheduled_at.isoformat(),
-                    "failure_point": point,
-                    "failure_code": exception_code(error),
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
+        payload = {
+            "event": "research.monitor.disclosure_refresh_failed",
+            "scheduled_at": scheduled_at.isoformat(),
+            "failure_point": point,
+            "failure_code": exception_code(error),
+        }
+        if isinstance(error, IdentityCollectionFailure):
+            payload["failure_code"] = error.failure_code
+            payload["sec_stage"] = error.stage
+            if error.http_timeout_phase is not None:
+                payload["http_timeout_phase"] = error.http_timeout_phase
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
     except Exception:
         # Logging must never change the source outcome or transaction cleanup.
         pass

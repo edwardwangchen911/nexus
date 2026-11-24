@@ -159,6 +159,64 @@ async def test_non_200_success_never_becomes_complete_source_receipt(tmp_path, s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_phase", ["before_response_headers", "response_body"])
+@pytest.mark.parametrize(
+    "timeout_type,code",
+    [(TimeoutError, "DEADLINE_EXCEEDED"), (httpx.ReadTimeout, "RETRY_BUDGET_EXHAUSTED")],
+)
+async def test_timeout_phase_reaches_sec_receipt_and_refresh_log(
+    tmp_path, capsys, timeout_phase, timeout_type, code
+):
+    module = importlib.import_module("nexus.ops.research_identity_local")
+    refresh = importlib.import_module("nexus.ops.monitor_disclosure_refresh")
+    canary = "test@example.invalid"
+    calls = []
+
+    class InterruptedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"fields":'
+            raise timeout_type(canary)
+
+    def respond(request):
+        calls.append(request.url.path)
+        if timeout_phase == "before_response_headers":
+            raise timeout_type(canary)
+        return httpx.Response(200, stream=InterruptedBody())
+
+    out = tmp_path / "deadline"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(module.IdentityCollectionFailure) as caught:
+            await module.collect_identity_sources(
+                symbols=("AAPL",), contact=canary, output_dir=out, client=client
+            )
+    assert caught.value.attempted_requests == 1
+    assert calls == ["/files/company_tickers_exchange.json"]
+    assert sorted(item.name for item in out.iterdir()) == ["result.json"]
+    raw = (out / "result.json").read_text()
+    assert canary not in raw
+    receipt = json.loads(raw)
+    assert (receipt["stage"], receipt["failure_phase"], receipt["failure_code"]) == (
+        "directory",
+        "request",
+        code,
+    )
+    assert receipt["http_timeout_phase"] == timeout_phase
+
+    bucket = datetime(2026, 11, 24, 14, 40, tzinfo=UTC)
+    refresh._report_refresh_failure(bucket, "collect", caught.value)
+    log = capsys.readouterr().err
+    assert canary not in log
+    assert json.loads(log) == {
+        "event": "research.monitor.disclosure_refresh_failed",
+        "scheduled_at": bucket.isoformat(),
+        "failure_point": "collect",
+        "failure_code": code,
+        "sec_stage": "directory",
+        "http_timeout_phase": timeout_phase,
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault,expected,phase,status",
     [
