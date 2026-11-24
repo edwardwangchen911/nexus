@@ -9051,7 +9051,7 @@ export interface components {
             /** Last Seen At */
             last_seen_at: string | null;
             /** Reason Code */
-            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE" | "HEARTBEAT_INVALID" | "READ_PROBE_DEADLINE") | null;
+            reason_code: ("HEARTBEAT_MISSING" | "HEARTBEAT_STALE" | "HEARTBEAT_INCOMPATIBLE" | "HEARTBEAT_INVALID" | "READ_PROBE_DEADLINE" | "READ_PROBE_PAUSE_UNCONFIRMED" | "RESEARCH_SETTLEMENT_HOLD") | null;
             /**
              * Stale After Seconds
              * @constant

@@ -19064,7 +19064,9 @@ export const runtimeContractSchemas = {
               "HEARTBEAT_STALE",
               "HEARTBEAT_INCOMPATIBLE",
               "HEARTBEAT_INVALID",
-              "READ_PROBE_DEADLINE"
+              "READ_PROBE_DEADLINE",
+              "READ_PROBE_PAUSE_UNCONFIRMED",
+              "RESEARCH_SETTLEMENT_HOLD"
             ],
             "type": "string"
           },
