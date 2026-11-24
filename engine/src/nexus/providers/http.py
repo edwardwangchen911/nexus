@@ -35,7 +35,7 @@ _HOST = re.compile(
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 
 
-HttpTimeoutPhase = Literal["before_response_headers", "response_body"]
+HttpTimeoutPhase = Literal["before_response_headers", "response_stream"]
 
 
 class HttpPolicyError(RuntimeError):
@@ -178,7 +178,8 @@ class FixedOriginHttpClient:
                         if not 200 <= status <= 299:
                             self._log(attempt, status, "status_rejected", started_at)
                             raise HttpPolicyError("STATUS_REJECTED", http_status=status)
-                        timeout_phase = "response_body"
+                        # HTTPX can close the stream as part of reading its last chunk.
+                        timeout_phase = "response_stream"
                         payload = await self._read_bounded(response)
                         timeout_phase = None
                         self._log(attempt, status, "ok", started_at)

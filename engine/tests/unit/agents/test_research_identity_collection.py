@@ -1,7 +1,9 @@
+import asyncio
 import importlib
 import json
 import stat
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 
 import httpx
@@ -159,28 +161,50 @@ async def test_non_200_success_never_becomes_complete_source_receipt(tmp_path, s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("timeout_phase", ["before_response_headers", "response_body"])
+@pytest.mark.parametrize(
+    "stall_phase,timeout_phase",
+    [
+        ("headers", "before_response_headers"),
+        ("body", "response_stream"),
+        ("close", "response_stream"),
+    ],
+)
 @pytest.mark.parametrize(
     "timeout_type,code",
     [(TimeoutError, "DEADLINE_EXCEEDED"), (httpx.ReadTimeout, "RETRY_BUDGET_EXHAUSTED")],
 )
 async def test_timeout_phase_reaches_sec_receipt_and_refresh_log(
-    tmp_path, capsys, timeout_phase, timeout_type, code
+    tmp_path, capsys, monkeypatch, stall_phase, timeout_phase, timeout_type, code
 ):
     module = importlib.import_module("nexus.ops.research_identity_local")
     refresh = importlib.import_module("nexus.ops.monitor_disclosure_refresh")
     canary = "test@example.invalid"
     calls = []
+    if timeout_type is TimeoutError:
+        request_policy = module.HttpRequestPolicy
+        monkeypatch.setattr(
+            module, "HttpRequestPolicy", partial(request_policy, deadline_seconds=1)
+        )
+
+    async def stall():
+        if timeout_type is TimeoutError:
+            await asyncio.Event().wait()
+        raise timeout_type(canary)
 
     class InterruptedBody(httpx.AsyncByteStream):
         async def __aiter__(self):
-            yield b'{"fields":'
-            raise timeout_type(canary)
+            yield b"{}"
+            if stall_phase == "body":
+                await stall()
 
-    def respond(request):
+        async def aclose(self):
+            if stall_phase == "close":
+                await stall()
+
+    async def respond(request):
         calls.append(request.url.path)
-        if timeout_phase == "before_response_headers":
-            raise timeout_type(canary)
+        if stall_phase == "headers":
+            await stall()
         return httpx.Response(200, stream=InterruptedBody())
 
     out = tmp_path / "deadline"
@@ -210,7 +234,8 @@ async def test_timeout_phase_reaches_sec_receipt_and_refresh_log(
         "event": "research.monitor.disclosure_refresh_failed",
         "scheduled_at": bucket.isoformat(),
         "failure_point": "collect",
-        "failure_code": code,
+        "failure_code": "VALIDATION_REJECTED",
+        "sec_failure_code": code,
         "sec_stage": "directory",
         "http_timeout_phase": timeout_phase,
     }

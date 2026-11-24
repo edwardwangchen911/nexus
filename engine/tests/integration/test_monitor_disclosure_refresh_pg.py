@@ -638,7 +638,8 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
         ]
         assert failure["event"] == "research.monitor.disclosure_refresh_failed"
         assert failure["failure_point"] == "collect"
-        assert failure["failure_code"] == "RETRY_BUDGET_EXHAUSTED"
+        assert failure["failure_code"] == "VALIDATION_REJECTED"
+        assert failure["sec_failure_code"] == "RETRY_BUDGET_EXHAUSTED"
         assert failure["sec_stage"] == "directory"
         assert failure["http_timeout_phase"] == "before_response_headers"
         async with factory() as session:

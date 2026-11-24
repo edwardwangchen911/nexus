@@ -295,7 +295,7 @@ def _report_refresh_failure(scheduled_at: datetime, point: _RefreshPoint, error:
             "failure_code": exception_code(error),
         }
         if isinstance(error, IdentityCollectionFailure):
-            payload["failure_code"] = error.failure_code
+            payload["sec_failure_code"] = error.failure_code
             payload["sec_stage"] = error.stage
             if error.http_timeout_phase is not None:
                 payload["http_timeout_phase"] = error.http_timeout_phase
