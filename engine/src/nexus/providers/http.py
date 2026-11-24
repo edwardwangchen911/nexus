@@ -35,6 +35,9 @@ _HOST = re.compile(
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 
 
+HttpTimeoutPhase = Literal["before_response_headers", "response_stream"]
+
+
 class HttpPolicyError(RuntimeError):
     """A safe code for a rejected or exhausted provider request."""
 
@@ -45,8 +48,10 @@ class HttpPolicyError(RuntimeError):
         content_length: int | None = None,
         bytes_read_boundary: int | None = None,
         http_status: int | None = None,
+        timeout_phase: HttpTimeoutPhase | None = None,
     ) -> None:
         super().__init__(code)
+        self.timeout_phase = timeout_phase
         self.http_status = (
             http_status if type(http_status) is int and 100 <= http_status <= 599 else None
         )
@@ -150,6 +155,7 @@ class FixedOriginHttpClient:
             remaining = deadline - self._clock()
             if remaining <= 0:
                 raise HttpPolicyError("DEADLINE_EXCEEDED")
+            timeout_phase: HttpTimeoutPhase | None = "before_response_headers"
             try:
                 async with asyncio.timeout(remaining):
                     async with self._client.stream(
@@ -158,6 +164,7 @@ class FixedOriginHttpClient:
                         params=query,
                         headers=headers,
                     ) as response:
+                        timeout_phase = None
                         status = response.status_code
                         if 300 <= status <= 399:
                             self._log(attempt, status, "redirect_rejected", started_at)
@@ -171,17 +178,25 @@ class FixedOriginHttpClient:
                         if not 200 <= status <= 299:
                             self._log(attempt, status, "status_rejected", started_at)
                             raise HttpPolicyError("STATUS_REJECTED", http_status=status)
+                        # HTTPX can close the stream as part of reading its last chunk.
+                        timeout_phase = "response_stream"
                         payload = await self._read_bounded(response)
+                        timeout_phase = None
                         self._log(attempt, status, "ok", started_at)
                         return payload
             except HttpPolicyError:
                 raise
             except TimeoutError:
-                raise HttpPolicyError("DEADLINE_EXCEEDED") from None
-            except httpx.TransportError:
+                raise HttpPolicyError("DEADLINE_EXCEEDED", timeout_phase=timeout_phase) from None
+            except httpx.TransportError as error:
                 self._log(attempt, None, "transport_error", started_at)
                 if attempt == self._policy.max_attempts:
-                    raise HttpPolicyError("RETRY_BUDGET_EXHAUSTED") from None
+                    raise HttpPolicyError(
+                        "RETRY_BUDGET_EXHAUSTED",
+                        timeout_phase=timeout_phase
+                        if isinstance(error, httpx.TimeoutException)
+                        else None,
+                    ) from None
                 await self._sleep_bounded(
                     self._policy.base_backoff_seconds * (2 ** (attempt - 1)),
                     deadline,

@@ -601,7 +601,7 @@ async def test_forward_refresh_dbapi_ack_loss(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listed_history", [False, True])
 async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_claim(
-    migrated_database_url, monkeypatch, tmp_path, listed_history
+    migrated_database_url, monkeypatch, tmp_path, capsys, listed_history
 ):
     import json
     from pathlib import Path
@@ -629,6 +629,19 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
         assert failed_requests == ["/files/company_tickers_exchange.json"]
         assert failed["items"][0]["provider_requests"] == 1
         assert failed["provider_requests"] == 1
+        log = capsys.readouterr().err
+        assert "test@example.invalid" not in log
+        (failure,) = [
+            json.loads(line)
+            for line in log.splitlines()
+            if line.startswith("{") and '"research.monitor.disclosure_refresh_failed"' in line
+        ]
+        assert failure["event"] == "research.monitor.disclosure_refresh_failed"
+        assert failure["failure_point"] == "collect"
+        assert failure["failure_code"] == "VALIDATION_REJECTED"
+        assert failure["sec_failure_code"] == "RETRY_BUDGET_EXHAUSTED"
+        assert failure["sec_stage"] == "directory"
+        assert failure["http_timeout_phase"] == "before_response_headers"
         async with factory() as session:
             audit = await session.scalar(
                 select(AuditEvent).where(
@@ -644,6 +657,7 @@ async def test_transport_diagnostic_preserves_stale_unknown_and_original_failed_
             receipt = json.loads(receipt_bytes)
             assert receipt["failure_phase"] == "request"
             assert receipt["failure_code"] == "RETRY_BUDGET_EXHAUSTED"
+            assert receipt["http_timeout_phase"] == "before_response_headers"
             assert receipt["stage"] == "directory" and receipt["requests"] == 1
             assert receipt.get("http_status") is None
             observed = await refresh.read_disclosure_observation(

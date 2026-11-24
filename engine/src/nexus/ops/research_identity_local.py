@@ -22,6 +22,7 @@ from nexus.providers.http import (
     FixedOriginHttpClient,
     HttpPolicyError,
     HttpRequestPolicy,
+    HttpTimeoutPhase,
 )
 from nexus.research.identity_sources import (
     directory_binding as _binding,
@@ -36,11 +37,21 @@ from nexus.research.sec_index_storage import DIRECTORY_URL, _receipt
 
 
 class IdentityCollectionFailure(ValueError):
-    """Terminal identity failure with the count recorded by this invocation."""
+    """Terminal identity failure with the diagnostics recorded by this invocation."""
 
-    def __init__(self, attempted_requests: int) -> None:
+    def __init__(
+        self,
+        attempted_requests: int,
+        *,
+        stage: str,
+        failure_code: str,
+        http_timeout_phase: HttpTimeoutPhase | None,
+    ) -> None:
         super().__init__("IDENTITY_COLLECTION_FAILED")
         self.attempted_requests = attempted_requests
+        self.stage = stage
+        self.failure_code = failure_code
+        self.http_timeout_phase = http_timeout_phase
 
 
 @dataclass
@@ -200,6 +211,7 @@ async def collect_identity_sources(
         # Closed, value-free diagnostics only. Never serialize exception text,
         # request URLs, headers, contact identity or raw provider responses.
         failure_code = _failure_code(error)
+        timeout_phase = error.timeout_phase if isinstance(error, HttpPolicyError) else None
         result = {
             "status": "unavailable",
             "code": "IDENTITY_COLLECTION_FAILED",
@@ -213,8 +225,15 @@ async def collect_identity_sources(
         }
         if isinstance(error, HttpPolicyError) and error.http_status is not None:
             result["http_status"] = error.http_status
+        if timeout_phase is not None:
+            result["http_timeout_phase"] = timeout_phase
         write_private(output_dir / "result.json", json.dumps(result).encode())
-        raise IdentityCollectionFailure(requests) from None
+        raise IdentityCollectionFailure(
+            requests,
+            stage=stage,
+            failure_code=failure_code,
+            http_timeout_phase=timeout_phase,
+        ) from None
     finally:
         if owned:
             await transport.aclose()
