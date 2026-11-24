@@ -1,9 +1,13 @@
 """Managed SEC source capture under a durable denial of paid work."""
 
 import asyncio
+import json
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic_ns
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -13,6 +17,7 @@ from nexus.jobs.models import QueueName
 from nexus.jobs.repository import upsert_worker_heartbeat
 from nexus.monitoring.host import PriceMonitorCoordinator
 from nexus.ops.monitor_disclosure_refresh import refresh_disclosure_observations
+from nexus.ops.preparation_diagnostics import exception_code
 from nexus.paper.host_probe_state import latest_probe_state, publish_monitor_only_start
 from nexus.paper.manual_entry import manual_host_scope
 from nexus.paper.target_service import lock_portfolio_account
@@ -23,6 +28,41 @@ from nexus.settings import EngineSettings
 
 if TYPE_CHECKING:
     from nexus.ops.agent_paper_loop import AgentPaperLoopAction
+
+
+def _report_pulse_failure(phase: str, started: int, error: Exception) -> None:
+    try:
+        code = (
+            "DEPENDENCY_TIMEOUT"
+            if isinstance(error, subprocess.TimeoutExpired)
+            else exception_code(error)
+        )
+        if type(error) is ValueError and error.args in (
+            ("AGENT_PAPER_RECOVERY_ACTIVATION_BLOCKED",),
+            ("MONITOR_HOST_SCOPE_CHANGED",),
+            ("MANUAL_HOST_NOT_READY",),
+            ("HOST_READ_PROBE_STATE_INVALID",),
+            ("FORMAL_BUDGET_APPLY_REQUIRED",),
+            ("FORMAL_BUDGET_BINDING_INVALID",),
+        ):
+            code = error.args[0]
+        print(
+            json.dumps(
+                {
+                    "event": "agent_paper.monitor_only.pulse_failed",
+                    "observed_at": datetime.now(UTC).isoformat(),
+                    "phase": phase,
+                    "phase_elapsed_ms": (monotonic_ns() - started) // 1_000_000,
+                    "code": code,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        # Diagnostics cannot replace the original failure or authorize a pulse.
+        return
 
 
 async def run_monitor_only(
@@ -50,7 +90,6 @@ async def run_monitor_only(
         raise ValueError("AGENT_PAPER_RECOVERY_ACTIVATION_BLOCKED")
 
     async def runtime_settings() -> tuple[EngineSettings, dict[str, str]]:
-        await asyncio.to_thread(verify_activation)
         environment: dict[str, str] = {}
         current = await load_host_settings(
             settings,
@@ -69,6 +108,7 @@ async def run_monitor_only(
         return current, environment
 
     async with asyncio.timeout(15):
+        await asyncio.to_thread(verify_activation)
         await runtime_settings()
     worker_id = f"agent-paper-loop-{operation_id}"
     worker, version = agent_paper_host_identity(
@@ -126,6 +166,7 @@ async def run_monitor_only(
         await factory.kw["bind"].dispose()
 
     async def capture(bucket: datetime) -> object:
+        await asyncio.to_thread(verify_activation)
         current, environment = await runtime_settings()
         return await refresh_disclosure_observations(
             current,
@@ -143,18 +184,28 @@ async def run_monitor_only(
     monitor = PriceMonitorCoordinator(no_scan, prepare=capture)
     try:
         while not shutdown.is_set():
-            async with asyncio.timeout(15):
-                await runtime_settings()
-                await heartbeat_agent_paper_loop(
-                    settings,
-                    worker_id=worker_id,
-                    account_id=account_id,
-                    started_at=started_at,
-                    seen_at=clock(),
-                    expected_hold=expected,
-                )
-            monitor.kick(clock())
-            await wait_sleep(15)
+            phase, phase_started = "activation", monotonic_ns()
+            try:
+                async with asyncio.timeout(15):
+                    await asyncio.to_thread(verify_activation)
+                    phase, phase_started = "configuration", monotonic_ns()
+                    await runtime_settings()
+                    phase, phase_started = "heartbeat", monotonic_ns()
+                    await heartbeat_agent_paper_loop(
+                        settings,
+                        worker_id=worker_id,
+                        account_id=account_id,
+                        started_at=started_at,
+                        seen_at=clock(),
+                        expected_hold=expected,
+                    )
+                phase, phase_started = "monitor_schedule", monotonic_ns()
+                monitor.kick(clock())
+                phase, phase_started = "wait", monotonic_ns()
+                await wait_sleep(15)
+            except Exception as error:
+                _report_pulse_failure(phase, phase_started, error)
+                raise
         return AgentPaperLoopAction.STOP_REQUESTED
     finally:
         await monitor.close()
