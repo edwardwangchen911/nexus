@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -13,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 class Session:
     def __init__(self, row):
-        self.scalars = AsyncMock(side_effect=[[], []])
+        self.scalars = AsyncMock(side_effect=[[], [], []])
         self.scalar = AsyncMock(side_effect=["read committed", row])
 
     @asynccontextmanager
@@ -49,14 +48,17 @@ async def test_send_recheck_rejection_does_not_call_transport():
 @pytest.mark.asyncio
 async def test_legacy_unaffected_payload_is_forwarded_unchanged():
     original = message()
-    row = SimpleNamespace(
+    row = OutboxEvent(
+        id=original.event_id,
         event_type=original.event_type,
         schema_version=original.schema_version,
         aggregate_id=original.aggregate_id,
         payload=original.payload,
     )
     publish = AsyncMock()
-    await DurableSecPublisher(lambda: Session(row), publish)(original)
+    session = Session(row)
+    await DurableSecPublisher(lambda: session, publish)(original)
+    assert session.scalars.await_count == 3
     publish.assert_awaited_once_with(original)
 
 
