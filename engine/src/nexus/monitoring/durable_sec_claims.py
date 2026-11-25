@@ -58,12 +58,12 @@ async def audit_fact(session: AsyncSession, row: DurableFact) -> None:
         row_id = f"{row.account_id}:{row.instrument_id}:{row.session_date.isoformat()}"
     else:
         where, params, row_id = "id=:id", dict(id=row.id), str(row.id)
+    binding = "to_jsonb(f)-'created_at'"
+    if isinstance(row, SecDiscoveryEvent) and row.observation_receipt_id is None:
+        binding += "-'observation_receipt_id'"
     result = (
         await session.execute(
-            text(
-                f"SELECT to_jsonb(f)-'created_at' AS binding, created_at "
-                f"FROM {table} f WHERE {where}"
-            ),
+            text(f"SELECT {binding} AS binding, created_at FROM {table} f WHERE {where}"),
             params,
         )
     ).one_or_none()
@@ -168,7 +168,7 @@ async def claim_notice(
         )
         .execution_options(populate_existing=True)
     )
-    if event is None:
+    if event is None or event.observation_receipt_id is not None:
         return False
     conflict = await session.scalar(
         select(SecDiscoveryEventRevision.id)

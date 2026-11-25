@@ -36,6 +36,7 @@ class DurableSecCheckView(MonitoringViewModel):
             "coverage_conflict",
             "source_stale",
             "source_invalid",
+            "collection_failed",
             "time_invalid",
             "history_invalid",
             "rule_inactive",
@@ -57,6 +58,7 @@ class DurableSecNoticeView(MonitoringViewModel):
 
 
 DurableSecResearchStatus = Literal[
+    "observation_only",
     "no_receipt",
     "bound",
     "increment_failed",

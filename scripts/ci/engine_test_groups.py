@@ -165,6 +165,7 @@ MERGE_SELECTORS = (
     "engine/tests/integration/test_monitor_market_prepare_pg.py",
     "engine/tests/integration/test_monitor_price_refresh_pg.py",
     "engine/tests/integration/test_monitor_disclosure_refresh_pg.py",
+    "engine/tests/integration/test_durable_sec_observation_only_pg.py",
     "engine/tests/integration/test_monitor_observation_tick_pg.py",
     "engine/tests/integration/test_monitor_daily_receipts_pg.py",
     "engine/tests/integration/test_monitor_frozen_members_pg.py",

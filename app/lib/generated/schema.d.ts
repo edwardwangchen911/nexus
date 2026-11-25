@@ -2820,7 +2820,7 @@ export interface components {
             /** Interval Start */
             interval_start: string | null;
             /** Reason */
-            reason: ("evidence_unverified" | "coverage_incomplete" | "accepted_cutoff_unproven" | "coverage_conflict" | "source_stale" | "source_invalid" | "time_invalid" | "history_invalid" | "rule_inactive") | null;
+            reason: ("evidence_unverified" | "coverage_incomplete" | "accepted_cutoff_unproven" | "coverage_conflict" | "source_stale" | "source_invalid" | "collection_failed" | "time_invalid" | "history_invalid" | "rule_inactive") | null;
             /**
              * Result
              * @enum {string}
@@ -2892,7 +2892,7 @@ export interface components {
             notice?: components["schemas"]["DurableSecNoticeView"] | null;
             preparation_rejection?: components["schemas"]["DurableSecPreparationRejection"] | null;
             /** Research Status */
-            research_status?: ("no_receipt" | "bound" | "increment_failed" | "addressed_increment" | "addressed_daily" | "unverified") | null;
+            research_status?: ("observation_only" | "no_receipt" | "bound" | "increment_failed" | "addressed_increment" | "addressed_daily" | "unverified") | null;
         };
         /** DurableSecNoticeView */
         DurableSecNoticeView: {

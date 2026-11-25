@@ -44,7 +44,11 @@ WITH frozen AS (
   THEN f.payload#>'{agent_paper_context,pending_durable_sec,events}' ELSE '[]'::jsonb END) item
  JOIN sec_discovery_events e ON e.id::text=item->>'event_id'
 )
-SELECT DISTINCT s.account_id,s.instrument_id,s.plan_id,s.event_key,s.entry FROM scopes s
+SELECT DISTINCT s.account_id,s.instrument_id,s.plan_id,s.event_key,s.entry,
+ EXISTS(SELECT FROM sec_discovery_events e
+        WHERE (e.account_id,e.instrument_id,e.event_key)=(s.account_id,s.instrument_id,s.event_key)
+        AND e.observation_receipt_id IS NOT NULL) AS observation_only
+FROM scopes s
 JOIN sec_monitor_rules r ON r.account_id=s.account_id AND r.instrument_id=s.instrument_id
 ORDER BY s.account_id,s.instrument_id,s.plan_id
 """)
@@ -63,6 +67,8 @@ ORDER BY observed_at DESC,available_at DESC,received_at DESC,created_at DESC,id 
 async def verify_send_inputs(session: AsyncSession, run_id: UUID) -> None:
     """SQL first proves the exact frozen relations and holds their security locks."""
     scopes = tuple((await session.execute(_SCOPES, {"run": run_id})).mappings())
+    if any(scope["observation_only"] for scope in scopes):
+        raise ValueError(INVALID)
     instruments = sorted({scope["instrument_id"] for scope in scopes}, key=str)
     # All normal capture publishers share this lock. New source material cannot
     # replace the one whose own originals we verify while the headers fence holds.

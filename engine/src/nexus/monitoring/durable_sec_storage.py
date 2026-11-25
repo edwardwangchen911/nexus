@@ -25,7 +25,7 @@ from nexus.notifications.durable_sec import DURABLE_SEC_EVENT, DurableSecNotific
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.monitoring import MonitorCheck, MonitorPlan, MonitorTrigger
-from nexus.persistence.models.runtime import OutboxEvent
+from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
 from nexus.persistence.models.sec_conflicts import SecDisclosureKeyConflict
 from nexus.persistence.models.sec_monitor import (
     SecDiscoveryCheck,
@@ -237,6 +237,28 @@ async def record_discovery(
     capture_id: UUID | None,
     scheduled_at: datetime,
 ) -> SecDiscoveryCheck:
+    check, discovered = await _record_discovery_facts(
+        session,
+        account_id=account_id,
+        rule_id=rule_id,
+        capture_id=capture_id,
+        scheduled_at=scheduled_at,
+        receipt=None,
+    )
+    for event in discovered:
+        await _publish_discovery_notice(session, event)
+    return check
+
+
+async def _record_discovery_facts(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    rule_id: UUID,
+    capture_id: UUID | None,
+    scheduled_at: datetime,
+    receipt: AuditEvent | None,
+) -> tuple[SecDiscoveryCheck, list[SecDiscoveryEvent]]:
     rule = await session.get(SecMonitorRule, rule_id)
     if rule is None or rule.account_id != account_id:
         raise ValueError("SEC_DURABLE_SCOPE_INVALID")
@@ -249,7 +271,9 @@ async def record_discovery(
         )
     )
     if old is not None:
-        return old
+        if receipt is not None and old.observation.get("observation_receipt_id") != str(receipt.id):
+            raise ValueError("SEC_OBSERVATION_BUCKET_OCCUPIED")
+        return old, []
     now = await _time(session)
     if scheduled_at != now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0):
         raise ValueError("SEC_DURABLE_BUCKET_UNAVAILABLE")
@@ -288,6 +312,7 @@ async def record_discovery(
         )
     )
     observation: dict[str, object]
+    discovered: list[SecDiscoveryEvent] = []
     result, coverage = "unknown", "unknown"
     reason: str | None = "DURABLE_SEC_SOURCE_INVALID"
     capture = None
@@ -317,6 +342,8 @@ async def record_discovery(
     except (OSError, ValueError):
         index = None
     if index is None or capture is None:
+        if receipt is not None and receipt.payload.get("status") == "failed":
+            reason = "SEC_INDEX_REFRESH_FAILED"
         observation = {"result": result, "coverage": coverage, "reason": reason}
     else:
         decision = evaluate_discovery(
@@ -413,60 +440,14 @@ async def record_discovery(
                 entry=item.entry.model_dump(mode="json"),
                 metadata_hash=_metadata(item.entry),
                 first_seen_at=now,
+                observation_receipt_id=receipt.id if receipt is not None else None,
             )
             session.add(event)
             await session.flush()
             await audit_fact(session, event)
-            outbox_id = new_uuid7()
-            if not await claim_notice(
-                session,
-                account_id=account_id,
-                instrument_id=rule.instrument_id,
-                event_key=event.event_key,
-                outbox_id=outbox_id,
-                legacy_trigger_id=None,
-                now=now,
-            ):
-                continue
-            symbols = tuple(
-                await session.scalars(
-                    select(InstrumentAlias.symbol)
-                    .where(
-                        InstrumentAlias.instrument_id == rule.instrument_id,
-                        InstrumentAlias.valid_from <= now.date(),
-                        (
-                            InstrumentAlias.valid_to.is_(None)
-                            | (InstrumentAlias.valid_to >= now.date())
-                        ),
-                    )
-                    .distinct()
-                )
-            )
-            notice = DurableSecNotification(
-                discovery_id=event.id,
-                instrument_id=rule.instrument_id,
-                rule_id=rule.id,
-                symbol=symbols[0] if len(symbols) == 1 else None,
-                event_key=event.event_key,
-                form=item.entry.form,
-                accepted_at=item.entry.accepted_at,
-                discovered_at=now,
-            )
-            session.add(
-                OutboxEvent(
-                    id=outbox_id,
-                    created_at=now,
-                    event_type=DURABLE_SEC_EVENT[0],
-                    aggregate_id=event.id,
-                    schema_version=DURABLE_SEC_EVENT[1],
-                    payload=notice.model_dump(mode="json"),
-                    status="queued",
-                    attempt_count=0,
-                    max_attempts=1,
-                    available_at=now,
-                )
-            )
-            await session.flush()
+            discovered.append(event)
+    if receipt is not None:
+        observation["observation_receipt_id"] = str(receipt.id)
     observation["evaluation_version"] = ACCEPTED_CUTOFF_EVALUATION
     observation["accepted_complete_through_at"] = None
     check = SecDiscoveryCheck(
@@ -484,4 +465,56 @@ async def record_discovery(
     session.add(check)
     await session.flush()
     await audit_fact(session, check)
-    return check
+    return check, discovered
+
+
+async def _publish_discovery_notice(session: AsyncSession, event: SecDiscoveryEvent) -> None:
+    entry = SecIndexEntry.model_validate(event.entry)
+    now = event.first_seen_at
+    outbox_id = new_uuid7()
+    if not await claim_notice(
+        session,
+        account_id=event.account_id,
+        instrument_id=event.instrument_id,
+        event_key=event.event_key,
+        outbox_id=outbox_id,
+        legacy_trigger_id=None,
+        now=now,
+    ):
+        return
+    symbols = tuple(
+        await session.scalars(
+            select(InstrumentAlias.symbol)
+            .where(
+                InstrumentAlias.instrument_id == event.instrument_id,
+                InstrumentAlias.valid_from <= now.date(),
+                (InstrumentAlias.valid_to.is_(None) | (InstrumentAlias.valid_to >= now.date())),
+            )
+            .distinct()
+        )
+    )
+    notice = DurableSecNotification(
+        discovery_id=event.id,
+        instrument_id=event.instrument_id,
+        rule_id=event.rule_id,
+        symbol=symbols[0] if len(symbols) == 1 else None,
+        event_key=event.event_key,
+        form=entry.form,
+        accepted_at=entry.accepted_at,
+        discovered_at=now,
+    )
+    session.add(
+        OutboxEvent(
+            id=outbox_id,
+            created_at=now,
+            event_type=DURABLE_SEC_EVENT[0],
+            aggregate_id=event.id,
+            schema_version=DURABLE_SEC_EVENT[1],
+            payload=notice.model_dump(mode="json"),
+            status="queued",
+            attempt_count=0,
+            max_attempts=1,
+            available_at=now,
+        )
+    )
+    await session.flush()

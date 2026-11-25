@@ -72,6 +72,9 @@ async def _audited(session: AsyncSession, row: ViewFact, now: datetime) -> bool:
         return False
     action, schema = audit
     table = row.__tablename__
+    binding = "to_jsonb(f)-'created_at'"
+    if isinstance(row, SecDiscoveryEvent) and row.observation_receipt_id is None:
+        binding += "-'observation_receipt_id'"
     return bool(
         await session.scalar(
             text(
@@ -81,7 +84,7 @@ async def _audited(session: AsyncSession, row: ViewFact, now: datetime) -> bool:
                 "AND a.occurred_at=f.created_at AND a.created_at<=:now "
                 "AND a.payload->>'table' IS NOT DISTINCT FROM :audit_table "
                 "AND a.payload->>'row_id'=:row_id "
-                "AND a.payload->'binding'=to_jsonb(f)-'created_at')"
+                f"AND a.payload->'binding'={binding})"
             ),
             {
                 "id": row.id,
@@ -148,6 +151,7 @@ def project_check(row: SecDiscoveryCheck, now: datetime) -> DurableSecCheckView:
                 "DURABLE_SEC_COVERAGE_CONFLICT": "coverage_conflict",
                 "DURABLE_SEC_SOURCE_STALE": "source_stale",
                 "DURABLE_SEC_SOURCE_INVALID": "source_invalid",
+                "SEC_INDEX_REFRESH_FAILED": "collection_failed",
                 "DURABLE_SEC_TIME_INVALID": "time_invalid",
                 "DURABLE_SEC_HISTORY_INVALID": "history_invalid",
                 "DURABLE_SEC_RULE_INACTIVE": "rule_inactive",
@@ -407,6 +411,8 @@ async def _read_event_research(
     """Project only saved research and per-event receipt facts for this exact event."""
     if max(event.created_at, event.first_seen_at) > now:
         return "unverified", None
+    if event.observation_receipt_id is not None:
+        return "observation_only", None
     daily_receipt = await session.scalar(
         select(SecDurableDailyEventReceipt).where(
             SecDurableDailyEventReceipt.event_id == event.id,
@@ -613,20 +619,25 @@ async def read_durable_sec_view(
         for row in rows:
             if not await _audited(session, row, now):
                 return unknown
-            research_status, rejection = (
-                await _read_event_research(
-                    session, row, now, include_preparation=include_preparation
-                )
-                if include_research
-                else (None, None)
-            )
+            research_status: DurableSecResearchStatus | None = None
+            rejection = None
+            notice = None
+            if row.observation_receipt_id is not None:
+                research_status = "observation_only"
+            else:
+                if include_research:
+                    research_status, rejection = await _read_event_research(
+                        session, row, now, include_preparation=include_preparation
+                    )
+                if include_notice:
+                    notice = await _read_notice(session, row, now)
             events.append(
                 project_event(
                     row,
                     policy,
                     now,
                     conflict=row.id in conflicts,
-                    notice=await _read_notice(session, row, now) if include_notice else None,
+                    notice=notice,
                     research_status=research_status,
                     preparation_rejection=rejection,
                 )

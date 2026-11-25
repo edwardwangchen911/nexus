@@ -29,6 +29,42 @@ test("verified output limit remains a read-only failed result on the research pa
   expect(methods).toEqual(["GET", "GET"]);
 });
 
+test("restricted SEC discovery stays visible through a later failed collection", async ({ page }) => {
+  await installShellFixture(page);
+  const at = "2026-11-17T03:00:00Z";
+  const next = "2026-11-17T03:05:00Z";
+  const methods: string[] = [];
+  await page.route(`**/api/v1/research-runs/${runId}`, (route) => {
+    methods.push(route.request().method());
+    const latest_check = methods.length === 1
+      ? { scheduled_at: at, checked_at: at, result: "true" as const, coverage: "partial" as const,
+          interval_start: at, interval_end: at, reason: null, coverage_details: null }
+      : { scheduled_at: next, checked_at: next, result: "unknown" as const, coverage: "unknown" as const,
+          interval_start: null, interval_end: null, reason: "collection_failed" as const, coverage_details: null };
+    return route.fulfill({ json: researchEnvelope(researchData({
+      durable_disclosure: {
+        observed_at: latest_check.checked_at, rule_id: runId, state: "active",
+        effective_at: "2026-11-17T00:00:00Z", forms: ["8-K"], execution_locked: true,
+        latest_check, event_count: 1, events: [{
+          event_id: runId, event_key: "sec:0000123456:0000123456-26-000099", form: "8-K",
+          accepted_at: "2026-11-17T02:58:00Z", first_seen_at: at,
+          metadata_status: "recorded", research_status: "observation_only",
+        }],
+      },
+    })) });
+  });
+  await page.goto(`/research/${instrumentId}?run_id=${runId}`);
+  const region = page.getByRole("region", { name: "长期 SEC 公告发现" });
+  await expect(region.getByText(/新公告 · 部分覆盖/)).toBeVisible();
+  await expect(region.getByText("仅记录公告发现，未触发通知或研究。")).toBeVisible();
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
+  await expect(region.getByText(/本轮 SEC 原件采集失败/)).toBeVisible();
+  await expect(region.getByRole("heading", { name: "8-K · 0000123456-26-000099" })).toBeVisible();
+  await expect(region.getByText(/完整覆盖区间未发现/)).toHaveCount(0);
+  await expect(region.getByText("暂无可核验通知记录。")).toHaveCount(0);
+  expect(methods).toEqual(["GET", "GET"]);
+});
+
 test("saved boolean research conditions remain unverified through page and evidence drawer", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.emulateMedia({ reducedMotion: "reduce" });

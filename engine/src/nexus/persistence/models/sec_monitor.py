@@ -82,6 +82,7 @@ class SecDiscoveryEvent(ImmutableCreatedAt, Base):
     entry: Mapped[dict[str, object]] = mapped_column(JSONB)
     metadata_hash: Mapped[str] = mapped_column(String(64))
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    observation_receipt_id: Mapped[UUID | None] = mapped_column(ForeignKey("audit_events.id"))
 
 
 class SecDiscoveryEventRevision(ImmutableCreatedAt, Base):

@@ -15,6 +15,7 @@ const reasons = {
   accepted_cutoff_unproven: "SEC 原件已核验，尚无完整受理截止证明。",
   coverage_conflict: "覆盖记录或公告元数据存在矛盾，受影响部分保持未知。",
   source_stale: "本次原件已超过新鲜度要求。",
+  collection_failed: "本轮 SEC 原件采集失败，暂时无法确认是否有新公告。",
   source_invalid: "原件或发行人身份未通过核验。",
   time_invalid: "原件接收时间或核对区间未通过核验。",
   history_invalid: "既有公告身份记录未通过核验。",
@@ -27,6 +28,7 @@ const noticeStatuses = {
   dead_letter: "发送尝试已结束",
 } satisfies Record<Notice["status"], string>;
 const researchStatuses = {
+  observation_only: "仅记录公告发现，未触发通知或研究。",
   no_receipt: "暂无逐事件处理回执。",
   bound: "已关联增量材料，暂无逐事件处理回执。",
   increment_failed: "原增量研究失败，暂无逐事件处理回执。",
@@ -128,7 +130,7 @@ export function DurableSecDiscovery({ discovery, dailyProposal }: {
         <h3>{event.form} · {event.event_key.split(":").at(-1)}</h3>
         <dl className="decision-card__versions"><div><dt>SEC 接受时间</dt><dd>{formatDisplayTime(event.accepted_at)}</dd></div><div><dt>首次发现时间</dt><dd>{formatDisplayTime(event.first_seen_at)}</dd></div></dl>
         {event.metadata_status === "conflict" ? <p>公告元数据出现冲突，后续处理状态待核验。</p> : null}
-        {review && (review.status === "unresolved" || review.status === "addressed") ? <>
+        {event.research_status !== "observation_only" && review && (review.status === "unresolved" || review.status === "addressed") ? <>
           <p>本次日研判断 · {review.status === "unresolved" ? "未决" : "已回答"}</p>
           <p>{review.rationale}</p>
         </> : null}
@@ -141,7 +143,9 @@ export function DurableSecDiscovery({ discovery, dailyProposal }: {
             {formatDisplayTime(event.preparation_rejection.rejected_at)}
           </time></p>
         </> : event.research_status ? <p>{researchStatuses[event.research_status]}</p> : null}
-        {event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>}
+        {event.research_status !== "observation_only"
+          ? event.notice ? <NoticeReceipt notice={event.notice} /> : <p>暂无可核验通知记录。</p>
+          : null}
       </article>;
     })}
     <p role="note">公告发现不代表通知已送达或研究已完成。研究有效期、旧事件一次限制、每日增量名额与未知费用仍独立核验；本区不表示可以发起研究或交易，交易保持锁定。</p>
