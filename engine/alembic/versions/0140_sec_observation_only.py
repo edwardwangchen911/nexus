@@ -122,11 +122,18 @@ CREATE FUNCTION public.sec_observation_require_check() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
 BEGIN
  IF TG_TABLE_NAME='sec_discovery_checks' THEN
-  IF NOT EXISTS(
-   SELECT FROM public.sec_discovery_events event
-   WHERE event.rule_id=NEW.rule_id AND event.capture_id=NEW.capture_id
-     AND event.first_seen_at=NEW.checked_at
-     AND event.observation_receipt_id=(NEW.observation->>'observation_receipt_id')::uuid
+  IF (NEW.result='true') IS DISTINCT FROM EXISTS(
+   SELECT FROM jsonb_array_elements(coalesce(NEW.observation->'events','[]'::jsonb)) fact
+   WHERE fact->>'classification'='new'
+  ) OR EXISTS(
+   SELECT FROM jsonb_array_elements(coalesce(NEW.observation->'events','[]'::jsonb)) fact
+   WHERE fact->>'classification'='new' AND NOT EXISTS(
+    SELECT FROM public.sec_discovery_events event
+    WHERE (event.rule_id,event.capture_id,event.first_seen_at)=
+          (NEW.rule_id,NEW.capture_id,NEW.checked_at)
+      AND event.observation_receipt_id=(NEW.observation->>'observation_receipt_id')::uuid
+      AND event.event_key=fact->>'event_key' AND event.entry=fact->'entry'
+   )
   ) THEN RAISE EXCEPTION 'SEC_OBSERVATION_EVENT_REQUIRED' USING ERRCODE='23514'; END IF;
   RETURN NEW;
  END IF;
@@ -148,7 +155,7 @@ $$
 _DOWNSTREAM = """
 CREATE FUNCTION public.sec_observation_downstream_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
-DECLARE held boolean;
+DECLARE held boolean; malformed boolean;
 BEGIN
  IF TG_TABLE_NAME='sec_notification_claims' THEN
   SELECT EXISTS(SELECT FROM public.sec_discovery_events event
@@ -159,13 +166,18 @@ BEGIN
   SELECT EXISTS(SELECT FROM public.sec_discovery_events event
     WHERE event.id=NEW.aggregate_id AND event.observation_receipt_id IS NOT NULL) INTO held;
  ELSIF TG_TABLE_NAME='data_snapshots' THEN
-  SELECT EXISTS(
-   SELECT FROM jsonb_path_query(NEW.payload,'$.agent_paper_context.pending_durable_sec.events[*]') item
-   JOIN public.sec_discovery_events event ON event.id=CASE
-    WHEN item->>'event_id' ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
-    THEN (item->>'event_id')::uuid END
-   WHERE event.observation_receipt_id IS NOT NULL
-  ) INTO held;
+  SELECT coalesce(bool_or(event.observation_receipt_id IS NOT NULL),false),
+         coalesce(bool_or(NOT ref.valid),false) INTO held, malformed
+  FROM (
+   SELECT item->>'event_id' AS event_id,
+          coalesce(pg_input_is_valid(item->>'event_id','uuid'),false) AS valid
+   FROM jsonb_path_query(NEW.payload,'$.agent_paper_context.pending_durable_sec.events[*]') item
+   UNION ALL
+   SELECT item->>'event_id', coalesce(pg_input_is_valid(item->>'event_id','uuid'),false)
+   FROM jsonb_path_query(NEW.payload,'$.agent_paper_context.pending_durable_sec.issues[*]') item
+  ) ref
+  LEFT JOIN public.sec_discovery_events event ON event.id=CASE WHEN ref.valid THEN ref.event_id::uuid END;
+  IF malformed THEN RAISE EXCEPTION 'SEC_OBSERVATION_REFERENCE_INVALID' USING ERRCODE='23514'; END IF;
  ELSE
   SELECT observation_receipt_id IS NOT NULL INTO held
   FROM public.sec_discovery_events WHERE id=NEW.event_id;
@@ -207,9 +219,11 @@ def upgrade() -> None:
         REFERENCES public.audit_events(id)
     """)
     op.execute("""
-        CREATE INDEX ix_sec_observation_refresh_operation ON public.audit_events
-        ((payload->>'operation_id')) WHERE schema_version='monitor_disclosure_refresh_v1'
+        CREATE UNIQUE INDEX uq_sec_refresh_operation_receipt ON public.audit_events
+        ((payload->>'operation_id'),action) WHERE schema_version='monitor_disclosure_refresh_v1'
         AND actor_id='research-monitor'
+        AND action IN ('research.monitor.disclosure_refresh_claimed',
+                       'research.monitor.disclosure_refresh_result')
     """)
     _rewrite_audit(forward=True)
     op.execute(_PRODUCER)
@@ -228,7 +242,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE CONSTRAINT TRIGGER sec_observation_require_event AFTER INSERT
         ON public.sec_discovery_checks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
-        WHEN (NEW.result='true' AND NEW.observation ? 'observation_receipt_id')
+        WHEN (NEW.observation ? 'observation_receipt_id')
         EXECUTE FUNCTION public.sec_observation_require_check()
     """)
     op.execute(_DOWNSTREAM)
@@ -258,5 +272,5 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER sec_observation_origin_guard ON public.{table}")
     op.execute("DROP FUNCTION public.sec_observation_origin_guard()")
     _rewrite_audit(forward=False)
-    op.execute("DROP INDEX public.ix_sec_observation_refresh_operation")
+    op.execute("DROP INDEX public.uq_sec_refresh_operation_receipt")
     op.execute("ALTER TABLE public.sec_discovery_events DROP COLUMN observation_receipt_id")

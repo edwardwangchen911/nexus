@@ -30,12 +30,23 @@ async def test_observation_only_has_database_fences(migrated_database_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["new", "failed", "no_proven_cutoff", "closed"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "new",
+        "failed",
+        "no_proven_cutoff",
+        "closed",
+        "missing_event",
+        "mismatched_event",
+    ],
+)
 async def test_restricted_refresh_publishes_only_its_own_check_and_observation(
     migrated_database_url, monkeypatch, tmp_path, source
 ):
     import json
     from datetime import datetime, timedelta
+    from types import SimpleNamespace
     from uuid import uuid4
     from zoneinfo import ZoneInfo
 
@@ -43,6 +54,7 @@ async def test_restricted_refresh_publishes_only_its_own_check_and_observation(
     from helpers.durable_test_clock import DisposableClock
     from integration.test_monitor_disclosure_refresh_pg import setup
     from nexus.api.durable_sec import read_durable_sec_view
+    from nexus.audit.service import append_audit_event
     from nexus.monitoring import durable_sec_host as host
     from nexus.monitoring import durable_sec_storage as storage
     from nexus.monitoring.durable_sec_claims import claim_notice
@@ -159,7 +171,33 @@ async def test_restricted_refresh_publishes_only_its_own_check_and_observation(
             job_count = await session.scalar(select(func.count()).select_from(Job))
         captured["clock"][0] = now
 
-        current_source = source
+        if source in {"missing_event", "mismatched_event"}:
+            evaluate = storage.evaluate_discovery
+
+            def wrong_check_events(*args, **kwargs):
+                original = evaluate(*args, **kwargs)
+                dumped = original.model_dump(mode="json")
+                prior = next(item for item in dumped["events"] if item["classification"] == "new")
+                wrong_entry = {**prior["entry"], "primary_document": "other.htm"}
+                wrong = {**prior, "entry": wrong_entry}
+                if source == "missing_event":
+                    wrong_number = "0000123456-26-000098"
+                    wrong["event_key"] = prior["event_key"].replace("000099", "000098")
+                    wrong["entry"]["accession_number"] = wrong_number
+                    dumped["events"].append(wrong)
+                else:
+                    prior["entry"] = wrong_entry
+                return SimpleNamespace(
+                    model_dump=lambda **_: dumped,
+                    events=original.events,
+                    result=original.result,
+                    coverage=original.coverage,
+                    reason=original.reason,
+                )
+
+            monkeypatch.setattr(storage, "evaluate_discovery", wrong_check_events)
+
+        current_source = "new" if source in {"missing_event", "mismatched_event"} else source
 
         def serve(request):
             calls.append(str(request.url))
@@ -196,6 +234,16 @@ async def test_restricted_refresh_publishes_only_its_own_check_and_observation(
                 assert await session.scalar(select(SecDiscoveryCheck)) is None
             return
         assert result["status"] == ("blocked" if source == "failed" else "refreshed"), result
+        if source in {"missing_event", "mismatched_event"}:
+            assert "check_id" not in result["items"][0]
+            async with factory() as session:
+                assert await session.scalar(select(SecDiscoveryCheck)) is None
+                assert await session.scalar(select(SecDiscoveryEvent)) is None
+                assert await session.scalar(select(OutboxEvent)) is None
+                assert await session.scalar(
+                    select(AuditEvent).where(AuditEvent.action == refresh.RESULT)
+                )
+            return
         assert "check_id" in result["items"][0], result
         captured_requests = len(calls)
         repeat = await invoke(
@@ -329,19 +377,30 @@ async def test_restricted_refresh_publishes_only_its_own_check_and_observation(
                         text(f"INSERT INTO {table}(id,event_id) VALUES (:id,:event)"),
                         {"id": uuid4(), "event": event_id},
                     )
-        with pytest.raises(IntegrityError, match="SEC_OBSERVATION_DOWNSTREAM_DENIED"):
+        for position in ("events", "issues"):
+            for spelling in (str(event_id), str(event_id).upper(), event_id.hex):
+                with pytest.raises(IntegrityError, match="SEC_OBSERVATION_DOWNSTREAM_DENIED"):
+                    async with factory.begin() as session:
+                        await session.execute(
+                            text("""
+                            INSERT INTO data_snapshots(id,payload)
+                            VALUES (:id,jsonb_build_object('agent_paper_context',
+                              jsonb_build_object('pending_durable_sec',jsonb_build_object(
+                                CAST(:position AS text), jsonb_build_array(
+                                  jsonb_build_object('event_id', CAST(:event_id AS text)))
+                              ))))
+                            """),
+                            {"id": uuid4(), "event_id": spelling, "position": position},
+                        )
+        with pytest.raises(IntegrityError, match="uq_sec_refresh_operation_receipt"):
             async with factory.begin() as session:
-                # A direct daily input writer is fenced before admission.
-                await session.execute(
-                    text("""
-                    INSERT INTO data_snapshots(id,payload)
-                    VALUES (:id,jsonb_build_object('agent_paper_context',
-                      jsonb_build_object('pending_durable_sec',jsonb_build_object(
-                        'events', jsonb_build_array(
-                          jsonb_build_object('event_id', CAST(:event_id AS text)))
-                      ))))
-                    """),
-                    {"id": uuid4(), "event_id": str(event_id)},
+                await append_audit_event(
+                    session,
+                    actor_id="research-monitor",
+                    action=refresh.RESULT,
+                    schema_version=refresh.SCHEMA,
+                    occurred_at=await storage._time(session),
+                    payload={**receipt.payload, "restricted_worker": "conflicting-worker"},
                 )
         with pytest.raises(IntegrityError, match="SEC_DURABLE_IMMUTABLE"):
             async with factory.begin() as session:

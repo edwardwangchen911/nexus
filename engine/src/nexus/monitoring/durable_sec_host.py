@@ -252,9 +252,6 @@ async def record_restricted_discovery(
                 AuditEvent.schema_version == SCHEMA,
                 AuditEvent.action.in_((CLAIM, RESULT)),
                 AuditEvent.payload["operation_id"].astext == str(operation_id),
-                AuditEvent.payload.contains(scope),
-                AuditEvent.occurred_at >= scheduled_at,
-                AuditEvent.occurred_at <= now,
             )
             .limit(3)
         )
@@ -265,8 +262,9 @@ async def record_restricted_discovery(
         raise ValueError("SEC_OBSERVATION_RECEIPT_INVALID")
     claim, receipt = claims[0], receipts[0]
     if (
-        claim.event_seq >= receipt.event_seq
-        or claim.occurred_at > receipt.occurred_at
+        any(claim.payload.get(key) != value for key, value in scope.items())
+        or claim.event_seq >= receipt.event_seq
+        or not scheduled_at <= claim.occurred_at <= receipt.occurred_at <= now
         or any(receipt.payload.get(key) != value for key, value in claim.payload.items())
     ):
         raise ValueError("SEC_OBSERVATION_RECEIPT_INVALID")
