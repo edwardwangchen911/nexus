@@ -74,6 +74,7 @@ class MonitorReplacement(NamedTuple):
     worker: str
     version: str
     digest: str
+    source_schema: str | None = None
 
 
 def _actor(account_id: UUID) -> str:
@@ -149,6 +150,7 @@ async def monitor_only_origin_hash(
     worker: str,
     version: str,
     exited_at: datetime | None = None,
+    source_schema: str | None = None,
 ) -> str:
     """Read the old monitoring denial and its last heartbeat without granting recovery."""
     from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
@@ -178,7 +180,7 @@ async def monitor_only_origin_hash(
         or not isinstance(now, datetime)
         or heartbeat.started_at != datetime.fromisoformat(state.started)
         or heartbeat.process_version != state.version
-        or heartbeat.migration_head != CURRENT_MIGRATION_HEAD
+        or heartbeat.migration_head != (source_schema or CURRENT_MIGRATION_HEAD)
         or not heartbeat.started_at <= heartbeat.seen_at <= now
         or exited_at is not None
         and heartbeat.seen_at > exited_at
@@ -369,6 +371,7 @@ async def publish_monitor_only_start(
             operation_id=replacement.attempt,
             worker=replacement.worker,
             version=replacement.version,
+            source_schema=replacement.source_schema,
         )
         != replacement.digest
     ):

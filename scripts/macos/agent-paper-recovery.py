@@ -954,9 +954,12 @@ def recover(service, root, env_file, project, *, report=True):
             or check.get("paid_dispatch_ready") is not False
             or not stopped
             or clean_monitor_stop(root, state) != clean_stop
+            or not isinstance(check.get("clean_monitor_stop_hold"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", check["clean_monitor_stop_hold"])
         ):
             return finish("BUSINESS_OR_DEPENDENCY_BLOCKED")
         attempt["clean_monitor_stop"] = clean_stop
+        attempt["clean_monitor_stop_hold"] = check["clean_monitor_stop_hold"]
     if reconciled:
         pointer = state["exit_reconciliation"]
         attempt["exit_reconciliation_sha256"] = pointer["evidence_sha256"]

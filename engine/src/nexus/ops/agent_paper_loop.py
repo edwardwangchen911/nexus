@@ -5719,7 +5719,13 @@ def main(argv: list[str] | None = None) -> int:
                             result.get("status") == "monitor_only"
                             and result.get("paid_dispatch_ready") is False
                         ):
-                            result["clean_monitor_stop"] = clean_stop
+                            original = asyncio.run(
+                                inspect_monitor_replacement(
+                                    recovery_settings, clean_stop[1], source_schema=clean_stop[2]
+                                )
+                            )
+                            result["clean_monitor_stop"] = clean_stop[0]
+                            result["clean_monitor_stop_hold"] = original.digest
                         elif result.get("status") == "ready":
                             require_recovery_process_quiescence()
             except Exception as error:

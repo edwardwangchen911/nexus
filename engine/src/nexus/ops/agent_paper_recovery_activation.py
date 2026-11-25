@@ -83,7 +83,7 @@ class RecoveryActivation:
         self.receipt_path = self.directory / f"recovery-activation-{attempt_id}.json"
         self.receipt: dict[str, object] | None = None
         self._monitor_config_hash: str | None = None
-        self._checked_clean_stop: str | None = None
+        self._checked_clean_stop: tuple[str, dict[str, object], str, str] | None = None
         self.monitor_replacement: MonitorReplacement | None = None
 
     def verify_monitor_runtime(self) -> None:
@@ -170,17 +170,21 @@ class RecoveryActivation:
             or manual_host_scope(self.settings) != manual_host_scope(effective)
         ):
             raise ValueError(_BLOCKED)
+        self._checked_clean_stop = None
         clean_stop = attempt.get("clean_monitor_stop")
         if clean_stop is not None:
             from nexus.ops.managed_exit_reconciliation import read_clean_monitor_stop
 
+            evidence = read_clean_monitor_stop(self.root, self.env_file, pending=attempt)
+            hold = attempt.get("clean_monitor_stop_hold")
             if (
-                not isinstance(clean_stop, str)
-                or attempt.get("runtime_mode") != "monitor_only"
-                or read_clean_monitor_stop(self.root, self.env_file, pending=attempt) != clean_stop
+                attempt.get("runtime_mode") != "monitor_only"
+                or evidence is None
+                or evidence[0] != clean_stop
+                or not isinstance(hold, str)
             ):
                 raise ValueError(_BLOCKED)
-        self._checked_clean_stop = clean_stop
+            self._checked_clean_stop = (*evidence, hold)
         if readiness is not None:
             mode = attempt.get("runtime_mode")
             if mode not in (None, "monitor_only") or readiness.get("status") != (mode or "ready"):
@@ -336,6 +340,13 @@ class RecoveryActivation:
                 if origin is not None:
                     replacement = await inspect_monitor_replacement(
                         effective, origin[0], expected=origin[1]
+                    )
+                elif clean_stop is not None:
+                    replacement = await inspect_monitor_replacement(
+                        effective,
+                        clean_stop[1],
+                        source_schema=clean_stop[2],
+                        expected=clean_stop[3],
                     )
             started = monotonic_ns()
             try:

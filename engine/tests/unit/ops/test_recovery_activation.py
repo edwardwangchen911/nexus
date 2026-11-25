@@ -619,15 +619,18 @@ async def test_clean_stop_process_policy_cannot_activate_paid_or_changed_origin(
     env, generation, attempt, target = state(tmp_path)
     settings = EngineSettings(release_revision="a" * 40)
     document = json.loads(target.read_text())
-    document["attempt"].update(runtime_mode="monitor_only", clean_monitor_stop="b" * 64)
+    document["attempt"].update(
+        runtime_mode="monitor_only", clean_monitor_stop="b" * 64, clean_monitor_stop_hold="c" * 64
+    )
     target.write_text(json.dumps(document))
     checked = []
-    proofs = iter(("b" * 64, None)) if outcome == "changed_stop" else None
+    evidence = ("b" * 64, {"runtime_mode": "monitor_only"}, "old-schema")
+    proofs = iter((evidence, None)) if outcome == "changed_stop" else None
 
     monkeypatch.setattr(
         managed_exit_reconciliation,
         "read_clean_monitor_stop",
-        lambda *_a, **_kw: "b" * 64 if proofs is None else next(proofs),
+        lambda *_a, **_kw: evidence if proofs is None else next(proofs),
     )
 
     def forbid_paid_process_check():
@@ -649,6 +652,11 @@ async def test_clean_stop_process_policy_cannot_activate_paid_or_changed_origin(
         }
 
     monkeypatch.setattr(agent_paper_recovery, "inspect_recovery_readiness", inspect)
+
+    async def original(_settings, _attempt, *, source_schema, expected):
+        assert (source_schema, expected) == ("old-schema", "c" * 64)
+
+    monkeypatch.setattr(agent_paper_recovery, "inspect_monitor_replacement", original)
     guard = make_recovery_guard(
         settings, repo_root=tmp_path, env_file=env, generation=generation, attempt_id=attempt
     )
