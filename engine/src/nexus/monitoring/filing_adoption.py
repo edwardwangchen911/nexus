@@ -83,6 +83,7 @@ async def verify_material(
         "0137_linear_json_canonical",
         "0138_sec_accepted_cutoff",
         "0139_sec_audit_lookup",
+        "0140_sec_observation_only",
     }:
         raise ValueError(ERROR)
     snapshot_id = UUID(str(material["original_snapshot_id"]))

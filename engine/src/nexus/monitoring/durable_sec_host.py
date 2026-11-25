@@ -12,7 +12,12 @@ from nexus.audit.service import append_audit_event
 from nexus.market.current_identity import SOURCE as IDENTITY_SOURCE
 from nexus.market.current_identity import identity_parse_scope
 from nexus.market.current_listing_revision import SOURCE as LISTING_SOURCE
-from nexus.monitoring.durable_sec_storage import _lock, record_discovery, rule_state
+from nexus.monitoring.durable_sec_storage import (
+    _lock,
+    _record_discovery_facts,
+    record_discovery,
+    rule_state,
+)
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.persistence.models.sec_monitor import SecDiscoveryCheck, SecMonitorRule
@@ -115,6 +120,7 @@ async def claim_refresh(
     repo_root: Path,
     contact: str | None,
     candidate_keys: tuple[str, ...] = (),
+    restricted_scope: tuple[str, UUID] | None = None,
 ) -> dict[str, object] | None:
     from nexus.ops.monitor_batch_prepare import _archive_root
     from nexus.ops.monitor_disclosure_refresh import (
@@ -132,7 +138,7 @@ async def claim_refresh(
     if now < rule.effective_at or now < rule.created_at:
         return {"status": "unknown", "reason": "SEC_DURABLE_SCOPE_NOT_EFFECTIVE"}
     identity_id = await current_identity(session, rule, now)
-    latest = await latest_capture(session, rule, now)
+    latest = await latest_capture(session, rule, now) if restricted_scope is None else None
     if latest is not None:
         try:
             _, capture = await read_durable_index_capture(
@@ -188,6 +194,10 @@ async def claim_refresh(
         scheduled_at=scheduled.isoformat(),
         archive_dir=str(_archive_root(repo_root) / f"index-{rule.issuer_cik}-{operation}"),
     )
+    if restricted_scope is not None:
+        worker, calendar = restricted_scope
+        claim["restricted_worker"] = worker
+        claim["calendar_authority_id"] = str(calendar)
     await append_audit_event(
         session,
         actor_id="research-monitor",
@@ -197,6 +207,102 @@ async def claim_refresh(
         payload=claim,
     )
     return claim
+
+
+async def record_restricted_discovery(
+    session: AsyncSession,
+    *,
+    settings: "EngineSettings",
+    account_id: UUID,
+    calendar_id: UUID,
+    instrument_id: UUID,
+    scheduled_at: datetime,
+    worker: str,
+    operation_id: UUID,
+) -> SecDiscoveryCheck:
+    """Evaluate one committed collection using the restricted host's own scope."""
+    from nexus.ops.monitor_disclosure_refresh import CLAIM, FEED, RESULT, SCHEMA, _scope
+    from nexus.paper.host_probe_state import require_monitor_only_capture
+
+    now, instruments = await _scope(session, settings, account_id, calendar_id, scheduled_at)
+    await require_monitor_only_capture(session, account_id, worker)
+    if instrument_id not in instruments:
+        raise ValueError("SEC_OBSERVATION_SCOPE_INVALID")
+    rule = await registered_rule(session, account_id, instrument_id)
+    if rule is None:
+        raise ValueError("SEC_OBSERVATION_SCOPE_INVALID")
+    await _lock(session, rule)
+    scope = {
+        "account_id": str(account_id),
+        "instrument_id": str(instrument_id),
+        "rule_id": str(rule.id),
+        "scheduled_at": scheduled_at.isoformat(),
+        "restricted_worker": worker,
+        "calendar_authority_id": str(calendar_id),
+        "operation_id": str(operation_id),
+        "issuer_cik": rule.issuer_cik,
+        "feed": FEED,
+        "durable_sec": True,
+    }
+    records = tuple(
+        await session.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.actor_id == "research-monitor",
+                AuditEvent.schema_version == SCHEMA,
+                AuditEvent.action.in_((CLAIM, RESULT)),
+                AuditEvent.payload["operation_id"].astext == str(operation_id),
+                AuditEvent.payload.contains(scope),
+                AuditEvent.occurred_at >= scheduled_at,
+                AuditEvent.occurred_at <= now,
+            )
+            .limit(3)
+        )
+    )
+    claims = [row for row in records if row.action == CLAIM]
+    receipts = [row for row in records if row.action == RESULT]
+    if len(claims) != 1 or len(receipts) != 1:
+        raise ValueError("SEC_OBSERVATION_RECEIPT_INVALID")
+    claim, receipt = claims[0], receipts[0]
+    if (
+        claim.event_seq >= receipt.event_seq
+        or claim.occurred_at > receipt.occurred_at
+        or any(receipt.payload.get(key) != value for key, value in claim.payload.items())
+    ):
+        raise ValueError("SEC_OBSERVATION_RECEIPT_INVALID")
+    status = receipt.payload.get("status")
+    capture_id = None
+    with identity_parse_scope(), evidence_read_scope(session), artifact_read_scope(session):
+        if status == "refreshed":
+            snapshot_id = UUID(str(receipt.payload.get("snapshot_id")))
+            snapshot = await session.get(DataSnapshot, snapshot_id)
+            index_payload = snapshot.payload.get("index") if snapshot is not None else None
+            if (
+                snapshot is None
+                or snapshot.source != SOURCE
+                or snapshot.revision != receipt.payload.get("snapshot_hash")
+                or not isinstance(index_payload, dict)
+                or index_payload.get("identity_snapshot_id")
+                != claim.payload.get("identity_snapshot_id")
+            ):
+                raise ValueError("SEC_OBSERVATION_RECEIPT_INVALID")
+            try:
+                identity = await current_identity(session, rule, now)
+            except (ValueError, OSError):
+                identity = None
+            if str(identity) == claim.payload.get("identity_snapshot_id"):
+                capture_id = snapshot.id
+        elif status != "failed" or receipt.payload.get("reason") != "SEC_INDEX_REFRESH_FAILED":
+            raise ValueError("SEC_OBSERVATION_RECEIPT_INVALID")
+        check, _ = await _record_discovery_facts(
+            session,
+            account_id=account_id,
+            rule_id=rule.id,
+            capture_id=capture_id,
+            scheduled_at=scheduled_at,
+            receipt=receipt,
+        )
+    return check
 
 
 async def scan_registered(
@@ -308,6 +414,7 @@ async def prepare_registered_research(
                         select(SecDiscoveryEvent.id)
                         .where(
                             SecDiscoveryEvent.rule_id == rule.id,
+                            SecDiscoveryEvent.observation_receipt_id.is_(None),
                             SecDiscoveryEvent.first_seen_at < scheduled_at,
                             SecDiscoveryEvent.created_at <= now,
                         )

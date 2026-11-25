@@ -146,6 +146,7 @@ async def _claim(
             repo_root=repo_root,
             contact=contact,
             candidate_keys=candidate_keys,
+            restricted_scope=(restricted_worker, calendar_id) if restricted_worker else None,
         )
     if restricted_worker is not None:
         return None
@@ -283,7 +284,9 @@ def _request_count(archive: Path, *, listed_history: bool = False) -> int | None
         return None
 
 
-_RefreshPoint = Literal["scope", "claim", "collect", "receipt", "failure_receipt", "cleanup"]
+_RefreshPoint = Literal[
+    "scope", "claim", "collect", "receipt", "failure_receipt", "discovery", "cleanup"
+]
 
 
 def _report_refresh_failure(scheduled_at: datetime, point: _RefreshPoint, error: Exception) -> None:
@@ -535,6 +538,31 @@ async def refresh_disclosure_observations(
                 )
                 items.append(item)
                 in_flight = False
+                if restricted_worker is not None:
+                    from nexus.monitoring.durable_sec_host import record_restricted_discovery
+
+                    point = "discovery"
+                    try:
+                        async with (
+                            account_transaction_turn(settings),
+                            factory() as session,
+                            session.begin(),
+                        ):
+                            check = await record_restricted_discovery(
+                                session,
+                                settings=settings,
+                                account_id=account_id,
+                                calendar_id=calendar_authority_id,
+                                instrument_id=instrument,
+                                scheduled_at=scheduled_at,
+                                worker=restricted_worker,
+                                operation_id=UUID(str(claim["operation_id"])),
+                            )
+                        item["check_id"] = str(check.id)
+                    except (ValueError, OSError, SQLAlchemyError) as error:
+                        # Keep the committed collection receipt; never retry the write
+                        # or infer a check outcome from a missing acknowledgement.
+                        _report_refresh_failure(scheduled_at, point, error)
     except TimeoutError as error:
         _report_refresh_failure(scheduled_at, point, error)
         return _result(

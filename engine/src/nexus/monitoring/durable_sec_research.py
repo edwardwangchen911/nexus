@@ -55,6 +55,8 @@ class CurrentSecCaptureExpired(ValueError):
 def verify_event_evidence(event: Any, capture: Any, *, now: datetime) -> SecIndexEntry:
     """A fresh independent source must reproduce the exact saved event; no set difference."""
     now = require_utc(now)
+    if isinstance(event, SecDiscoveryEvent) and event.observation_receipt_id is not None:
+        raise ValueError(INVALID)
     entry = SecIndexEntry.model_validate(event.entry)
     current = capture.index
     if (
@@ -123,6 +125,7 @@ async def read_binding_observation(
     event = await session.get(SecDiscoveryEvent, binding.event_id)
     if (
         event is None
+        or event.observation_receipt_id is not None
         or binding.rule_id != event.rule_id
         or binding.metadata_hash != event.metadata_hash
         or check.checked_at != binding.bound_at
@@ -140,7 +143,7 @@ async def read_binding_observation(
     if row.revision != binding.capture_hash:
         raise ValueError(INVALID)
     entry = verify_event_evidence(event, capture, now=binding.bound_at)
-    observation = {
+    observation: dict[str, object] = {
         "policy": POLICY,
         "binding_id": str(binding.id),
         "event_id": str(event.id),
@@ -278,6 +281,7 @@ async def prepare_durable_sec_research_batch(
             select(SecDiscoveryEvent)
             .where(
                 SecDiscoveryEvent.account_id == account_id,
+                SecDiscoveryEvent.observation_receipt_id.is_(None),
                 SecDiscoveryEvent.instrument_id == rule.instrument_id,
                 ~exists(
                     select(SecDiscoveryEventRevision.id).where(

@@ -54,6 +54,7 @@ async def run(settings: EngineSettings, args: argparse.Namespace) -> dict[str, o
                 "0137_linear_json_canonical",
                 "0138_sec_accepted_cutoff",
                 "0139_sec_audit_lookup",
+                "0140_sec_observation_only",
             }:
                 raise ValueError("MONITOR_SCHEMA_UNAVAILABLE")
             created = False

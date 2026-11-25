@@ -123,6 +123,7 @@ async def freeze_durable_sec_pending(
             select(SecDiscoveryEvent)
             .where(
                 SecDiscoveryEvent.account_id == cycle.account_id,
+                SecDiscoveryEvent.observation_receipt_id.is_(None),
                 SecDiscoveryEvent.instrument_id == instrument_id,
                 SecDiscoveryEvent.first_seen_at <= as_of,
                 ~exists(
@@ -303,6 +304,7 @@ async def validate_durable_sec_pending(
         original = await session.get(SecDiscoveryEvent, issue.event_id)
         if (
             original is None
+            or original.observation_receipt_id is not None
             or (original.account_id, original.instrument_id, original.event_key)
             != (context.account_id, context.instrument_id, issue.event_key)
             or original.first_seen_at > context.decision_time
@@ -312,6 +314,7 @@ async def validate_durable_sec_pending(
         event = await session.get(SecDiscoveryEvent, item.event_id)
         if (
             event is None
+            or event.observation_receipt_id is not None
             or event.first_seen_at > context.decision_time
             or (
                 event.account_id,
@@ -407,7 +410,7 @@ async def record_durable_sec_daily_consumption(
         if item.status != "addressed":
             continue
         event = await session.get(SecDiscoveryEvent, item.event_id)
-        if event is None:
+        if event is None or event.observation_receipt_id is not None:
             raise ValueError("DURABLE_SEC_DAILY_CONSUMPTION_INVALID")
         rule = await session.get(SecMonitorRule, event.rule_id)
         if rule is None:

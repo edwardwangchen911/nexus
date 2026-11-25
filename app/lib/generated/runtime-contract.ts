@@ -4015,6 +4015,7 @@ export const runtimeContractSchemas = {
               "coverage_conflict",
               "source_stale",
               "source_invalid",
+              "collection_failed",
               "time_invalid",
               "history_invalid",
               "rule_inactive"
@@ -4215,6 +4216,7 @@ export const runtimeContractSchemas = {
         "anyOf": [
           {
             "enum": [
+              "observation_only",
               "no_receipt",
               "bound",
               "increment_failed",

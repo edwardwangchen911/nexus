@@ -146,7 +146,8 @@ async def expired_dispatch_capture(
         )
     )
     if not 1 <= len(rows) <= 32 or any(
-        row.rule_id != rule.id
+        row.observation_receipt_id is not None
+        or row.rule_id != rule.id
         or (row.account_id, row.instrument_id) != (member.account_id, member.instrument_id)
         or (parent.account_id, parent.instrument_id, parent.kind)
         != (member.account_id, member.instrument_id, "disclosure")

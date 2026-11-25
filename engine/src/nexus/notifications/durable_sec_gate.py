@@ -111,7 +111,12 @@ def notice_claim_condition(*, check_host: bool = True) -> ColumnElement[bool]:
     exact = exists(
         select(SecNotificationClaim.id)
         .join(SecMonitorRule, scope)
+        .join(SecDiscoveryEvent, SecDiscoveryEvent.id == OutboxEvent.aggregate_id)
         .where(
+            SecDiscoveryEvent.account_id == SecNotificationClaim.account_id,
+            SecDiscoveryEvent.instrument_id == SecNotificationClaim.instrument_id,
+            SecDiscoveryEvent.event_key == SecNotificationClaim.event_key,
+            SecDiscoveryEvent.observation_receipt_id.is_(None),
             SecNotificationClaim.outbox_id == OutboxEvent.id,
             SecNotificationClaim.event_key == OutboxEvent.payload["event_key"].astext,
             SecMonitorRule.id.cast(String) == OutboxEvent.payload["rule_id"].astext,

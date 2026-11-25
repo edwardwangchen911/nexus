@@ -95,16 +95,19 @@ async def setup(database_url, monkeypatch, root, *, listed_history=False):
     monkeypatch.setattr("nexus.ops.research_identity_local.datetime", Clock)
     monkeypatch.setattr("nexus.ops.sec_listed_local.datetime", Clock)
 
-    async def invoke(environment=None, scheduled_at=None):
+    async def invoke(
+        environment=None, scheduled_at=None, *, calendar_id=CALENDAR_ID, restricted_worker=None
+    ):
         return await refresh.refresh_disclosure_observations(
             settings,
             account_id=pointer.account_id,
-            calendar_authority_id=CALENDAR_ID,
+            calendar_authority_id=calendar_id,
             scheduled_at=scheduled_at or refresh._bucket(captured["clock"][0]),
             environment={"SEC_CONTACT": "Synthetic test test@example.invalid"}
             if environment is None
             else environment,
             repo_root=root,
+            restricted_worker=restricted_worker,
         )
 
     return factory, store, captured, pointer, calls, client, invoke

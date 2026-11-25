@@ -118,6 +118,14 @@ describe("durable SEC discovery facts", () => {
     expect(screen.getByText(label)).toBeVisible();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+  it("shows restricted discovery as observation only with no action or notice", () => {
+    render(<DurableSecDiscovery discovery={{ ...view, events: [
+      { ...view.events[0], research_status: "observation_only" },
+    ] }} />);
+    expect(screen.getByText("仅记录公告发现，未触发通知或研究。")).toBeVisible();
+    expect(screen.queryByText("暂无可核验通知记录。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
   it("shows the original preparation rejection without claiming a failed model run", () => {
     const event = { ...view.events[0], research_status: "bound" as const,
       preparation_rejection: { rejected_at: at, reason: "ineligible" as const } };
