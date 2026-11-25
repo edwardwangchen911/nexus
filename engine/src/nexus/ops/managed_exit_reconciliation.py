@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 from uuid import UUID
 
 from dotenv import dotenv_values
@@ -79,6 +80,31 @@ def published_monitor_replacement(
     ):
         raise ValueError(_PREFIX + "SCOPE_INVALID")
     return origin
+
+
+def read_clean_monitor_stop(
+    repo_root: Path, env_file: Path, *, pending: dict[str, object] | None = None
+) -> str | None:
+    if not (repo_root / ".secrets/nexus-agent-paper/recovery.json").is_file():
+        return None
+    service = _load_service(repo_root)
+    manager = service._recovery_module()
+    state = manager.read(repo_root)
+    if (
+        state is None
+        or state.get("root") != str(repo_root)
+        or state.get("env_file") != str(env_file)
+    ):
+        return None
+    if state.get("config_hash") != hashlib.sha256(env_file.read_bytes()).hexdigest():
+        return None
+    if pending is None:
+        status, _ = service._launchctl_inspection(
+            "launchctl", repo_root, env_file, "nexus-fosun-live"
+        )
+        if status != "stopped":
+            return None
+    return cast("str | None", manager.clean_monitor_stop(repo_root, state, pending=pending))
 
 
 def reconcile_managed_exit(

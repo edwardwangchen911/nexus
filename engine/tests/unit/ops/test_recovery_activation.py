@@ -606,3 +606,57 @@ async def test_readiness_timeout_provenance_in_durable_rejection(
     )
     assert 0 <= receipt["stage_elapsed_ms"] <= receipt["activation_elapsed_ms"]
     assert "private-connect-timeout" not in json.dumps(receipt)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["monitor_only", "paid", "changed_stop"])
+async def test_clean_stop_process_policy_cannot_activate_paid_or_changed_origin(
+    tmp_path, monkeypatch, outcome
+):
+    from nexus.ops import agent_paper_recovery, managed_exit_reconciliation
+    from nexus.ops.agent_paper_recovery_activation import make_recovery_guard
+
+    env, generation, attempt, target = state(tmp_path)
+    settings = EngineSettings(release_revision="a" * 40)
+    document = json.loads(target.read_text())
+    document["attempt"].update(runtime_mode="monitor_only", clean_monitor_stop="b" * 64)
+    target.write_text(json.dumps(document))
+    checked = []
+    proofs = iter(("b" * 64, None)) if outcome == "changed_stop" else None
+
+    monkeypatch.setattr(
+        managed_exit_reconciliation,
+        "read_clean_monitor_stop",
+        lambda *_a, **_kw: "b" * 64 if proofs is None else next(proofs),
+    )
+
+    def forbid_paid_process_check():
+        pytest.fail("the clean monitor-only path cannot use the paid process policy")
+
+    monkeypatch.setattr(
+        agent_paper_recovery, "require_recovery_process_quiescence", forbid_paid_process_check
+    )
+    monkeypatch.setattr(
+        agent_paper_recovery,
+        "require_monitor_replacement_process_quiescence",
+        lambda: checked.append(True),
+    )
+
+    async def inspect(_):
+        return {
+            "status": "ready" if outcome == "paid" else "monitor_only",
+            "paid_dispatch_ready": outcome == "paid",
+        }
+
+    monkeypatch.setattr(agent_paper_recovery, "inspect_recovery_readiness", inspect)
+    guard = make_recovery_guard(
+        settings, repo_root=tmp_path, env_file=env, generation=generation, attempt_id=attempt
+    )
+    if outcome == "monitor_only":
+        assert await guard(settings) == "monitor_only"
+        assert checked == [True, True]
+    else:
+        with pytest.raises(ValueError, match="RECOVERY_ACTIVATION_BLOCKED"):
+            await guard(settings)
+        assert checked == [True]
+        assert json.loads(guard.receipt_path.read_text())["phase"] != "activated"
