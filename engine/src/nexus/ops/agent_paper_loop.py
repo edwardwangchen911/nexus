@@ -5676,7 +5676,10 @@ def main(argv: list[str] | None = None) -> int:
                 require_monitor_replacement_process_quiescence,
                 require_recovery_process_quiescence,
             )
-            from nexus.ops.managed_exit_reconciliation import published_monitor_replacement
+            from nexus.ops.managed_exit_reconciliation import (
+                published_monitor_replacement,
+                read_clean_monitor_stop,
+            )
 
             failure_code = "AGENT_PAPER_RECOVERY_SCOPE_INVALID"
             try:
@@ -5685,7 +5688,10 @@ def main(argv: list[str] | None = None) -> int:
                 with acquire_agent_paper_lock():
                     assert env_file is not None
                     origin = published_monitor_replacement(recovery_settings, root, env_file)
-                    if origin is None:
+                    clean_stop = read_clean_monitor_stop(root, env_file) if origin is None else None
+                    if clean_stop is not None:
+                        require_monitor_replacement_process_quiescence()
+                    elif origin is None:
                         require_recovery_process_quiescence()
                     else:
                         require_monitor_replacement_process_quiescence()
@@ -5705,6 +5711,23 @@ def main(argv: list[str] | None = None) -> int:
                         ):
                             raise ValueError(failure_code)
                         result["monitor_only_origin"] = origin[1]
+                    if clean_stop is not None:
+                        failure_code = "AGENT_PAPER_RECOVERY_PROCESS_UNCONFIRMED"
+                        if read_clean_monitor_stop(root, env_file) != clean_stop:
+                            raise ValueError(failure_code)
+                        if (
+                            result.get("status") == "monitor_only"
+                            and result.get("paid_dispatch_ready") is False
+                        ):
+                            original = asyncio.run(
+                                inspect_monitor_replacement(
+                                    recovery_settings, clean_stop[1], source_schema=clean_stop[2]
+                                )
+                            )
+                            result["clean_monitor_stop"] = clean_stop[0]
+                            result["clean_monitor_stop_hold"] = original.digest
+                        elif result.get("status") == "ready":
+                            require_recovery_process_quiescence()
             except Exception as error:
                 if (
                     isinstance(error, RuntimeError)

@@ -68,6 +68,7 @@ async def inspect_monitor_replacement(
     *,
     expected: str | None = None,
     exited_at: datetime | None = None,
+    source_schema: str | None = None,
 ) -> MonitorReplacement:
     from nexus.ops.agent_paper_loop import agent_paper_host_identity
 
@@ -99,10 +100,11 @@ async def inspect_monitor_replacement(
                 worker=worker,
                 version=version,
                 exited_at=exited_at,
+                source_schema=source_schema,
             )
         if expected is not None and digest != expected:
             raise ValueError("AGENT_PAPER_RECOVERY_SCOPE_INVALID")
-        return MonitorReplacement(attempt, worker, version, digest)
+        return MonitorReplacement(attempt, worker, version, digest, source_schema)
     finally:
         await factory.kw["bind"].dispose()
 

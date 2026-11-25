@@ -535,6 +535,47 @@ def disable(root, *, maintenance=False):
         write(root, state)
 
 
+def clean_monitor_stop(root, state, *, pending=None):
+    """Revalidate the original clean exit without conferring paid readiness."""
+    attempt = state.get("active_attempt")
+    owner = state.get("instance")
+    proof = state.get("stop_proof")
+    if (
+        state.get("project") != "nexus-fosun-live"
+        or state.get("boot") != boot_id()
+        or any(
+            state.get(k) is not None
+            for k in ("unconfirmed_exit", "exit_reconciliation", "rejected_start")
+        )
+        or state.get("attempt") != pending
+        or not isinstance(owner, dict)
+        or not isinstance(proof, dict)
+        or proof.get("boot") != state.get("boot")
+        or proof.get("instance") != owner
+        or proof.get("exit") != 0
+        or not isinstance(attempt, dict)
+        or attempt not in state["attempts"]
+        or attempt.get("runtime_mode") != "monitor_only"
+        or attempt.get("boot") != state.get("boot")
+        or process(owner["pid"]) is not None
+        or (pending is None and state.get("stopped_confirmed") is not True)
+        or (pending is not None and pending.get("old_instance") != owner)
+    ):
+        return None
+    receipt = activation_receipt(root, state, attempt)
+    if (
+        receipt is None
+        or receipt.get("phase") != "exited"
+        or receipt.get("reason") != "stop_requested"
+        or receipt.get("pid") != owner["pid"]
+        or receipt.get("process_started") != owner["started"]
+    ):
+        return None
+    return hashlib.sha256(
+        json.dumps([attempt, proof, receipt], sort_keys=True).encode()
+    ).hexdigest()
+
+
 def record_stop(service, root, *, observed_clean_exit):
     state = read(root)
     if state is None:
@@ -835,6 +876,7 @@ def recover(service, root, env_file, project, *, report=True):
     qualified_exit = qualified_exit or reconciled
     if pending is not None and not qualified_exit and not pending_prior_boot:
         return finish("START_RESULT_UNKNOWN")
+    stopped = False
     if current_boot == state["boot"]:
         old = state.get("instance")
         if old is None or process(old["pid"]) is not None:
@@ -906,6 +948,18 @@ def recover(service, root, env_file, project, *, report=True):
     }
     if check.get("status") == "monitor_only":
         attempt["runtime_mode"] = "monitor_only"
+    if clean_stop := check.get("clean_monitor_stop"):
+        if (
+            check.get("status") != "monitor_only"
+            or check.get("paid_dispatch_ready") is not False
+            or not stopped
+            or clean_monitor_stop(root, state) != clean_stop
+            or not isinstance(check.get("clean_monitor_stop_hold"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", check["clean_monitor_stop_hold"])
+        ):
+            return finish("BUSINESS_OR_DEPENDENCY_BLOCKED")
+        attempt["clean_monitor_stop"] = clean_stop
+        attempt["clean_monitor_stop_hold"] = check["clean_monitor_stop_hold"]
     if reconciled:
         pointer = state["exit_reconciliation"]
         attempt["exit_reconciliation_sha256"] = pointer["evidence_sha256"]

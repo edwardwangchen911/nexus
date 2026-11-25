@@ -1,9 +1,11 @@
 """Explicit lifecycle evidence only; never accepts unknown business effects or starts a host."""
 
+import ast
 import asyncio
 import hashlib
 import importlib.util
 import re
+import subprocess
 import sys
 from datetime import UTC, datetime
 from io import StringIO
@@ -79,6 +81,60 @@ def published_monitor_replacement(
     ):
         raise ValueError(_PREFIX + "SCOPE_INVALID")
     return origin
+
+
+def read_clean_monitor_stop(
+    repo_root: Path, env_file: Path, *, pending: dict[str, object] | None = None
+) -> tuple[str, dict[str, object], str] | None:
+    if not (repo_root / ".secrets/nexus-agent-paper/recovery.json").is_file():
+        return None
+    service = _load_service(repo_root)
+    manager = service._recovery_module()
+    state = manager.read(repo_root)
+    if (
+        state is None
+        or state.get("root") != str(repo_root)
+        or state.get("env_file") != str(env_file)
+    ):
+        return None
+    if state.get("config_hash") != hashlib.sha256(env_file.read_bytes()).hexdigest():
+        return None
+    if pending is None:
+        status, _ = service._launchctl_inspection(
+            "launchctl", repo_root, env_file, "nexus-fosun-live"
+        )
+        if status != "stopped":
+            return None
+    digest = manager.clean_monitor_stop(repo_root, state, pending=pending)
+    if digest is None:
+        return None
+    attempt = state["active_attempt"]
+    revision = attempt["revision"]
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError(_PREFIX + "SCOPE_INVALID")
+    source = subprocess.check_output(
+        (
+            "git",
+            "-C",
+            str(repo_root),
+            "show",
+            f"{revision}:engine/src/nexus/persistence/migrations.py",
+        ),
+        text=True,
+        timeout=5,
+    )
+    (schema,) = [
+        item.value.value
+        for item in ast.parse(source).body
+        if isinstance(item, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "CURRENT_MIGRATION_HEAD"
+            for target in item.targets
+        )
+        and isinstance(item.value, ast.Constant)
+        and isinstance(item.value.value, str)
+    ]
+    return digest, attempt, schema
 
 
 def reconcile_managed_exit(

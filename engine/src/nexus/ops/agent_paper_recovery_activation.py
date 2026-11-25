@@ -83,6 +83,7 @@ class RecoveryActivation:
         self.receipt_path = self.directory / f"recovery-activation-{attempt_id}.json"
         self.receipt: dict[str, object] | None = None
         self._monitor_config_hash: str | None = None
+        self._checked_clean_stop: tuple[str, dict[str, object], str, str] | None = None
         self.monitor_replacement: MonitorReplacement | None = None
 
     def verify_monitor_runtime(self) -> None:
@@ -169,6 +170,21 @@ class RecoveryActivation:
             or manual_host_scope(self.settings) != manual_host_scope(effective)
         ):
             raise ValueError(_BLOCKED)
+        self._checked_clean_stop = None
+        clean_stop = attempt.get("clean_monitor_stop")
+        if clean_stop is not None:
+            from nexus.ops.managed_exit_reconciliation import read_clean_monitor_stop
+
+            evidence = read_clean_monitor_stop(self.root, self.env_file, pending=attempt)
+            hold = attempt.get("clean_monitor_stop_hold")
+            if (
+                attempt.get("runtime_mode") != "monitor_only"
+                or evidence is None
+                or evidence[0] != clean_stop
+                or not isinstance(hold, str)
+            ):
+                raise ValueError(_BLOCKED)
+            self._checked_clean_stop = (*evidence, hold)
         if readiness is not None:
             mode = attempt.get("runtime_mode")
             if mode not in (None, "monitor_only") or readiness.get("status") != (mode or "ready"):
@@ -278,10 +294,11 @@ class RecoveryActivation:
 
         try:
             origin = self._validate(effective)
+            clean_stop = self._checked_clean_stop
             require_process_quiet = (
-                require_recovery_process_quiescence
-                if origin is None
-                else require_monitor_replacement_process_quiescence
+                require_monitor_replacement_process_quiescence
+                if origin is not None or clean_stop
+                else require_recovery_process_quiescence
             )
             descriptor = os.open(
                 self.receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
@@ -310,19 +327,27 @@ class RecoveryActivation:
                 raise ValueError(_BLOCKED) from None
             check_started = monotonic_ns()
             result = await inspect_recovery_readiness(effective)
-            if self._validate(effective) != origin:
+            if self._validate(effective) != origin or self._checked_clean_stop != clean_stop:
                 raise ValueError(_BLOCKED)
             replacement = None
-            if origin is not None:
+            if origin is not None or clean_stop is not None:
                 if (
                     result.get("status") != "monitor_only"
                     or result.get("paid_dispatch_ready") is not False
                 ):
                     reject("readiness", "AGENT_PAPER_RECOVERY_UNAVAILABLE", check_started, result)
                     raise ValueError(_BLOCKED)
-                replacement = await inspect_monitor_replacement(
-                    effective, origin[0], expected=origin[1]
-                )
+                if origin is not None:
+                    replacement = await inspect_monitor_replacement(
+                        effective, origin[0], expected=origin[1]
+                    )
+                elif clean_stop is not None:
+                    replacement = await inspect_monitor_replacement(
+                        effective,
+                        clean_stop[1],
+                        source_schema=clean_stop[2],
+                        expected=clean_stop[3],
+                    )
             started = monotonic_ns()
             try:
                 require_process_quiet()
@@ -338,7 +363,10 @@ class RecoveryActivation:
                 # manager, which can hold its lock while dispatching this child.
                 with _service_control_lock(self.root):
                     stage, started = "identity_recheck", monotonic_ns()
-                    if self._validate(effective, readiness=result) != origin:
+                    if (
+                        self._validate(effective, readiness=result) != origin
+                        or self._checked_clean_stop != clean_stop
+                    ):
                         raise ValueError(_BLOCKED)
                     stage, started = "activation_receipt", monotonic_ns()
                     self._save("activated", "READY")
